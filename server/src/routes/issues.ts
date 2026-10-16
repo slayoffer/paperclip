@@ -264,7 +264,7 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
-import { shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
+import { isNoWakeComment, shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
 import {
@@ -13840,6 +13840,7 @@ export function issueRoutes(
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
+            !isNoWakeComment(commentBody) &&
             shouldImplicitlyMoveCommentedIssueToTodo({
               issueStatus: existing.status,
               assigneeAgentId: requestedAssigneeAgentId,
@@ -15545,6 +15546,7 @@ export function issueRoutes(
           const shouldWakeAssigneeForComment =
             shouldWakeAssigneeForIssueComment({
               selfComment,
+              noWake: isNoWakeComment(commentBody),
               resumeRequested: resumeRequested === true,
               commentCreatedByRunId: comment.createdByRunId,
               issueAtCommentStart: existing,
@@ -18298,6 +18300,7 @@ export function issueRoutes(
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
+          (!isNoWakeComment(req.body.body) &&
           shouldImplicitlyMoveCommentedIssueToTodo({
             issueStatus: issue.status,
             assigneeAgentId: issue.assigneeAgentId,
@@ -18306,7 +18309,7 @@ export function issueRoutes(
             actorRunId: actor.runId,
             checkoutRunId: issue.checkoutRunId,
             executionRunId: issue.executionRunId,
-          }) ||
+          })) ||
           shouldResumeInProgressScheduledRetry);
       const hasUnresolvedFirstClassBlockers =
         isBlocked && effectiveMoveToTodoRequested
@@ -18979,6 +18982,7 @@ export function issueRoutes(
         // explicit resume from a completed prior run remains a valid new turn.
         const shouldWakeAssigneeForComment = shouldWakeAssigneeForIssueComment({
           selfComment,
+          noWake: isNoWakeComment(req.body.body),
           resumeRequested: resumeRequested === true,
           commentCreatedByRunId: comment.createdByRunId,
           issueAtCommentStart: issue,
