@@ -1,0 +1,46 @@
+# Synthiq thin-fork image build (fork-only; never proposed upstream).
+# A push to a synthiq/<upstream-version> branch builds the upstream Dockerfile's production target on the
+# operator's self-hosted runner and pushes registry.synthiq.ru/paperclip:<upstream-version>-synthiq.<run>.
+# Push and manual triggers only: this fork is public, so no pull_request trigger may reach the self-hosted runner.
+name: synthiq-image
+on:
+  push:
+    branches: ["synthiq/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: synthiq-image-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: [self-hosted, paperclip-fork]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag
+        id: tag
+        run: |
+          base="${GITHUB_REF_NAME#synthiq/}"
+          echo "version=${base}-synthiq.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "image=registry.synthiq.ru/paperclip:${base}-synthiq.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: |
+          docker build --target production \
+            --build-arg PAPERCLIP_BUILD_VERSION="${{ steps.tag.outputs.version }}" \
+            --build-arg PAPERCLIP_BUILD_COMMIT="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source=https://github.com/slayoffer/paperclip \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.version="${{ steps.tag.outputs.version }}" \
+            -t "${{ steps.tag.outputs.image }}" .
+      - name: Push
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          export DOCKER_CONFIG="$(mktemp -d "${RUNNER_TEMP}/docker.XXXXXX")"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_PASSWORD" | docker login registry.synthiq.ru -u "$REGISTRY_USER" --password-stdin
+          docker push "${{ steps.tag.outputs.image }}"
+          echo "pushed ${{ steps.tag.outputs.image }}" >> "$GITHUB_STEP_SUMMARY"
