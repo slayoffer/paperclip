@@ -150,6 +150,8 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   { method: "GET", path: /^\/api\/companies\/[^/]+\/skills$/ },
   // Label discovery so an agent can set area labels on issues it updates.
   { method: "GET", path: /^\/api\/companies\/[^/]+\/labels$/ },
+  // Exact-id card lookup (read-only), so an owner can check the card it was woken for.
+  { method: "GET", path: /^\/api\/companies\/[^/]+\/interaction-locations\/[^/]+$/ },
   { method: "GET", path: /^\/api\/projects\/[^/]+$/ },
   { method: "GET", path: /^\/api\/goals\/[^/]+$/ },
 
