@@ -590,6 +590,7 @@ import {
 } from "../log-redaction.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
+import { redactRunResultSecrets } from "./run-result-redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolvePaperclipRunnerIdleTimeoutMs,
@@ -25647,7 +25648,9 @@ export function heartbeatService(
                 ...(adapterResult.nativeFinalization || outcome === "cancelled"
                   ? parseObject(latestRun?.resultJson)
                   : {}),
-                ...parseObject(adapterResult.resultJson),
+                // Host-side credentials that Paperclip did not inject can reach captured output;
+                // mask token-shaped text before the result is stored.
+                ...redactRunResultSecrets(parseObject(adapterResult.resultJson)),
                 ...(adapterResult.executionRecovery
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
