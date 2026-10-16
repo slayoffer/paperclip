@@ -142,6 +142,7 @@ import {
 import {
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
+  enforceMonitorMinimumInterval,
 } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
@@ -10225,12 +10226,15 @@ export function issueService(db: Db) {
         if (values.status === "cancelled") {
           values.cancelledAt = new Date();
         }
+        const initialPolicy = enforceMonitorMinimumInterval(
+          normalizeIssueExecutionPolicy(issueData.executionPolicy ?? null),
+          null,
+        );
+        if (initialPolicy?.monitor) values.executionPolicy = initialPolicy as unknown as typeof values.executionPolicy;
         Object.assign(
           values,
           buildInitialIssueMonitorFields({
-            policy: normalizeIssueExecutionPolicy(
-              issueData.executionPolicy ?? null,
-            ),
+            policy: initialPolicy,
             status: values.status ?? "backlog",
             assigneeAgentId: values.assigneeAgentId ?? null,
             assigneeUserId: values.assigneeUserId ?? null,
