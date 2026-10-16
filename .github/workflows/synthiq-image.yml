@@ -19,6 +19,20 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Same step as upstream's docker.yml: a release tag's lockfile can lag package metadata, and the Dockerfile
+      # installs with --frozen-lockfile. Only pnpm-lock.yaml may change.
+      - name: Refresh lockfile for Docker build context
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+          changed="$(git status --porcelain)"
+          if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Fvq ' pnpm-lock.yaml'; then
+            echo "Unexpected files changed during lockfile refresh:"; echo "$changed"; exit 1
+          fi
       - name: Tag
         id: tag
         run: |
