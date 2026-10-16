@@ -72,10 +72,11 @@ jobs:
           export DOCKER_CONFIG="$tmp"
           trap 'rm -rf "$tmp"' EXIT
           printf '%s' "$REGISTRY_PASSWORD" | docker login registry.synthiq.ru -u "$REGISTRY_USER" --password-stdin
-          # A push over the home uplink can hang with no progress (2026-10-16: one connection, ~0 bytes for an
-          # hour). Bound each attempt and retry; layers that already arrived are skipped on the next attempt.
+          # The proxy in front of registry.synthiq.ru cuts every upload request at 30 min (2026-10-16), and home-pc pushes
+          # at ~2 MB/s; home-pc dockerd has max-concurrent-uploads=1 so each layer gets the full link. Bound each attempt
+          # and retry; layers that already arrived are skipped on the next attempt.
           for attempt in 1 2 3; do
-            if timeout 1200 docker push "$IMAGE"; then break; fi
+            if timeout 5400 docker push "$IMAGE"; then break; fi
             [ "$attempt" = 3 ] && { echo "push failed after 3 attempts"; exit 1; }
             echo "push attempt $attempt failed or timed out; retrying"
           done
