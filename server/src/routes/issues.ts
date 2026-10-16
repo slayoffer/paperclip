@@ -369,6 +369,7 @@ import {
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
+  enforceMonitorMinimumInterval,
 } from "../services/issue-execution-policy.js";
 import { buildExecutionWorkspaceAdapterConfig, parseProjectExecutionWorkspacePolicy, parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -14906,6 +14907,12 @@ export function issueRoutes(
       const previousExecutionPolicy = normalizeIssueExecutionPolicy(
         existing.executionPolicy ?? null,
       );
+      if (updateFields.executionPolicy !== undefined) {
+        updateFields.executionPolicy = enforceMonitorMinimumInterval(
+          updateFields.executionPolicy as NormalizedExecutionPolicy | null,
+          previousExecutionPolicy,
+        );
+      }
       const nextExecutionPolicy =
         updateFields.executionPolicy !== undefined
           ? (updateFields.executionPolicy as NormalizedExecutionPolicy | null)
