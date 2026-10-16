@@ -23,38 +23,54 @@ jobs:
         with:
           node-version: 24
       # Same step as upstream's docker.yml: a release tag's lockfile can lag package metadata, and the Dockerfile
-      # installs with --frozen-lockfile. Only pnpm-lock.yaml may change.
+      # installs with --frozen-lockfile. Only pnpm-lock.yaml may change (exact path match).
       - name: Refresh lockfile for Docker build context
         run: |
           set -euo pipefail
           corepack enable
           pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
-          changed="$(git status --porcelain)"
-          if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Fvq ' pnpm-lock.yaml'; then
-            echo "Unexpected files changed during lockfile refresh:"; echo "$changed"; exit 1
+          unexpected="$(git status --porcelain=v1 -z | tr '\0' '\n' | awk 'NF { p = substr($0, 4); if (p != "pnpm-lock.yaml") print }')"
+          if [ -n "$unexpected" ]; then
+            echo "Unexpected files changed during lockfile refresh:"; echo "$unexpected"; exit 1
           fi
+      # Ref-derived values travel only through the environment and are validated; nothing is interpolated into shell source.
       - name: Tag
         id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          base="${GITHUB_REF_NAME#synthiq/}"
-          echo "version=${base}-synthiq.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "image=registry.synthiq.ru/paperclip:${base}-synthiq.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          base="${REF_NAME#synthiq/}"
+          if ! printf '%s' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Branch must be synthiq/<upstream version>, got: $REF_NAME"; exit 1
+          fi
+          echo "version=${base}-synthiq.${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "image=registry.synthiq.ru/paperclip:${base}-synthiq.${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
       - name: Build
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          IMAGE: ${{ steps.tag.outputs.image }}
         run: |
+          set -euo pipefail
           docker build --target production \
-            --build-arg PAPERCLIP_BUILD_VERSION="${{ steps.tag.outputs.version }}" \
-            --build-arg PAPERCLIP_BUILD_COMMIT="${GITHUB_SHA}" \
+            --build-arg PAPERCLIP_BUILD_VERSION="$VERSION" \
+            --build-arg PAPERCLIP_BUILD_COMMIT="$GITHUB_SHA" \
             --label org.opencontainers.image.source=https://github.com/slayoffer/paperclip \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.version="${{ steps.tag.outputs.version }}" \
-            -t "${{ steps.tag.outputs.image }}" .
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.version="$VERSION" \
+            -t "$IMAGE" .
       - name: Push
         env:
+          IMAGE: ${{ steps.tag.outputs.image }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          export DOCKER_CONFIG="$(mktemp -d "${RUNNER_TEMP}/docker.XXXXXX")"
-          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          set -euo pipefail
+          tmp="$(mktemp -d "${RUNNER_TEMP}/docker.XXXXXX")"
+          [ -n "$tmp" ] && [ -d "$tmp" ] || { echo "mktemp failed"; exit 1; }
+          export DOCKER_CONFIG="$tmp"
+          trap 'rm -rf "$tmp"' EXIT
           printf '%s' "$REGISTRY_PASSWORD" | docker login registry.synthiq.ru -u "$REGISTRY_USER" --password-stdin
-          docker push "${{ steps.tag.outputs.image }}"
-          echo "pushed ${{ steps.tag.outputs.image }}" >> "$GITHUB_STEP_SUMMARY"
+          docker push "$IMAGE"
+          echo "pushed $IMAGE" >> "$GITHUB_STEP_SUMMARY"
