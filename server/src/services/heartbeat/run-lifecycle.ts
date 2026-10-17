@@ -83,6 +83,8 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
+import { redactRunPersistencePatch } from "../run-result-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
 import {
   appendHeartbeatRunEvent,
@@ -1022,6 +1024,30 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     });
   }
 
+  // SYNA-1817: secret values a run's adapter received (declared secret env keys), by run id. Read at every run-row
+  // write that carries error, excerpts or resultJson, so late and failure writers mask them too. Entries expire.
+  const runPersistSecretReaders = new Map<string, { read: () => string[]; at: number }>();
+  function rememberRunPersistSecrets(runId: string, read: () => string[]) {
+    const now = Date.now();
+    for (const [id, entry] of runPersistSecretReaders) if (now - entry.at > 24 * 3600_000) runPersistSecretReaders.delete(id);
+    runPersistSecretReaders.set(runId, { read, at: now });
+  }
+  async function redactRunPatchForPersistence(
+    run: { id: string; companyId: string } | null,
+    patch: Partial<typeof heartbeatRuns.$inferInsert> | undefined,
+  ) {
+    if (!patch || !run) return patch;
+    if (patch.error == null && patch.stdoutExcerpt == null && patch.stderrExcerpt == null && patch.resultJson == null) return patch;
+    let registered: string[] = [];
+    try {
+      registered = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, "run secret registry unavailable; masking token shapes and declared values only");
+    }
+    const declared = runPersistSecretReaders.get(run.id)?.read() ?? [];
+    return redactRunPersistencePatch(patch, [...declared, ...registered]);
+  }
+
   async function setRunStatus(
     runId: string,
     status: string,
@@ -1062,6 +1088,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated = await writeRunStatus(status, previousStatus?.companyId, writer =>
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? terminalizeLegacyExecution({
@@ -1158,6 +1185,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated = await writeRunStatus(status, previousStatus?.companyId, writer =>
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? terminalizeLegacyExecution({
@@ -3003,6 +3031,8 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
   return {
     appendRunEvent,
+    rememberRunPersistSecrets,
+    redactRunPatchForPersistence,
     escalatePlanApprovalResumeFailureNeedsAttention,
     recordPlanApprovalResumeFailureRetry,
     setRunStatusIfRunning,

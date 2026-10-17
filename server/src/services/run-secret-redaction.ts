@@ -149,6 +149,9 @@ export function createRunSecretRedactionRegistry(db: Db) {
       const disclosure = await valuesForRun(companyId, runId, viewerUserId);
       return redactRegisteredSecretValues(value, disclosure.values, disclosure.credentialConnectionName);
     },
+    /** Decrypted values registered for one run; for write-time masking only, never stored or logged. */
+    valuesForRun: async (companyId: string, runId: string): Promise<string[]> =>
+      (await valuesForRun(companyId, runId, null)).values,
     redactForIssue: async <T>(companyId: string, issueId: string, value: T): Promise<T> =>
       redactRegisteredSecretValues(value, await valuesForIssue(companyId, issueId)),
   };
