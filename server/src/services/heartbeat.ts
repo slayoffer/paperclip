@@ -551,7 +551,7 @@ import {
   redactCurrentUserText,
 } from "../log-redaction.js";
 
-import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
 import { declaredSecretValues } from "./run-result-redaction.js";
 
 import {
@@ -4100,9 +4100,27 @@ export function heartbeatService(
 
         const currentUserRedactionOptions =
           await getCurrentUserRedactionOptions();
+        // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
+        // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
+        let logRegistryValues: string[] = [];
+        let logRegistryVersion = -1;
+        const logRegisteredValues = async () => {
+          const version = runSecretRegistryVersion(run.id);
+          if (version !== logRegistryVersion) {
+            try {
+              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+              logRegistryVersion = version;
+            } catch {
+              // Keep the previous values; the run row is scanned again when it is written.
+            }
+          }
+          return [...runLifecycle.readRunPersistSecrets(run.id), ...logRegistryValues];
+        };
         const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
+            undefined,
+            await logRegisteredValues(),
           );
           if (stream === "stdout")
             stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
