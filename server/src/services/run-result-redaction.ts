@@ -49,16 +49,24 @@ const NEUTRAL_ASSIGNMENT_VALUE = /^(?:[0-9]+|true|false|null|undefined|none|requ
 // after "eyJ" is quadratic on "eyJeyJ…", and a lookbehind fix misses a JWT after "-" (codex review, 2026-10-17).
 const JWT_RUN_RE = /[A-Za-z0-9_.-]{27,}/g;
 function maskJwtsInRun(run: string): string {
+  // One forward pass over the parts, no recursion and no re-joining of the rest (codex review 3, 2026-10-17).
   const parts = run.split(".");
-  for (let i = 0; i + 2 < parts.length; i++) {
-    const start = parts[i]!.indexOf("eyJ");
-    if (start < 0 || parts[i]!.length - start < 11 || parts[i + 1]!.length < 8 || parts[i + 2]!.length < 8) continue;
-    const head = parts.slice(0, i).concat(parts[i]!.slice(0, start)).join(".");
-    const rest = parts.slice(i + 3);
-    // Later JWTs in the same run: each part is visited once overall, so this stays linear.
-    return `${head}${REDACTED_EVENT_VALUE}${rest.length > 0 ? `.${maskJwtsInRun(rest.join("."))}` : ""}`;
+  const out: string[] = [];
+  let changed = false;
+  for (let i = 0; i < parts.length; ) {
+    const part = parts[i]!;
+    const start = part.indexOf("eyJ");
+    if (start >= 0 && i + 2 < parts.length && part.length - start >= 11 &&
+      parts[i + 1]!.length >= 8 && parts[i + 2]!.length >= 8) {
+      out.push(`${part.slice(0, start)}${REDACTED_EVENT_VALUE}`);
+      i += 3;
+      changed = true;
+    } else {
+      out.push(part);
+      i += 1;
+    }
   }
-  return run;
+  return changed ? out.join(".") : run;
 }
 function maskJwts(input: string): string {
   if (!input.includes("eyJ")) return input;
@@ -159,12 +167,17 @@ const WORD_CHAR = /[A-Za-z0-9]/;
 function maskShortValue(text: string, value: string): string {
   let out = "";
   let from = 0;
-  for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + value.length)) {
+  // Advance by one character after a rejected candidate, so an overlapping occurrence is still checked.
+  for (let at = text.indexOf(value); at >= 0; ) {
     const before = at > 0 ? text[at - 1]! : "";
     const after = text[at + value.length] ?? "";
-    if ((before && WORD_CHAR.test(before)) || (after && WORD_CHAR.test(after))) continue;
+    if ((before && WORD_CHAR.test(before)) || (after && WORD_CHAR.test(after))) {
+      at = text.indexOf(value, at + 1);
+      continue;
+    }
     out += text.slice(from, at) + REDACTED_EVENT_VALUE;
     from = at + value.length;
+    at = text.indexOf(value, from);
   }
   return from === 0 ? text : out + text.slice(from);
 }
