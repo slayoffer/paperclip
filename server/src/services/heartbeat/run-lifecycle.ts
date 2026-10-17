@@ -1082,7 +1082,6 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
-    forgetRunPersistSecretsLater(runId, status);
     const updated =
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? await terminalizeLegacyExecution({
@@ -1112,6 +1111,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
     }
 
     return updated;
@@ -1180,7 +1180,6 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
-    forgetRunPersistSecretsLater(runId, status);
     const updated =
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? await terminalizeLegacyExecution({
@@ -1238,6 +1237,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null, failureReport);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
       return { run: updated, updated: true as const };
     }
 
