@@ -2378,8 +2378,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       return null;
     }
 
-    // Guild model v2 rule 5: stop agent and system wakes on an issue over its token budget; raise one card.
-    const issueTokenBudget = issueId && isUuidLike(issueId) && opts.requestedByActorType !== "user"
+    // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
+    // Retry in the board UI passes (Anton, 2026-10-17): board keys act in his name, so "user" is not enough.
+    const issueTokenBudget = issueId && isUuidLike(issueId) && opts.issueBudgetOverride !== true
       ? issueTokenBudgetConfig()
       : null;
     if (issueTokenBudget && issueId) {
