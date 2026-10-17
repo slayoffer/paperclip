@@ -32,17 +32,19 @@ const LINEAR_TOKEN_RES = [
   /gh[pousr]_[A-Za-z0-9_]{20,}/g,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
-  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Starts only where a run of token characters starts (lookbehind), so "eyJeyJ…" without dots is scanned once.
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   // Paperclip agent, board, CLI, claim and invite keys (server/src/services/{agents,board-auth}.ts, routes/access.ts).
   /pcp_(?:board_|cli_auth_|claim_|invite_)?[0-9a-f]{48}/g,
   // Telegram bot token: bot id, ":AA", 33 more characters.
   /\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/g,
 ];
 // Credential-named assignment (`TOKEN=…`, `"api_key":"…"`) inside a long run, where the shared scanner does not run.
-// It starts with a literal keyword and every quantifier before the value is bounded, so each start position costs
-// constant work. The value must mix letters and digits, so counts ("tokens: 1234567890") and words stay.
+// No lookahead: an attempt either fails within the bounded key and separator, or consumes the whole value, so the scan
+// stays linear. The callback keeps pure counts ("tokens: 1234567890") and a few neutral words; any other value is masked.
 const LINEAR_ASSIGNMENT_RE =
-  /(token|secret|password|passwd|api[_-]?key|authorization|cookie|credential)([A-Za-z0-9_-]{0,40}\\?["']?\s{0,5}[:=]\s{0,5}\\?["']?)(?=[^\s"'\\&;,]*[0-9])(?=[^\s"'\\&;,]*[A-Za-z])([^\s"'\\&;,]{8,})/gi;
+  /(token|secret|password|passwd|api[_-]?key|authorization|cookie|credential)([A-Za-z0-9_-]{0,40}\\?["']?\s{0,5}[:=]\s{0,5}\\?["']?)([^\s"'\\&;,]{4,})/gi;
+const NEUTRAL_ASSIGNMENT_VALUE = /^(?:[0-9]+|true|false|null|undefined|none|required|optional|redacted|\*+|\[redacted\]|\$\{[A-Za-z0-9_]+\}?)$/i;
 
 function redactLinear(input: string): string {
   return LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input);
@@ -50,7 +52,8 @@ function redactLinear(input: string): string {
 
 function redactLongSegment(segment: string): string {
   return redactLinear(segment)
-    .replace(LINEAR_ASSIGNMENT_RE, (_match, key: string, separator: string) => `${key}${separator}${REDACTED_EVENT_VALUE}`);
+    .replace(LINEAR_ASSIGNMENT_RE, (match: string, key: string, separator: string, value: string) =>
+      NEUTRAL_ASSIGNMENT_VALUE.test(value) || value.includes(REDACTED_EVENT_VALUE) ? match : `${key}${separator}${REDACTED_EVENT_VALUE}`);
 }
 
 function redactString(input: string): string {
@@ -98,7 +101,10 @@ function isCredentialKey(key: string): boolean {
 }
 
 export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | null = null): T {
-  if (depth > MAX_DEPTH) return (value !== null && typeof value === "object" ? redactDeepSubtree(value) : value) as T;
+  if (depth > MAX_DEPTH) {
+    if (typeof value === "string") return redactString(value) as T;
+    return (value !== null && typeof value === "object" ? redactDeepSubtree(value) : value) as T;
+  }
   if (typeof value === "string") {
     if (key !== null && value.length >= 8 && isCredentialKey(key)) return REDACTED_EVENT_VALUE as T;
     return redactString(value) as T;
@@ -128,7 +134,8 @@ export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | nul
   return value;
 }
 
-const MIN_REGISTERED_VALUE_LENGTH = 8;
+// Registered and declared values are known secrets; only trivially short ones are skipped (they would mask noise).
+const MIN_REGISTERED_VALUE_LENGTH = 4;
 
 /**
  * Bounded text policy for one run-log chunk (SYNA-1817 finding 5): the same token shapes as stored results (linear on
