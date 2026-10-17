@@ -332,6 +332,7 @@ import {
 import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
+import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled, skipSelfUnblockWake } from "../services/self-block-guard.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -13421,6 +13422,10 @@ export function issueRoutes(
               "Agents may only name themselves as an unblock owner",
             );
           }
+          if (req.actor.type === "agent" && req.actor.agentId === owner.agentId && selfBlockGuardEnabled()) {
+            res.status(409).json({ error: SELF_BLOCK_REFUSAL, details: { code: "self_block_refused" } });
+            return;
+          }
         } else if (owner !== "board" && "userId" in owner) {
           const member = await db
             .select({ id: companyMemberships.id })
@@ -13958,7 +13963,7 @@ export function issueRoutes(
       if (enteringBlocked) {
         const blockedIssue = issue;
         let ownerNotifiedAt: Date | null = null;
-        await deliverAgentUnblockNotification({
+        if (!skipSelfUnblockWake(blockedIssue)) await deliverAgentUnblockNotification({
           issue: blockedIssue,
           wakeup: heartbeat.wakeup,
           markNotified: async (blockedOwnerNotifiedAt) => {
