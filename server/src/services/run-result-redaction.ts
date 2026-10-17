@@ -32,8 +32,6 @@ const LINEAR_TOKEN_RES = [
   /gh[pousr]_[A-Za-z0-9_]{20,}/g,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
-  // Starts only where a run of token characters starts (lookbehind), so "eyJeyJ…" without dots is scanned once.
-  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   // Paperclip agent, board, CLI, claim and invite keys (server/src/services/{agents,board-auth}.ts, routes/access.ts).
   /pcp_(?:board_|cli_auth_|claim_|invite_)?[0-9a-f]{48}/g,
   // Telegram bot token: bot id, ":AA", 33 more characters.
@@ -46,14 +44,35 @@ const LINEAR_ASSIGNMENT_RE =
   /(token|secret|password|passwd|api[_-]?key|authorization|cookie|credential)([A-Za-z0-9_-]{0,40}\\?["']?\s{0,5}[:=]\s{0,5}\\?["']?)([^\s"'\\&;,]{4,})/gi;
 const NEUTRAL_ASSIGNMENT_VALUE = /^(?:[0-9]+|true|false|null|undefined|none|required|optional|redacted|\*+|\[redacted\]|\$\{[A-Za-z0-9_]+\}?)$/i;
 
+// JWT: find maximal runs of JWT characters (one linear pass), split each run on ".", and mask from an "eyJ" in one part
+// through the end of the second part after it, when all three parts are long enough. A regex with an unbounded class
+// after "eyJ" is quadratic on "eyJeyJ…", and a lookbehind fix misses a JWT after "-" (codex review, 2026-10-17).
+const JWT_RUN_RE = /[A-Za-z0-9_.-]{27,}/g;
+function maskJwtsInRun(run: string): string {
+  const parts = run.split(".");
+  for (let i = 0; i + 2 < parts.length; i++) {
+    const start = parts[i]!.indexOf("eyJ");
+    if (start < 0 || parts[i]!.length - start < 11 || parts[i + 1]!.length < 8 || parts[i + 2]!.length < 8) continue;
+    const head = parts.slice(0, i).concat(parts[i]!.slice(0, start)).join(".");
+    const rest = parts.slice(i + 3);
+    // Later JWTs in the same run: each part is visited once overall, so this stays linear.
+    return `${head}${REDACTED_EVENT_VALUE}${rest.length > 0 ? `.${maskJwtsInRun(rest.join("."))}` : ""}`;
+  }
+  return run;
+}
+function maskJwts(input: string): string {
+  if (!input.includes("eyJ")) return input;
+  return input.replace(JWT_RUN_RE, (run) => (run.includes("eyJ") && run.includes(".") ? maskJwtsInRun(run) : run));
+}
+
 function redactLinear(input: string): string {
-  return LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input);
+  return maskJwts(LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input));
 }
 
 function redactLongSegment(segment: string): string {
   return redactLinear(segment)
     .replace(LINEAR_ASSIGNMENT_RE, (match: string, key: string, separator: string, value: string) =>
-      NEUTRAL_ASSIGNMENT_VALUE.test(value) || value.includes(REDACTED_EVENT_VALUE) ? match : `${key}${separator}${REDACTED_EVENT_VALUE}`);
+      NEUTRAL_ASSIGNMENT_VALUE.test(value) || value === REDACTED_EVENT_VALUE ? match : `${key}${separator}${REDACTED_EVENT_VALUE}`);
 }
 
 function redactString(input: string): string {
@@ -101,14 +120,12 @@ function isCredentialKey(key: string): boolean {
 }
 
 export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | null = null): T {
-  if (depth > MAX_DEPTH) {
-    if (typeof value === "string") return redactString(value) as T;
-    return (value !== null && typeof value === "object" ? redactDeepSubtree(value) : value) as T;
-  }
+  // Strings first: a string has no subtree, so the depth limit never applies to it (or to its credential key).
   if (typeof value === "string") {
     if (key !== null && value.length >= 8 && isCredentialKey(key)) return REDACTED_EVENT_VALUE as T;
     return redactString(value) as T;
   }
+  if (depth > MAX_DEPTH) return (value !== null && typeof value === "object" ? redactDeepSubtree(value) : value) as T;
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map((item) => {
@@ -134,8 +151,39 @@ export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | nul
   return value;
 }
 
-// Registered and declared values are known secrets; only trivially short ones are skipped (they would mask noise).
-const MIN_REGISTERED_VALUE_LENGTH = 4;
+// Registered and declared values are known secrets. Values of 4+ characters are masked wherever they occur; shorter
+// ones only as a whole token (no letter or digit on either side), so "z9!" is masked but not every "a" in the text.
+const MIN_REGISTERED_VALUE_LENGTH = 1;
+const SHORT_VALUE_LENGTH = 4;
+const WORD_CHAR = /[A-Za-z0-9]/;
+function maskShortValue(text: string, value: string): string {
+  let out = "";
+  let from = 0;
+  for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + value.length)) {
+    const before = at > 0 ? text[at - 1]! : "";
+    const after = text[at + value.length] ?? "";
+    if ((before && WORD_CHAR.test(before)) || (after && WORD_CHAR.test(after))) continue;
+    out += text.slice(from, at) + REDACTED_EVENT_VALUE;
+    from = at + value.length;
+  }
+  return from === 0 ? text : out + text.slice(from);
+}
+function redactKnownValues<T>(input: T, values: string[]): T {
+  const long = values.filter((value) => value.length >= SHORT_VALUE_LENGTH);
+  const short = values.filter((value) => value.length > 0 && value.length < SHORT_VALUE_LENGTH);
+  let result = long.length > 0 ? redactRegisteredSecretValues(input, long) : input;
+  if (short.length === 0) return result;
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") return short.reduce((text, item) => maskShortValue(text, item), value);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value && typeof value === "object" && !(value instanceof Date)) {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, walk(v)]));
+    }
+    return value;
+  };
+  result = walk(result) as T;
+  return result;
+}
 
 /**
  * Bounded text policy for one run-log chunk (SYNA-1817 finding 5): the same token shapes as stored results (linear on
@@ -145,7 +193,7 @@ const MIN_REGISTERED_VALUE_LENGTH = 4;
 export function redactRunLogText(text: string, registeredValues: string[] = []): string {
   const shaped = redactString(text);
   const values = registeredValues.filter((value) => value.length >= MIN_REGISTERED_VALUE_LENGTH);
-  return values.length > 0 ? redactRegisteredSecretValues(shaped, values) : shaped;
+  return values.length > 0 ? redactKnownValues(shaped, values) : shaped;
 }
 
 /**
@@ -177,7 +225,7 @@ export function redactRunPersistencePatch<T extends PersistedRunFields>(patch: T
     const current = next[field];
     if (current === null || current === undefined) continue;
     let redacted = redactRunResultSecrets(current);
-    if (values.length > 0) redacted = redactRegisteredSecretValues(redacted, values);
+    if (values.length > 0) redacted = redactKnownValues(redacted, values);
     if (redacted !== current) {
       next[field] = redacted;
       changed = true;
