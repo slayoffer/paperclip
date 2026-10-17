@@ -1,6 +1,8 @@
 import { appendWithByteCap, MAX_EXCERPT_BYTES, parseObject } from "../../adapters/utils.js";
 import { redactSensitiveText, sanitizeRecord } from "../../redaction.js";
 import { redactCurrentUserText, redactCurrentUserValue, type CurrentUserRedactionOptions } from "../../log-redaction.js";
+import { redactRunLogText, redactRunResultSecrets } from "../run-result-redaction.js";
+import { redactRegisteredSecretValues } from "../run-secret-redaction.js";
 
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
 const MAX_RUN_EVENT_PAYLOAD_STRING_CHARS = 16 * 1024;
@@ -108,8 +110,9 @@ function redactInlineBase64ImageData(chunk: string) {
 export function compactRunLogChunk(
   chunk: string,
   maxChars = MAX_PERSISTED_LOG_CHUNK_CHARS,
+  registeredValues: string[] = [],
 ) {
-  const normalized = redactSensitiveText(redactInlineBase64ImageData(chunk));
+  const normalized = redactRunLogText(redactInlineBase64ImageData(chunk), registeredValues);
   if (normalized.length <= maxChars) return normalized;
 
   const headChars = Math.max(0, Math.floor(maxChars * 0.6));
@@ -123,6 +126,7 @@ export function compactRunLogChunk(
 interface CanonicalNativeLogRedaction {
   redactIdentity: <T>(value: T) => T;
   currentUser: CurrentUserRedactionOptions;
+  registeredValues?: string[];
 }
 
 function omitCanonicalImageData(value: unknown): unknown {
@@ -153,7 +157,11 @@ export function redactCanonicalNativeRunLogChunk(chunk: string, options: Canonic
   const projected = redactCurrentUserValue(
     options.redactIdentity(omitCanonicalImageData(envelope)), options.currentUser,
   );
-  return `${JSON.stringify(sanitizeRecord(projected as Record<string, unknown>))}\n`;
+  const sanitized = sanitizeRecord(projected as Record<string, unknown>);
+  const redacted = options.registeredValues
+    ? redactRegisteredSecretValues(redactRunResultSecrets(sanitized), options.registeredValues)
+    : sanitized;
+  return `${JSON.stringify(redacted)}\n`;
 }
 
 /** New complete-value forms first; old text projections are computed only when
@@ -164,8 +172,13 @@ export function* canonicalNativeRunLogRedactionForms(chunk: string, options: Can
     yield redactCanonicalNativeRunLogChunk(chunk, {
       ...options, currentUser: { ...options.currentUser, enabled },
     });
-  for (const enabled of [false, true])
-    yield compactRunLogChunk(redactCurrentUserText(options.redactIdentity(chunk), {
-      ...options.currentUser, enabled,
-    }), Number.MAX_SAFE_INTEGER);
+  for (const enabled of [false, true]) {
+    if (options.registeredValues) {
+      yield redactCanonicalNativeRunLogChunk(chunk, {
+        ...options, currentUser: { ...options.currentUser, enabled }, registeredValues: undefined,
+      });
+    }
+    const historical = redactCurrentUserText(options.redactIdentity(chunk), { ...options.currentUser, enabled });
+    yield redactSensitiveText(redactInlineBase64ImageData(historical));
+  }
 }

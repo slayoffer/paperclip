@@ -9,7 +9,7 @@ import { publishLiveEvent } from "../live-events.js";
 import { isRunLogStoreType, type RunLogHandle, type RunLogStore } from "../run-log-store.js";
 import { appendExcerpt, canonicalNativeRunLogRedactionForms, compactRunLogChunk, redactCanonicalNativeRunLogChunk } from "./run-log.js";
 import { createNativeRunLogExporter, nativeRunLogPrefixCursor } from "../native-runtime/native-run-log-export.js";
-import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "../run-secret-redaction.js";
 import {
   isHeartbeatRunRuntimeStatusActive,
   publishHeartbeatRunRuntimeProgress,
@@ -30,6 +30,7 @@ export interface HeartbeatRunOutputInput {
   runLogStore: Pick<RunLogStore, "begin" | "append" | "enqueue" | "flush"> & Partial<Pick<RunLogStore, "read" | "recordVerifiedSourcePrefix">>;
   identityRedactor: Pick<ReturnType<typeof createAgentIdentityRedactor>, "chunk" | "redact">;
   secretKeys: Set<string>;
+  readRunPersistSecrets?: () => string[];
   appendRunEvent: ReturnType<typeof createHeartbeatLifecycle>["appendRunEvent"];
   getCurrentUserRedactionOptions: () => Promise<CurrentUserRedactionOptions>;
   assertWriterAuthority?: () => Promise<void>;
@@ -157,6 +158,22 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         payload: { reason: "object_log_persistence_failed" },
       }).catch(() => undefined);
     };
+    // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
+    // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
+    let logRegistryValues: string[] = [];
+    let logRegistryVersion = -1;
+    const logRegisteredValues = async () => {
+      const version = runSecretRegistryVersion(run.id);
+      if (version !== logRegistryVersion) {
+        try {
+          logRegistryValues = await createRunSecretRedactionRegistry(db).redactionValuesForRun(run.companyId, run.id);
+          logRegistryVersion = version;
+        } catch {
+          // Keep the previous values; the run row is scanned again when it is written.
+        }
+      }
+      return [...(input.readRunPersistSecrets?.() ?? []), ...logRegistryValues];
+    };
     const appendIdentityRedactedLog = async (
       stream: "stdout" | "stderr",
       chunk: string,
@@ -164,12 +181,14 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
       source?: CanonicalNativeLog,
     ) => {
       const sourceCursor = source?.sourceCursor;
+      const registeredValues = await logRegisteredValues();
       const sanitizedChunk = source?.kind === "canonical_native"
         ? redactCanonicalNativeRunLogChunk(chunk, {
             redactIdentity: identityRedactor.redact,
             currentUser: currentUserRedactionOptions,
+            registeredValues,
           })
-        : compactRunLogChunk(redactCurrentUserText(chunk, currentUserRedactionOptions));
+        : compactRunLogChunk(redactCurrentUserText(chunk, currentUserRedactionOptions), undefined, registeredValues);
       if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
       if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
       const ts = new Date().toISOString();
@@ -265,12 +284,13 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         for (const value of new Set(input.runtimeLogSecretValues))
           await registry.register(run.companyId, runId, value);
       }
+      const registeredValues = await logRegisteredValues();
       const afterCursor = await nativeRunLogPrefixCursor({
         db, companyId: run.companyId, runId, store: runLogStore, handle: handle!,
         // Verify the two supported historical username-masking settings. Keep
         // the full private-data projection here; compaction is proved separately.
         redactChunks: (chunk) => canonicalNativeRunLogRedactionForms(chunk, {
-          redactIdentity: identityRedactor.redact, currentUser: currentUserRedactionOptions,
+          redactIdentity: identityRedactor.redact, currentUser: currentUserRedactionOptions, registeredValues,
         }),
       });
       return createNativeRunLogExporter({

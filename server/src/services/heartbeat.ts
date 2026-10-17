@@ -3218,6 +3218,7 @@ export function heartbeatService(
       });
 
       const runOutput = createHeartbeatRunOutput(db, {
+        readRunPersistSecrets: () => runLifecycle.readRunPersistSecrets(run.id),
         run, runId, issueId, runLogStore, identityRedactor, secretKeys,
         appendRunEvent, getCurrentUserRedactionOptions,
         assertWriterAuthority: createRunLogWriterAuthority(db, run, runOptions.nativeLeaseOwner),

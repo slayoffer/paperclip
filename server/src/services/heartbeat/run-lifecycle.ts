@@ -1133,6 +1133,9 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     for (const [id, entry] of runPersistSecretReaders) if (now - entry.at > 24 * 3600_000) runPersistSecretReaders.delete(id);
     runPersistSecretReaders.set(runId, { read, at: now });
   }
+  function readRunPersistSecrets(runId: string): string[] {
+    return runPersistSecretReaders.get(runId)?.read() ?? [];
+  }
   async function redactRunPatchForPersistence<T extends Partial<typeof heartbeatRuns.$inferInsert> | undefined>(
     run: { id: string; companyId: string } | null,
     patch: T,
@@ -3180,6 +3183,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
   return {
     appendRunEvent,
     rememberRunPersistSecrets,
+    readRunPersistSecrets,
     redactRunPatchForPersistence,
     escalatePlanApprovalResumeFailureNeedsAttention,
     recordPlanApprovalResumeFailureRetry,
