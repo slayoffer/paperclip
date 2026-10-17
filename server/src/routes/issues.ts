@@ -264,6 +264,7 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { agentWipFull, agentWipLimit, isWipActiveStatus, wipPullRefusal } from "../services/agent-wip-limit.js";
 import {
   agentIssueCreateLimits,
   agentIssueCreateRefusal,
@@ -12456,8 +12457,15 @@ export function issueRoutes(
       );
       let deduplicationReason: "idempotency_key" | "recent_open_title" | null =
         null;
+      // Guild model v2 rule 2: a new assignment over the WIP limit waits in backlog (no assignment wake).
+      const wipDeferCreate = await agentWipFull(db, req.actor, {
+        companyId,
+        agentId: createBody.assigneeAgentId as string | null | undefined,
+        status: createBody.status,
+      });
       const createInput = {
         ...createBody,
+        ...(wipDeferCreate ? { status: "backlog" as const } : {}),
         projectId: createAssignmentScope.projectId,
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
@@ -12829,8 +12837,14 @@ export function issueRoutes(
         },
         actor,
       );
+      const wipDeferChild = await agentWipFull(db, req.actor, {
+        companyId: parent.companyId,
+        agentId: createBody.assigneeAgentId as string | null | undefined,
+        status: createBody.status,
+      });
       const { issue, parentBlockerAdded } = await svc.createChild(parent.id, {
         ...createBody,
+        ...(wipDeferChild ? { status: "backlog" as const } : {}),
         projectId: childAssignmentScope.projectId,
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
@@ -13045,7 +13059,17 @@ export function issueRoutes(
 
       const actor = getActorInfo(req);
       const normalizedChildren = [];
-      for (const child of requestedChildren) {
+      const wipPendingByAgent = new Map<string, number>();
+      for (const requestedChild of requestedChildren) {
+        let child = requestedChild;
+        const wipAgentId = child.assigneeAgentId as string | null | undefined;
+        if (wipAgentId && isWipActiveStatus(child.status ?? "todo")) {
+          const pending = wipPendingByAgent.get(wipAgentId) ?? 0;
+          if (await agentWipFull(db, req.actor, {
+            companyId: sourceIssue.companyId, agentId: wipAgentId, status: child.status ?? "todo", pending,
+          })) child = { ...child, status: "backlog" };
+          else wipPendingByAgent.set(wipAgentId, pending + 1);
+        }
         const executionPolicy = applyActorMonitorScheduledBy(
           normalizeIssueExecutionPolicy(child.executionPolicy),
           actor.actorType,
@@ -14116,6 +14140,31 @@ export function issueRoutes(
         throw unprocessable("Snapshot-guarded policy updates cannot change task status or ownership");
       }
       Object.assign(updateFields, transition.patch);
+
+      // Guild model v2 rule 2: a new agent assignment over the WIP limit waits in backlog; pulling own backlog work
+      // into an active status over the limit is refused. Reopen, resume and review returns are not new work.
+      {
+        const wipStatus = updateFields.status ?? existing.status;
+        const reassignedTo =
+          normalizedAssigneeAgentId && normalizedAssigneeAgentId !== existing.assigneeAgentId
+            ? normalizedAssigneeAgentId
+            : null;
+        if (reassignedTo) {
+          if (await agentWipFull(db, req.actor, {
+            companyId: existing.companyId, agentId: reassignedTo, status: wipStatus, excludeIssueId: existing.id,
+          })) updateFields.status = "backlog";
+        } else if (
+          existing.status === "backlog" &&
+          existing.assigneeAgentId &&
+          isWipActiveStatus(wipStatus) &&
+          await agentWipFull(db, req.actor, {
+            companyId: existing.companyId, agentId: existing.assigneeAgentId, status: wipStatus, excludeIssueId: existing.id,
+          })
+        ) {
+          res.status(409).json({ error: wipPullRefusal(agentWipLimit() ?? 0), details: { code: "agent_wip_limit" } });
+          return;
+        }
+      }
 
       const nextStatus = updateFields.status ?? existing.status;
       if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
