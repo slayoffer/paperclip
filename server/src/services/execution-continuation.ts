@@ -3,7 +3,9 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle
 import { z } from "zod";
 import {
   agentWakeupRequests,
+  documents,
   heartbeatRuns,
+  issueDocuments,
   issueComments,
   issueRecoveryActions,
   issueThreadInteractions,
@@ -30,6 +32,31 @@ const object = (v: unknown): Record<string, unknown> =>
     : {};
 const string = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v : null;
+/**
+ * Recent-comment window (synthiq fork, Guild model v2 rule 4, 2026-10-17). When PAPERCLIP_WAKE_RECENT_COMMENTS is a
+ * positive integer, the continuation carries only the last N comments plus the comments that must stay (wake origins
+ * and the latest human request), a count of the omitted ones, and the issue's `plan` document. Unset: full history.
+ */
+export function wakeRecentCommentLimit(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.PAPERCLIP_WAKE_RECENT_COMMENTS?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 ? n : null;
+}
+
+export function selectRecentCommentWindow<T extends { id: string }>(
+  messages: T[],
+  limit: number,
+  mustKeepIds: Iterable<string>,
+): { kept: T[]; omittedCount: number } {
+  const keep = new Set(mustKeepIds);
+  for (const message of messages.slice(-limit)) keep.add(message.id);
+  const kept = messages.filter((message) => keep.has(message.id));
+  return { kept, omittedCount: messages.length - kept.length };
+}
+
+export const PLAN_DOCUMENT_MAX_CHARS = 16_000;
+
 export function continuationOriginCommentIds(context: unknown): string[] {
   const c = object(context);
   const prior = object(c.executionContinuation);
@@ -246,7 +273,7 @@ export async function buildExecutionContinuation(input: {
   // Missing source rows cannot silently become a claim of complete context.
   if (originCommentIds.some((id) => !rows.some((row) => row.id === id)))
     throw new Error("continuation_source_context_missing");
-  const messages = rows.map((row) => {
+  const allMessages = rows.map((row) => {
     const safe = input.exposeLowTrustRaw
       ? row
       : sanitizeQuarantinedCommentForHigherTrust(row);
@@ -264,6 +291,26 @@ export async function buildExecutionContinuation(input: {
       sourceTrust: row.sourceTrust,
     };
   });
+  const isHumanRequest = (row: (typeof allMessages)[number]) =>
+    row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0;
+  const recentLimit = wakeRecentCommentLimit();
+  const latestHumanRequestId = allMessages.findLast(isHumanRequest)?.id;
+  const window = recentLimit
+    ? selectRecentCommentWindow(allMessages, recentLimit, [
+        ...originCommentIds,
+        ...(latestHumanRequestId ? [latestHumanRequestId] : []),
+      ])
+    : null;
+  const messages = window ? window.kept : allMessages;
+  const planDocument = recentLimit
+    ? (await db
+        .select({ key: issueDocuments.key, title: documents.title, body: documents.latestBody,
+          revision: documents.latestRevisionNumber, updatedAt: documents.updatedAt })
+        .from(issueDocuments)
+        .innerJoin(documents, eq(documents.id, issueDocuments.documentId))
+        .where(and(eq(issueDocuments.companyId, companyId), eq(issueDocuments.issueId, issueId),
+          eq(issueDocuments.key, "plan"))))[0] ?? null
+    : null;
   const previousRun = input.previousContextRunId
     ? (
         await db
@@ -304,10 +351,7 @@ export async function buildExecutionContinuation(input: {
           ),
         }
       : undefined;
-  const latestRequest = messages.findLast(
-    (row) =>
-      row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
-  );
+  const latestRequest = messages.findLast(isHumanRequest);
   const hashObjectiveSource = (value: string) => createHash("sha256").update(value.trim()).digest("hex");
   const objectiveSource = latestRequest
     ? { kind: "comment" as const, id: latestRequest.id, revision: latestRequest.updatedAt }
@@ -463,8 +507,24 @@ export async function buildExecutionContinuation(input: {
     unresolvedInteractionIds: interactions
       .filter((row) => row.status === "pending")
       .map((row) => row.id),
+    ...(window ? {
+      omittedMessages: {
+        count: window.omittedCount,
+        readVia: `GET /api/issues/${issueId}/comments`,
+      },
+    } : {}),
+    ...(planDocument ? {
+      planDocument: {
+        key: planDocument.key,
+        title: planDocument.title,
+        revision: planDocument.revision,
+        updatedAt: planDocument.updatedAt.toISOString(),
+        body: planDocument.body.slice(0, PLAN_DOCUMENT_MAX_CHARS),
+        truncated: planDocument.body.length > PLAN_DOCUMENT_MAX_CHARS,
+      },
+    } : {}),
     coverage: {
-      kind: "full_task_history",
+      kind: window ? "recent_window" : "full_task_history",
       throughCommentId: messages.at(-1)?.id ?? null,
       summaryThroughCommentId: null,
     },
