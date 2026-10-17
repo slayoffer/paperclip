@@ -102,10 +102,23 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     expect(skipped).toHaveLength(0);
   });
 
-  it("does not gate a wake requested by a person", async () => {
+  it("gates a wake recorded as a user (board keys act in Anton's name)", async () => {
     const { companyId, agentId, issueId } = await seed();
     process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";
-    await wake(heartbeatService(db), agentId, issueId, "user");
+    expect(await wake(heartbeatService(db), agentId, issueId, "user")).toBeNull();
+    const skipped = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.reason, "issue.token_budget_exceeded")));
+    expect(skipped).toHaveLength(1);
+  });
+
+  it("does not gate a board-UI Run now (issueBudgetOverride)", async () => {
+    const { companyId, agentId, issueId } = await seed();
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";
+    await heartbeatService(db).wakeup(agentId, {
+      source: "on_demand", triggerDetail: "manual", reason: "manual_run",
+      payload: { issueId }, contextSnapshot: { issueId, taskId: issueId },
+      requestedByActorType: "user", requestedByActorId: "local-board", issueBudgetOverride: true,
+    });
     const skipped = await db.select().from(agentWakeupRequests).where(and(
       eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.reason, "issue.token_budget_exceeded")));
     expect(skipped).toHaveLength(0);
