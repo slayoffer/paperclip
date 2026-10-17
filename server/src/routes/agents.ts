@@ -6284,6 +6284,8 @@ export function agentRoutes(
     const run = await heartbeat.wakeup(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: opts.source,
       triggerDetail: req.body.triggerDetail ?? "manual",
       reason: req.body.reason ?? null,
@@ -6422,6 +6424,8 @@ export function agentRoutes(
     }
     const wakeOpts: Parameters<typeof heartbeat.wakeup>[1] = {
       ...(req.actor.type === "board" ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: "on_demand",
       triggerDetail: typeof body.triggerDetail === "string" ? body.triggerDetail as "manual" | "system" | "ping" | "callback" : "manual",
       requestedByActorType: req.actor.type === "agent" ? "agent" : "user",

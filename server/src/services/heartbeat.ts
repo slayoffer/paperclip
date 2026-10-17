@@ -3772,6 +3772,8 @@ function normalizeMaxConcurrentRuns(value: unknown) {
 interface WakeupOptions {
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
+  /** A person pressed Run now / Retry in the board UI: passes the per-issue token budget (rule 5). */
+  issueBudgetOverride?: boolean;
   /** Internal resume of a queue with persisted board interruption intent. */
   queuedCommentInterruptId?: string;
   /** Internal delivery of an existing undelivered user comment. */
@@ -27321,8 +27323,9 @@ export function heartbeatService(
       return null;
     }
 
-    // Guild model v2 rule 5: stop agent and system wakes on an issue over its token budget; raise one card.
-    const issueTokenBudget = issueId && isUuidLike(issueId) && opts.requestedByActorType !== "user"
+    // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
+    // Retry in the board UI passes (Anton, 2026-10-17): board keys act in his name, so "user" is not enough.
+    const issueTokenBudget = issueId && isUuidLike(issueId) && opts.issueBudgetOverride !== true
       ? issueTokenBudgetConfig()
       : null;
     if (issueTokenBudget && issueId) {
