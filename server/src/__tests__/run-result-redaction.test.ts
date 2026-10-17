@@ -142,6 +142,21 @@ describe("redactRunResultSecrets", () => {
     expect(redactRunPersistencePatch({ stdoutExcerpt: "result: z9!Ab6" }, ["z9!Ab6"]).stdoutExcerpt).not.toContain("z9!Ab6");
   });
 
+  it("re-review: partial marker, JWT after a hyphen, 1-3 character secrets, credential key at depth 65", async () => {
+    const { redactRunPersistencePatch } = await import("../services/run-result-redaction.js");
+    const partial = JSON.stringify({ padding: "A".repeat(1100), password: "opaque9***REDACTED***suffix" });
+    expect(redactRunResultSecrets({ s: partial }).s).not.toContain("opaque9");
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghABCDEFGH12345678";
+    const url = JSON.stringify({ padding: "A".repeat(1100), url: `https://example.invalid/#id-${jwt}` });
+    expect(redactRunResultSecrets({ s: url }).s).not.toContain("abcdefghABCDEFGH12345678");
+    expect(redactRunResultSecrets({ s: `short ${jwt} text` }).s).not.toContain(jwt);
+    expect(redactRunPersistencePatch({ stdoutExcerpt: "result: z9!" }, ["z9!"]).stdoutExcerpt).not.toContain("z9!");
+    expect(redactRunPersistencePatch({ stdoutExcerpt: "ab1 cab1d" }, ["ab1"]).stdoutExcerpt).toContain("cab1d");
+    let deep: unknown = { password: "correct-horse-battery" };
+    for (let i = 0; i < 64; i++) deep = { next: deep };
+    expect(JSON.stringify(redactRunResultSecrets(deep))).not.toContain("correct-horse-battery");
+  });
+
   it("keeps an own __proto__ key as data", () => {
     const input = JSON.parse(`{"__proto__":{"x":1},"stdout":"token ${GH}"}`);
     const out = redactRunResultSecrets(input);
