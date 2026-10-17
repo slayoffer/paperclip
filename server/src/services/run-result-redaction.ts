@@ -21,7 +21,10 @@ import { REDACTED_EVENT_VALUE, redactSensitiveText } from "../redaction.js";
 const LONG_SEGMENT = 1024;
 const LONG_SEGMENT_RE = new RegExp(String.raw`\S{${LONG_SEGMENT + 1},}`, "g");
 const HAS_LONG_SEGMENT_RE = new RegExp(String.raw`\S{${LONG_SEGMENT + 1}}`);
-const PLACEHOLDER_RE = /\u0000(\d+)\u0000/g;
+// Placeholders use a private-use character that the input does not contain (the input may contain NUL).
+const SENTINEL_CANDIDATES = Array.from({ length: 64 }, (_, i) => String.fromCharCode(0xe000 + i));
+const MAX_DEPTH = 64;
+const DEEP_SUBTREE_MAX_CHARS = 65_536;
 
 // Prefix-anchored credential shapes: each match attempt fails fast at a position without the literal prefix.
 const LINEAR_TOKEN_RES = [
@@ -30,9 +33,19 @@ const LINEAR_TOKEN_RES = [
   /\bsk-[A-Za-z0-9_-]{12,}/g,
   /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
 ];
+// Credential-named assignment (`TOKEN=…`, `"api_key":"…"`) inside a long run, where the shared scanner does not run.
+// It starts with a literal keyword and every quantifier before the value is bounded, so each start position costs
+// constant work. The value must mix letters and digits, so counts ("tokens: 1234567890") and words stay.
+const LINEAR_ASSIGNMENT_RE =
+  /(token|secret|password|passwd|api[_-]?key|authorization|cookie|credential)([A-Za-z0-9_-]{0,40}\\?["']?\s{0,5}[:=]\s{0,5}\\?["']?)(?=[^\s"'\\&;,]*[0-9])(?=[^\s"'\\&;,]*[A-Za-z])([^\s"'\\&;,]{8,})/gi;
 
 function redactLinear(input: string): string {
   return LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input);
+}
+
+function redactLongSegment(segment: string): string {
+  return redactLinear(segment)
+    .replace(LINEAR_ASSIGNMENT_RE, (_match, key: string, separator: string) => `${key}${separator}${REDACTED_EVENT_VALUE}`);
 }
 
 function redactString(input: string): string {
@@ -40,13 +53,33 @@ function redactString(input: string): string {
     // The shared scanner has no fine-grained PAT shape; the linear pass adds it.
     return redactLinear(redactSensitiveText(input));
   }
-  if (input.includes("\u0000")) return redactLinear(input);
+  const sentinel = SENTINEL_CANDIDATES.find((candidate) => !input.includes(candidate));
   const long: string[] = [];
   const masked = input.replace(LONG_SEGMENT_RE, (segment) => {
-    long.push(redactLinear(segment));
-    return `\u0000${long.length - 1}\u0000`;
+    // No free sentinel (practically impossible): mask the whole long run rather than skip the shared scanner.
+    if (!sentinel) return REDACTED_EVENT_VALUE;
+    long.push(redactLongSegment(segment));
+    return `${sentinel}${long.length - 1}${sentinel}`;
   });
-  return redactLinear(redactSensitiveText(masked)).replace(PLACEHOLDER_RE, (match, index: string) => long[Number(index)] ?? match);
+  const scanned = redactLinear(redactSensitiveText(masked));
+  if (!sentinel) return scanned;
+  // A placeholder that the scanner masked (for example the value after "Bearer ") stays masked.
+  const placeholder = new RegExp(`${sentinel}(\\d+)${sentinel}`, "g");
+  return scanned.replace(placeholder, (match, index: string) => long[Number(index)] ?? match);
+}
+
+function redactDeepSubtree(value: unknown): string {
+  // Past the depth limit, store a redacted, size-capped string instead of the raw subtree.
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    return REDACTED_EVENT_VALUE;
+  }
+  const capped = text.length > DEEP_SUBTREE_MAX_CHARS
+    ? `${text.slice(0, DEEP_SUBTREE_MAX_CHARS)}[truncated ${text.length - DEEP_SUBTREE_MAX_CHARS} chars]`
+    : text;
+  return redactString(capped);
 }
 
 const CREDENTIAL_KEYS = new Set([
@@ -60,7 +93,7 @@ function isCredentialKey(key: string): boolean {
 }
 
 export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | null = null): T {
-  if (depth > 64) return value;
+  if (depth > MAX_DEPTH) return (value !== null && typeof value === "object" ? redactDeepSubtree(value) : value) as T;
   if (typeof value === "string") {
     if (key !== null && value.length >= 8 && isCredentialKey(key)) return REDACTED_EVENT_VALUE as T;
     return redactString(value) as T;
