@@ -157,6 +157,16 @@ describe("redactRunResultSecrets", () => {
     expect(JSON.stringify(redactRunResultSecrets(deep))).not.toContain("correct-horse-battery");
   });
 
+  it("review 3: a JWT chain stays linear, overlapping short secrets are checked", async () => {
+    const { redactRunLogText } = await import("../services/run-result-redaction.js");
+    const chain = "eyJ12345678.abcdefgh.ijklmnop.".repeat(5333).padEnd(160000, "x");
+    const started = performance.now();
+    const out = redactRunLogText(chain);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(out).not.toContain("abcdefgh");
+    expect(redactRunLogText("progress!!!", ["!!"])).toBe("progress!***REDACTED***");
+  });
+
   it("keeps an own __proto__ key as data", () => {
     const input = JSON.parse(`{"__proto__":{"x":1},"stdout":"token ${GH}"}`);
     const out = redactRunResultSecrets(input);

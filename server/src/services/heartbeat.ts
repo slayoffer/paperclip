@@ -13000,7 +13000,6 @@ export function heartbeatService(
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
-    forgetRunPersistSecretsLater(runId, status);
     const updated =
       previousStatus &&
       await legacyExecutionNeedsReconciliationWithEvidence(db, {
@@ -13034,6 +13033,7 @@ export function heartbeatService(
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
     }
 
     return updated;
@@ -13092,7 +13092,6 @@ export function heartbeatService(
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
-    forgetRunPersistSecretsLater(runId, status);
     const updated =
       previousStatus &&
       await legacyExecutionNeedsReconciliationWithEvidence(db, {
@@ -13135,6 +13134,7 @@ export function heartbeatService(
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null, failureReport);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
       return { run: updated, updated: true as const };
     }
 
