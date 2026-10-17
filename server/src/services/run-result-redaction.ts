@@ -32,6 +32,10 @@ const LINEAR_TOKEN_RES = [
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
   /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Paperclip agent, board, CLI, claim and invite keys (server/src/services/{agents,board-auth}.ts, routes/access.ts).
+  /pcp_(?:board_|cli_auth_|claim_|invite_)?[0-9a-f]{48}/g,
+  // Telegram bot token: bot id, ":AA", 33 more characters.
+  /\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/g,
 ];
 // Credential-named assignment (`TOKEN=…`, `"api_key":"…"`) inside a long run, where the shared scanner does not run.
 // It starts with a literal keyword and every quantifier before the value is bounded, so each start position costs
