@@ -1,3 +1,4 @@
+import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "../run-secret-redaction.js";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { AdapterInvocationMeta, AdapterRuntimeEvent } from "../../adapters/index.js";
@@ -22,6 +23,7 @@ export interface HeartbeatRunOutputInput {
   runLogStore: Pick<RunLogStore, "begin" | "append">;
   identityRedactor: Pick<ReturnType<typeof createAgentIdentityRedactor>, "chunk" | "redact">;
   secretKeys: Set<string>;
+  readRunPersistSecrets?: () => string[];
   appendRunEvent: ReturnType<typeof createHeartbeatLifecycle>["appendRunEvent"];
   getCurrentUserRedactionOptions: () => Promise<CurrentUserRedactionOptions>;
 }
@@ -87,9 +89,27 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
 
     const currentUserRedactionOptions =
       await getCurrentUserRedactionOptions();
+        // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
+        // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
+        let logRegistryValues: string[] = [];
+        let logRegistryVersion = -1;
+        const logRegisteredValues = async () => {
+          const version = runSecretRegistryVersion(run.id);
+          if (version !== logRegistryVersion) {
+            try {
+              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+              logRegistryVersion = version;
+            } catch {
+              // Keep the previous values; the run row is scanned again when it is written.
+            }
+          }
+          return [...(input.readRunPersistSecrets?.() ?? []), ...logRegistryValues];
+        };
     const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
       const sanitizedChunk = compactRunLogChunk(
         redactCurrentUserText(chunk, currentUserRedactionOptions),
+        undefined,
+        await logRegisteredValues(),
       );
       if (stream === "stdout")
         stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);

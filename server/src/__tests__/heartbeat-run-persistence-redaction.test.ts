@@ -60,7 +60,9 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     if (during) await during({ id: run.id, companyId });
     await heartbeat.drainActiveRunExecutions();
     const stored = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]!);
-    return { stored, text: JSON.stringify([stored.error, stored.stdoutExcerpt, stored.stderrExcerpt, stored.resultJson]) };
+    // The ndjson run log as stored on disk, read back through the service.
+    const log = stored.logRef ? JSON.stringify(await heartbeat.readLog(run.id, { limitBytes: 1_000_000 })) : "";
+    return { stored, log, text: JSON.stringify([stored.error, stored.stdoutExcerpt, stored.stderrExcerpt, stored.resultJson]) + log };
   }
 
   const leak = (value: string) => `console.log(${JSON.stringify(value)}); console.error(${JSON.stringify(value)});`;
@@ -70,6 +72,14 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     expect(stored.status).toBe("succeeded");
     for (const value of [BOARD_KEY, GH, OPAQUE_ASSIGNMENT.slice(15)]) expect(text).not.toContain(value);
     expect(text).toContain("OPENCLAW_TOKEN=");
+  }, 30_000);
+
+  it("writes the run log file with the same policy", async () => {
+    const { log } = await runOnce(`${leak(`key ${BOARD_KEY}`)} ${leak(GH)}`);
+    expect(log.length).toBeGreaterThan(0);
+    expect(log).toContain("key ");
+    expect(log).not.toContain(BOARD_KEY);
+    expect(log).not.toContain(GH);
   }, 30_000);
 
   it("masks shapes in a failed run's stored row, including the error", async () => {
