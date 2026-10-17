@@ -595,8 +595,8 @@ import {
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
-import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
-import { declaredSecretValues, redactRunPersistencePatch, redactRunResultSecrets } from "./run-result-redaction.js";
+import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
+import { declaredSecretValues, redactRunLogText, redactRunPersistencePatch, redactRunResultSecrets } from "./run-result-redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolvePaperclipRunnerIdleTimeoutMs,
@@ -3746,8 +3746,9 @@ function redactInlineBase64ImageData(chunk: string) {
 export function compactRunLogChunk(
   chunk: string,
   maxChars = MAX_PERSISTED_LOG_CHUNK_CHARS,
+  registeredValues: string[] = [],
 ) {
-  const normalized = redactSensitiveText(redactInlineBase64ImageData(chunk));
+  const normalized = redactRunLogText(redactInlineBase64ImageData(chunk), registeredValues);
   if (normalized.length <= maxChars) return normalized;
 
   const headChars = Math.max(0, Math.floor(maxChars * 0.6));
@@ -23468,9 +23469,27 @@ export function heartbeatService(
 
         const currentUserRedactionOptions =
           await getCurrentUserRedactionOptions();
+        // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
+        // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
+        let logRegistryValues: string[] = [];
+        let logRegistryVersion = -1;
+        const logRegisteredValues = async () => {
+          const version = runSecretRegistryVersion(run.id);
+          if (version !== logRegistryVersion) {
+            try {
+              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+              logRegistryVersion = version;
+            } catch {
+              // Keep the previous values; the run row is scanned again when it is written.
+            }
+          }
+          return [...(runPersistSecretReaders.get(run.id)?.read() ?? []), ...logRegistryValues];
+        };
         const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
+            MAX_PERSISTED_LOG_CHUNK_CHARS,
+            await logRegisteredValues(),
           );
           if (stream === "stdout")
             stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);

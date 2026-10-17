@@ -131,6 +131,17 @@ export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | nul
 const MIN_REGISTERED_VALUE_LENGTH = 8;
 
 /**
+ * Bounded text policy for one run-log chunk (SYNA-1817 finding 5): the same token shapes as stored results (linear on
+ * long runs), then the run's registered values. A value split across two chunks is not seen here; the excerpts are
+ * scanned again whole when the run row is written.
+ */
+export function redactRunLogText(text: string, registeredValues: string[] = []): string {
+  const shaped = redactString(text);
+  const values = registeredValues.filter((value) => value.length >= MIN_REGISTERED_VALUE_LENGTH);
+  return values.length > 0 ? redactRegisteredSecretValues(shaped, values) : shaped;
+}
+
+/**
  * Values of env keys that are bound to secrets (declared secret keys), for write-time masking. Only declared keys:
  * masking every env value would also mask neutral settings such as URLs and paths in stored output.
  */
