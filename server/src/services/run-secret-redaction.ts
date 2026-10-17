@@ -139,6 +139,8 @@ export function createRunSecretRedactionRegistry(db: Db) {
       })));
       return runs.map((run) => redactRegisteredSecretValues(run, valuesByRun.get(run.id) ?? []));
     },
+    /** Decrypted values registered for one run; for write-time masking only, never stored or logged. */
+    valuesForRun,
     redactForRun: async <T>(companyId: string, runId: string, value: T): Promise<T> =>
       redactRegisteredSecretValues(value, await valuesForRun(companyId, runId)),
     redactForIssue: async <T>(companyId: string, issueId: string, value: T): Promise<T> =>

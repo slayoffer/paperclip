@@ -596,7 +596,7 @@ import {
 } from "../log-redaction.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
-import { redactRunResultSecrets } from "./run-result-redaction.js";
+import { declaredSecretValues, redactRunPersistencePatch, redactRunResultSecrets } from "./run-result-redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolvePaperclipRunnerIdleTimeoutMs,
@@ -12923,6 +12923,30 @@ export function heartbeatService(
     void reportRunFailure(db, updated, failureReport);
   }
 
+  // SYNA-1817: secret values a run's adapter received (declared secret env keys), by run id. Read at every run-row
+  // write that carries error, excerpts or resultJson, so late and failure writers mask them too. Entries expire.
+  const runPersistSecretReaders = new Map<string, { read: () => string[]; at: number }>();
+  function rememberRunPersistSecrets(runId: string, read: () => string[]) {
+    const now = Date.now();
+    for (const [id, entry] of runPersistSecretReaders) if (now - entry.at > 24 * 3600_000) runPersistSecretReaders.delete(id);
+    runPersistSecretReaders.set(runId, { read, at: now });
+  }
+  async function redactRunPatchForPersistence(
+    run: { id: string; companyId: string } | null,
+    patch: Partial<typeof heartbeatRuns.$inferInsert> | undefined,
+  ) {
+    if (!patch || !run) return patch;
+    if (patch.error == null && patch.stdoutExcerpt == null && patch.stderrExcerpt == null && patch.resultJson == null) return patch;
+    let registered: string[] = [];
+    try {
+      registered = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, "run secret registry unavailable; masking token shapes and declared values only");
+    }
+    const declared = runPersistSecretReaders.get(run.id)?.read() ?? [];
+    return redactRunPersistencePatch(patch, [...declared, ...registered]);
+  }
+
   async function setRunStatus(
     runId: string,
     status: string,
@@ -12955,6 +12979,7 @@ export function heartbeatService(
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated =
       previousStatus &&
       await legacyExecutionNeedsReconciliationWithEvidence(db, {
@@ -13045,6 +13070,7 @@ export function heartbeatService(
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated =
       previousStatus &&
       await legacyExecutionNeedsReconciliationWithEvidence(db, {
@@ -21779,6 +21805,7 @@ export function heartbeatService(
           trustPreset,
         });
       readFailureReportSecrets = () => collectRunFailureSecretValues(resolvedConfig.env, secretKeys);
+      rememberRunPersistSecrets(run.id, () => declaredSecretValues(resolvedConfig.env, secretKeys));
       if (aiBinding) {
         try {
           managedAiRuntime = await prepareManagedAiRuntime(db, { companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType, binding: aiBinding, config: resolvedConfig });
@@ -21882,6 +21909,10 @@ export function heartbeatService(
         ...resolvedFailureSecrets,
         ...collectRunFailureSecretValues(runtimeConfig.env, secretKeys),
       ];
+      rememberRunPersistSecrets(run.id, () => [
+        ...declaredSecretValues(resolvedConfig.env, secretKeys),
+        ...declaredSecretValues(runtimeConfig.env, secretKeys),
+      ]);
       const latestAgentConfigRevision = await getLatestAgentConfigRevision(
         agent.companyId,
         agent.id,
@@ -25712,13 +25743,13 @@ export function heartbeatService(
           ) {
             persistedRun = await db
               .update(heartbeatRuns)
-              .set({
+              .set((await redactRunPatchForPersistence(persistedRunWrite.run, {
                 ...finalRunPatch,
                 resultJson: cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage),
                 finishedAt:
                   persistedRunWrite.run.finishedAt ?? finalRunPatch.finishedAt,
                 updatedAt: new Date(),
-              })
+              }))!)
               .where(
                 and(
                   eq(heartbeatRuns.id, run.id),
@@ -25912,13 +25943,13 @@ export function heartbeatService(
 
             await db
               .update(heartbeatRuns)
-              .set({
+              .set((await redactRunPatchForPersistence(livenessRun, {
                 resultJson: {
                   ...persistedResultJson,
                   presentationDecision,
                 },
                 updatedAt: new Date(),
-              })
+              }))!)
               .where(eq(heartbeatRuns.id, livenessRun.id));
             await appendRunEvent(livenessRun, {
               eventType: "run.presentation.resolved",
