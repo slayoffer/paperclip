@@ -82,7 +82,7 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
     "classifyAndPersistRunLiveness" | "completeSkillTestRunForHeartbeatOutcome" | "refreshContinuationSummaryForRun" |
     "findRunIssueComment" | "findLatestCompletedFinalAgentMessage" | "parseMaxTurnContinuationPolicy" |
     "finalizeIssueCommentPolicy" | "handleIssueReviewPathDisposition" | "handleRunLivenessContinuation" |
-    "handleSuccessfulRunHandoff" | "updateRuntimeState">,
+    "handleSuccessfulRunHandoff" | "updateRuntimeState" | "redactRunPatchForPersistence">,
   Pick<ReturnType<typeof createHeartbeatRetries>,
     "scheduleBoundedRetryForRun" | "scheduleInteractionContinuationInfrastructureRetryIfEligible" | "timerClaimWasFirstHeartbeat">,
   Pick<ReturnType<typeof createHeartbeatRunControl>, "releaseIssueExecutionAndPromote">,
@@ -399,6 +399,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     handleRunLivenessContinuation,
     handleSuccessfulRunHandoff,
     updateRuntimeState,
+    redactRunPatchForPersistence,
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
@@ -705,12 +706,16 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           (processCancellation && !processCancellation.failed && status === "cancelled")) &&
         persistedRunWrite.run?.status === status
       ) {
+        const redactedFinalRunPatch = (await redactRunPatchForPersistence(persistedRunWrite.run, {
+          ...finalRunPatch,
+          resultJson: cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage),
+        }))!;
         persistedRun = await db
           .update(heartbeatRuns)
           .set({
-            ...finalRunPatch,
+            ...redactedFinalRunPatch,
             resultJson: preserveWorkspaceRestoreRecoveryMetadataSql(
-              cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage) ?? null,
+              redactedFinalRunPatch.resultJson ?? null,
             ),
 
             usageJson: preserveAcceptedRunUsageProjectionSql({ ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) }),
@@ -936,8 +941,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           };
         }
 
+        const { resultJson } = await redactRunPatchForPersistence(livenessRun, {
+          resultJson: { presentationDecision },
+        });
         await recordRunPresentationDecision(db, { companyId: livenessRun.companyId,
-          runId: livenessRun.id, issueId: issueId ?? undefined, decision: presentationDecision });
+          runId: livenessRun.id, issueId: issueId ?? undefined, decision: resultJson.presentationDecision });
         await appendRunEvent(livenessRun, {
           eventType: "run.presentation.resolved",
           stream: "system",

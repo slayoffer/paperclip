@@ -1,4 +1,5 @@
 import { REDACTED_EVENT_VALUE, redactSensitiveText } from "../redaction.js";
+import { redactRegisteredSecretValues } from "./run-secret-redaction.js";
 
 /**
  * Redact token-shaped text in an adapter result before it is persisted.
@@ -125,4 +126,44 @@ export function redactRunResultSecrets<T>(value: T, depth = 0, key: string | nul
     return (changed ? next : value) as T;
   }
   return value;
+}
+
+const MIN_REGISTERED_VALUE_LENGTH = 8;
+
+/**
+ * Values of env keys that are bound to secrets (declared secret keys), for write-time masking. Only declared keys:
+ * masking every env value would also mask neutral settings such as URLs and paths in stored output.
+ */
+export function declaredSecretValues(env: unknown, secretKeys: Iterable<string>): string[] {
+  if (!env || typeof env !== "object") return [];
+  const values = new Set<string>();
+  for (const key of secretKeys) {
+    const value = (env as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.length >= MIN_REGISTERED_VALUE_LENGTH) values.add(value);
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+
+const PERSISTED_TEXT_FIELDS = ["error", "stdoutExcerpt", "stderrExcerpt", "resultJson"] as const;
+type PersistedRunFields = Partial<Record<(typeof PERSISTED_TEXT_FIELDS)[number], unknown>>;
+
+/**
+ * One write-time policy for a heartbeat run row (SYNA-1817 findings 1 and 4): token shapes, then the run's registered
+ * secret values, on `error`, both excerpts and `resultJson`. Other fields pass through unchanged. Idempotent.
+ */
+export function redactRunPersistencePatch<T extends PersistedRunFields>(patch: T, registeredValues: string[]): T {
+  let changed = false;
+  const next: Record<string, unknown> = { ...patch };
+  const values = registeredValues.filter((value) => value.length >= MIN_REGISTERED_VALUE_LENGTH);
+  for (const field of PERSISTED_TEXT_FIELDS) {
+    const current = next[field];
+    if (current === null || current === undefined) continue;
+    let redacted = redactRunResultSecrets(current);
+    if (values.length > 0) redacted = redactRegisteredSecretValues(redacted, values);
+    if (redacted !== current) {
+      next[field] = redacted;
+      changed = true;
+    }
+  }
+  return (changed ? next : patch) as T;
 }

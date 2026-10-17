@@ -537,6 +537,7 @@ import {
 
 
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
+import { declaredSecretValues } from "./run-result-redaction.js";
 
 
 import { environmentService } from "./environments.js";
@@ -1848,6 +1849,7 @@ export function heartbeatService(
     handleRunLivenessContinuation,
     handleSuccessfulRunHandoff,
     updateRuntimeState,
+    redactRunPatchForPersistence: runLifecycle.redactRunPatchForPersistence,
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
@@ -2751,7 +2753,7 @@ export function heartbeatService(
         policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory, requestedExecutionWorkspaceMode },
         environment: { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput },
         services: { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral },
-        onFailureSecretsResolved: (readSecrets) => { readFailureReportSecrets = () => [...readSecrets(), ...identityRedactor.values]; },
+        onFailureSecretsResolved: (readSecrets) => { readFailureReportSecrets = () => [...readSecrets(), ...identityRedactor.values]; runLifecycle.rememberRunPersistSecrets(run.id, readSecrets); },
         onManagedAiRuntimeAcquired: (runtime) => { managedAiRuntime = runtime; },
         onIdentityRedactorPrepared: (redactor) => { identityRedactor = redactor; },
       }));
@@ -2762,6 +2764,10 @@ export function heartbeatService(
         runtimeSkillEntries, nativeRunnerPreparationSpans, agentIdentity, observability,
       } = executionConfiguration;
       let { runtimeConfig } = executionConfiguration;
+      runLifecycle.rememberRunPersistSecrets(run.id, () => [
+        ...declaredSecretValues(resolvedConfig.env, secretKeys),
+        ...declaredSecretValues(runtimeConfig.env, secretKeys),
+      ]);
       const resolvedFailureSecrets = readFailureReportSecrets();
       readFailureReportSecrets = () => [
         ...resolvedFailureSecrets,
