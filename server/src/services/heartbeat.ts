@@ -3743,6 +3743,13 @@ function redactInlineBase64ImageData(chunk: string) {
   );
 }
 
+export function maxRunningRunsCap(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.PAPERCLIP_MAX_RUNNING_RUNS?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 ? n : null;
+}
+
 export function compactRunLogChunk(
   chunk: string,
   maxChars = MAX_PERSISTED_LOG_CHUNK_CHARS,
@@ -20183,10 +20190,21 @@ export function heartbeatService(
       }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(
+      let availableSlots = Math.max(
         0,
         policy.maxConcurrentRuns - runningCount,
       );
+      // Synthiq fork (2026-10-17, Guild slim-down): PAPERCLIP_MAX_RUNNING_RUNS caps running runs instance-wide. A queued
+      // run stays queued and the periodic sweep starts it when a slot frees. Agent start locks are per agent, so two
+      // agents starting at the same moment can briefly exceed the cap by one or two.
+      const instanceCap = maxRunningRunsCap();
+      if (instanceCap !== null && availableSlots > 0) {
+        const instanceRunning = Number((await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.status, "running")))[0]?.n ?? 0);
+        availableSlots = Math.min(availableSlots, Math.max(0, instanceCap - instanceRunning));
+      }
       if (availableSlots <= 0) return [];
 
       const queuedRuns = await db
