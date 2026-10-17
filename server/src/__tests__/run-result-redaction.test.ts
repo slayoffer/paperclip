@@ -117,6 +117,31 @@ describe("redactRunResultSecrets", () => {
     expect(out).not.toContain(bot);
   });
 
+  it("stays linear on adversarial assignment and JWT-prefix runs (codex P1)", () => {
+    for (const input of ["token=aaaa".repeat(16_000), "eyJ".repeat(53_000)]) {
+      const started = performance.now();
+      redactRunResultSecrets({ stdout: input });
+      expect(performance.now() - started).toBeLessThan(500);
+    }
+  });
+
+  it("masks an alphabetic password inside long minified JSON (codex P2)", () => {
+    const text = JSON.stringify({ data: "A".repeat(1100), password: "correct-horse-battery" });
+    expect(redactRunResultSecrets({ stdout: text }).stdout).not.toContain("correct-horse-battery");
+  });
+
+  it("redacts a string leaf exactly past the depth limit (codex P2)", () => {
+    const board = `pcp_board_${"0a1b2c3d4e5f".repeat(4)}`;
+    let deep: unknown = board;
+    for (let i = 0; i < 65; i++) deep = { next: deep };
+    expect(JSON.stringify(redactRunResultSecrets(deep))).not.toContain(board);
+  });
+
+  it("masks a short registered value (codex P2)", async () => {
+    const { redactRunPersistencePatch } = await import("../services/run-result-redaction.js");
+    expect(redactRunPersistencePatch({ stdoutExcerpt: "result: z9!Ab6" }, ["z9!Ab6"]).stdoutExcerpt).not.toContain("z9!Ab6");
+  });
+
   it("keeps an own __proto__ key as data", () => {
     const input = JSON.parse(`{"__proto__":{"x":1},"stdout":"token ${GH}"}`);
     const out = redactRunResultSecrets(input);
