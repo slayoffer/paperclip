@@ -10,14 +10,17 @@ export const NO_WAKE_COMMENT_MARKER = "[no-wake]";
 /**
  * Wake-marker rule (synthiq fork, Guild model v2 rule 3, 2026-10-17). When PAPERCLIP_COMMENT_WAKE_REQUIRES_MARKER is
  * "true", a comment from an agent, a board API key or any other non-browser actor wakes the assignee only if its body
- * starts with `[wake]`.
+ * starts with `[wake]` or has `[wake]` as a whole line.
  * Human board comments (browser session) keep waking, and events (cards, blockers, monitors, assignment) are not
  * comments, so they are unaffected. Off by default: an operator switch, read on every request.
  */
 export const WAKE_COMMENT_MARKER = "[wake]";
 
+/** `[wake]` at the start of the body, or as a whole line anywhere (the review bridge puts it on the last line). */
 export function isWakeComment(body: unknown): boolean {
-  return typeof body === "string" && body.trimStart().toLowerCase().startsWith(WAKE_COMMENT_MARKER);
+  if (typeof body !== "string") return false;
+  if (body.trimStart().toLowerCase().startsWith(WAKE_COMMENT_MARKER)) return true;
+  return body.split(/\r?\n/).some((line) => line.trim().toLowerCase() === WAKE_COMMENT_MARKER);
 }
 
 export function commentWakeRequiresMarker(actor: { type?: string; source?: string } | undefined | null): boolean {

@@ -117,6 +117,9 @@ describe("wake comment marker rule", () => {
     expect(isWakeComment("[wake] decision: ship it")).toBe(true);
     expect(isWakeComment("  [WAKE] go")).toBe(true);
     expect(isWakeComment("note [wake]")).toBe(false);
+    expect(isWakeComment("Merge go: abc123\nall checks green\n[wake]")).toBe(true);
+    expect(isWakeComment("Merge go: abc123\r\n  [Wake]  \r\nmore")).toBe(true);
+    expect(isWakeComment("Merge go\nsee [wake] above")).toBe(false);
     expect(isWakeComment("[no-wake] note")).toBe(false);
     expect(isWakeComment(null)).toBe(false);
   });
