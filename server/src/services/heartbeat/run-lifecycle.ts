@@ -1000,14 +1000,24 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
   // SYNA-1817: secret values a run's adapter received (declared secret env keys), by run id. Read at every run-row
   // write that carries error, excerpts or resultJson, so late and failure writers mask them too. Entries expire.
+  // Bounded by count, least recently used first; every read refreshes an entry, so an active run keeps its reader.
   const runPersistSecretReaders = new Map<string, { read: () => string[]; at: number }>();
+  const RUN_PERSIST_SECRET_READERS_MAX = 5_000;
   function rememberRunPersistSecrets(runId: string, read: () => string[]) {
-    const now = Date.now();
-    for (const [id, entry] of runPersistSecretReaders) if (now - entry.at > 24 * 3600_000) runPersistSecretReaders.delete(id);
-    runPersistSecretReaders.set(runId, { read, at: now });
+    runPersistSecretReaders.delete(runId);
+    runPersistSecretReaders.set(runId, { read, at: Date.now() });
+    while (runPersistSecretReaders.size > RUN_PERSIST_SECRET_READERS_MAX) {
+      const oldest = runPersistSecretReaders.keys().next().value;
+      if (oldest === undefined) break;
+      runPersistSecretReaders.delete(oldest);
+    }
   }
   function readRunPersistSecrets(runId: string): string[] {
-    return runPersistSecretReaders.get(runId)?.read() ?? [];
+    const entry = runPersistSecretReaders.get(runId);
+    if (!entry) return [];
+    runPersistSecretReaders.delete(runId);
+    runPersistSecretReaders.set(runId, { ...entry, at: Date.now() });
+    return entry.read();
   }
   async function redactRunPatchForPersistence(
     run: { id: string; companyId: string } | null,
@@ -1021,7 +1031,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     } catch (err) {
       logger.warn({ err, runId: run.id }, "run secret registry unavailable; masking token shapes and declared values only");
     }
-    const declared = runPersistSecretReaders.get(run.id)?.read() ?? [];
+    const declared = readRunPersistSecrets(run.id);
     return redactRunPersistencePatch(patch, [...declared, ...registered]);
   }
 
