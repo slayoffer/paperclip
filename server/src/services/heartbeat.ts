@@ -346,6 +346,12 @@ import { reportRunFailure } from "./run-failure-report.js";
 import { collectRunFailureSecretValues, type RunFailureReportOptions } from "./run-failure-diagnostics.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
+import {
+  ISSUE_TOKEN_BUDGET_SKIP_REASON,
+  ensureIssueTokenBudgetCard,
+  issueTokenBudgetConfig,
+  loadIssueTokenBudgetState,
+} from "./issue-token-budget.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import {
   resolveDefaultAgentWorkspaceDir,
@@ -27242,6 +27248,30 @@ export function heartbeatService(
         error: `Wake suppressed because company status is ${companyStatus}`,
       }, { companyStatus });
       return null;
+    }
+
+    // Guild model v2 rule 5: stop agent and system wakes on an issue over its token budget; raise one card.
+    const issueTokenBudget = issueId && isUuidLike(issueId) && opts.requestedByActorType !== "user"
+      ? issueTokenBudgetConfig()
+      : null;
+    if (issueTokenBudget && issueId) {
+      const budgetState = await loadIssueTokenBudgetState(db, {
+        companyId: agent.companyId, issueId, config: issueTokenBudget,
+      });
+      if (budgetState.exceeded) {
+        const cardCreated = await ensureIssueTokenBudgetCard(db, {
+          companyId: agent.companyId, issueId, config: issueTokenBudget, state: budgetState,
+        }).catch((err) => {
+          logger.warn({ err, issueId }, "failed to raise issue token budget card");
+          return false;
+        });
+        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON, {
+          error: `Wake suppressed: this issue used ${budgetState.spent} input tokens since ` +
+            `${budgetState.windowStart.toISOString()} (budget ${issueTokenBudget.budget}).`,
+        });
+        logger.info({ issueId, agentId, spent: budgetState.spent, cardCreated }, "issue token budget reached; wake skipped");
+        return null;
+      }
     }
 
     const explicitResumeSession = await resolveExplicitResumeSessionOverride(
