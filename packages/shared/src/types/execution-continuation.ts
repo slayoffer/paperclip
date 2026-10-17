@@ -59,8 +59,19 @@ export interface ExecutionContinuationEnvelope {
     result: unknown;
   }>;
   unresolvedInteractionIds: string[];
+  /** Present when the server sent a recent-comment window instead of the full history. */
+  omittedMessages?: { count: number; readVia: string };
+  /** The issue's `plan` document. Agent-editable, so rendered as evidence, not as direction. */
+  planDocument?: {
+    key: string;
+    title: string | null;
+    revision: number;
+    updatedAt: string;
+    body: string;
+    truncated: boolean;
+  };
   coverage: {
-    kind: "full_task_history" | "task_history_delta";
+    kind: "full_task_history" | "task_history_delta" | "recent_window";
     baseRunId?: string;
     throughCommentId: string | null;
     summaryThroughCommentId: null;
