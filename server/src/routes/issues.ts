@@ -11901,6 +11901,7 @@ export function issueRoutes(
         companyId,
         agentId: createBody.assigneeAgentId as string | null | undefined,
         status: createBody.status,
+        priority: createBody.priority,
       });
       const createInput = {
         ...createBody,
@@ -12265,6 +12266,7 @@ export function issueRoutes(
         companyId: parent.companyId,
         agentId: createBody.assigneeAgentId as string | null | undefined,
         status: createBody.status,
+        priority: createBody.priority,
       });
       const { issue, parentBlockerAdded } = await svc.createChild(parent.id, {
         ...createBody,
@@ -12491,6 +12493,7 @@ export function issueRoutes(
           const pending = wipPendingByAgent.get(wipAgentId) ?? 0;
           if (await agentWipFull(db, req.actor, {
             companyId: sourceIssue.companyId, agentId: wipAgentId, status: child.status ?? "todo", pending,
+            priority: child.priority,
           })) child = { ...child, status: "backlog" };
           else wipPendingByAgent.set(wipAgentId, pending + 1);
         }
@@ -13363,6 +13366,7 @@ export function issueRoutes(
         if (reassignedTo) {
           if (await agentWipFull(db, req.actor, {
             companyId: existing.companyId, agentId: reassignedTo, status: wipStatus, excludeIssueId: existing.id,
+            priority: updateFields.priority ?? existing.priority,
           })) updateFields.status = "backlog";
         } else if (
           existing.status === "backlog" &&
@@ -13370,6 +13374,7 @@ export function issueRoutes(
           isWipActiveStatus(wipStatus) &&
           await agentWipFull(db, req.actor, {
             companyId: existing.companyId, agentId: existing.assigneeAgentId, status: wipStatus, excludeIssueId: existing.id,
+            priority: updateFields.priority ?? existing.priority,
           })
         ) {
           res.status(409).json({ error: wipPullRefusal(agentWipLimit() ?? 0), details: { code: "agent_wip_limit" } });
