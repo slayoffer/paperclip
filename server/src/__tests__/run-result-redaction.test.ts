@@ -107,6 +107,16 @@ describe("redactRunResultSecrets", () => {
     expect(out).toContain("plain value");
   });
 
+  it("masks Paperclip keys and Telegram bot tokens", () => {
+    const board = `pcp_board_${"0a1b2c3d4e5f".repeat(4)}`;
+    const agent = `pcp_${"9f8e7d6c5b4a".repeat(4)}`;
+    const bot = `1234567890:AA${"Bc1De2Fg3Hi4Jk5Lm6No7Pq8Rs9Tu0Vw1"}`;
+    const out = JSON.stringify(redactRunResultSecrets({ stdout: `k=${board} a ${agent} t ${bot}`, long: `x${"Y".repeat(1100)}${board}` }));
+    expect(out).not.toContain(board);
+    expect(out).not.toContain(agent);
+    expect(out).not.toContain(bot);
+  });
+
   it("keeps an own __proto__ key as data", () => {
     const input = JSON.parse(`{"__proto__":{"x":1},"stdout":"token ${GH}"}`);
     const out = redactRunResultSecrets(input);
