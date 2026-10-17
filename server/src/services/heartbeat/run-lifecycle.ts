@@ -1127,9 +1127,15 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
   // SYNA-1817: secret values a run's adapter received (declared secret env keys), by run id. Read at every run-row
   // write that carries error, excerpts or resultJson, so late and failure writers mask them too. Entries expire.
-  // Bounded by count, least recently used first; every read refreshes an entry, so an active run keeps its reader.
+  // An entry lives while its run is live: a terminal status write schedules its removal 15 min later (late writers still
+  // see it). The count cap is only a memory backstop, far above the number of live runs.
   const runPersistSecretReaders = new Map<string, { read: () => string[]; at: number }>();
-  const RUN_PERSIST_SECRET_READERS_MAX = 5_000;
+  const RUN_PERSIST_SECRET_READERS_MAX = 50_000;
+  const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out", "interrupted"]);
+  function forgetRunPersistSecretsLater(runId: string, status: string) {
+    if (!TERMINAL_RUN_STATUSES.has(status) || !runPersistSecretReaders.has(runId)) return;
+    setTimeout(() => runPersistSecretReaders.delete(runId), 15 * 60_000).unref?.();
+  }
   function rememberRunPersistSecrets(runId: string, read: () => string[]) {
     runPersistSecretReaders.delete(runId);
     runPersistSecretReaders.set(runId, { read, at: Date.now() });
@@ -1203,6 +1209,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
+    forgetRunPersistSecretsLater(runId, status);
     const updated = await writeRunStatus(status, previousStatus, writer =>
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? terminalizeLegacyExecution({
@@ -1306,6 +1313,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       };
     }
     patch = await redactRunPatchForPersistence(previousStatus, patch);
+    forgetRunPersistSecretsLater(runId, status);
     const updated = await writeRunStatus(status, previousStatus, async writer => {
       if (options?.setupFailure && previousStatus?.runtimeMode === "native" && previousStatus.nativeIssueId) {
         await writer.select({ runId: nativeRunFinalizations.runId }).from(nativeRunFinalizations)
