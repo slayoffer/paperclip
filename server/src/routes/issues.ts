@@ -264,6 +264,11 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import {
+  agentIssueCreateLimits,
+  agentIssueCreateRefusal,
+  loadAgentIssueCreateCounts,
+} from "../services/agent-issue-create-limits.js";
 import { commentWakeSuppressed, shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
@@ -6331,6 +6336,27 @@ export function issueRoutes(
     return true;
   }
 
+  /** Guild model v2 rule 1: per-agent create limits. Board actors and task-watchdog runs are not limited. */
+  async function assertAgentIssueCreateLimitsAllowed(
+    req: Request,
+    res: Response,
+    companyId: string,
+    parent: { id: string; identifier?: string | null } | null,
+    requested = 1,
+  ) {
+    if (req.actor.type !== "agent" || !req.actor.agentId) return true;
+    const limits = agentIssueCreateLimits();
+    if (limits.childrenPerParent === null && limits.issuesPerDay === null && limits.maxDepth === null) return true;
+    if ((await resolveTaskWatchdogMutationScope(db, req.actor)).kind !== "none") return true;
+    const counts = await loadAgentIssueCreateCounts(db, {
+      companyId, agentId: req.actor.agentId, parentId: parent?.id ?? null, limits,
+    });
+    const refusal = agentIssueCreateRefusal(limits, counts, parent ? parent.identifier ?? parent.id : null, requested);
+    if (!refusal) return true;
+    res.status(409).json({ error: refusal, details: { code: "agent_issue_create_limit", limits, counts } });
+    return false;
+  }
+
   async function assertTaskWatchdogCreateIssueAllowed(
     req: Request,
     res: Response,
@@ -12255,6 +12281,16 @@ export function issueRoutes(
         ))
       )
         return;
+      if (
+        !watchdogProductBugFollowUp &&
+        !(await assertAgentIssueCreateLimitsAllowed(
+          req,
+          res,
+          companyId,
+          createParent,
+        ))
+      )
+        return;
       await assertNoAgentDelegationCycle({
         actorType: req.actor.type,
         actorAgentId: req.actor.agentId,
@@ -12695,6 +12731,15 @@ export function issueRoutes(
         ))
       )
         return;
+      if (
+        !(await assertAgentIssueCreateLimitsAllowed(
+          req,
+          res,
+          parent.companyId,
+          parent,
+        ))
+      )
+        return;
       assertNoAgentHostWorkspaceCommandMutation(
         req,
         collectIssueWorkspaceCommandPaths(req.body),
@@ -12986,6 +13031,17 @@ export function issueRoutes(
           childBody.executionWorkspaceSettings?.environmentId,
         );
       }
+
+      if (
+        !(await assertAgentIssueCreateLimitsAllowed(
+          req,
+          res,
+          sourceIssue.companyId,
+          sourceIssue,
+          requestedChildren.length,
+        ))
+      )
+        return;
 
       const actor = getActorInfo(req);
       const normalizedChildren = [];
