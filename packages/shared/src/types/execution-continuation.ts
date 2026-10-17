@@ -62,8 +62,19 @@ export interface ExecutionContinuationEnvelope {
    * relative to the new working directory and include a provenance record. */
   recoveredFiles?: Array<{ operationId: string; sourceRunId: string; path: string }>;
   unresolvedInteractionIds: string[];
+  /** Present when the server sent a recent-comment window instead of the full history. */
+  omittedMessages?: { count: number; readVia: string };
+  /** The issue's `plan` document. Agent-editable, so rendered as evidence, not as direction. */
+  planDocument?: {
+    key: string;
+    title: string | null;
+    revision: number;
+    updatedAt: string;
+    body: string;
+    truncated: boolean;
+  };
   coverage: {
-    kind: "full_task_history" | "task_history_delta";
+    kind: "full_task_history" | "task_history_delta" | "recent_window";
     baseRunId?: string;
     throughCommentId: string | null;
     summaryThroughCommentId: null;
