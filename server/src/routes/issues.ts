@@ -13370,6 +13370,8 @@ export function issueRoutes(
             priority: updateFields.priority ?? existing.priority,
           })) updateFields.status = "backlog";
         } else if (
+          // Only an agent pulling its own backlog is limited; a board move (watchdog promote, coordinator) passes.
+          req.actor.type === "agent" &&
           existing.status === "backlog" &&
           existing.assigneeAgentId &&
           isWipActiveStatus(wipStatus) &&
