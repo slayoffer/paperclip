@@ -63,6 +63,50 @@ describe("redactRunResultSecrets", () => {
     expect(out.stdout.startsWith("start ")).toBe(true);
   });
 
+  it("masks a credential assignment inside a run longer than the segment limit", () => {
+    const opaque = "Zq9".repeat(366); // 1098 characters, no known token prefix
+    const out = redactRunResultSecrets({ stdout: `export OPENCLAW_TOKEN=${opaque} done`, flag: `x-api-key:${opaque}` });
+    expect(out.stdout).not.toContain(opaque);
+    expect(out.stdout).toContain("OPENCLAW_TOKEN=");
+    expect(out.flag).not.toContain(opaque);
+  });
+
+  it("keeps counts and words in a long run (neutral data)", () => {
+    const run = `inputTokens:1234567890,${"a".repeat(1100)},password:required`;
+    expect(redactRunResultSecrets({ stdout: run }).stdout).toBe(run);
+  });
+
+  it("still runs the shared scanner when the text contains NUL and a long run", () => {
+    const blob = "B".repeat(2000);
+    const input = { stdout: `a\u0000b ${blob} Authorization: Bearer abcdefghijklmnopqrstuvwx ${GH}` };
+    const out = redactRunResultSecrets(input);
+    expect(out.stdout).not.toContain("abcdefghijklmnopqrstuvwx");
+    expect(out.stdout).not.toContain(GH);
+    expect(out.stdout).toContain(blob);
+    expect(out.stdout).toContain("a\u0000b");
+  });
+
+  it("masks a long bearer value through its placeholder", () => {
+    const token = "Q7".repeat(700);
+    const out = redactRunResultSecrets({ stdout: `curl -H "Authorization: Bearer ${token}" https://example.invalid` });
+    expect(out.stdout).not.toContain(token);
+  });
+
+  it("never stores a raw subtree past the depth limit", () => {
+    let deep: Record<string, unknown> = { leaf: `token ${GH}`, count: 3 };
+    for (let i = 0; i < 80; i++) deep = { next: deep };
+    const out = JSON.stringify(redactRunResultSecrets(deep));
+    expect(out).not.toContain(GH);
+    expect(out).toContain("count");
+  });
+
+  it("keeps a neutral deep subtree's content", () => {
+    let deep: Record<string, unknown> = { leaf: "plain value", n: 42 };
+    for (let i = 0; i < 70; i++) deep = { next: deep };
+    const out = JSON.stringify(redactRunResultSecrets(deep));
+    expect(out).toContain("plain value");
+  });
+
   it("keeps an own __proto__ key as data", () => {
     const input = JSON.parse(`{"__proto__":{"x":1},"stdout":"token ${GH}"}`);
     const out = redactRunResultSecrets(input);
