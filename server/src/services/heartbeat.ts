@@ -552,6 +552,7 @@ import {
 } from "../log-redaction.js";
 
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
+import { declaredSecretValues } from "./run-result-redaction.js";
 
 import {
   readPaperclipSkillSyncPreference,
@@ -1915,6 +1916,7 @@ export function heartbeatService(
     handleRunLivenessContinuation,
     handleSuccessfulRunHandoff,
     updateRuntimeState,
+    redactRunPatchForPersistence: runLifecycle.redactRunPatchForPersistence,
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
@@ -3122,6 +3124,7 @@ export function heartbeatService(
           trustPreset,
         });
       readFailureReportSecrets = () => collectRunFailureSecretValues(resolvedConfig.env, secretKeys);
+      runLifecycle.rememberRunPersistSecrets(run.id, () => declaredSecretValues(resolvedConfig.env, secretKeys));
       if (aiBinding) {
         try {
           managedAiRuntime = await prepareManagedAiRuntime(db, { companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType, binding: aiBinding, config: resolvedConfig });
@@ -3235,6 +3238,10 @@ export function heartbeatService(
         ...identityRedactor.values,
         ...collectRunFailureSecretValues(runtimeConfig.env, secretKeys),
       ];
+      runLifecycle.rememberRunPersistSecrets(run.id, () => [
+        ...declaredSecretValues(resolvedConfig.env, secretKeys),
+        ...declaredSecretValues(runtimeConfig.env, secretKeys),
+      ]);
       const latestAgentConfigRevision = await getLatestAgentConfigRevision(
         agent.companyId,
         agent.id,
