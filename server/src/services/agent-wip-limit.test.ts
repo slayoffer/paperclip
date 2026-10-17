@@ -86,5 +86,7 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await agentWipFull(db, { type: "board", source: "session" }, { companyId, agentId: busy, status: "todo" })).toBe(false);
     expect(await agentWipFull(db, agentActor, { companyId, agentId: free, status: "todo" })).toBe(false);
     expect(await agentWipFull(db, agentActor, { companyId, agentId: free, status: "todo", pending: 2 })).toBe(true);
+    expect(await agentWipFull(db, agentActor, { companyId, agentId: busy, status: "todo", priority: "critical" })).toBe(false);
+    expect(await agentWipFull(db, agentActor, { companyId, agentId: busy, status: "todo", priority: "high" })).toBe(true);
   });
 });

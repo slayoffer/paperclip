@@ -5,7 +5,7 @@ import { issues, type Db } from "@paperclipai/db";
  * Agent WIP limit (synthiq fork, Guild model v2 rule 2, 2026-10-17). With PAPERCLIP_AGENT_WIP_LIMIT=N, a NEW assignment
  * that would give an agent more than N active issues (todo, in_progress, blocked) is stored in `backlog`, which skips the
  * assignment wake. An agent that moves its own backlog issue to an active status over the limit gets 409. Existing load
- * is untouched. A person in the board UI (browser session) is not limited. The promote step that moves the next backlog
+ * is untouched. A person in the board UI (browser session) is not limited, and a `critical` issue is never deferred. The promote step that moves the next backlog
  * issue to `todo` when a slot frees lives outside the server (the homelab watchdog).
  */
 export const WIP_ACTIVE_STATUSES = ["todo", "in_progress", "blocked"] as const;
@@ -46,10 +46,15 @@ export async function countAgentActiveIssues(
 export async function agentWipFull(
   db: Db,
   actor: { type?: string; source?: string } | undefined | null,
-  input: { companyId: string; agentId: string | null | undefined; status: unknown; excludeIssueId?: string | null; pending?: number },
+  input: {
+    companyId: string; agentId: string | null | undefined; status: unknown; excludeIssueId?: string | null; pending?: number;
+    priority?: unknown;
+  },
 ): Promise<boolean> {
   const limit = agentWipLimit();
   if (limit === null || !input.agentId || !isWipActiveStatus(input.status) || !wipLimitAppliesToActor(actor)) return false;
+  // Anton, 2026-10-17: a critical assignment bypasses WIP for any actor (the escape for urgent board-key work).
+  if (input.priority === "critical") return false;
   const active = await countAgentActiveIssues(db, { companyId: input.companyId, agentId: input.agentId, excludeIssueId: input.excludeIssueId });
   return active + (input.pending ?? 0) >= limit;
 }
