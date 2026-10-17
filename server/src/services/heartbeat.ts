@@ -66,6 +66,7 @@ import {
   createHeartbeatQueue,
 } from "./heartbeat/queue.js";
 export {
+  maxRunningRunsCap,
   shouldDeferFollowupWakeForSameIssue,
   shouldQueueFollowupForRunningIssueWake,
 } from "./heartbeat/queue.js";
