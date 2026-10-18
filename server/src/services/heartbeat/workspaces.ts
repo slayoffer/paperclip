@@ -99,6 +99,8 @@ const execFile = promisify(execFileCallback);
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 
+export { managedCloneTimeoutMs, managedCloneFilterArgs, describeManagedCloneFailure } from "../managed-repository-checkout.js";
+
 export const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 
 const GITHUB_PR_WORKFLOW_SKILL_KEY =
