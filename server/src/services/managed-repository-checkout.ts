@@ -21,7 +21,7 @@ const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
  */
 export function managedCloneTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS;
+  return Number.isFinite(raw) && raw >= 60_000 ? Math.min(Math.floor(raw), 2_147_483_647) : MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS;
 }
 
 /**
@@ -159,7 +159,10 @@ export async function materializeManagedProjectWorkspace(
       }
       await execFile("git", ["-C", cloneTmpDir, "remote", "set-url", "origin", input.repoUrl], { timeout: 10_000 });
     } else if (input.repoRef) {
-      await measureRunPhase("workspace.checkout.git_ref", () => execFile("git", ["-C", cloneTmpDir, "checkout", input.repoRef!], { timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS }));
+      await measureRunPhase("workspace.checkout.git_ref", () => execFile("git", [...(auth?.configArgs ?? []), "-C", cloneTmpDir, "checkout", input.repoRef!], {
+        timeout: cloneTimeoutMs,
+        env: { ...sanitizeRuntimeServiceBaseEnv(process.env), GIT_TERMINAL_PROMPT: "0", ...(auth?.env ?? {}) },
+      }));
     }
     await input.beforePublish?.(cloneTmpDir);
   } catch (error) {
