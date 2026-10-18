@@ -55,7 +55,16 @@ function prepareQuestionInteractionAnswers(
       return { ...question, textValidation };
     }),
   };
-  const parsed = parsePaperclipQuestionResponse(withoutPatterns, response);
+  let parsed: PaperclipQuestionResponse;
+  try {
+    parsed = parsePaperclipQuestionResponse(withoutPatterns, response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid question response";
+    throw new Error(
+      `${message}. Send {questionId, optionIds} for listed choices. ` +
+      'Send {questionId, text} or {questionId, optionIds, otherText} for text. summaryMarkdown does not answer a question.',
+    );
+  }
   const checks = answerableQuestionSet.questions.flatMap((question) => {
     const pattern = question.textValidation?.pattern;
     const answer = parsed.answers[question.id];

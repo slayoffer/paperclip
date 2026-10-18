@@ -5,7 +5,7 @@ import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type { IssueContextUsage } from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
-  AskUserQuestionsAnswer,
+  RespondIssueThreadInteractionInput,
   Approval,
   CompactIssue,
   InboxMineSnapshot,
@@ -639,10 +639,7 @@ export const issuesApi = {
   respondToInteraction: (
     id: string,
     interactionId: string,
-    data: {
-      answers: AskUserQuestionsAnswer[];
-      summaryMarkdown?: string | null;
-    },
+    data: RespondIssueThreadInteractionInput,
   ) =>
     resolveInteractionOnce(
       id,

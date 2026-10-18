@@ -11,6 +11,7 @@ import {
   askUserQuestionsPayloadSchema,
   createIssueThreadInteractionSchema,
   paperclipQuestionSetPayloadSchema,
+  respondIssueThreadInteractionSchema,
   requestConfirmationPayloadSchema,
   requestConfirmationResultSchema,
   requestItemVerdictsResultSchema,
@@ -18,6 +19,20 @@ import {
 } from "./validators/issue.js";
 
 describe("issue thread interaction schemas", () => {
+  it("normalizes text response shorthand into the stored answer shape", () => {
+    expect(respondIssueThreadInteractionSchema.parse({
+      answers: [{ questionId: "repo", text: "  https://example.test/repo  " }],
+      // Upstream keeps exact answer text here and normalizes it later against the stored question.
+    })).toEqual({ answers: [{ questionId: "repo", optionIds: [], otherText: "  https://example.test/repo  " }] });
+  });
+
+  it("rejects conflicting text fields instead of silently losing an answer", () => {
+    const result = respondIssueThreadInteractionSchema.safeParse({
+      answers: [{ questionId: "repo", optionIds: [], text: "first", otherText: "second" }],
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("derives every legacy question from a complete mixed canonical form", () => {
     const questionSet = paperclipQuestionSetPayloadSchema.parse({
       schema: "paperclip.question_set.v1",

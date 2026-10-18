@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { parseQuestionInteractionAnswers } from "./question-interaction-answers.js";
 import { expect, it } from "vitest";
 
 it("isolates pathological patterns throughout canonical answer validation", () => {
@@ -28,3 +29,13 @@ it("isolates pathological patterns throughout canonical answer validation", () =
   expect(result.message).toContain("time limit");
   expect(result.ticks).toBeGreaterThan(1);
 }, 15_000);
+
+
+it("shows the accepted text shape before native question resolution", async () => {
+  await expect(parseQuestionInteractionAnswers({
+    schema: "paperclip.question_set.v1",
+    questions: [{ id: "value", prompt: "Value?", required: true, answerMode: "text" }],
+  }, [{ questionId: "value", optionIds: ["paperclip_text_answer"] }], [])).rejects.toThrow(
+    "Send {questionId, text} or {questionId, optionIds, otherText}",
+  );
+});
