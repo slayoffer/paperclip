@@ -84,7 +84,7 @@ async function isMissingRef(cloneCwd: string, ref: string, checkoutError: unknow
  */
 export function managedCloneTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS;
+  return Number.isFinite(raw) && raw >= 60_000 ? Math.min(Math.floor(raw), 2_147_483_647) : MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS;
 }
 
 /**
@@ -230,9 +230,10 @@ export async function materializeManagedProjectWorkspace(
     } else if (input.repoRef) {
       const repoRef = input.repoRef;
       try {
-        await measureRunPhase("workspace.checkout.git_ref", () => execFile("git", ["-C", cloneTmpDir, "checkout", repoRef], {
+        await measureRunPhase("workspace.checkout.git_ref", () => execFile("git", [...(auth?.configArgs ?? []), "-C", cloneTmpDir, "checkout", repoRef], {
           // Untranslated Git messages keep missing-ref classification locale independent.
-          timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C", LANGUAGE: "C" },
+          timeout: cloneTimeoutMs,
+          env: { ...sanitizeRuntimeServiceBaseEnv(process.env), GIT_TERMINAL_PROMPT: "0", ...(auth?.env ?? {}), LC_ALL: "C", LANGUAGE: "C" },
         }));
       } catch (error) {
         // Only a ref that a complete fresh clone cannot resolve is a missing ref;
