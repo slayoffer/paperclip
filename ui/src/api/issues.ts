@@ -4,7 +4,7 @@ import type { IssueSummary } from "@paperclipai/shared";
 import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
-  AskUserQuestionsAnswer,
+  RespondIssueThreadInteractionInput,
   Approval,
   CompactIssue,
   CreateIssueTreeHold,
@@ -495,10 +495,7 @@ export const issuesApi = {
   respondToInteraction: (
     id: string,
     interactionId: string,
-    data: {
-      answers: AskUserQuestionsAnswer[];
-      summaryMarkdown?: string | null;
-    },
+    data: RespondIssueThreadInteractionInput,
   ) =>
     api.post<IssueThreadInteraction>(
       `/issues/${id}/interactions/${interactionId}/respond`,

@@ -1710,6 +1710,13 @@ function normalizeQuestionAnswers(args: {
     const otherText = args.textQuestionIds?.has(answer.questionId)
       ? answer.otherText ?? ""
       : normalizeEscapedLineBreaks(answer.otherText ?? "").trim();
+    if (!otherText.trim() && question.options.some((option) => option.freeText && uniqueOptionIds.includes(option.id))) {
+      throw unprocessable(
+        `Question ${answer.questionId} requires text for the selected free-text option. ` +
+        'Send {questionId, text} or {questionId, optionIds, otherText} in answers. summaryMarkdown does not answer a question.',
+        { code: "invalid_question_response" },
+      );
+    }
     answerByQuestionId.set(answer.questionId, {
       questionId: answer.questionId,
       optionIds: uniqueOptionIds,
@@ -1723,7 +1730,11 @@ function normalizeQuestionAnswers(args: {
       question.required &&
       (!answer || (answer.optionIds.length === 0 && !answer.otherText?.trim()))
     ) {
-      throw unprocessable(`Question ${question.id} requires an answer`);
+      throw unprocessable(
+        `Question ${question.id} requires an answer. ` +
+        'Send {questionId, optionIds} for a listed choice. Send {questionId, text} or {questionId, optionIds, otherText} for text.',
+        { code: "invalid_question_response" },
+      );
     }
   }
 
