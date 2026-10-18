@@ -31,10 +31,11 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { ONBOARDING_FIRST_TASK_ORIGIN_KIND } from "@paperclipai/shared";
+import { ONBOARDING_FIRST_TASK_ORIGIN_KIND, respondIssueThreadInteractionSchema } from "@paperclipai/shared";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import { buildQuestionResponseDeliveryEnvelope } from "../services/question-response-delivery.js";
 import { agentService } from "../services/agents.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -243,6 +244,71 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     unsubscribe();
     expect(notified).toHaveBeenCalledTimes(1);
     expect(answered.status).toBe("answered");
+  });
+
+  it.each(["text", "otherText", "synthetic"])("persists and delivers mixed custom answers through the %s request shape", async (shape) => {
+    const { companyId, issueId, agentId, runId } = await seedSourceQuestionFixture({});
+    const issue = { id: issueId, companyId };
+    const created = await interactionsSvc.create(issue, {
+      kind: "ask_user_questions", resolverPolicy: "human_only", payload: { version: 1, questionSet: {
+        schema: "paperclip.question_set.v1", questions: [
+          { id: "repo", prompt: "Repository?", required: true, answerMode: "text" },
+          { id: "scope", prompt: "Scope?", required: true, answerMode: "single_select", options: [{ id: "paperclip_custom_answer", label: "Listed" }], customAnswer: { enabled: true } },
+          { id: "hosting", prompt: "Hosting?", required: true, answerMode: "multi_select", options: [{ id: "existing", label: "Existing" }], customAnswer: { enabled: true } },
+        ],
+      } },
+    }, { userId: "local-board" });
+    if (created.kind !== "ask_user_questions") throw new Error("expected questions");
+    const answers = [
+      { questionId: "repo", value: "https://example.test/repo", selected: [] as string[] },
+      { questionId: "scope", value: "Selected files", selected: [] as string[] },
+      { questionId: "hosting", value: "Local host", selected: ["existing"] },
+    ].map(({ questionId, value, selected }) => {
+      const freeTextId = created.payload.questions.find((question) => question.id === questionId)!
+        .options.find((option) => option.freeText)!.id;
+      return {
+        questionId,
+        ...(shape === "synthetic" ? { optionIds: [...selected, freeTextId] } : { optionIds: selected }),
+        ...(shape === "text" ? { text: value } : { otherText: value }),
+      };
+    });
+    const input = respondIssueThreadInteractionSchema.parse({ answers, summaryMarkdown: "Responses recorded." });
+    await expect(interactionsSvc.answerQuestions(issue, created.id, input, { agentId, runId }))
+      .rejects.toMatchObject({ status: 403 });
+    const answered = await interactionsSvc.answerQuestions(issue, created.id, input, { userId: "local-board" });
+    expect(answered.status).toBe("answered");
+    expect(answered.result?.answers.map((answer) => answer.otherText)).toEqual([
+      "https://example.test/repo", "Selected files", "Local host",
+    ]);
+    const saved = await interactionsSvc.getForIssue(issue, created.id);
+    if (saved?.kind !== "ask_user_questions") throw new Error("expected saved questions");
+    expect(buildQuestionResponseDeliveryEnvelope(saved).response.answers).toEqual({
+      repo: { text: "https://example.test/repo" },
+      scope: { selectedOptionIds: [], customText: "Selected files" },
+      hosting: { selectedOptionIds: ["existing"], customText: "Local host" },
+    });
+    const deliveries = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.interactionId, created.id));
+    expect(deliveries).toHaveLength(1);
+  });
+
+  it.each(["text", "single_select", "multi_select"] as const)("explains missing %s text without accepting summaryMarkdown as an answer", async (answerMode) => {
+    const { companyId, issueId } = await seedSourceQuestionFixture({});
+    const issue = { id: issueId, companyId };
+    const created = await interactionsSvc.create(issue, { kind: "ask_user_questions", payload: {
+      version: 1, questionSet: { schema: "paperclip.question_set.v1", questions: [{
+        id: "value", prompt: "Value?", required: true, answerMode,
+        ...(answerMode === "text" ? {} : { options: [{ id: "listed", label: "Listed" }], customAnswer: { enabled: true } }),
+      }] },
+    } }, { userId: "local-board" });
+    if (created.kind !== "ask_user_questions") throw new Error("expected questions");
+    const optionId = created.payload.questions[0].options.find((option) => option.freeText)!.id;
+    await expect(interactionsSvc.answerQuestions(issue, created.id, {
+      answers: [{ questionId: "value", optionIds: [optionId] }], summaryMarkdown: "This is a summary.",
+    }, { userId: "local-board" })).rejects.toMatchObject({
+      status: 422, message: expect.stringContaining("{questionId, optionIds, otherText}"),
+    });
+    expect((await interactionsSvc.getForIssue(issue, created.id))?.status).toBe("pending");
   });
 
   it("rejects canonical text and custom answers that violate constraints before resolution", async () => {
@@ -4518,6 +4584,36 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       },
     );
 
+    it.each([
+      ["request_confirmation", "interrupted"],
+      ["request_confirmation", "failed"],
+      ["request_confirmation", "cancelled"],
+      ["request_confirmation", "timed_out"],
+      ["request_confirmation", "succeeded"],
+      ["request_checkbox_confirmation", "interrupted"],
+      ["request_checkbox_confirmation", "failed"],
+      ["request_checkbox_confirmation", "cancelled"],
+    ] as const)("accepts %s after its source run becomes %s before finalize", async (kind, sourceRunStatus) => {
+      const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId } =
+        await seedAcceptGateFixture({ kind, sourceRunStatus: "running" });
+      await db.insert(workspaceOperations).values({
+        companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+        phase: "worktree_prepare", status: "succeeded",
+      });
+      expect((await interactionsSvc.getById(interactionId))?.acceptanceBlocker).toBe("workspace_sync_pending");
+      await db.update(heartbeatRuns).set({ status: sourceRunStatus, finishedAt: new Date() })
+        .where(eq(heartbeatRuns.id, sourceRunId!));
+      expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+      expect((await interactionsSvc.getById(interactionId))?.acceptanceBlocker).toBeUndefined();
+      expect((await interactionsSvc.getForIssue({ id: issueId, companyId }, interactionId)).acceptanceBlocker).toBeUndefined();
+      const accepted = await interactionsSvc.acceptInteraction(
+        { id: issueId, companyId, goalId, projectId: null }, interactionId,
+        kind === "request_checkbox_confirmation" ? { selectedOptionIds: ["file-a"] } : {},
+        { userId: "local-board" },
+      );
+      expect(accepted.interaction.status).toBe("accepted");
+    });
+
     it.each(["failed", "skipped", "stale"])("does not keep preparing after a %s finalize", async (outcome) => {
       const { companyId, executionWorkspaceId, issueId, sourceRunId } =
         await seedAcceptGateFixture({ sourceRunStatus: "failed" });
@@ -4611,7 +4707,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
     it("refuses request_confirmation accept until the source run records a successful workspace_finalize", async () => {
       const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId } =
-        await seedAcceptGateFixture();
+        await seedAcceptGateFixture({ sourceRunStatus: "running" });
 
       await db.insert(workspaceOperations).values({
         companyId,
@@ -4833,7 +4929,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
     it("refuses request_checkbox_confirmation accept until the source run records a successful workspace_finalize", async () => {
       const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId } =
-        await seedAcceptGateFixture({ kind: "request_checkbox_confirmation" });
+        await seedAcceptGateFixture({ kind: "request_checkbox_confirmation", sourceRunStatus: "running" });
 
       await db.insert(workspaceOperations).values({
         companyId,

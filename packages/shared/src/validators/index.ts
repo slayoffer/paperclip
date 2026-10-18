@@ -522,6 +522,7 @@ export {
   type SkipIssueThreadInteraction,
   type WithdrawIssueThreadInteraction,
   type RespondIssueThreadInteraction,
+  type RespondIssueThreadInteractionInput,
   type SubmitIssueThreadInteractionVerdicts,
   type LinkIssueApproval,
   type CreateIssueAttachmentMetadata,
