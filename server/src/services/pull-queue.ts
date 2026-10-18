@@ -79,6 +79,9 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
           payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id, source: "pull_queue" },
           issueStateGuard: { statuses: [issue.status], statusVersion: issue.statusVersion, assigneeAgentId: agent.id },
         });
+      }).catch((err) => {
+        logger.error({ err, companyId, agentId: agent.id },
+          "Pull queue selection failed for this owner. The next reconciliation will retry.");
       });
     }
   }
@@ -109,14 +112,11 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
 
   async function reconcile(now = new Date()) {
     if (stopped || !isPullQueueEnabled() || (await dependencies.isSuppressed()).suppressed) return;
-    // Recheck the execution predicates in the atomic UPDATE. Admission takes
-    // the same issue row lock, so an admitted run prevents ghost release.
+    // Admission holds the same issue row lock. After the lock wait, a separate
+    // statement must see executions that admission committed during the wait.
     const cutoff = new Date(now.getTime() - 30 * 60_000);
     const released = await db.transaction(async (tx) => {
-      const rows = await tx.update(issues).set({ status: "todo", updatedAt: now,
-        statusVersion: sql`${issues.statusVersion} + 1`, checkoutRunId: null,
-        executionRunId: null, executionLockedAt: null, executionAgentNameKey: null,
-      }).where(and(eq(issues.status, "in_progress"), isNull(issues.conversationAgentId),
+      const eligible = and(eq(issues.status, "in_progress"), isNull(issues.conversationAgentId),
         isNotNull(issues.assigneeAgentId), isNull(issues.assigneeUserId),
         isNull(issues.monitorNextCheckAt), lt(issues.updatedAt, cutoff),
         sql`not ${issueHasExecution()}`,
@@ -129,11 +129,19 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
         sql`not exists (select 1 from ${issueThreadInteractions} c
           where c.company_id = "issues"."company_id" and c.issue_id = "issues"."id" and c.status = 'pending')`,
         sql`exists (select 1 from ${companies} c where c.id = "issues"."company_id" and c.status = 'active')`,
-      )).returning({ id: issues.id, companyId: issues.companyId });
+      );
+      const candidates = await tx.select({ id: issues.id }).from(issues)
+        .where(eligible).orderBy(asc(issues.id)).for("update");
+      if (!candidates.length) return [];
+      const rows = await tx.update(issues).set({ status: "todo", updatedAt: now,
+        statusVersion: sql`${issues.statusVersion} + 1`, checkoutRunId: null,
+        executionRunId: null, executionLockedAt: null, executionAgentNameKey: null,
+      }).where(and(inArray(issues.id, candidates.map((row) => row.id)), eligible))
+        .returning({ id: issues.id, companyId: issues.companyId });
       for (const row of rows) await tx.insert(issueComments).values({ companyId: row.companyId,
         issueId: row.id, authorType: "system", body: "The scheduler returned this task to todo. No run, queued wake, or monitor existed for 30 minutes." });
       return rows;
-    });
+    }, { isolationLevel: "read committed" });
     for (const row of released) await logActivity(db, { companyId: row.companyId, actorType: "system",
       actorId: "pull-queue", action: "issue.updated", entityType: "issue", entityId: row.id,
       details: { status: "todo", reason: "pull_queue_ghost_release" } });

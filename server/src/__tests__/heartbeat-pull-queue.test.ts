@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents, companies, createDb, heartbeatRuns, issueComments, issueRelations,
@@ -198,6 +198,31 @@ databaseTests("event-driven pull queue", () => {
     expect(first.wakeup.mock.calls.length + second.wakeup.mock.calls.length).toBe(1);
   });
 
+  it("continues with healthy owners after an admission error and retries the failed owner", async () => {
+    const otherOwner = randomUUID();
+    await db.insert(agents).values({ id: otherOwner, companyId, name: "Other owner", role: "engineer",
+      status: "idle", adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await task();
+    await task({ assigneeAgentId: otherOwner });
+    const { queue, wakeup } = scheduler();
+    wakeup.mockRejectedValueOnce(new Error("Admission failed"));
+
+    await queue.notify(companyId);
+
+    expect(wakeup).toHaveBeenCalledTimes(2);
+    expect(new Set(wakeup.mock.calls.map(([owner]) => owner))).toEqual(new Set([agentId, otherOwner]));
+    const failedOwner = wakeup.mock.calls[0][0];
+    const healthyOwner = wakeup.mock.calls[1][0];
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, failedOwner))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, healthyOwner))).toHaveLength(1);
+
+    await queue.notify(companyId);
+
+    expect(wakeup).toHaveBeenCalledTimes(3);
+    expect(wakeup.mock.calls[2][0]).toBe(failedOwner);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, failedOwner))).toHaveLength(1);
+  });
+
   it("keeps work pending when a wake exists or scheduling is suppressed", async () => {
     const issue = await task();
     const { queue, wakeup } = scheduler();
@@ -249,6 +274,45 @@ databaseTests("event-driven pull queue", () => {
     expect(wakeup).not.toHaveBeenCalled();
     const [saved] = await db.select().from(issues).where(eq(issues.id, ghost.id));
     expect(saved.status).toBe("in_progress");
+  });
+
+  it("keeps a task when admission queues a run while ghost recovery waits for its row lock", async () => {
+    const issue = await task({ status: "in_progress", updatedAt: new Date(Date.now() - 31 * 60_000) });
+    const { queue } = scheduler();
+    let admissionPid = 0;
+    let unlock!: () => void;
+    const unlocked = new Promise<void>((resolve) => { unlock = resolve; });
+    let locked!: () => void;
+    const rowLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const admission = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issue.id)).for("update");
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      admissionPid = backend.pid;
+      locked();
+      await unlocked;
+      // Admission can insert a run without changing the locked issue row.
+      await tx.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: issue.id,
+        invocationSource: "assignment", status: "queued", contextSnapshot: { issueId: issue.id } });
+    });
+    let recovery: Promise<void> | undefined;
+    try {
+      await rowLocked;
+      recovery = queue.reconcile();
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where ${admissionPid} = any(pg_blocking_pids(pid))`);
+        expect(waiting).toHaveLength(1);
+      }, { timeout: 5_000 });
+    } finally {
+      unlock();
+      await admission;
+      await recovery;
+    }
+
+    const [saved] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(saved).toMatchObject({ status: "in_progress", statusVersion: issue.statusVersion });
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.nativeIssueId, issue.id))).toHaveLength(1);
   });
 });
 
