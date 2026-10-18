@@ -1073,6 +1073,20 @@ export const issueThreadInteractionStatusSchema = z.enum(
 export const issueThreadInteractionKindSchema = z.enum(
   ISSUE_THREAD_INTERACTION_KINDS,
 );
+export const listCompanyInteractionsQuerySchema = z.object({
+  status: issueThreadInteractionStatusSchema.optional(),
+  kind: issueThreadInteractionKindSchema.optional(),
+  issueId: z.string().uuid().optional(),
+  limit: z.string()
+    .regex(/^[0-9]+$/)
+    .transform(Number)
+    .pipe(z.number().int().min(1).max(1000))
+    .optional()
+    .default(1000),
+  cursor: z.string().uuid().optional(),
+});
+export type ListCompanyInteractionsQuery = z.infer<typeof listCompanyInteractionsQuerySchema>;
+
 export const issueThreadInteractionCanonicalResolverPolicySchema = z
   .enum(ISSUE_THREAD_INTERACTION_CANONICAL_RESOLVER_POLICIES)
   .describe("Canonical resolver audience: anyone, not_creator, or human_only.");

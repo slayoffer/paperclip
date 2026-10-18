@@ -446,6 +446,8 @@ export {
   issueCommentMetadataSectionSchema,
   issueCommentMetadataSchema,
   addIssueCommentSchema,
+  listCompanyInteractionsQuerySchema,
+  type ListCompanyInteractionsQuery,
   issueThreadInteractionStatusSchema,
   issueThreadInteractionKindSchema,
   issueThreadInteractionCanonicalResolverPolicySchema,

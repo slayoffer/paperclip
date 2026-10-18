@@ -745,6 +745,24 @@ administrator remediation rather than promising a nonexistent approval step.
 
 ### 9.8.1 Issue-thread interaction resolver contract
 
+The read route `GET /api/companies/:companyId/interactions` lists interactions
+across readable issues in one company. It returns `{ items, nextCursor }`.
+Each item has the per-issue interaction fields and `issueIdentifier`.
+`issueIdentifier` can be null when an issue has no identifier.
+
+The query accepts `status`, `kind`, `issueId`, `limit`, and `cursor`.
+`limit` defaults to 1000 and must be an integer from 1 through 1000.
+Results use ascending interaction UUID order. The cursor is the last returned
+interaction UUID. Continue with `cursor=nextCursor` until `nextCursor` is null.
+Pagination does not provide a snapshot when interactions change between requests.
+
+Status filtering runs in SQL. Pending interactions on done or cancelled issues
+appear as expired, as they do on the per-issue read route. Reads do not persist
+this expiry. Company access and issue read permissions apply before pagination.
+The route preserves resolver policy fields and workspace acceptance blockers.
+
+
+
 Issue-thread interactions are coordination records, not grants of authority. Every
 interaction kind defaults to resolver policy `anyone` when the create request omits
 `resolverPolicy`. Restrictions are opt-in.

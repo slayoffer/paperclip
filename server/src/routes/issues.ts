@@ -73,6 +73,7 @@ import {
   withdrawIssueThreadInteractionSchema,
   companySearchExtractQuerySchema,
   companySearchQuerySchema,
+  listCompanyInteractionsQuerySchema,
   createIssueAttachmentMetadataSchema,
   createIssueThreadInteractionSchema,
   createIssueWorkProductSchema,
@@ -15970,6 +15971,23 @@ export function issueRoutes(
       res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, result.queue));
     },
   );
+
+  router.get("/companies/:companyId/interactions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const parsed = listCompanyInteractionsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid interaction query" });
+      return;
+    }
+    const companyScope = await actorCanReadCompanyScope(req, companyId);
+    const page = await issueThreadInteractionService(db).listForCompany(
+      companyId,
+      parsed.data,
+      async (issue) => companyScope || (await decideIssueAccess(req, issue, "issue:read")).allowed,
+    );
+    res.json(page);
+  });
 
   router.get("/issues/:id/interactions", async (req, res) => {
     const id = req.params.id as string;
