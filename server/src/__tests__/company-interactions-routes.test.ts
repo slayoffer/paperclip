@@ -14,6 +14,9 @@ import { issueRoutes } from "../routes/issues.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 
 const support = await getEmbeddedPostgresTestSupport();
+if (!support.supported && process.env.CI) {
+  throw new Error(`Company interaction tests require PostgreSQL: ${support.reason}`);
+}
 const suite = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skipping company interaction route tests: ${support.reason}`);
 
