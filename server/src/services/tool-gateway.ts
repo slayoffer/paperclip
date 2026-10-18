@@ -1,3 +1,4 @@
+import { credentialTransferOperationSchema, type CredentialTransferOperation } from "@paperclipai/shared";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
@@ -9015,8 +9016,17 @@ export function createToolGatewayService(
     /** Authorize the bounded in-process transfer without logging secret arguments or results. */
     async authorizeCredentialTransfer(input: {
       sessionToken: string; companyId: string; issueId: string; agentId: string; userId: string;
-      connectionId: string; grantId: string; toolNames: readonly string[];
+      connectionId: string; grantId: string; toolNames: readonly string[]; operation: CredentialTransferOperation;
     }) {
+      // Only the validated, approved operation enters policy evaluation. No credential values enter here.
+      const parsed = credentialTransferOperationSchema.safeParse(input.operation);
+      if (!parsed.success || parsed.data.operation !== "r2_credential_transfer"
+        || parsed.data.companyId !== input.companyId || parsed.data.issueId !== input.issueId
+        || parsed.data.agentId !== input.agentId || parsed.data.userId !== input.userId
+        || ![parsed.data.source, parsed.data.destination].some(binding =>
+          binding.connectionId === input.connectionId && binding.grantId === input.grantId)) {
+        throw new ToolGatewayHttpError(403, "The transfer operation does not match.", "transfer_operation_mismatch");
+      }
       const session = await getActiveSession(input.sessionToken);
       await assertGatewayTokenAction(session, "tools/call");
       if (session.companyId !== input.companyId || session.issueId !== input.issueId
@@ -9039,7 +9049,8 @@ export function createToolGatewayService(
         if (tool.connectionId !== input.connectionId) {
           throw new ToolGatewayHttpError(403, "The transfer tool does not match.", "transfer_tool_mismatch");
         }
-        const decision = await policyService.decide(policyInputForTool({ session, tool, consumeRateLimit: false }));
+        const decision = await policyService.decide(policyInputForTool({ session, tool,
+          parameters: parsed.data, consumeRateLimit: false }), { requireKnownArguments: true });
         // Operation-document approval cannot override a gateway denial or an ask-first tool policy.
         if (!decision.allowed) {
           throw new ToolGatewayHttpError(403, "The transfer tool requires authority.", "transfer_tool_denied");

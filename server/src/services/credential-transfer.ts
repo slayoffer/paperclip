@@ -20,7 +20,7 @@ export type TransferRow = {
 };
 export interface TransferJournal {
   /** Company-wide cross-process lock. A competing executor fails without waiting or lease theft. */
-  exclusive<T>(companyId: string, destinationConnectionId: string, work: () => Promise<T>): Promise<T>;
+  exclusive<T>(companyId: string, destinationConnectionId: string, work: (assertHeld: () => Promise<void>) => Promise<T>): Promise<T>;
   insert(row: TransferRow): Promise<void>;
   save(row: TransferRow): Promise<void>;
   get(companyId: string, id: string): Promise<TransferRow | null>;
@@ -132,8 +132,9 @@ export function credentialTransferService(deps: {
       requireCondition(parsed.success, "request_invalid");
       const request = parsed.data;
       try {
-        return await deps.journal.exclusive(actor.companyId, request.destination.connectionId, async () => {
+        return await deps.journal.exclusive(actor.companyId, request.destination.connectionId, async assertHeld => {
           const operation = validateOperation(actor, request, await deps.authority.check(actor, request));
+          await assertHeld();
           const inventory = await deps.providers.inspect(operation);
           requireCondition(inventory.complete && inventory.bucketOwned && inventory.identityExclusive
             && inventory.accountId === operation.accountId && inventory.bucket === operation.bucket
@@ -151,13 +152,17 @@ export function credentialTransferService(deps: {
             row.cleanupTicketId = randomUUID();
             row.state = "armed";
             await deps.journal.save(row);
+            await recheck(row);
+            await assertHeld();
             await deps.providers.arm({ ticketId: row.cleanupTicketId, transferId: row.id, operation,
               baselineGrantIds: row.baselineGrantIds });
             await recheck(row);
+            await assertHeld();
             await deps.providers.activate(row.cleanupTicketId);
             await recheck(row);
             row.state = "issuing";
             await deps.journal.save(row);
+            await assertHeld();
             const issued = await deps.providers.issue(row.cleanupTicketId);
             requireCondition(/^[a-f0-9]{32}$/.test(issued.credentialId), "credential_identifier_invalid");
             row.credentialId = issued.credentialId;
@@ -171,12 +176,16 @@ export function credentialTransferService(deps: {
             const values = [issued.accessKeyId, issued.secretAccessKey];
             for (const [index, name] of TRANSFER_NAMES.entries()) {
               await recheck(row);
+              await assertHeld();
               await deps.providers.createOnly(row.cleanupTicketId, name, values[index]!);
               row.storedNames.push(name);
               await deps.journal.save(row);
+              await recheck(row);
+              await assertHeld();
               requireCondition(equalSecret(values[index]!, await deps.providers.readCreated(row.cleanupTicketId, name)), "storage_mismatch");
             }
             await recheck(row);
+            await assertHeld();
             await clean(row, false);
             row.state = "complete";
             await deps.journal.save(row);
@@ -202,7 +211,8 @@ export function credentialTransferService(deps: {
     async recover(companyId: string) {
       const receipts: ReturnType<typeof transferReceipt>[] = [];
       for (const candidate of await deps.journal.unfinished(companyId)) {
-        await deps.journal.exclusive(companyId, candidate.bindings.destination.connectionId, async () => {
+        await deps.journal.exclusive(companyId, candidate.bindings.destination.connectionId, async assertHeld => {
+          await assertHeld();
           const row = await deps.journal.get(companyId, candidate.id);
           if (!row || ["complete", "revoked"].includes(row.state)) return;
           // Recovery never reads a secret or repeats issuance/storage. The provider ticket fences late work.

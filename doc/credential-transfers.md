@@ -12,6 +12,9 @@ Both confirmations must have human-only resolution and acceptance from the respo
 A later document revision invalidates the earlier approval.
 The service checks current grants, credential ownership, versions, and gateway policy before each effect.
 An operation approval cannot replace an Off or Ask first tool policy.
+Policy checks receive the approved operation fields, including the destination path.
+These checks run before inventory, cleanup arming, activation, issuance, storage, and verification.
+A condition on an unavailable argument causes denial. Secret values never enter policy arguments.
 
 The only destination is `synthiq-infra/prod /clpn-ha`.
 The only names are `CLPN_R2_MONITOR_ACCESS_KEY_ID` and `CLPN_R2_MONITOR_SECRET_ACCESS_KEY`.
@@ -22,6 +25,12 @@ It never overwrites or adopts an existing entry.
 
 The journal permits one executor per company and one use of each approval.
 It contains references, deadlines, identifiers, and fixed outcomes. It contains no secret values or provider errors.
+A reserved database connection holds the execution lock throughout provider calls.
+The lock connection disables idle reaping and maximum lifetime closure.
+The executor checks lock ownership before each provider effect.
+A lost backend cannot reconnect or permit more activation, issuance, or storage calls.
+Failure cleanup remains available through the durable ticket.
+Company removal deletes settled journal rows. It rejects removal while any transfer needs cleanup.
 The executor persists a cleanup ticket before permission activation.
 Failure cleanup revokes only the new credential and removes only the ticket's temporary grants.
 It preserves baseline grants, unrelated grants, and partial destination entries.
@@ -58,5 +67,6 @@ Run each command from `server/`:
 
 The last suite uses an isolated PostgreSQL database and applies the generated migration.
 It checks saved approvals, connection versions, company isolation, concurrency, replay, and restart cleanup.
+It also checks argument-dependent denial, delayed providers, lost lock backends, and company removal.
 The other suites check failure injection, deadlines, partial storage, and secret canaries.
 The repository test runner discovers these files for its existing continuous integration groups.

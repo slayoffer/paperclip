@@ -1342,7 +1342,7 @@ export function toolAccessPolicyService(db: Db) {
    */
   async function decide(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache } = {},
+    options: { cache?: ToolAccessDecisionCache; requireKnownArguments?: boolean } = {},
   ): Promise<ToolAccessDecision> {
     // A decision that consumes a rate limit can also record a trust-rule hit
     // from the policy row, so it always reads fresh rows.
@@ -1362,6 +1362,17 @@ export function toolAccessPolicyService(db: Db) {
     for (const policy of policies) {
       const conditions = policyConditions(policy);
       if (conditions && selectorMatches(policy.selectors, ctx)) {
+        // A secret-free transfer cannot evaluate predicates on omitted provider arguments.
+        const argumentCondition = conditionRecord(conditions.arguments ?? conditions.args);
+        if (options.requireKnownArguments && argumentCondition) {
+          const paths = ["fieldEquals", "fieldNotEquals", "fieldIn", "fieldMatches"].flatMap(key =>
+            Object.keys(conditionRecord(argumentCondition[key]) ?? {}));
+          paths.push(...listValues(argumentCondition.fieldExists), ...listValues(argumentCondition.fieldAbsent));
+          if (paths.some(path => readPath(ctx.arguments, path) === undefined)) {
+            return decision("deny", "deny_policy_block", "The transfer cannot safely evaluate an argument condition.",
+              effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan });
+          }
+        }
         const parsed = toolPolicyConditionsSchema.safeParse(conditions);
         if (!parsed.success) {
           return decision(

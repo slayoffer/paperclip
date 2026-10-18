@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { credentialTransfers, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import { CredentialTransferError, type TransferJournal, type TransferRow } from "./credential-transfer.js";
 
@@ -18,12 +18,35 @@ function restore(row: typeof credentialTransfers.$inferSelect): TransferRow {
 export function credentialTransferJournal(db: Db): TransferJournal {
   return {
     exclusive: (companyId, _connectionId, work) => withDedicatedDbConnection(db, async dedicated => {
-      // Serialize the whole company. Two destinations can share one source identity.
+      // A reserved backend never reconnects after loss. Later queries reject instead.
+      const backend = await dedicated.$client.reserve();
       const key = `credential-transfer:${companyId}`;
-      const [lock] = await dedicated.execute<{ acquired: boolean }>(sql`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`);
-      if (!lock?.acquired) throw new CredentialTransferError(409, "transfer_busy");
-      try { return await work(); }
-      finally { await dedicated.execute(sql`select pg_advisory_unlock(hashtextextended(${key}, 0))`); }
+      let acquired = false;
+      const assertHeld = async () => {
+        try {
+          const [lock] = await backend`select exists (
+            select 1 from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()
+              and classid = (hashtextextended(${key}, 0) >> 32)::int::oid
+              and objid = (hashtextextended(${key}, 0) & 4294967295)::oid and objsubid = 1 and granted
+          ) as held`;
+          if (!lock?.held) throw new Error("lock_lost");
+        } catch {
+          throw new CredentialTransferError(409, "transfer_lock_lost");
+        }
+      };
+      try {
+        const [lock] = await backend`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`;
+        acquired = lock?.acquired === true;
+        if (!acquired) throw new CredentialTransferError(409, "transfer_busy");
+        const result = await work(assertHeld);
+        await assertHeld();
+        return result;
+      } finally {
+        try {
+          if (acquired) await backend`select pg_advisory_unlock(hashtextextended(${key}, 0))`;
+        } catch { /* Backend loss already releases its lock. Never reconnect to unlock. */ }
+        backend.release();
+      }
     }),
     async insert(row) {
       const inserted = await db.insert(credentialTransfers).values(values(row)).onConflictDoNothing().returning({ id: credentialTransfers.id });

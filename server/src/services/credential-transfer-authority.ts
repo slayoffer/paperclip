@@ -64,7 +64,7 @@ export function credentialTransferAuthority(db: Db, gateway: Pick<ToolGatewaySer
         }
         if (!isDeepStrictEqual(versions, binding.credentialVersions)) deny();
         await gateway.authorizeCredentialTransfer({ ...actor, sessionToken,
-          connectionId: binding.connectionId, grantId: binding.grantId, toolNames: tools[side] });
+          connectionId: binding.connectionId, grantId: binding.grantId, toolNames: tools[side], operation: operations[1]! });
       }
       return operations[1]!;
     },

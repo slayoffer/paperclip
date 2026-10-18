@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDb, companies, agents, issues, documents, issueDocuments, issueThreadInteractions,
@@ -7,6 +7,7 @@ import {
   companyMemberships, heartbeatRuns, toolCatalogEntries, toolProfiles, toolProfileBindings, toolPolicies,
   type Db,
 } from "@paperclipai/db";
+import { companyService } from "../services/companies.js";
 import { credentialTransferAuthority } from "../services/credential-transfer-authority.js";
 import { credentialTransferJournal } from "../services/credential-transfer-journal.js";
 import { credentialTransferService } from "../services/credential-transfer.js";
@@ -155,7 +156,7 @@ databaseSuite("credential transfer saved authority and journal", () => {
     const tool = (await gateway.listToolsForSession(session.token)).find(value => value.connectionId === connection!.id)!;
     expect(tool).toBeDefined();
     const binding = { ...f.actor, sessionToken: session.token, connectionId: connection!.id,
-      grantId: f.request.source.grantId, toolNames: [tool.name] };
+      grantId: f.request.source.grantId, toolNames: [tool.name], operation: f.operation };
     await expect(gateway.authorizeCredentialTransfer(binding)).resolves.toBeUndefined();
     await expect(gateway.authorizeCredentialTransfer({ ...binding, userId: "another-person" })).rejects.toMatchObject({ status: 403 });
     await expect(gateway.authorizeCredentialTransfer({ ...binding, issueId: randomUUID() })).rejects.toMatchObject({ status: 403 });
@@ -164,6 +165,17 @@ databaseSuite("credential transfer saved authority and journal", () => {
       policyType: "require_approval", selectors: { catalogEntryId: entry!.id } }).returning();
     await expect(gateway.authorizeCredentialTransfer(binding)).rejects.toMatchObject({ status: 403 });
     await db.update(toolPolicies).set({ policyType: "block" }).where(eq(toolPolicies.id, policy!.id));
+    await expect(gateway.authorizeCredentialTransfer(binding)).rejects.toMatchObject({ status: 403 });
+    // An operation approval must not bypass an argument-dependent destination denial.
+    await db.update(toolPolicies).set({ conditions: { arguments: { fieldEquals: { path: "/clpn-ha" } } } })
+      .where(eq(toolPolicies.id, policy!.id));
+    await expect(gateway.authorizeCredentialTransfer(binding)).rejects.toMatchObject({ status: 403 });
+    await db.update(toolPolicies).set({ conditions: { arguments: { fieldEquals: { path: "/other" } } } })
+      .where(eq(toolPolicies.id, policy!.id));
+    await expect(gateway.authorizeCredentialTransfer(binding)).resolves.toBeUndefined();
+    // Missing or secret-dependent arguments cannot establish a safe policy decision.
+    await db.update(toolPolicies).set({ conditions: { arguments: { fieldEquals: { secretValue: "secret" } } } })
+      .where(eq(toolPolicies.id, policy!.id));
     await expect(gateway.authorizeCredentialTransfer(binding)).rejects.toMatchObject({ status: 403 });
     expect(f.trace).toEqual([]);
   });
@@ -198,4 +210,66 @@ databaseSuite("credential transfer saved authority and journal", () => {
       eq(credentialTransfers.id, receipt.id)));
     for (const canary of CANARIES) expect(JSON.stringify(persisted)).not.toContain(canary);
   });
+  it("retains the lock across provider delays beyond idle and lifetime settings", async () => {
+    const slowDb = createDb(database.connectionString, { idleTimeoutSeconds: 1, maxLifetimeSeconds: 1 });
+    const f = await seed();
+    const originalArm = f.providers.arm.bind(f.providers);
+    f.providers.arm = async input => {
+      await originalArm(input);
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      await expect(credentialTransferJournal(db).exclusive(f.actor.companyId, randomUUID(),
+        async () => { throw new Error("Second executor entered"); })).rejects.toMatchObject({ status: 409 });
+    };
+    const service = credentialTransferService({ authority: f.authority, journal: credentialTransferJournal(slowDb),
+      providers: f.providers, now: () => Date.parse("2026-10-18T12:00:00.000Z") });
+    expect((await service.execute(f.actor, f.request)).state).toBe("complete");
+    await slowDb.$client.end();
+  });
+
+  it("fences subsequent provider effects when the reserved backend is lost", async () => {
+    const f = await seed();
+    const originalArm = f.providers.arm.bind(f.providers);
+    f.providers.arm = async input => {
+      await originalArm(input);
+      const key = `credential-transfer:${f.actor.companyId}`;
+      // Terminate only this disposable test's lock backend.
+      const killed = await db.execute(sql`select pg_terminate_backend(pid) as killed from pg_locks
+        where locktype = 'advisory' and granted
+          and classid = (hashtextextended(${key}, 0) >> 32)::int::oid
+          and objid = (hashtextextended(${key}, 0) & 4294967295)::oid and objsubid = 1`);
+      expect(killed).toHaveLength(1);
+      expect(killed[0]?.killed).toBe(true);
+    };
+    const service = credentialTransferService({ authority: f.authority, journal: credentialTransferJournal(db),
+      providers: f.providers, now: () => Date.parse("2026-10-18T12:00:00.000Z") });
+    await expect(service.execute(f.actor, f.request)).rejects.toMatchObject({ status: 409 });
+    expect(f.trace).not.toContain("activate");
+    expect(f.issueCount).toBe(0);
+    expect(f.trace).toContain("cleanup");
+    expect((await db.select().from(credentialTransfers).where(eq(credentialTransfers.companyId, f.actor.companyId)))[0]?.state)
+      .toBe("revoked");
+  });
+
+  it.each(["complete", "revoked"] as const)("removes a company with a %s journal", async state => {
+    const f = transferFixture();
+    await db.insert(companies).values({ id: f.actor.companyId, name: "Settled transfer", issuePrefix: `T${randomUUID().slice(0, 8)}` });
+    await credentialTransferJournal(db).insert({ id: randomUUID(), actor: f.actor, bindings: f.request,
+      operation: f.operation, state, baselineGrantIds: [], cleanupTicketId: null, credentialId: null,
+      storedNames: [], failureCode: null });
+    expect((await companyService(db).remove(f.actor.companyId))?.id).toBe(f.actor.companyId);
+    expect(await db.select().from(credentialTransfers).where(eq(credentialTransfers.companyId, f.actor.companyId))).toEqual([]);
+  });
+
+  it.each(["prepared", "armed", "issuing", "storing", "cleanup_required"] as const)(
+    "preserves company and %s cleanup journal during removal", async state => {
+      const f = transferFixture();
+      await db.insert(companies).values({ id: f.actor.companyId, name: "Unfinished transfer", issuePrefix: `T${randomUUID().slice(0, 8)}` });
+      const row = { id: randomUUID(), actor: f.actor, bindings: f.request, operation: f.operation, state,
+        baselineGrantIds: [], cleanupTicketId: randomUUID(), credentialId: null, storedNames: [], failureCode: null };
+      await credentialTransferJournal(db).insert(row);
+      await expect(companyService(db).remove(f.actor.companyId)).rejects.toMatchObject({ status: 422 });
+      expect(await credentialTransferJournal(db).get(f.actor.companyId, row.id)).toEqual(row);
+      expect(await db.select().from(companies).where(eq(companies.id, f.actor.companyId))).toHaveLength(1);
+    });
+
 });

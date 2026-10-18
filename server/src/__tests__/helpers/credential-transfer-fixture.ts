@@ -36,7 +36,7 @@ export function transferFixture() {
       const key = companyId;
       if (locks.has(key)) throw new CredentialTransferError(409, "transfer_busy");
       locks.add(key);
-      try { return await work(); } finally { locks.delete(key); }
+      try { return await work(async () => {}); } finally { locks.delete(key); }
     },
     async insert(row) {
       if ([...rows.values()].some(r => r.actor.companyId === row.actor.companyId
