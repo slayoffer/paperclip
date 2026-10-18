@@ -170,12 +170,16 @@ export function buildQuestionResponseDeliveryEnvelope(
     answers: Object.fromEntries(
       interaction.result.answers.map((answer) => {
         const question = questionById.get(answer.questionId);
+        const customOptionIds = new Set(
+          interaction.payload.questions.find((entry) => entry.id === answer.questionId)
+            ?.options.filter((option) => option.freeText).map((option) => option.id) ?? [],
+        );
         return [
           answer.questionId,
           question?.answerMode === "text"
             ? { ...(answer.otherText ? { text: answer.otherText } : {}) }
             : {
-                selectedOptionIds: answer.optionIds,
+                selectedOptionIds: answer.optionIds.filter((optionId) => !customOptionIds.has(optionId)),
                 ...(answer.otherText ? { customText: answer.otherText } : {}),
               },
         ];

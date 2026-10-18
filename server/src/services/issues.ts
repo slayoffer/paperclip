@@ -2541,8 +2541,8 @@ export async function heartbeatRunIsTerminalOrMissing(
  * Semantics:
  * - No operations recorded → settled. The run never touched the workspace state
  *   the gates protect.
- * - Earlier phases recorded but no `workspace_finalize` yet → NOT settled. The
- *   sync-back hasn't been attempted; the gate should wait for it.
+ * - Earlier phases recorded but no `workspace_finalize` yet → wait while the
+ *   source run is alive. A terminal or missing run cannot start finalization.
  * - Latest `workspace_finalize` reached a terminal status (`succeeded`, `failed`,
  *   or `skipped`) → settled. A finalize that ran and finished is done even if it
  *   failed: it will not retry within this run, so continuing to block would wedge
@@ -2583,8 +2583,9 @@ export async function runWorkspaceIsFinalized(
       latestFinalize = row;
   }
 
-  // The run touched the workspace but hasn't reached the sync-back phase yet.
-  if (!latestFinalize) return false;
+  // A run can stop before it records any finalize operation, including during
+  // a server restart. Do not wait for that terminal run to start finalization.
+  if (!latestFinalize) return heartbeatRunIsTerminalOrMissing(dbOrTx, runId);
 
   // A finalize that reached any terminal status is settled — including `failed`
   // and `skipped`. It will not retry within this run, so gates must stop waiting.

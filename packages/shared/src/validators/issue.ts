@@ -2135,13 +2135,30 @@ export type WithdrawIssueThreadInteraction = z.infer<
   typeof withdrawIssueThreadInteractionSchema
 >;
 
+const respondQuestionAnswerSchema = askUserQuestionsAnswerSchema.extend({
+  optionIds: askUserQuestionsAnswerSchema.shape.optionIds.default([]),
+  text: askUserQuestionsAnswerSchema.shape.otherText.optional(),
+}).superRefine((answer, ctx) => {
+  if (answer.text != null && answer.otherText != null && answer.text !== answer.otherText) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "Use text or otherText for the answer. If both fields exist, their values must match.",
+    });
+  }
+}).transform(({ text, ...answer }) => ({
+  ...answer,
+  ...(text != null ? { otherText: text } : {}),
+}));
+
 export const respondIssueThreadInteractionSchema = z.object({
-  answers: z.array(askUserQuestionsAnswerSchema).max(20),
+  answers: z.array(respondQuestionAnswerSchema).max(20),
   summaryMarkdown: multilineTextSchema
     .pipe(z.string().max(20000))
     .nullable()
     .optional(),
 });
+export type RespondIssueThreadInteractionInput = z.input<typeof respondIssueThreadInteractionSchema>;
 export type RespondIssueThreadInteraction = z.infer<
   typeof respondIssueThreadInteractionSchema
 >;
