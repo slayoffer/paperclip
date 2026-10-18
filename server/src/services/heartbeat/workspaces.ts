@@ -99,6 +99,42 @@ const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Managed checkout clone timeout. `PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS` raises it for big repositories on slow links
+ * (a ~400 MB repository at ~500 KB/s needs ~15 min, and the fixed 10 min made every re-clone fail from zero).
+ * Values below 1 min or not numeric fall back to the 10 min default.
+ */
+export function managedCloneTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS;
+}
+
+/**
+ * Optional partial clone for managed checkouts cloned from a URL: `PAPERCLIP_MANAGED_CLONE_FILTER=blob:none` (or
+ * `blob:limit=<n>[kmg]`, `tree:0`). Off by default. Later commands fetch missing blobs on demand, so a private
+ * repository needs working git auth for those commands too.
+ */
+export function managedCloneFilterArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = (env.PAPERCLIP_MANAGED_CLONE_FILTER ?? "").trim();
+  return /^(blob:none|blob:limit=\d+[kmg]?|tree:0)$/.test(raw) ? [`--filter=${raw}`] : [];
+}
+
+/**
+ * The cause of a failed managed clone, cause first: a timeout says so, otherwise the last stderr lines. The bare
+ * execFile message starts with the whole command line (including the inline credential helper), and the stored run
+ * error is cut before git's own error, so a timeout used to read like an auth failure.
+ */
+export function describeManagedCloneFailure(error: unknown, timeoutMs: number): string {
+  const e = error as { killed?: boolean; signal?: string | null; stderr?: unknown; message?: string } | null;
+  const stderr = typeof e?.stderr === "string" ? e.stderr : Buffer.isBuffer(e?.stderr) ? e!.stderr.toString("utf8") : "";
+  const tail = stderr.split("\n").map((l) => l.trim()).filter((l) => l && !/^Cloning into /.test(l)).slice(-3).join(" | ");
+  if (e?.killed || e?.signal === "SIGTERM") {
+    return `git clone timed out after ${Math.round(timeoutMs / 60_000)} min (set PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS for big repositories)${tail ? `; last git output: ${tail}` : ""}`;
+  }
+  if (tail) return `git clone failed: ${tail}`;
+  return error instanceof Error ? error.message : String(error);
+}
+
 export const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 
 const GITHUB_PR_WORKFLOW_SKILL_KEY =
@@ -550,11 +586,13 @@ async function materializeManagedProjectWorkspace(
     ? await input.resolveGitAuth(input.repoUrl)
     : null;
   const cloneTmpDir = await fs.mkdtemp(`${cwd}.clone-`);
+  const cloneTimeoutMs = managedCloneTimeoutMs();
   try {
     try {
       await execFile(
         "git",
-        [...(auth?.configArgs ?? []), "clone", "--no-hardlinks", "--", input.localSource ?? input.repoUrl, cloneTmpDir],
+        [...(auth?.configArgs ?? []), "clone", "--no-hardlinks", ...(input.localSource ? [] : managedCloneFilterArgs()),
+          "--", input.localSource ?? input.repoUrl, cloneTmpDir],
         {
           env: {
             // Spread order matters: the sanitizer strips PAPERCLIP_*, which would remove the
@@ -565,13 +603,13 @@ async function materializeManagedProjectWorkspace(
             GIT_TERMINAL_PROMPT: "0",
             ...(auth?.env ?? {}),
           },
-          timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
+          timeout: cloneTimeoutMs,
         },
       );
     } catch (error) {
       const connectionFailure = !input.localSource ? classifyGitCloneFailure(input.repoUrl, error) : null;
       if (connectionFailure) throw new GitConnectionFailureError(
-        error instanceof Error ? error.message : "Git clone failed", connectionFailure,
+        error instanceof Error ? describeManagedCloneFailure(error, cloneTimeoutMs) : "Git clone failed", connectionFailure,
       );
       throw error;
     }
@@ -594,9 +632,10 @@ async function materializeManagedProjectWorkspace(
     await fs
       .rm(cloneTmpDir, { recursive: true, force: true })
       .catch(() => undefined);
-    const reason = error instanceof Error ? error.message : String(error);
+    const rawReason = error instanceof Error ? error.message : String(error);
+    const reason = describeManagedCloneFailure(error, cloneTimeoutMs);
     const authNote = describeGitAuthFailure({
-      error: reason,
+      error: rawReason,
       used: auth ? { source: auth.source, secretName: auth.secretName } : null,
     });
     const message = scrubGitCredentialText(
