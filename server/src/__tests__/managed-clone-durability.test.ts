@@ -15,6 +15,7 @@ describe("managed clone timeout and filter switches", () => {
     expect(managedCloneTimeoutMs({ PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS: "3600000" })).toBe(3_600_000);
     expect(managedCloneTimeoutMs({ PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS: "5000" })).toBe(600_000);
     expect(managedCloneTimeoutMs({ PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS: "abc" })).toBe(600_000);
+    expect(managedCloneTimeoutMs({ PAPERCLIP_MANAGED_CLONE_TIMEOUT_MS: "2592000000" })).toBe(2_147_483_647);
   });
 
   it("accepts only known partial-clone filters", () => {
