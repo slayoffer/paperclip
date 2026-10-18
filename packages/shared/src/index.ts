@@ -2829,3 +2829,4 @@ export { aiConnectionRouterSlug, aiConnectionRouterAppDefinition, aiConnectionRo
 export { isAppAggregator, aggregatorManagementUrl, aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema, type AggregatorAppSnapshot, type AggregatorAppsResponse, type ArcadeDiscoverySetupInput } from "./aggregator-apps.js";
 
 export * from "./connection-instructions.js";
+export * from "./validators/credential-transfers.js";
