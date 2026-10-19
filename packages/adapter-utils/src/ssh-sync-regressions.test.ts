@@ -110,6 +110,54 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
     await expect(stat(path.join(local, "old.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it.each(
+    ["direct", "managed", "all", "git"].flatMap((restorePath) =>
+      ["file", "symlink"].flatMap((replacement) =>
+        ["node_modules", "dist"].map((excluded) => ({ restorePath, replacement, excluded })))),
+  )("rejects unsafe $replacement replacements with $excluded, restore=$restorePath", async ({ restorePath, replacement, excluded }) => {
+    if (restorePath === "git") await repository();
+    const dependency = path.join(local, "app", excluded, "pkg/data");
+    await mkdir(path.dirname(dependency), { recursive: true });
+    await writeFile(dependency, "local dependency");
+    await writeFile(path.join(local, "app/source.txt"), "local source");
+    await writeFile(path.join(local, "00-first.txt"), "local first");
+    await writeFile(path.join(local, "deleted.txt"), "local deleted");
+    const prepared = restorePath === "direct" ? null : await prepareRemoteManagedRuntime({
+      spec: spec(), runId: "replacement", adapterKey: "test", workspaceLocalDir: local,
+      ...(restorePath === "all" ? { workspaceFileMode: "all" as const } : {}),
+    });
+    if (!prepared) await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    const remoteRoot = prepared?.workspaceRemoteDir ?? remote;
+    await rm(path.join(remoteRoot, "app"), { recursive: true, force: true });
+    if (replacement === "file") await writeFile(path.join(remoteRoot, "app"), "remote replacement");
+    else await symlink("00-first.txt", path.join(remoteRoot, "app"));
+    await writeFile(path.join(remoteRoot, "00-first.txt"), "remote first");
+    await rm(path.join(remoteRoot, "deleted.txt"));
+    const localHead = restorePath === "git" ? await git(local, "rev-parse", "HEAD") : null;
+    if (restorePath === "git") {
+      await git(remoteRoot, "add", ".");
+      await git(remoteRoot, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Replace parent");
+    }
+    const restore = prepared ? prepared.restoreWorkspace() : restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
+    await expect(restore).rejects.toMatchObject({ code: "DIRECTORY_MERGE_CONFLICT", paths: [`app/${excluded}`] });
+    expect(await readFile(dependency, "utf8")).toBe("local dependency");
+    expect(await readFile(path.join(local, "app/source.txt"), "utf8")).toBe("local source");
+    expect(await readFile(path.join(local, "00-first.txt"), "utf8")).toBe("local first");
+    expect(await readFile(path.join(local, "deleted.txt"), "utf8")).toBe("local deleted");
+    if (localHead) expect(await git(local, "rev-parse", "HEAD")).toBe(localHead);
+  });
+
+  it("preserves a concurrent local directory when the remote file did not change", async () => {
+    await writeFile(path.join(local, "app"), "unchanged remote file");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    const baselineSnapshot = await captureDirectorySnapshot(local, { exclude: [...SSH_WORKSPACE_EXCLUDES] });
+    await rm(path.join(local, "app"));
+    await mkdir(path.join(local, "app/node_modules/pkg"), { recursive: true });
+    await writeFile(path.join(local, "app/node_modules/pkg/data"), "concurrent dependency");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
+    expect(await readFile(path.join(local, "app/node_modules/pkg/data"), "utf8")).toBe("concurrent dependency");
+  });
+
   it.each(["once", "always"])("re-exports a truncated bundle once, corruption=%s", async (corruption) => {
     await repository();
     await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });

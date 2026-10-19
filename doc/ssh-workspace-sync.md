@@ -10,6 +10,8 @@ SSH workspace transfers exclude generated directories at every depth:
 The baseline snapshot uses the same exclusions as the transfer.
 Sync-back preserves these local directories, including their contents.
 This rule also applies when the workspace uses `workspaceFileMode: "all"`.
+A remote file or symbolic link cannot replace a directory with excluded local descendants.
+The restore rejects that replacement before it changes local files or integrates Git history.
 Runtime assets retain their separate transfer settings.
 
 Sync-back preserves symbolic link text exactly, including relative targets.
