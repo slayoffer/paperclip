@@ -6,6 +6,7 @@ import { markIdleStartupComplete } from "./services/idle-local-work.js";
 import { clearIdleBackupWakeRequired, idleBackupWakeMarker, markIdleBackupWakeRequired, verifyIdleDatabaseBackup } from "./services/idle-database-backup.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
+import { createHeartbeatPullQueue, isPullQueueSignal } from "./services/pull-queue.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -895,6 +896,10 @@ async function startServerWithDatabaseTeardown(
     ? heartbeatService(db as any, { pluginWorkerManager })
     : null;
   const accountingHeartbeat = heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
+  const pullQueue = heartbeat ? createHeartbeatPullQueue(db as any, {
+    wakeup: heartbeat.wakeup,
+    isSuppressed: () => heartbeat.resolveSchedulingSuppression(),
+  }) : null;
   const decisionServiceOptions = {
     wakeOriginAgent: createDecisionWakeOriginAgent(heartbeat?.wakeup ?? null),
   };
@@ -1283,6 +1288,11 @@ async function startServerWithDatabaseTeardown(
       .catch(err => logger.error({ err }, "post-commit chat completion delivery failed")));
   });
   server.on("close", unsubscribeChatCompletions);
+  const unsubscribePullQueue = subscribeAllCompanyLiveEvents(event => {
+    if (isIdleTaskDrainActive() || isWarmStandby() || heartbeatSchedulerStopped || !isPullQueueSignal(event)) return;
+    if (pullQueue) trackHeartbeatSchedulerWork(pullQueue.notify(event.companyId));
+  });
+  server.on("close", unsubscribePullQueue);
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepPendingCleanupLeases({ backoffMs })
@@ -1692,6 +1702,9 @@ async function startServerWithDatabaseTeardown(
         }
 
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
+          if (pullQueue) trackHeartbeatSchedulerWork(pullQueue.reconcile().catch(err => {
+            logger.error({ err }, "Pull queue reconciliation failed");
+          }));
           trackHeartbeatSchedulerWork(heartbeat
             .tickTimers(new Date())
             .then((result) => {
@@ -1969,6 +1982,8 @@ async function startServerWithDatabaseTeardown(
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
     unsubscribeChatCompletions();
+    unsubscribePullQueue();
+    await pullQueue?.stop();
     await deliveryWork.stop();
     clearInterval(executionControlInterval);
     if (heartbeatSchedulerInterval) {

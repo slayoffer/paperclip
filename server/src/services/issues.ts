@@ -1,4 +1,5 @@
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
+import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -2658,9 +2659,8 @@ async function listIssueDependencyReadinessMap(
       readinessMap.get(row.issueId) ??
       createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
-    // Only done blockers resolve dependents; cancelled blockers stay unresolved
-    // until an operator removes or replaces the blocker relationship explicitly.
-    if (row.blockerStatus !== "done") {
+    // The guarded pull queue also resolves cancelled blockers.
+    if (row.blockerStatus !== "done" && !(isPullQueueEnabled() && row.blockerStatus === "cancelled")) {
       current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
       current.unresolvedBlockerCount += 1;
       current.allBlockersDone = false;
@@ -9262,7 +9262,7 @@ export function issueService(db: Db) {
       const wakeableCandidates = candidates.filter(
         (candidate) =>
           candidate.assigneeAgentId &&
-          !["backlog", "done", "cancelled"].includes(candidate.status),
+          !(isPullQueueEnabled() ? ["done", "cancelled"] : ["backlog", "done", "cancelled"]).includes(candidate.status),
       );
       if (wakeableCandidates.length === 0) return [];
 

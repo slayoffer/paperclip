@@ -11,7 +11,8 @@ import type {
   IssueMonitorScheduledBy,
 } from "@paperclipai/shared";
 import { issueExecutionPolicySchema, issueExecutionStateSchema } from "@paperclipai/shared";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
+import { isPullQueueEnabled } from "./pull-queue-policy.js";
 
 type AssigneeLike = {
   assigneeAgentId?: string | null;
@@ -1070,6 +1071,13 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
   const invalidReason = input.policy?.monitor
     ? monitorClearReasonForIssue(nextStatus, assigneeAgentId, assigneeUserId)
     : null;
+
+  if (isPullQueueEnabled() && input.issue.monitorNextCheckAt && invalidReason === "invalid_status") {
+    throw conflict("This status change would remove the scheduled monitor. Remove the monitor explicitly before this change.", {
+      code: "scheduled_monitor_status_conflict",
+      nextCheckAt: input.issue.monitorNextCheckAt.toISOString(),
+    });
+  }
 
   let targetMonitorState = currentMonitorState;
 
