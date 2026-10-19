@@ -7,6 +7,19 @@ on:
   push:
     branches: ["synthiq/**"]
   workflow_dispatch:
+    inputs:
+      existing_version:
+        description: "Publish an existing image version. Supply its revision and configuration digest too."
+        type: string
+        default: ""
+      existing_revision:
+        description: "Exact source commit for the existing image. Leave all existing-image fields empty for a new build."
+        type: string
+        default: ""
+      existing_id:
+        description: "Exact local image configuration digest (sha256:...). Recovery never rebuilds the image."
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
@@ -14,55 +27,96 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    if: github.repository == 'slayoffer/paperclip'
+    if: github.repository == 'slayoffer/paperclip' && startsWith(github.ref, 'refs/heads/synthiq/')
     runs-on: [self-hosted, paperclip-fork]
     timeout-minutes: 120
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+      version: ${{ steps.tag.outputs.version }}
+      revision: ${{ steps.tag.outputs.revision }}
+      image_id: ${{ steps.identity.outputs.image_id }}
+      runner_name: ${{ runner.name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      # Same step as upstream's docker.yml: a release tag's lockfile can lag package metadata, and the Dockerfile
-      # installs with --frozen-lockfile. Only pnpm-lock.yaml may change (exact path match).
+      - name: Select artifact
+        id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+          EXISTING_VERSION: ${{ inputs.existing_version }}
+          EXISTING_REVISION: ${{ inputs.existing_revision }}
+          EXISTING_ID: ${{ inputs.existing_id }}
+        run: node .github/scripts/synthiq-image.mjs plan
+      # Recovery preserves the original image. It skips dependency resolution and compilation.
       - name: Refresh lockfile for Docker build context
+        if: inputs.existing_version == ''
         run: |
           set -euo pipefail
           corepack enable
           pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
           unexpected="$(git status --porcelain=v1 -z | tr '\0' '\n' | awk 'NF { p = substr($0, 4); if (p != "pnpm-lock.yaml") print }')"
           if [ -n "$unexpected" ]; then
-            echo "Unexpected files changed during lockfile refresh:"; echo "$unexpected"; exit 1
+            echo "Unexpected files changed during lockfile refresh:"
+            echo "$unexpected"
+            exit 1
           fi
-      # Ref-derived values travel only through the environment and are validated; nothing is interpolated into shell source.
-      - name: Tag
-        id: tag
-        env:
-          REF_NAME: ${{ github.ref_name }}
-          RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          set -euo pipefail
-          base="${REF_NAME#synthiq/}"
-          if ! printf '%s' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Branch must be synthiq/<upstream version>, got: $REF_NAME"; exit 1
-          fi
-          echo "version=${base}-synthiq.${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "image=registry.synthiq.ru/paperclip:${base}-synthiq.${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
       - name: Build
+        if: inputs.existing_version == ''
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           IMAGE: ${{ steps.tag.outputs.image }}
+          REVISION: ${{ steps.tag.outputs.revision }}
         run: |
           set -euo pipefail
           docker build --target production \
             --build-arg PAPERCLIP_BUILD_VERSION="$VERSION" \
-            --build-arg PAPERCLIP_BUILD_COMMIT="$GITHUB_SHA" \
+            --build-arg PAPERCLIP_BUILD_COMMIT="$REVISION" \
             --label org.opencontainers.image.source=https://github.com/slayoffer/paperclip \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$REVISION" \
             --label org.opencontainers.image.version="$VERSION" \
             -t "$IMAGE" .
-      - name: Push
+      - name: Record image identity
+        id: identity
         env:
           IMAGE: ${{ steps.tag.outputs.image }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          REVISION: ${{ steps.tag.outputs.revision }}
+          IMAGE_ID: ${{ steps.tag.outputs.image_id }}
+        run: node .github/scripts/synthiq-image.mjs inspect
+
+  # The fork uses one persistent runner. Fail if a different runner receives publication.
+  # Failed-job retries retain the build outputs and never rebuild the selected artifact.
+  publish:
+    needs: build
+    runs-on: [self-hosted, paperclip-fork]
+    # Three 90-minute attempts, their termination grace, and time for verification.
+    timeout-minutes: 285
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      VERSION: ${{ needs.build.outputs.version }}
+      REVISION: ${{ needs.build.outputs.revision }}
+      IMAGE_ID: ${{ needs.build.outputs.image_id }}
+      EXPECTED_RUNNER: ${{ needs.build.outputs.runner_name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Verify the original image
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = "$EXPECTED_RUNNER"
+          node .github/scripts/synthiq-image.mjs inspect
+      - name: Push
+        timeout-minutes: 275
+        env:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
@@ -72,12 +126,13 @@ jobs:
           export DOCKER_CONFIG="$tmp"
           trap 'rm -rf "$tmp"' EXIT
           printf '%s' "$REGISTRY_PASSWORD" | docker login registry.synthiq.ru -u "$REGISTRY_USER" --password-stdin
-          # The proxy in front of registry.synthiq.ru cuts every upload request at 30 min (2026-10-16), and home-pc pushes
-          # at ~2 MB/s; home-pc dockerd has max-concurrent-uploads=1 so each layer gets the full link. Bound each attempt
-          # and retry; layers that already arrived are skipped on the next attempt.
-          for attempt in 1 2 3; do
-            if timeout 5400 docker push "$IMAGE"; then break; fi
-            [ "$attempt" = 3 ] && { echo "push failed after 3 attempts"; exit 1; }
-            echo "push attempt $attempt failed or timed out; retrying"
-          done
-          echo "pushed $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          node .github/scripts/synthiq-image.mjs push
+      - name: Verify publication
+        run: node .github/scripts/synthiq-image.mjs receipt
+      - name: Save publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication.json
+          if-no-files-found: error
+          retention-days: 30
