@@ -69,5 +69,8 @@ jobs:
           server/src/__tests__/issue-dependency-wakeups-routes.test.ts
           server/src/__tests__/disposition-repair.test.ts
           server/src/__tests__/disposition-repair-documents.test.ts
+          server/src/__tests__/issue-liveness.test.ts
+          server/src/__tests__/recovery-classifiers.test.ts
+          server/src/services/recovery/provider-failure-classification.test.ts
           server/src/services/self-block-guard.test.ts
           server/src/services/issue-dependency-wakeups.test.ts

@@ -14,6 +14,7 @@ import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { hasNonDependencyBlockedWait } from "../services/blocked-state-integrity.js";
+import { classifyIssueGraphLiveness } from "../services/recovery/issue-graph-liveness.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -151,6 +152,14 @@ describeDatabase("blocked-state integrity", () => {
     expect(await svc.getById(source.id)).toMatchObject({ status: "blocked" });
     await svc.update(last.id, { status: "cancelled" });
     expect(await svc.getById(source.id)).toMatchObject({ status: "todo", unblockDescriptor: null });
+  });
+  it("does not report cancelled dependencies as live blockers", async () => {
+    const cancelled = await issue("SYNA-1858", "cancelled");
+    expect(classifyIssueGraphLiveness({
+      issues: [source, cancelled],
+      relations: [{ companyId, blockerIssueId: cancelled.id, blockedIssueId: source.id }],
+      agents: [{ id: agentId, companyId, name: "Owner", role: "engineer", status: "idle" }],
+    })).toEqual([]);
   });
   it("keeps an open bridge hold after the reviewer completes", async () => {
     const reviewer = await issue("SYNA-2025", "in_progress");
