@@ -1,3 +1,4 @@
+import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -15971,19 +15972,11 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/interactions", async (req, res) => {
-    const id = req.params.id as string;
-    const issue = await getAccessibleResource(
-      req,
-      res,
-      getIssueById(req, id),
-      "Issue not found",
-    );
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const interactions =
-      await issueThreadInteractionService(db).listForIssue(id);
-    res.json(interactions);
+  registerIssueInteractionReads(router, {
+    getIssue: (req, res) => getAccessibleResource(req, res,
+      getIssueById(req, req.params.id as string), "Issue not found"),
+    authorize: assertIssueReadAllowed,
+    service: issueThreadInteractionService(db),
   });
 
   router.post(
