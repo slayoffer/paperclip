@@ -10,6 +10,7 @@ Implementation: [task thread](../ui/src/pages/IssueDetail.tsx), [execution polic
 - `dependencies`: show blocking tasks and wake eligible work when prerequisites resolve.
 - `signoff`: apply the configured implementation/review completion policy.
 - `tree-control`: pause or resume a task tree without bypassing its gates.
+- `pull-queue`: select ready assigned work when an owner becomes idle. See the [guarded queue](../doc/pull-queue.md).
 
 ## How to get to it (user POV)
 
@@ -28,6 +29,8 @@ Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Prep
 ### `task-relationships`
 
 Automated: [dependency wakeups](../server/src/__tests__/issue-dependency-wakeups-routes.test.ts) checks server behavior; visual relationship navigation remains a manual check.
+
+Automated: [pull queue](../server/src/__tests__/heartbeat-pull-queue.test.ts) checks guarded selection, real-work counts, ghost release, and monitor protection. Deployment latency requires a separate measurement.
 
 Manual: Block one task on another, finish the prerequisite, and observe the dependent task’s eligible continuation. Follow parent/child links back to the source request. Verify no duplicate run or false parent completion occurs.
 
