@@ -1,3 +1,5 @@
+import { IssueThreadInteractionBase, IssueThreadInteractionActorFields } from "./issue-interaction-base.js";
+export type { IssueThreadInteractionActorFields, IssueThreadInteractionBase } from "./issue-interaction-base.js";
 import type { ExecutionProjection, ExecutionBlocker } from "./execution-projection.js";
 import type {
   IssueCommentAuthorType,
@@ -1100,14 +1102,6 @@ export interface IssueCommentPresentation {
   density?: IssueCommentPresentationDensity;
 }
 
-export interface IssueThreadInteractionActorFields {
-  createdByAgentId?: string | null;
-  createdByUserId?: string | null;
-  resolvedByAgentId?: string | null;
-  resolvedByRunId?: string | null;
-  resolvedByUserId?: string | null;
-}
-
 export interface SuggestedTaskDraft {
   clientKey: string;
   parentClientKey?: string | null;
@@ -1509,39 +1503,6 @@ export interface RequestItemVerdictsResult {
   items: RequestItemVerdictsResultItem[];
   commentId?: string | null;
   staleTarget?: RequestConfirmationTarget | null;
-}
-
-export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {
-  id: string;
-  companyId: string;
-  issueId: string;
-  kind: IssueThreadInteractionKind;
-  idempotencyKey?: string | null;
-  originCommentIds?: string[];
-  sourceCommentId?: string | null;
-  sourceRunId?: string | null;
-  sourceIdentityContextId?: string | null;
-  addresseeAgentId?: string | null;
-  addresseeUserId?: string | null;
-  title?: string | null;
-  summary?: string | null;
-  status: IssueThreadInteractionStatus;
-  continuationPolicy: IssueThreadInteractionContinuationPolicy;
-  /** Read-time acceptance gate; omitted when no workspace preparation is pending. */
-  acceptanceBlocker?: "workspace_sync_pending";
-  /** @deprecated Read requestedResolverPolicy. Kept for API compatibility. */
-  resolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  requestedResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  effectiveResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  resolverPolicyProvenance: IssueThreadInteractionResolverPolicyProvenance;
-  effectiveResolverPolicySource: IssueThreadInteractionEffectiveResolverPolicySource;
-  legacyResolverPolicyAliases: {
-    requested: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-    effective: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-  };
-  createdAt: Date | string;
-  updatedAt: Date | string;
-  resolvedAt?: Date | string | null;
 }
 
 export interface SuggestTasksInteraction extends IssueThreadInteractionBase {

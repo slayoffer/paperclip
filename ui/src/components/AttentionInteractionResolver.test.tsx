@@ -64,3 +64,33 @@ it("refreshes a preparing approval automatically, then stops polling without acc
     client.clear();
   }
 });
+
+it("sends the revision from the displayed confirmation", async () => {
+  vi.useFakeTimers();
+  const interaction = { ...pendingRequestConfirmationInteraction, revision: "displayed-revision" };
+  vi.mocked(issuesApi.listInteractions).mockResolvedValue([interaction]);
+  vi.mocked(issuesApi.acceptInteraction).mockResolvedValue({ ...interaction, status: "accepted" });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ThemeProvider>
+          <AttentionInteractionResolver companyId={interaction.companyId}
+            issueId={interaction.issueId} interactionId={interaction.id} />
+        </ThemeProvider></TooltipProvider>
+      </QueryClientProvider>,
+    ));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const approve = container.querySelector<HTMLButtonElement>('[data-testid="confirmation-actions"] button')!;
+    await act(async () => { approve.click(); await vi.advanceTimersByTimeAsync(1); });
+    expect(issuesApi.acceptInteraction).toHaveBeenCalledWith(interaction.issueId, interaction.id,
+      expect.objectContaining({ expectedRevision: "displayed-revision" }));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    client.clear();
+  }
+});

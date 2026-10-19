@@ -745,9 +745,9 @@ administrator remediation rather than promising a nonexistent approval step.
 
 ### 9.8.1 Issue-thread interaction resolver contract
 
-Issue-thread interactions are coordination records, not grants of authority. Every
-interaction kind defaults to resolver policy `anyone` when the create request omits
-`resolverPolicy`. Restrictions are opt-in.
+Interactions coordinate work. They grant no authority. Resolver policy defaults to
+`anyone`. Restrictions require explicit configuration. See the
+[answer preconditions](interaction-resolution.md).
 
 Question, confirmation, checkbox confirmation, and item verdict cards stay pending
 when a user sends an ordinary task comment. Their `supersedeOnUserComment` flag
