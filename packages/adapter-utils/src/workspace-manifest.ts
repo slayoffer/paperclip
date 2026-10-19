@@ -54,11 +54,13 @@ function openDatabase(filePath: string, readOnly = true): DatabaseSync {
 
 /** One private database, sealed before it is published. Consumers open read-only. */
 export class WorkspaceManifestWriter {
+  readonly filePath: string;
   private readonly db: DatabaseSync;
   private readonly insert: StatementSync;
   private closed = false;
   private bytesSinceDiskCheck = 0;
-  constructor(readonly filePath: string) {
+  constructor(filePath: string) {
+    this.filePath = filePath;
     const availableBytes = assertWorkspaceManifestDiskSpace(path.dirname(filePath));
     this.db = openDatabase(filePath, false);
     try {
@@ -105,9 +107,14 @@ export class WorkspaceManifestWriter {
 }
 
 export class WorkspaceManifestMap<T> {
+  readonly manifest: PathManifest;
+  private readonly parse: (value: string) => T;
   private db: DatabaseSync | null = null;
   private lookup: StatementSync | null = null;
-  constructor(readonly manifest: PathManifest, private readonly parse: (value: string) => T) {}
+  constructor(manifest: PathManifest, parse: (value: string) => T) {
+    this.manifest = manifest;
+    this.parse = parse;
+  }
   get size(): number { return this.manifest.count; }
   get(relative: string): T | undefined {
     this.db ??= openDatabase(this.manifest.filePath);
@@ -176,10 +183,11 @@ export function workspacePathMatcher(paths?: WorkspacePaths): { matches(relative
 
 /** Incremental NUL parser: one bounded record, strict UTF-8, no partial success. */
 export class WorkspaceNulParser {
+  private readonly record: (relative: string) => void;
   private readonly pending = Buffer.alloc(WORKSPACE_PATH_MAX_BYTES);
   private length = 0;
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
-  constructor(private readonly record: (relative: string) => void) {}
+  constructor(record: (relative: string) => void) { this.record = record; }
   write(chunk: Buffer): void {
     let start = 0;
     while (start < chunk.length) {
