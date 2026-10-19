@@ -2,7 +2,7 @@ import { and, asc, eq, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, issueRelations, issues } from "@paperclipai/db";
 import type { heartbeatService } from "./heartbeat.js";
-import { blockedStateIntegrityEnabled, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
+import { blockedStateIntegrityEnabled, blockedWaitFacts } from "./blocked-state-integrity.js";
 import { buildIssueBlockersResolvedWakeStateKey, findExistingIssueBlockersResolvedWakeForReadyState,
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import { logger } from "../middleware/logger.js";
@@ -73,7 +73,8 @@ export async function dispatchPendingDependencyReleaseWakes(
       }
       const { issueService } = await import("./issues.js");
       const readiness = (await issueService(db).listDependencyReadiness(intent.companyId, [issueId])).get(issueId);
-      if (!readiness?.isDependencyReady || await hasNonDependencyBlockedWait(db, issueId)) {
+      const wait = await blockedWaitFacts(db, issue, issue.unblockDescriptor);
+      if (!readiness?.isDependencyReady || wait.hasTarget || wait.outside) {
         await settle(pending);
         result.deferredOrFailed++;
         continue;

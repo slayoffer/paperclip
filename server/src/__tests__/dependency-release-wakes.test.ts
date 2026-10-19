@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRelations, issues,
+  activityLog, agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRelations, issueThreadInteractions, issues,
   getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
 import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../services/issues.js";
@@ -46,7 +46,7 @@ describeDatabase("durable dependency release wakes", () => {
     await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: dependent.id, type: "blocks" });
   });
   afterEach(async () => {
-    for (const table of [activityLog, issueComments, issueRelations, heartbeatRuns, agentWakeupRequests, issues, agents, companies]) {
+    for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns, agentWakeupRequests, issues, agents, companies]) {
       await db.delete(table);
     }
     vi.unstubAllEnvs();
@@ -86,6 +86,20 @@ describeDatabase("durable dependency release wakes", () => {
     expect(await recover()).toMatchObject({ checked: 1, healed: 1, issueIds: [dependent.id] });
     expect(heartbeat.wakeup).toHaveBeenCalledTimes(2);
     expect((await intents())[0]?.status).toBe("completed_dependency_dispatch");
+  });
+
+  it("preserves a card that appears before a deferred dispatch retries", async () => {
+    await svc.update(blocker.id, { status: "done" });
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: dependent.id,
+      kind: "request_confirmation", status: "pending", title: "Approve the operation", payload: {},
+      continuationPolicy: "wake_assignee" }).returning();
+    heartbeat.wakeup.mockClear();
+    expect(await recover()).toMatchObject({ healed: 0, deferredOrFailed: 1 });
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+    expect((await intents())[0]?.status).toBe("pending_dependency_dispatch");
+    await db.update(issueThreadInteractions).set({ status: "accepted" }).where(eq(issueThreadInteractions.id, card!.id));
+    heartbeat.wakeup.mockResolvedValueOnce(await delivered());
+    expect(await recover()).toMatchObject({ healed: 1 });
   });
 
   it("rolls back the pending wake with the status transition", async () => {
