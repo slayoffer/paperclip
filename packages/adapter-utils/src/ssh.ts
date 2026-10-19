@@ -7,6 +7,7 @@ import path from "node:path";
 import { Transform } from "node:stream";
 import { createSshAuthArgs, shellQuote } from "./ssh-auth.js";
 import { streamSshToLocalFile } from "./ssh-download.js";
+import { updateGitHeadAndIndex } from "./ssh-git-index.js";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 export { shellQuote } from "./ssh-auth.js";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
@@ -840,10 +841,7 @@ async function integrateImportedGitHead(input: {
 
     if (mergeBaseHead === currentHead) {
       try {
-        await runLocalGit(input.localDir, ["update-ref", headRef, input.importedHead, currentHead], {
-          timeout: 10_000,
-          maxBuffer: 16 * 1024,
-        });
+        await updateGitHeadAndIndex(input.localDir, headRef, currentHead, input.importedHead);
         return;
       } catch (error) {
         if (isConcurrentRefUpdateError(error) && attempt < 4) continue;
@@ -862,10 +860,7 @@ async function integrateImportedGitHead(input: {
         syncLabel: "Paperclip SSH sync",
       });
       try {
-        await runLocalGit(input.localDir, ["update-ref", headRef, graftCommit, currentHead], {
-          timeout: 10_000,
-          maxBuffer: 16 * 1024,
-        });
+        await updateGitHeadAndIndex(input.localDir, headRef, currentHead, graftCommit);
         return;
       } catch (error) {
         if (isConcurrentRefUpdateError(error) && attempt < 4) continue;
@@ -909,10 +904,7 @@ async function integrateImportedGitHead(input: {
       },
     );
     try {
-      await runLocalGit(input.localDir, ["update-ref", headRef, mergeCommit.stdout.trim(), currentHead], {
-        timeout: 10_000,
-        maxBuffer: 16 * 1024,
-      });
+      await updateGitHeadAndIndex(input.localDir, headRef, currentHead, mergeCommit.stdout.trim());
       return;
     } catch (error) {
       if (isConcurrentRefUpdateError(error) && attempt < 4) continue;

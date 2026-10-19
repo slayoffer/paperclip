@@ -14,6 +14,10 @@ A remote file or symbolic link cannot replace a directory with excluded local de
 The restore rejects that replacement before it changes local files or integrates Git history.
 Direct Git restoration without a supplied baseline uses the same staged merge.
 It captures a filtered local baseline and imports history only after the safety check.
+History integration also prepares the index with a two-tree merge before it advances HEAD.
+The Git index lock protects this change. The index update does not change working files.
+Nonconflicting local staged changes remain staged. Conflicting staged changes reject before HEAD advances.
+Dirty remote edits remain unstaged above the imported commit.
 Runtime assets retain their separate transfer settings.
 
 Sync-back preserves symbolic link text exactly, including relative targets.

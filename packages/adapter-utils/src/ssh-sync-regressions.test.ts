@@ -174,6 +174,61 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
     expect(await git(local, "for-each-ref", "refs/paperclip/ssh-sync/imported")).toBe("");
   });
 
+  it.each([false, true])("synchronizes the direct Git index, dirty remote=%s", async (dirty) => {
+    await repository();
+    await writeFile(path.join(local, ".gitignore"), "node_modules/\n");
+    await git(local, "add", ".gitignore");
+    await git(local, "commit", "-m", "Ignore dependencies");
+    await mkdir(path.join(local, "node_modules/pkg"), { recursive: true });
+    await writeFile(path.join(local, "node_modules/pkg/data"), "local dependency");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    await writeFile(path.join(remote, "source.txt"), "remote commit\n");
+    await git(remote, "add", ".");
+    await git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Remote commit");
+    const remoteHead = await git(remote, "rev-parse", "HEAD");
+    if (dirty) await writeFile(path.join(remote, "source.txt"), "dirty remote edit\n");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
+    expect(await git(local, "rev-parse", "HEAD")).toBe(remoteHead);
+    expect(await git(local, "show", ":source.txt")).toBe("remote commit");
+    expect(await git(local, "diff", "--cached", "--exit-code")).toBe("");
+    const status = (await exec("git", ["-C", local, "status", "--porcelain"])).stdout;
+    expect(status).toBe(dirty ? " M source.txt\n" : "");
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe(dirty ? "dirty remote edit\n" : "remote commit\n");
+    expect(await readFile(path.join(local, "node_modules/pkg/data"), "utf8")).toBe("local dependency");
+    await writeFile(path.join(local, "next.txt"), "next fixture file\n");
+    await git(local, "add", "next.txt");
+    await git(local, "commit", "-m", "Next ordinary commit");
+    expect(await git(local, "show", "HEAD:source.txt")).toBe("remote commit");
+  });
+
+  it.each([false, true])("preserves local staged changes during direct Git restore, conflict=%s", async (conflict) => {
+    await repository();
+    await writeFile(path.join(local, "local.txt"), "original local\n");
+    await git(local, "add", ".");
+    await git(local, "commit", "-m", "Add local file");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    const changedFile = conflict ? "source.txt" : "local.txt";
+    await writeFile(path.join(local, changedFile), "intended staged edit\n");
+    await git(local, "add", changedFile);
+    await writeFile(path.join(local, changedFile), "unstaged local edit\n");
+    const oldHead = await git(local, "rev-parse", "HEAD");
+    const oldIndex = await git(local, "write-tree");
+    await writeFile(path.join(remote, "source.txt"), "remote commit\n");
+    await git(remote, "add", ".");
+    await git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Remote commit");
+    if (conflict) {
+      await expect(restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local })).rejects.toThrow();
+      expect(await git(local, "rev-parse", "HEAD")).toBe(oldHead);
+      expect(await git(local, "write-tree")).toBe(oldIndex);
+      expect(await readFile(path.join(local, changedFile), "utf8")).toBe("unstaged local edit\n");
+    } else {
+      await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
+      expect(await git(local, "rev-parse", "HEAD")).toBe(await git(remote, "rev-parse", "HEAD"));
+      expect(await git(local, "show", ":source.txt")).toBe("remote commit");
+    }
+    expect(await git(local, "show", `:${changedFile}`)).toBe("intended staged edit");
+  });
+
   it("preserves a concurrent local directory when the remote file did not change", async () => {
     await writeFile(path.join(local, "app"), "unchanged remote file");
     await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
