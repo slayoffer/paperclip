@@ -23,6 +23,7 @@ export interface FlowSnapshot {
   relations: Array<{ issueId: string; relatedIssueId: string }>;
   decisions: Array<{ issueId: string }>;
   runs: Array<{ id: string; agentId: string; issueId: string | null }>;
+  pendingFinalizeBlockerIssueIds: string[];
 }
 
 const closed = (status: string) => status === "done" || status === "cancelled";
@@ -41,6 +42,7 @@ export function buildCompanyFlowReport(
   wipLimit: number | null,
 ): CompanyFlowReport {
   const rows = new Map(snapshot.issues.map((issue) => [issue.id, issue]));
+  const pendingFinalize = new Set(snapshot.pendingFinalizeBlockerIssueIds);
   const open = snapshot.issues.filter((issue) => issue.executionVisible && !closed(issue.status));
   const decisions = new Map<string, number>();
   for (const row of snapshot.decisions) decisions.set(row.issueId, (decisions.get(row.issueId) ?? 0) + 1);
@@ -75,7 +77,8 @@ export function buildCompanyFlowReport(
     assigneeAgentId: row.assigneeAgentId, assigneeUserId: row.assigneeUserId,
     ageMs: Math.max(0, now.getTime() - row.createdAt.getTime()),
     unchangedForMs: Math.max(0, now.getTime() - row.updatedAt.getTime()),
-    openBlockerIds: [...(blockers.get(row.id) ?? [])].filter((id) => !closed(rows.get(id)!.status)).sort(),
+    openBlockerIds: [...(blockers.get(row.id) ?? [])]
+      .filter((id) => rows.get(id)!.status !== "done" || pendingFinalize.has(id)).sort(),
     pendingDecisionCount: decisions.get(row.id) ?? 0,
   }]));
   const issues = [...references.values()].sort(issueOrder);

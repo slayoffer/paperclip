@@ -12,7 +12,8 @@ function issue(id: string, fields: Partial<FlowIssueRow> = {}): FlowIssueRow {
 }
 function report(issues: FlowIssueRow[], fields: Partial<FlowSnapshot> = {}, limit: number | null = 3) {
   return buildCompanyFlowReport("company", {
-    issues, agents: [{ id: "owner", name: "Owner", status: "idle" }], relations: [], decisions: [], runs: [], ...fields,
+    issues, agents: [{ id: "owner", name: "Owner", status: "idle" }], relations: [], decisions: [], runs: [],
+    pendingFinalizeBlockerIssueIds: [], ...fields,
   }, now, limit);
 }
 const edge = (issueId: string, relatedIssueId: string) => ({ issueId, relatedIssueId });
@@ -37,6 +38,28 @@ describe("company flow projection", () => {
     });
     expect(result.chainRoots.map((root) => root.transitiveDependentCount)).toEqual([3, 3, 3, 3]);
     expect(result.chainRoots[0]!.issue.openBlockerIds).toEqual(["d"]);
+  });
+
+  it.each(["todo", "backlog", "blocked"])("keeps a cancelled blocker unresolved for %s work", (status) => {
+    const result = report([
+      issue("cancelled", { status: "cancelled" }), issue("dependent", { status }),
+      issue("child"),
+    ], { relations: [edge("cancelled", "dependent"), edge("dependent", "child")] });
+    expect(result.readyQueues).toEqual([]);
+    expect(result.ghosts.blockedWithClosedLinks).toEqual([]);
+    expect(result.chainRoots[0]!.issue.openBlockerIds).toEqual(["cancelled"]);
+  });
+
+  it("keeps done blockers unresolved while their workspace finalization is pending", () => {
+    const result = report([
+      issue("done", { status: "done" }), issue("todo"), issue("backlog", { status: "backlog" }),
+      issue("blocked", { status: "blocked" }),
+    ], {
+      relations: [edge("done", "todo"), edge("done", "backlog"), edge("done", "blocked")],
+      pendingFinalizeBlockerIssueIds: ["done"],
+    });
+    expect(result.readyQueues).toEqual([]);
+    expect(result.ghosts.blockedWithClosedLinks).toEqual([]);
   });
 
   it("uses the exact WIP predicate, preserves weekly WIP, and reports stall signals", () => {
@@ -71,13 +94,13 @@ describe("company flow projection", () => {
 
   it("finds closed blocker links and review holds without open rounds", () => {
     const result = report([
-      issue("done", { status: "done" }), issue("cancelled", { status: "cancelled" }),
+      issue("done", { status: "done" }),
       issue("ghost", { status: "blocked" }), issue("empty", { status: "blocked" }),
       issue("orphan", { title: "Review hold: root (bridge-owned, do not edit)", status: "backlog" }),
       issue("hold", { title: "Review hold: other (bridge-owned, do not edit)", parentId: "other" }),
       issue("round", { title: "Review r1: other @ head", parentId: "other" }),
       issue("closed-round", { title: "Review r1: root @ head", status: "done" }),
-    ], { relations: [edge("done", "ghost"), edge("cancelled", "ghost")] });
+    ], { relations: [edge("done", "ghost")] });
     expect(result.ghosts.blockedWithClosedLinks.map((row) => row.id)).toEqual(["ghost"]);
     expect(result.ghosts.reviewHoldsWithoutRound.map((row) => row.id)).toEqual(["orphan"]);
     expect(result.readyQueues.flatMap((queue) => [...queue.todo, ...queue.backlog]).some((row) => row.id === "hold")).toBe(false);

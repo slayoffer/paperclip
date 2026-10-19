@@ -4,7 +4,7 @@ import express, { type ErrorRequestHandler } from "express";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents, approvals, companies, createDb, heartbeatRuns, issueApprovals,
-  issueRelations, issues, issueThreadInteractions,
+  executionWorkspaces, issueRelations, issues, issueThreadInteractions, projects, workspaceOperations,
 } from "@paperclipai/db";
 import type { CompanyFlowReport } from "@paperclipai/shared/types/company-flow";
 import { companyFlowRoutes } from "../routes/company-flow.js";
@@ -127,6 +127,71 @@ if (!support.supported) console.warn(`Company flow database tests skipped: ${sup
     expect(JSON.stringify(report)).not.toContain(otherAgentId);
     // Reading the report must preserve the real assignment count, including hidden issues.
     expect(report.agents[0]?.wip).toBe(9);
+  });
+
+  it("keeps done blockers unresolved until their workspace finalization succeeds", async () => {
+    const scopedCompanyId = randomUUID();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const blockerId = randomUUID();
+    const unrelatedId = randomUUID();
+    const dependents = ["todo", "backlog", "blocked"].map((status) => ({ id: randomUUID(), status }));
+    await db.insert(companies).values({ id: scopedCompanyId, name: "Finalization", issuePrefix: "FINAL" });
+    await db.insert(projects).values({ id: projectId, companyId: scopedCompanyId, name: "Finalization" });
+    await db.insert(executionWorkspaces).values({
+      id: workspaceId, companyId: scopedCompanyId, projectId, name: "Shared workspace",
+      mode: "isolated", strategyType: "git_worktree",
+    });
+    await db.insert(issues).values([
+      { id: blockerId, companyId: scopedCompanyId, title: "Done blocker", status: "done", executionWorkspaceId: workspaceId },
+      { id: unrelatedId, companyId: scopedCompanyId, title: "Other workspace user", status: "done", executionWorkspaceId: workspaceId },
+      ...dependents.map(({ id, status }) => ({ id, status, companyId: scopedCompanyId, title: `Dependent ${status}` })),
+    ]);
+    await db.insert(issueRelations).values(dependents.map(({ id }) => ({
+      companyId: scopedCompanyId, issueId: blockerId, relatedIssueId: id, type: "blocks" as const,
+    })));
+    const readReport = async () => {
+      const response = await fetch(`${baseUrl}/${scopedCompanyId}/flow`, { headers: { "x-test-actor": "local" } });
+      expect(response.status).toBe(200);
+      return response.json() as Promise<CompanyFlowReport>;
+    };
+    const expectReleased = (report: CompanyFlowReport) => {
+      expect(report.counts.readyTodo).toBe(1);
+      expect(report.counts.readyBacklog).toBe(1);
+      expect(report.ghosts.blockedWithClosedLinks.map((issue) => issue.id)).toEqual([dependents[2]!.id]);
+    };
+    const expectWaiting = (report: CompanyFlowReport) => {
+      expect(report.readyQueues).toEqual([]);
+      expect(report.ghosts.blockedWithClosedLinks).toEqual([]);
+    };
+    const recordOperation = async (phase: string, status: string, offset: number, issueId: string | null = blockerId, opCompanyId = scopedCompanyId) => {
+      await db.insert(workspaceOperations).values({
+        companyId: opCompanyId, executionWorkspaceId: workspaceId, issueId, phase, status,
+        startedAt: new Date(Date.UTC(2026, 9, 19, 0, offset)),
+      });
+    };
+    // An untouched workspace needs no finalization.
+    expectReleased(await readReport());
+    for (const [index, [phase, status]] of [
+      ["worktree_prepare", "succeeded"], ["workspace_finalize", "running"],
+      ["workspace_finalize", "failed"], ["workspace_finalize", "skipped"],
+    ].entries()) {
+      await recordOperation(phase!, status!, index + 1);
+      expectWaiting(await readReport());
+    }
+    // Another company's finalize cannot release this company's dependents.
+    await recordOperation("workspace_finalize", "succeeded", 5, null, otherCompanyId);
+    expectWaiting(await readReport());
+    // A later success on this shared workspace clears the blocker's barrier.
+    await recordOperation("workspace_finalize", "succeeded", 6, unrelatedId);
+    expectReleased(await readReport());
+    // Later work for a different issue does not reopen this blocker's barrier.
+    await recordOperation("worktree_prepare", "succeeded", 7, unrelatedId);
+    expectReleased(await readReport());
+    await recordOperation("worktree_prepare", "succeeded", 8);
+    expectWaiting(await readReport());
+    await recordOperation("workspace_finalize", "succeeded", 9);
+    expectReleased(await readReport());
   });
 
   it("returns a complete company report within two seconds for 2,000 issues", async () => {

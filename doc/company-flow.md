@@ -13,13 +13,18 @@ The response contains these fields:
 | `chainRoots` | Open issues that block other open issues, with unique transitive dependent counts. |
 | `agents` | Active agents, their assignment count, configured limit, and limit state. |
 | `ghosts.inProgressWithoutRun` | Open work with no current queued or running run for its assigned agent. |
-| `ghosts.blockedWithClosedLinks` | Blocked work with at least one blocker link, all done or cancelled. |
+| `ghosts.blockedWithClosedLinks` | Blocked work with at least one blocker link, all done with workspace finalization complete. |
 | `ghosts.reviewHoldsWithoutRound` | Open review holds without an open review round for the same parent or issue identifier. |
 | `unassigned` | Open work without an agent or user owner, except review holds. |
 | `counts` | Counts for the complete report. |
 | `scorecard` | Counts and owner groups with the weekly scorecard title exclusions. |
 
 Ready issues have no open blocker link and no pending decision.
+Only `done` blockers resolve a dependency. Cancelled blockers remain unresolved until an operator removes or replaces the link.
+A done blocker remains unresolved while its workspace finalization is pending or unsuccessful.
+The report uses the same finalization barrier as issue checkout, inside the same snapshot.
+Workspaces without recorded operations need no finalization.
+The barrier tracks each blocker's operations. A later successful finalization can release blockers that share the workspace.
 Pending decisions include pending thread interactions and linked approvals that need a decision or revision.
 An owner at the assignment limit can still have ready backlog work.
 Readiness describes the issue dependencies. The agent fields describe owner capacity.
@@ -69,7 +74,7 @@ Do not replace a failed request with zero or change the existing weekly work cou
 
 ## Consistency and verification
 
-The service uses seven company-scoped queries in one repeatable-read, read-only transaction.
+The service uses at most nine company-scoped queries in one repeatable-read, read-only transaction.
 It does not read comments, decision contents, logs, or agent configuration.
 The response still contains board-visible issue titles and owner IDs.
 Use the existing board session or board key access rules.

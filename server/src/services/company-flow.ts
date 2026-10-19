@@ -7,8 +7,10 @@ import { notFound } from "../errors.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
 import { buildCompanyFlowReport } from "./company-flow-model.js";
 import { executionIssueCondition } from "./issue-visibility.js";
+import { issueService } from "./issues.js";
 
 export function companyFlowService(db: Db) {
+  const issueSvc = issueService(db);
   return {
     report: (companyId: string) => db.transaction(async (tx) => {
       const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
@@ -40,8 +42,10 @@ export function companyFlowService(db: Db) {
           eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ["queued", "running"]), isNull(heartbeatRuns.finishedAt),
         )),
       ]);
+      const readiness = await issueSvc.listDependencyReadiness(companyId, issueRows.map((issue) => issue.id), tx);
       return buildCompanyFlowReport(companyId, {
         issues: issueRows, agents: agentRows, relations, decisions: [...interactions, ...approvalRows], runs,
+        pendingFinalizeBlockerIssueIds: [...new Set([...readiness.values()].flatMap((row) => row.pendingFinalizeBlockerIssueIds))],
       }, collectedAt, agentWipLimit());
     }, { isolationLevel: "repeatable read", accessMode: "read only" }),
   };
