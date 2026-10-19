@@ -1,3 +1,4 @@
+import type { IssueBlockerAttention } from "@paperclipai/shared";
 import type { IssueDependencyReadiness } from "./issues.js";
 import { blockedStateIntegrityEnabled } from "./blocked-state-integrity.js";
 import { and, eq, inArray, notInArray } from "drizzle-orm";
@@ -71,5 +72,26 @@ export function createIssueDependencyReadiness(
     pendingFinalizeBlockerIssueIds: [],
     allBlockersDone: true,
     isDependencyReady: true,
+  };
+}
+
+export function createIssueBlockerAttention(
+  input: Partial<IssueBlockerAttention> = {},
+): IssueBlockerAttention {
+  return {
+    state: input.state ?? "none",
+    reason: input.reason ?? null,
+    unresolvedBlockerCount: input.unresolvedBlockerCount ?? 0,
+    coveredBlockerCount: input.coveredBlockerCount ?? 0,
+    stalledBlockerCount: input.stalledBlockerCount ?? 0,
+    attentionBlockerCount: input.attentionBlockerCount ?? 0,
+    pendingFinalizeBlockerIssueIds: input.pendingFinalizeBlockerIssueIds ?? [],
+    sampleBlockerIdentifier: input.sampleBlockerIdentifier ?? null,
+    sampleStalledBlockerIdentifier:
+      input.sampleStalledBlockerIdentifier ?? null,
+    blockingTreeLive: input.blockingTreeLive ?? false,
+    directBlockerIssueId: input.directBlockerIssueId ?? null,
+    terminalBlockerIssueId: input.terminalBlockerIssueId ?? null,
+    terminalBlocker: input.terminalBlocker ?? null,
   };
 }

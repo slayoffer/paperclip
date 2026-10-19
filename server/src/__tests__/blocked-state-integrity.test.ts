@@ -4,9 +4,11 @@ import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, agents, companies, createDb, heartbeatRuns, issueComments, issueRelations, issues, issueThreadInteractions,
+  activityLog, agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRelations, issues, issueThreadInteractions,
   getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
+import { recoveryService } from "../services/recovery/service.js";
+import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.js";
 import { issueService } from "../services/issues.js";
 import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 import { collectDispositionRepairSourceState } from "../services/recovery/disposition-repair.js";
@@ -15,6 +17,18 @@ import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { hasNonDependencyBlockedWait } from "../services/blocked-state-integrity.js";
 import { classifyIssueGraphLiveness } from "../services/recovery/issue-graph-liveness.js";
+
+const routeHeartbeat = vi.hoisted(() => ({ wakeup: vi.fn() }));
+vi.mock("../services/index.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../services/index.js")>();
+  return {
+    ...actual,
+    heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+      ...actual.heartbeatService(...args),
+      wakeup: routeHeartbeat.wakeup,
+    }),
+  };
+});
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -35,6 +49,7 @@ describeDatabase("blocked-state integrity", () => {
     svc = issueService(db);
   }, 30_000);
   beforeEach(async () => {
+    routeHeartbeat.wakeup.mockReset().mockResolvedValue(null);
     vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", "true");
     vi.stubEnv("PAPERCLIP_SELF_BLOCK_GUARD", "true");
     companyId = randomUUID();
@@ -44,7 +59,7 @@ describeDatabase("blocked-state integrity", () => {
     source = await issue("SYNA-1937", "in_progress", { assigneeAgentId: agentId });
   });
   afterEach(async () => {
-    for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns, issues, agents, companies]) await db.delete(table);
+    for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns, agentWakeupRequests, issues, agents, companies]) await db.delete(table);
     vi.unstubAllEnvs();
   });
   afterAll(async () => { vi.unstubAllEnvs(); await database?.cleanup(); });
@@ -76,7 +91,7 @@ describeDatabase("blocked-state integrity", () => {
     expect(state).toMatchObject({ hasDurableWaitingPath: true, durablePathReason: "recorded_wait" });
   });
   it("commits a handoff and the blocked state in one route request without a card", async () => {
-    const wakeup = vi.fn(async () => null);
+    const wakeup = routeHeartbeat.wakeup;
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running",
       contextSnapshot: { issueId: source.id } }).returning();
     await db.update(issues).set({ checkoutRunId: run!.id, executionRunId: run!.id }).where(eq(issues.id, source.id));
@@ -86,7 +101,7 @@ describeDatabase("blocked-state integrity", () => {
       req.actor = { type: "agent", companyId, agentId, runId: run!.id, source: "agent_jwt" };
       next();
     });
-    app.use("/api", issueRoutes(db, { wakeup } as never));
+    app.use("/api", issueRoutes(db, {} as never));
     app.use(errorHandler);
     const res = await request(app).patch(`/api/issues/${source.id}`).send({
       status: "blocked", comment: manifest(source.identifier!),
@@ -144,6 +159,67 @@ describeDatabase("blocked-state integrity", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.authorAgentId).toBeNull();
   });
+  it.each(["route", "workspace.finalize", "issue_graph_liveness.backstop"] as const)(
+    "keeps distinct wake keys for two cycles through %s", async producer => {
+      const blocker = await issue("SYNA-1780");
+      const keys: string[] = [];
+      const enqueueWakeup = vi.fn(async (_agentId: string, opts?: { reason?: string | null; idempotencyKey?: string | null }) => {
+        if (opts?.reason !== "issue_blockers_resolved") return null;
+        keys.push(opts.idempotencyKey!);
+        await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation",
+          reason: opts.reason, idempotencyKey: opts.idempotencyKey, status: "completed" });
+        return (await db.insert(heartbeatRuns).values({ companyId, agentId, status: "succeeded" }).returning())[0]!;
+      });
+      const recovery = recoveryService(db, { enqueueWakeup });
+      routeHeartbeat.wakeup.mockImplementation(enqueueWakeup);
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.actor = { type: "board", userId: "board", companyIds: [companyId], isInstanceAdmin: true,
+          source: "local_implicit" };
+        next();
+      });
+      app.use("/api", issueRoutes(db, {} as never));
+      app.use(errorHandler);
+
+      for (const cycle of [new Date("2026-04-01T12:00:00Z"), new Date("2026-08-01T12:00:00Z")]) {
+        await svc.update(blocker.id, { status: "todo" });
+        await svc.update(source.id, { status: "blocked", blockedByIssueIds: [blocker.id] });
+        // Pin distinct cycle times without changing the production clock.
+        await db.update(issues).set({ blockedTransitionAt: cycle }).where(eq(issues.id, source.id));
+        const expectedKey = buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: source.id,
+          blockerIssueIds: [blocker.id], blockedTransitionAt: cycle });
+        if (producer === "route") {
+          const res = await request(app).patch(`/api/issues/${blocker.id}`).send({ status: "done" });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+        } else {
+          // Simulate a dependency that becomes ready after the status event.
+          // Finalization and the periodic check use this shared producer.
+          await db.update(issues).set({ status: "done" }).where(eq(issues.id, blocker.id));
+          const result = await recovery.reconcileResolvedDependencyWakeBackstop({ companyId,
+            blockerIssueId: producer === "workspace.finalize" ? blocker.id : undefined, source: producer });
+          expect(result).toMatchObject({ healed: 1, existingWakeSkipped: 0 });
+        }
+        await vi.waitFor(() => expect(keys.at(-1)).toBe(expectedKey));
+        const released = (await svc.getById(source.id))!;
+        expect(released.status).toBe("todo");
+        expect(released.blockedTransitionAt).toEqual(cycle);
+        const [dependent] = await svc.listWakeableBlockedDependents(blocker.id);
+        expect(dependent?.blockedTransitionAt).toEqual(cycle);
+        expect(buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: dependent!.id,
+          blockerIssueIds: dependent!.blockerIssueIds, blockedTransitionAt: dependent!.blockedTransitionAt })).toBe(expectedKey);
+        if (producer === "route") {
+          const res = await request(app).patch(`/api/issues/${blocker.id}`).send({ status: "done" });
+          expect(res.status).toBe(200);
+        } else {
+          await recovery.reconcileResolvedDependencyWakeBackstop({ companyId, source: producer });
+        }
+      }
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).not.toBe(keys[1]);
+    }, 30_000,
+  );
+
   it("waits until both blockers end", async () => {
     const first = await issue("SYNA-1780");
     const last = await issue("SYNA-1858");
@@ -193,6 +269,17 @@ describeDatabase("blocked-state integrity", () => {
     expect(await svc.getById(source.id)).toMatchObject({ status: "blocked" });
     expect(await hasNonDependencyBlockedWait(db, source.id)).toBe(true);
     expect(await svc.listWakeableBlockedDependents(blocker.id)).toEqual([]);
+  });
+
+  it.each(["todo", "in_progress", "done", "cancelled"])("keeps %s attention empty without unresolved blockers", async status => {
+    await db.update(issues).set({ status }).where(eq(issues.id, source.id));
+    source = (await svc.getById(source.id))!;
+    const emptyAttention = { state: "none", reason: null, unresolvedBlockerCount: 0,
+      terminalBlockerIssueId: null, terminalBlocker: null, directBlockerIssueId: null };
+    expect((await svc.listBlockerAttention(companyId, [source])).get(source.id)).toMatchObject(emptyAttention);
+    const blocker = await issue("SYNA-1858", "cancelled");
+    await link(blocker.id);
+    expect((await svc.listBlockerAttention(companyId, [source])).get(source.id)).toMatchObject(emptyAttention);
   });
 
   it.each(["SYNA-582", "SYNA-555", "SYNA-605", "SYNA-1445"])("counts explicit links on %s in every status", async identifier => {

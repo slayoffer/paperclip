@@ -38,8 +38,10 @@ export async function releaseResolvedBlockedDependents(
     if (holds.length || !await isReady(candidate.id)) continue;
     const facts = await blockedWaitFacts(tx, candidate, candidate.unblockDescriptor);
     if (facts.hasTarget || facts.outside) continue;
+    // Wake producers read this row after release. Retain the completed cycle timestamp.
+    // The next transition into blocked replaces it with the new cycle timestamp.
     await tx.update(issues).set({
-      status: "todo", unblockDescriptor: null, blockedTransitionAt: null, blockedOwnerNotifiedAt: null,
+      status: "todo", unblockDescriptor: null, blockedOwnerNotifiedAt: null,
       updatedAt: new Date(), statusVersion: candidate.statusVersion + 1,
     }).where(and(eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.id), eq(issues.status, "blocked")));
     await tx.insert(issueComments).values({

@@ -1,4 +1,4 @@
-import { createIssueDependencyReadiness, listUnresolvedBlockerDetails, listUnresolvedBlockerIssueIds } from "./issue-blocker-details.js";
+import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails, listUnresolvedBlockerIssueIds } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
@@ -3476,27 +3476,6 @@ async function liveDescendantCountMapForIssues(
   return map;
 }
 
-function createIssueBlockerAttention(
-  input: Partial<IssueBlockerAttention> = {},
-): IssueBlockerAttention {
-  return {
-    state: input.state ?? "none",
-    reason: input.reason ?? null,
-    unresolvedBlockerCount: input.unresolvedBlockerCount ?? 0,
-    coveredBlockerCount: input.coveredBlockerCount ?? 0,
-    stalledBlockerCount: input.stalledBlockerCount ?? 0,
-    attentionBlockerCount: input.attentionBlockerCount ?? 0,
-    pendingFinalizeBlockerIssueIds: input.pendingFinalizeBlockerIssueIds ?? [],
-    sampleBlockerIdentifier: input.sampleBlockerIdentifier ?? null,
-    sampleStalledBlockerIdentifier:
-      input.sampleStalledBlockerIdentifier ?? null,
-    blockingTreeLive: input.blockingTreeLive ?? false,
-    directBlockerIssueId: input.directBlockerIssueId ?? null,
-    terminalBlockerIssueId: input.terminalBlockerIssueId ?? null,
-    terminalBlocker: input.terminalBlocker ?? null,
-  };
-}
-
 function blockerSampleIdentifier(
   node: IssueBlockerAttentionNode | null | undefined,
 ) {
@@ -4245,11 +4224,11 @@ async function listIssueBlockerAttentionMap(
     if (topLevelEdges.length === 0) {
       attentionMap.set(
         root.id,
-        createIssueBlockerAttention({
-          state: "needs_attention",
-          reason: "attention_required",
-          terminalBlockerIssueId: root.id,
-        }),
+        createIssueBlockerAttention(
+          root.status === "blocked"
+            ? { state: "needs_attention", reason: "attention_required", terminalBlockerIssueId: root.id }
+            : {},
+        ),
       );
       continue;
     }

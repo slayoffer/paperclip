@@ -25,9 +25,12 @@ An open bridge hold remains a blocker when an update replaces reviewer links.
 Reviewer completion preserves that hold and does not wake the source owner.
 Only explicit blocker relations contribute to `blockerAttention` counts.
 Unlinked children do not contribute. Counts also cover issues outside blocked status.
+Nonblocked issues without unresolved blockers retain `none` attention.
 
 When the last blocker becomes `done` or `cancelled`, the same transaction returns an eligible dependent to `todo`.
 It clears the old unblock action and records a system comment and an activity event.
+The released issue retains its completed cycle timestamp for dependency wake keys.
+A later transition into blocked creates a new cycle timestamp.
 Pending cards, outside waits, review handoffs, and open bridge holds preserve the blocked state.
 Workspace finalization remains a dependency barrier. Its existing wake path rechecks the dependent after synchronization.
 The periodic dependency check also respects these waits.
