@@ -1,0 +1,87 @@
+name: Fork release tests
+
+on:
+  pull_request:
+    branches: ["synthiq/*"]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-tests:
+    name: Fork release checks
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout the pull request merge commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Check the workflow contract
+        run: node --test .github/scripts/tests/fork-release-tests.test.mjs
+
+      - name: Install pnpm
+        run: npm install --global pnpm@9.15.4
+
+      - name: Install repository dependencies
+        id: install
+        run: pnpm install --no-frozen-lockfile
+
+      # Each check runs after a successful install, even if another check fails.
+      # A failed step still fails the job. No step suppresses its exit status.
+      - name: Check types
+        id: typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 20
+        run: pnpm -r typecheck
+
+      - name: Run the repository tests
+        id: tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 30
+        run: pnpm test:run
+
+      - name: Build the repository
+        id: build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 20
+        run: pnpm build
+
+      - name: Record the tested commits and results
+        if: ${{ always() }}
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          TYPECHECK_RESULT: ${{ steps.typecheck.outcome }}
+          TEST_RESULT: ${{ steps.tests.outcome }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+        run: |
+          {
+            echo "Pull request head: $PR_HEAD"
+            echo "Target: $BASE_REF at $BASE_SHA"
+            echo "Tested merge commit: $GITHUB_SHA"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Install: $INSTALL_RESULT"
+            echo "Typecheck: $TYPECHECK_RESULT"
+            echo "Tests: $TEST_RESULT"
+            echo "Build: $BUILD_RESULT"
+            echo 'Runner limit: one GitHub-hosted job, 60 minutes per run.'
+          } >> "$GITHUB_STEP_SUMMARY"
