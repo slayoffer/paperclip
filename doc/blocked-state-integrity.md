@@ -31,6 +31,12 @@ When the last blocker becomes `done` or `cancelled`, the same transaction return
 It clears the old unblock action and records a system comment and an activity event.
 The released issue retains its completed cycle timestamp for dependency wake keys.
 A later transition into blocked creates a new cycle timestamp.
+The transaction also records a dependency wake intent in `agent_wakeup_requests`.
+The intent uses `pending_dependency_dispatch`. It does not represent a queued heartbeat.
+After commit, dispatch applies the existing scheduler checks and the cycle wake key.
+Failed or deferred dispatches remain pending. The periodic dependency check retries them for released `todo` issues.
+An expired dispatch claim also permits a retry. An existing wake prevents a duplicate dispatch.
+A new status transition or assignee change cancels an obsolete intent.
 Pending cards, outside waits, review handoffs, and open bridge holds preserve the blocked state.
 Workspace finalization remains a dependency barrier. Its existing wake path rechecks the dependent after synchronization.
 The periodic dependency check also respects these waits.
@@ -39,5 +45,5 @@ No database migration is required. The descriptor uses the existing JSON column.
 Disable the environment switch to restore the previous rules.
 This source change does not enable the switch or deploy the server.
 
-Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`.
+Verification uses `server/src/__tests__/blocked-state-integrity.test.ts` and `server/src/__tests__/dependency-release-wakes.test.ts`.
 The test uses a temporary PostgreSQL database.

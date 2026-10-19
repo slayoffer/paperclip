@@ -1,3 +1,4 @@
+import { persistDependencyReleaseWake } from "./dependency-release-wakes.js";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueComments, issueRelations, issues } from "@paperclipai/db";
@@ -19,11 +20,12 @@ export async function releaseResolvedBlockedDependents(
   isReady: (issueId: string) => Promise<boolean>,
   publications: ActivityPublication[],
 ) {
-  if (!blockedStateIntegrityEnabled()) return;
+  const intents: string[] = [];
+  if (!blockedStateIntegrityEnabled()) return intents;
   const relations = await tx.select({ id: issueRelations.relatedIssueId }).from(issueRelations).where(and(
     eq(issueRelations.companyId, blocker.companyId), eq(issueRelations.issueId, blocker.id), eq(issueRelations.type, "blocks"),
   ));
-  if (!relations.length) return;
+  if (!relations.length) return intents;
   const candidates = await tx.select().from(issues).where(and(
     eq(issues.companyId, blocker.companyId), inArray(issues.id, relations.map(row => row.id)),
     eq(issues.status, "blocked"), isNull(issues.hiddenAt), isNull(issues.conversationAgentId),
@@ -44,6 +46,8 @@ export async function releaseResolvedBlockedDependents(
       status: "todo", unblockDescriptor: null, blockedOwnerNotifiedAt: null,
       updatedAt: new Date(), statusVersion: candidate.statusVersion + 1,
     }).where(and(eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.id), eq(issues.status, "blocked")));
+    const intentId = await persistDependencyReleaseWake(tx, candidate);
+    if (intentId) intents.push(intentId);
     await tx.insert(issueComments).values({
       companyId: candidate.companyId, issueId: candidate.id,
       body: "All blocker issues are complete or cancelled. This issue is ready. The stale unblock action is cleared.",
@@ -54,4 +58,5 @@ export async function releaseResolvedBlockedDependents(
       details: { previousStatus: "blocked", status: "todo", resolvedBlockerIssueId: blocker.id },
     }, publications);
   }
+  return intents;
 }

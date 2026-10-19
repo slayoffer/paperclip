@@ -1,3 +1,4 @@
+import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
 import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails, listUnresolvedBlockerIssueIds } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
@@ -249,47 +250,7 @@ const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = [
   "issue.tree_hold_wakeup_deferred",
 ] as const;
 
-export type IssuePostCommitAction = {
-  type: "cancel_native_question_run";
-  runId: string;
-  issueId: string;
-  issueStatus: string;
-};
-
-/** Execute side effects that must never run before the issue transaction commits. */
-export async function executeIssuePostCommitActions(
-  db: Db,
-  actions: readonly IssuePostCommitAction[],
-): Promise<void> {
-  if (actions.length === 0) return;
-  const { heartbeatService } = await import("./heartbeat.js");
-  const heartbeat = heartbeatService(db);
-  const cancelledRunIds = new Set<string>();
-  for (const action of actions) {
-    if (cancelledRunIds.has(action.runId)) continue;
-    cancelledRunIds.add(action.runId);
-    try {
-      await heartbeat.cancelRun(
-        action.runId,
-        "Task closed while waiting for operator input",
-        {
-          resultJson: {
-            cancelledByIssueStatus: action.issueStatus,
-            cancelledIssueId: action.issueId,
-          },
-        },
-      );
-    } catch (err) {
-      // The durable marker written by the issue transaction remains available
-      // to startup and periodic recovery. Do not report a post-commit failure
-      // as though the already-committed issue transition had rolled back.
-      logger.warn(
-        { err, runId: action.runId, issueId: action.issueId },
-        "native question cancellation deferred to recovery sweep",
-      );
-    }
-  }
-}
+export { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
 
 function wakeRequestTargetsIssue(issueId: string) {
   return sql`(
@@ -9037,9 +8998,12 @@ export function issueService(db: Db) {
       if (!blockerIssue) return [];
       if (blockedStateIntegrityEnabled()) {
         const publications: ActivityPublication[] = [];
-        await db.transaction(async tx => releaseResolvedBlockedDependents(tx as unknown as Db, blockerIssue,
+        const intents = await db.transaction(async tx => releaseResolvedBlockedDependents(tx as unknown as Db, blockerIssue,
           async (issueId) => (await listIssueDependencyReadinessMap(tx, blockerIssue.companyId, [issueId])).get(issueId)?.isDependencyReady ?? false, publications));
         for (const publication of publications) publishActivity(publication);
+        await executeIssuePostCommitActions(db, intents.map(intentId => ({
+          type: "dispatch_dependency_wake", companyId: blockerIssue.companyId, intentId,
+        })));
       }
 
       const candidates = await db
@@ -11020,8 +10984,11 @@ export function issueService(db: Db) {
             }
           }
           if (updated.status === "done" || updated.status === "cancelled") {
-            await releaseResolvedBlockedDependents(tx as unknown as Db, updated, async (issueId) =>
+            const intents = await releaseResolvedBlockedDependents(tx as unknown as Db, updated, async (issueId) =>
               (await listIssueDependencyReadinessMap(tx, updated.companyId, [issueId])).get(issueId)?.isDependencyReady ?? false, activityPublications);
+            for (const intentId of intents) queuedPostCommitActions.push({
+              type: "dispatch_dependency_wake", companyId: updated.companyId, intentId,
+            });
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
             // Every terminal transition funnels through here, including direct
             // service callers (tree control, recovery, pipelines, status cards)

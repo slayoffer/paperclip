@@ -30,6 +30,13 @@ vi.mock("../services/index.js", async importOriginal => {
   };
 });
 
+vi.mock("../services/heartbeat.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
+  return { ...actual, heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+    ...actual.heartbeatService(...args), wakeup: routeHeartbeat.wakeup,
+  }) };
+});
+
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
 const head = "a".repeat(40);
@@ -198,7 +205,8 @@ describeDatabase("blocked-state integrity", () => {
           await db.update(issues).set({ status: "done" }).where(eq(issues.id, blocker.id));
           const result = await recovery.reconcileResolvedDependencyWakeBackstop({ companyId,
             blockerIssueId: producer === "workspace.finalize" ? blocker.id : undefined, source: producer });
-          expect(result).toMatchObject({ healed: 1, existingWakeSkipped: 0 });
+          // Release can dispatch the intent before the legacy backstop reaches this row.
+          expect(result.healed + result.existingWakeSkipped).toBe(1);
         }
         await vi.waitFor(() => expect(keys.at(-1)).toBe(expectedKey));
         const released = (await svc.getById(source.id))!;
