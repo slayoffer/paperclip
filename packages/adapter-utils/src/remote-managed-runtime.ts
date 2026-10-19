@@ -1,4 +1,5 @@
 import path from "node:path";
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -151,10 +152,11 @@ export async function prepareRemoteManagedRuntime(input: {
         exclude: preparedWorkspace.gitBacked
           ? [
               ...GIT_ARCHIVE_EXCLUDES,
+              ...SSH_WORKSPACE_EXCLUDES,
               ".paperclip-runtime",
               ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : []),
             ]
-          : [".paperclip-runtime", ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
       })
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
@@ -162,7 +164,7 @@ export async function prepareRemoteManagedRuntime(input: {
     repositoryBaselines.push({
       path: repository,
       baselineSnapshot: await captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
-        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"],
+        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
       }),
     });
   }
