@@ -1,0 +1,40 @@
+# Blocked-state integrity
+
+Set `PAPERCLIP_BLOCKED_STATE_INTEGRITY=true` to enable these rules.
+The default is disabled. The switch does not change cards or release gates.
+Keep `PAPERCLIP_SELF_BLOCK_GUARD=true` to reject waits that name only the owner.
+
+A blocked issue requires an open blocker link, a pending card, a recorded review handoff, or a typed outside wait.
+The update API returns `422` when no target exists.
+The self-block guard still returns `409 self_block_refused` for a self-owned wait without a target.
+An action that names another issue requires an open blocker link to that issue.
+
+The API accepts these optional `unblockDescriptor` fields:
+
+- `kind`: `external`, `human`, or `date`.
+- `until`: an ISO date and time. A `date` wait requires a future value.
+
+The existing `owner` and `action` fields remain required.
+A self-owned review wait requires the owner's latest handoff and its full head commit in the action.
+The handoff branch must be `review/<issue identifier>`.
+A later rejection or merge authorization ends that review wait.
+The server can save the handoff comment and blocked status in one transaction.
+This wait evidence grants no permission to publish, merge, or deploy.
+
+An open bridge hold remains a blocker when an update replaces reviewer links.
+Reviewer completion preserves that hold and does not wake the source owner.
+Only explicit blocker relations contribute to `blockerAttention` counts.
+Unlinked children do not contribute. Counts also cover issues outside blocked status.
+
+When the last blocker becomes `done` or `cancelled`, the same transaction returns an eligible dependent to `todo`.
+It clears the old unblock action and records a system comment and an activity event.
+Pending cards, outside waits, review handoffs, and open bridge holds preserve the blocked state.
+Workspace finalization remains a dependency barrier. Its existing wake path rechecks the dependent after synchronization.
+The periodic dependency check also respects these waits.
+
+No database migration is required. The descriptor uses the existing JSON column.
+Disable the environment switch to restore the previous rules.
+This source change does not enable the switch or deploy the server.
+
+Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`.
+The test uses a temporary PostgreSQL database.

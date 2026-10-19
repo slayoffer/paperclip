@@ -1,3 +1,5 @@
+import type { IssueUnblockDescriptor } from "./issue-unblock.js";
+export type { IssueUnblockDescriptor, IssueUnblockOwner } from "./issue-unblock.js";
 import type { ExecutionProjection, ExecutionBlocker } from "./execution-projection.js";
 import type {
   IssueCommentAuthorType,
@@ -528,13 +530,6 @@ export interface IssueBlockedInboxAttention {
     externalDetailsRedacted: boolean;
     secretFieldsOmitted: true;
   };
-}
-
-export type IssueUnblockOwner = { agentId: string } | { userId: string } | "board";
-
-export interface IssueUnblockDescriptor {
-  owner: IssueUnblockOwner;
-  action: string;
 }
 
 export interface IssueRecoveryAction {

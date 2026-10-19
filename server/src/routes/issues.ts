@@ -1,3 +1,5 @@
+import { blockedStateIntegrityEnabled } from "../services/blocked-state-integrity.js";
+import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -332,7 +334,7 @@ import {
 import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
-import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled, skipSelfUnblockWake } from "../services/self-block-guard.js";
+import { skipSelfUnblockWake } from "../services/self-block-guard.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -13385,131 +13387,13 @@ export function issueRoutes(
         }
       }
 
-      const nextStatus = updateFields.status ?? existing.status;
-      if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
-        throw unprocessable("unblockDescriptor requires blocked status");
-      }
-      const descriptor = updateFields.unblockDescriptor ?? null;
-      if (descriptor && typeof descriptor === "object") {
-        const owner = descriptor.owner;
-        if (
-          req.actor.type === "agent" &&
-          (owner === "board" || "userId" in owner)
-        ) {
-          throw forbidden(
-            "Agents may only name themselves as an unblock owner",
-          );
-        }
-        if (owner !== "board" && "agentId" in owner) {
-          const target = await db
-            .select({ id: agents.id })
-            .from(agents)
-            .where(
-              and(
-                eq(agents.id, owner.agentId),
-                eq(agents.companyId, existing.companyId),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-          if (!target)
-            throw unprocessable(
-              "Unblock owner agent must belong to the issue company",
-            );
-          if (
-            req.actor.type === "agent" &&
-            req.actor.agentId !== owner.agentId
-          ) {
-            throw forbidden(
-              "Agents may only name themselves as an unblock owner",
-            );
-          }
-          if (req.actor.type === "agent" && req.actor.agentId === owner.agentId && selfBlockGuardEnabled()) {
-            res.status(409).json({ error: SELF_BLOCK_REFUSAL, details: { code: "self_block_refused" } });
-            return;
-          }
-        } else if (owner !== "board" && "userId" in owner) {
-          const member = await db
-            .select({ id: companyMemberships.id })
-            .from(companyMemberships)
-            .where(
-              and(
-                eq(companyMemberships.companyId, existing.companyId),
-                eq(companyMemberships.principalType, "user"),
-                eq(companyMemberships.principalId, owner.userId),
-                eq(companyMemberships.status, "active"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-          if (!member)
-            throw unprocessable(
-              "Unblock owner user must be an active company member",
-            );
-        }
-      }
-      const enteringBlocked =
-        existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
-        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
-          ? [...new Set(req.body.blockedByIssueIds as string[])]
-          : null;
-        const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
-        }
-      }
+      const enteringBlocked = existing.status !== "blocked" && updateFields.status === "blocked";
+      await assertBlockedIssueUpdate({
+        db, actor: req.actor, existing, updateFields,
+        requestedBlockerIds: req.body.blockedByIssueIds,
+        getDependencyReadiness: svc.getDependencyReadiness,
+        commentBody,
+      });
       if (
         reviewRequest !== undefined &&
         transition.patch.executionState === undefined
@@ -13708,6 +13592,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
+        blockedWaitCommentBody: actor.agentId === existing.assigneeAgentId ? commentBody : null,
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
@@ -13856,8 +13741,9 @@ export function issueRoutes(
       const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
+      const transactionalHandoff = blockedStateIntegrityEnabled() && Boolean(commentBody?.includes("```handoff"));
       const shouldUseTransactionalIssueUpdate =
-        Boolean(commentAttachmentIds?.length) ||
+        transactionalHandoff || Boolean(commentAttachmentIds?.length) ||
         commentWithAdapterOverrides ||
         Boolean(decision) ||
         shouldRelayStop ||
@@ -13873,7 +13759,7 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            if (commentAttachmentIds?.length || commentWithAdapterOverrides) {
+            if (transactionalHandoff || commentAttachmentIds?.length || commentWithAdapterOverrides) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
               transactionalComment = await svc.addComment(
@@ -14925,7 +14811,7 @@ export function issueRoutes(
         }
 
         const becameDone =
-          existing.status !== "done" && issue.status === "done";
+          existing.status !== issue.status && (issue.status === "done" || (blockedStateIntegrityEnabled() && issue.status === "cancelled"));
         if (becameDone) {
           const dependents = await svc.listWakeableBlockedDependents(issue.id);
           for (const dependent of dependents) {
