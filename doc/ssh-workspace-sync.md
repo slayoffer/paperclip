@@ -12,6 +12,8 @@ Sync-back preserves these local directories, including their contents.
 This rule also applies when the workspace uses `workspaceFileMode: "all"`.
 A remote file or symbolic link cannot replace a directory with excluded local descendants.
 The restore rejects that replacement before it changes local files or integrates Git history.
+Direct Git restoration without a supplied baseline uses the same staged merge.
+It captures a filtered local baseline and imports history only after the safety check.
 Runtime assets retain their separate transfer settings.
 
 Sync-back preserves symbolic link text exactly, including relative targets.

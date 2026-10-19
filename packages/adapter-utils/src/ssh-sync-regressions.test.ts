@@ -111,18 +111,23 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
   });
 
   it.each(
-    ["direct", "managed", "all", "git"].flatMap((restorePath) =>
+    ["direct", "direct-git", "managed", "all", "git"].flatMap((restorePath) =>
       ["file", "symlink"].flatMap((replacement) =>
         ["node_modules", "dist"].map((excluded) => ({ restorePath, replacement, excluded })))),
   )("rejects unsafe $replacement replacements with $excluded, restore=$restorePath", async ({ restorePath, replacement, excluded }) => {
-    if (restorePath === "git") await repository();
+    if (restorePath === "git" || restorePath === "direct-git") await repository();
     const dependency = path.join(local, "app", excluded, "pkg/data");
     await mkdir(path.dirname(dependency), { recursive: true });
     await writeFile(dependency, "local dependency");
     await writeFile(path.join(local, "app/source.txt"), "local source");
     await writeFile(path.join(local, "00-first.txt"), "local first");
     await writeFile(path.join(local, "deleted.txt"), "local deleted");
-    const prepared = restorePath === "direct" ? null : await prepareRemoteManagedRuntime({
+    if (restorePath === "direct-git") {
+      await writeFile(path.join(local, ".gitignore"), `${excluded}/\n`);
+      await git(local, "add", ".");
+      await git(local, "commit", "-m", "Track parent and ignore generated data");
+    }
+    const prepared = restorePath.startsWith("direct") ? null : await prepareRemoteManagedRuntime({
       spec: spec(), runId: "replacement", adapterKey: "test", workspaceLocalDir: local,
       ...(restorePath === "all" ? { workspaceFileMode: "all" as const } : {}),
     });
@@ -133,8 +138,8 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
     else await symlink("00-first.txt", path.join(remoteRoot, "app"));
     await writeFile(path.join(remoteRoot, "00-first.txt"), "remote first");
     await rm(path.join(remoteRoot, "deleted.txt"));
-    const localHead = restorePath === "git" ? await git(local, "rev-parse", "HEAD") : null;
-    if (restorePath === "git") {
+    const localHead = restorePath.includes("git") ? await git(local, "rev-parse", "HEAD") : null;
+    if (restorePath.includes("git")) {
       await git(remoteRoot, "add", ".");
       await git(remoteRoot, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Replace parent");
     }
@@ -145,6 +150,28 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
     expect(await readFile(path.join(local, "00-first.txt"), "utf8")).toBe("local first");
     expect(await readFile(path.join(local, "deleted.txt"), "utf8")).toBe("local deleted");
     if (localHead) expect(await git(local, "rev-parse", "HEAD")).toBe(localHead);
+  });
+
+  it.each(["file", "symlink"])("restores a safe direct Git %s replacement without a baseline", async (replacement) => {
+    await repository();
+    await mkdir(path.join(local, "app"));
+    await writeFile(path.join(local, "app/source.txt"), "tracked source");
+    await git(local, "add", ".");
+    await git(local, "commit", "-m", "Track parent");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    await rm(path.join(remote, "app"), { recursive: true });
+    if (replacement === "file") await writeFile(path.join(remote, "app"), "safe replacement");
+    else await symlink("source.txt", path.join(remote, "app"));
+    await git(remote, "add", ".");
+    await git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Replace parent");
+    const remoteHead = await git(remote, "rev-parse", "HEAD");
+    await writeFile(path.join(remote, "source.txt"), "dirty remote edit");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
+    expect(await git(local, "rev-parse", "HEAD")).toBe(remoteHead);
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("dirty remote edit");
+    if (replacement === "file") expect(await readFile(path.join(local, "app"), "utf8")).toBe("safe replacement");
+    else expect(await readlink(path.join(local, "app"))).toBe("source.txt");
+    expect(await git(local, "for-each-ref", "refs/paperclip/ssh-sync/imported")).toBe("");
   });
 
   it("preserves a concurrent local directory when the remote file did not change", async () => {

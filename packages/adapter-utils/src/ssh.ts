@@ -18,7 +18,7 @@ import {
 } from "./git-workspace-sync.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
-import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
+import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import {
   createRuntimeProgressReporter,
   type RuntimeProgressDirection,
@@ -1651,13 +1651,23 @@ async function restoreWorkspaceRootFromSsh(input: {
   hasProjectRepositories?: boolean;
 }): Promise<void> {
   const remoteDir = input.remoteDir;
-  if (input.baselineSnapshot) {
+  // Direct Git restores need the same preflight as managed restores. Fetching
+  // objects is safe, but resetting the working tree would remove excluded data.
+  const gitSnapshot = input.baselineSnapshot ? null : await readLocalGitWorkspaceSnapshot(input.localDir);
+  const baseline = input.baselineSnapshot ?? (gitSnapshot
+    ? await captureDirectorySnapshot(input.localDir, {
+      exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
+        ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : [])],
+    })
+    : null);
+  const restoreGitHistory = gitSnapshot !== null || input.restoreGitHistory;
+  if (baseline) {
     const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
-    const importedRef = input.restoreGitHistory
+    const importedRef = restoreGitHistory
       ? `refs/paperclip/ssh-sync/imported/${randomUUID()}`
       : null;
     try {
-      const importedHead = input.restoreGitHistory
+      const importedHead = restoreGitHistory
         ? await exportGitWorkspaceFromSsh({
           spec: input.spec,
           remoteDir,
@@ -1671,12 +1681,12 @@ async function restoreWorkspaceRootFromSsh(input: {
         spec: input.spec,
         remoteDir,
         localDir: stagingDir,
-        exclude: input.baselineSnapshot.exclude,
+        exclude: baseline.exclude,
         onProgress: input.onProgress,
         progressLabel: input.progressLabel,
       });
       await mergeDirectoryWithBaseline({
-        baseline: input.baselineSnapshot,
+        baseline,
         sourceDir: stagingDir,
         targetDir: input.localDir,
         // Git history advances via integrateImportedGitHead; the working tree
@@ -1698,28 +1708,8 @@ async function restoreWorkspaceRootFromSsh(input: {
         }).catch(() => undefined);
       }
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      if (!input.baselineSnapshot) await disposeDirectorySnapshot(baseline);
     }
-    return;
-  }
-  const gitSnapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
-
-  if (gitSnapshot) {
-    const projectRepositoryEntries = input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : [];
-    await exportGitWorkspaceFromSsh({
-      spec: input.spec,
-      remoteDir,
-      localDir: input.localDir,
-      onProgress: input.onProgress,
-    });
-    await syncDirectoryFromSsh({
-      spec: input.spec,
-      remoteDir,
-      localDir: input.localDir,
-      exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...projectRepositoryEntries],
-      preserveLocalEntries: [".git", ...projectRepositoryEntries],
-      onProgress: input.onProgress,
-      progressLabel: input.progressLabel,
-    });
     return;
   }
 
