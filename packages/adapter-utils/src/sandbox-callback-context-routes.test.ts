@@ -24,7 +24,7 @@ const deniedRequests = [
   { method: "GET", path: "/api/issues/task-1/diagnostics/wakes/extra" },
   { method: "GET", path: "/api/issues/task-1/monitor/check-now" },
   { method: "POST", path: "/api/issues/task-1/monitor/check-now/extra" },
-  { method: "POST", path: "/api/issues/task-1/recovery-actions/resolve" },
+  { method: "PUT", path: "/api/issues/task-1/recovery-actions/resolve" },
 ];
 
 describe.each([

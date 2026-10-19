@@ -1540,7 +1540,7 @@ describe("sandbox callback bridge", () => {
     { method: "POST", path: "/api/heartbeat-runs/run-1/cancel" },
     { method: "POST", path: "/api/heartbeat-runs/run-1/retry" },
     { method: "POST", path: "/api/heartbeat-runs/run-1/watchdog-decisions" },
-    { method: "POST", path: "/api/issues/issue-1/recovery-actions/resolve" },
+    { method: "PUT", path: "/api/issues/issue-1/recovery-actions/resolve" },
     { method: "POST", path: "/api/issues/issue-1/recovery-actions/retry-workspace-export" },
     { method: "GET", path: "/api/heartbeat-runs/run-1/provider-trace" },
     { method: "GET", path: "/api/companies/co-1/provider-traces" },
