@@ -25,7 +25,7 @@ function checkContract(source) {
   assert.match(text, /^    runs-on: ubuntu-24\.04$/m);
   assert.match(text, /^    timeout-minutes: 60$/m);
   assert.match(text, /^  cancel-in-progress: true$/m);
-  assert.match(text, /^  group: fork-release-tests-\$\{\{ github.event.pull_request.number \}\}$/m);
+  assert.ok(lines.includes("  group: fork-release-tests-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'fork-release-tests' && github.run_id || 'checks' }}"));
   assert.doesNotMatch(text, /continue-on-error:|working-directory:|needs:|strategy:|container:|services:/);
   assert.doesNotMatch(text, /\|\|\s*(?:true|:)|set \+e|exit 0/);
   assert.doesNotMatch(text, /^    uses:/m);
@@ -69,6 +69,7 @@ for (const command of commands) {
 
 for (const [name, before, after] of [
   ["a different target", 'branches: ["synthiq/*"]', 'branches: ["master"]'],
+  ["cancellation by an unrelated label", "&& github.run_id || 'checks'", "&& 'checks' || 'checks'"],
   ["a skipped job", "    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}", "    if: ${{ false }}"],
   ["a privileged event", "  pull_request:", "  pull_request_target:"],
   ["write permission", "contents: read", "contents: write"],

@@ -30,7 +30,8 @@ Each check runs after a successful install, even when an earlier check fails.
 A failed check fails the job. The workflow does not suppress command exit codes.
 Typecheck and build each have a 20-minute limit. Tests have a 30-minute limit.
 The whole job has a 60-minute limit, including installation.
-A newer event for the same pull request cancels its previous run.
+A newer test event for the same pull request cancels its previous run.
+Ignored label events use separate concurrency groups and cannot cancel tests.
 These limits bound configured execution time. They do not guarantee a billing cap.
 Browser suites and live provider tests remain outside this workflow.
 

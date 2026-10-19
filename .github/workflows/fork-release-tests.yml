@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: fork-release-tests-${{ github.event.pull_request.number }}
+  # Ignored label events must not cancel an active test run.
+  group: fork-release-tests-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'fork-release-tests' && github.run_id || 'checks' }}
   cancel-in-progress: true
 
 jobs:
