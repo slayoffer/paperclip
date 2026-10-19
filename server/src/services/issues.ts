@@ -14,6 +14,7 @@ import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
 import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
+import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -2673,9 +2674,8 @@ async function listIssueDependencyReadinessMap(
       ),
     );
 
-  // Collect issue/workspace pairs of "done" blockers — these are the only ones
-  // subject to the workspace-finalize barrier. Blockers that aren't done already
-  // mark the dependent as not-ready and don't need a finalize check.
+  // Only done blockers need the workspace-finalize barrier. The pull queue can
+  // also resolve cancelled blockers, which have no completed output to finalize.
   const doneBlockerWorkspacePairs: Array<{
     blockerIssueId: string;
     executionWorkspaceId: string;
@@ -2700,9 +2700,8 @@ async function listIssueDependencyReadinessMap(
       readinessMap.get(row.issueId) ??
       createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
-    // Only done blockers resolve dependents; cancelled blockers stay unresolved
-    // until an operator removes or replaces the blocker relationship explicitly.
-    if (row.blockerStatus !== "done") {
+    // The guarded pull queue also resolves cancelled blockers.
+    if (row.blockerStatus !== "done" && !(isPullQueueEnabled() && row.blockerStatus === "cancelled")) {
       current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
       current.unresolvedBlockerCount += 1;
       current.allBlockersDone = false;
@@ -9252,12 +9251,12 @@ export function issueService(db: Db) {
       const wakeableCandidates = candidates.filter(
         (candidate) =>
           candidate.assigneeAgentId &&
-          !["backlog", "done", "cancelled"].includes(candidate.status),
+          !(isPullQueueEnabled() ? ["done", "cancelled"] : ["backlog", "done", "cancelled"]).includes(candidate.status),
       );
       if (wakeableCandidates.length === 0) return [];
 
       // Defer to the unified readiness check so that a dependent only fires when
-      // (a) every blocker is done AND (b) every done blocker's workspace has
+      // (a) every blocker is resolved AND (b) every done blocker's workspace has
       // recorded a successful workspace_finalize. The finalize hook also calls
       // this function on completion, so a wake initially gated by an in-flight
       // sync-back will re-fire once the restore lands locally.

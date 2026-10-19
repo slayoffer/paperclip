@@ -1,5 +1,6 @@
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
+import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
 
 /**
  * Agent WIP limit (synthiq fork, Guild model v2 rule 2, 2026-10-17). With PAPERCLIP_AGENT_WIP_LIMIT=N, a NEW assignment
@@ -7,6 +8,7 @@ import { issues, type Db } from "@paperclipai/db";
  * assignment wake. An agent that moves its own backlog issue to an active status over the limit gets 409. Existing load
  * is untouched. A person in the board UI (browser session) is not limited, and a `critical` issue is never deferred. The promote step that moves the next backlog
  * issue to `todo` when a slot frees lives outside the server (the homelab watchdog).
+ * PAPERCLIP_PULL_QUEUE_ENABLED uses execution and monitor state to count real work.
  */
 export const WIP_ACTIVE_STATUSES = ["todo", "in_progress", "blocked"] as const;
 
@@ -36,7 +38,12 @@ export async function countAgentActiveIssues(
     .where(and(
       eq(issues.companyId, input.companyId),
       eq(issues.assigneeAgentId, input.agentId),
-      inArray(issues.status, [...WIP_ACTIVE_STATUSES]),
+      isPullQueueEnabled() ? or(
+        eq(issues.status, "todo"),
+        and(eq(issues.status, "in_progress"), issueHasExecution()),
+        and(eq(issues.status, "blocked"), isNull(issues.monitorNextCheckAt)),
+      ) : inArray(issues.status, [...WIP_ACTIVE_STATUSES]),
+      isPullQueueEnabled() ? isNull(issues.conversationAgentId) : undefined,
       input.excludeIssueId ? ne(issues.id, input.excludeIssueId) : undefined,
     ));
   return Number(rows[0]?.n ?? 0);

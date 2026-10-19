@@ -19,6 +19,8 @@ Agent access: [companion](../agent-access-map/task-coordination.md).
 - `signoff`: `task-coordination/signoff` — apply the configured implementation/review completion policy.
 - `tree-control`: `task-coordination/tree-control` — pause or resume a task tree without bypassing its gates.
 
+- `pull-queue`: select ready assigned work when an owner becomes idle. See the [guarded queue](../../doc/pull-queue.md).
+
 ## How to get to it (user POV)
 
 ### `task-relationships`
@@ -54,3 +56,5 @@ Manual: Complete implementation under a review-required policy and confirm it wa
 - Review completion and task completion are different events under some policies.
 - Pausing a tree must not be “tested” by changing statuses until the screen looks quiet.
 - Use [questions and approvals](./questions-and-approvals.md) for decision forms and [recovery](./recovery.md) for interrupted work.
+
+Automated: [pull queue](../../server/src/__tests__/heartbeat-pull-queue.test.ts) checks guarded selection, real-work counts, ghost release, and monitor protection. Deployment latency requires a separate measurement.

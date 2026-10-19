@@ -11,6 +11,10 @@ Source inputs: `GOAL.md`, `PRODUCT.md`, `SPEC.md`, `DATABASE.md`, current monore
 This document is the concrete, build-ready V1 contract.
 When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
+The Synthiq fork provides an optional [guarded pull queue](pull-queue.md).
+`PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
+The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
+
 ## 2. V1 Outcomes
 
 Paperclip V1 must provide a full control-plane loop for autonomous agents:

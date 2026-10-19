@@ -26,6 +26,9 @@ awareness is supplied by the harness; compatible session continuations carry
 fresh routing information and changed facts, with full context retained for
 new sessions and resume failure.
 
+The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
+The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
+
 ---
 
 Reusable workflows stay inside the Cases experiment. A workflow is a company-shared
