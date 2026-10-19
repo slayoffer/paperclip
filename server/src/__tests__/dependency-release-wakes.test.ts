@@ -60,6 +60,27 @@ describeDatabase("durable dependency release wakes", () => {
     .reconcileResolvedDependencyWakeBackstop({ companyId });
   const delivered = async () => (await db.insert(heartbeatRuns).values({ companyId, agentId, status: "succeeded" }).returning())[0]!;
 
+  it.each([
+    { integrity: false, pullQueue: false },
+    { integrity: false, pullQueue: true },
+    { integrity: true, pullQueue: false },
+    { integrity: true, pullQueue: true },
+  ])("preserves readiness with integrity=$integrity and pullQueue=$pullQueue", async ({ integrity, pullQueue }) => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", String(integrity));
+    vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", String(pullQueue));
+    for (const status of ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]) {
+      await db.update(issues).set({ status }).where(eq(issues.id, blocker.id));
+      const resolved = status === "done" || (status === "cancelled" && (integrity || pullQueue));
+      expect(await svc.getDependencyReadiness(dependent.id), status).toMatchObject({
+        blockerIssueIds: [blocker.id],
+        unresolvedBlockerIssueIds: resolved ? [] : [blocker.id],
+        unresolvedBlockerCount: resolved ? 0 : 1,
+        allBlockersDone: resolved,
+        isDependencyReady: resolved,
+      });
+    }
+  });
+
   it.each(["done", "cancelled"])("dispatches after direct service completion to %s commits", async status => {
     heartbeat.wakeup.mockImplementation(async (owner, opts) => {
       expect(owner).toBe(agentId);
