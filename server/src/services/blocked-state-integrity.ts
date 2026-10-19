@@ -80,7 +80,7 @@ export async function blockedWaitFacts(
     )).limit(1),
     db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId)).where(and(
       eq(issueApprovals.companyId, issue.companyId), eq(approvals.companyId, issue.companyId),
-      eq(issueApprovals.issueId, issue.id), eq(approvals.status, "pending"),
+      eq(issueApprovals.issueId, issue.id), inArray(approvals.status, ["pending", "revision_requested"]),
     )).limit(1),
     hasPendingHandoffWait(db, issue, descriptor, commentBody),
     openBridgeHoldIds(db, issue),

@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRelations, issueThreadInteractions, issues,
+  activityLog, agents, agentWakeupRequests, approvals, companies, createDb, executionWorkspaces, heartbeatRuns, issueApprovals, issueComments, issueRelations, issueThreadInteractions, issues, projects, workspaceOperations,
   getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
 import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../services/issues.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { dispatchPendingDependencyReleaseWakes } from "../services/dependency-release-wakes.js";
+import { assertRealBlockedWait } from "../services/blocked-state-integrity.js";
+import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.js";
 
 const heartbeat = vi.hoisted(() => ({ wakeup: vi.fn() }));
@@ -46,7 +48,7 @@ describeDatabase("durable dependency release wakes", () => {
     await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: dependent.id, type: "blocks" });
   });
   afterEach(async () => {
-    for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns, agentWakeupRequests, issues, agents, companies]) {
+    for (const table of [issueApprovals, approvals, workspaceOperations, issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns, agentWakeupRequests, issues, executionWorkspaces, projects, agents, companies]) {
       await db.delete(table);
     }
     vi.unstubAllEnvs();
@@ -100,6 +102,78 @@ describeDatabase("durable dependency release wakes", () => {
     await db.update(issueThreadInteractions).set({ status: "accepted" }).where(eq(issueThreadInteractions.id, card!.id));
     heartbeat.wakeup.mockResolvedValueOnce(await delivered());
     expect(await recover()).toMatchObject({ healed: 1 });
+  });
+
+  const deliverOnce = () => heartbeat.wakeup.mockImplementationOnce(async (_owner, opts) => {
+    await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation", status: "completed",
+      reason: "issue_blockers_resolved", idempotencyKey: opts.idempotencyKey });
+    return delivered();
+  });
+
+  async function approvalWait(status: string) {
+    const [approval] = await db.insert(approvals).values({ companyId, type: "approve_ceo_strategy", status, payload: {} }).returning();
+    await db.insert(issueApprovals).values({ companyId, issueId: dependent.id, approvalId: approval!.id });
+    return approval!;
+  }
+
+  it.each(["pending", "revision_requested"])("accepts a %s approval as the only blocked wait", async status => {
+    await db.delete(issueRelations);
+    await approvalWait(status);
+    await expect(assertRealBlockedWait(db, dependent)).resolves.toBeUndefined();
+    await expect(assertBlockedIssueUpdate({ db,
+      actor: { type: "agent", companyId, agentId, source: "agent_jwt" }, existing: { ...dependent, status: "in_progress" },
+      updateFields: { status: "blocked" }, getDependencyReadiness: svc.getDependencyReadiness,
+    })).resolves.toBeUndefined();
+  });
+
+  it.each(["pending", "revision_requested"])("preserves a %s approval after the last blocker ends", async status => {
+    const approval = await approvalWait(status);
+    await svc.update(blocker.id, { status: "done" });
+    expect((await svc.getById(dependent.id))?.status).toBe("blocked");
+    expect(await intents()).toEqual([]);
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(approvals))[0]?.status).toBe(status);
+    await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, approval.id));
+    deliverOnce();
+    const result = await recover();
+    expect(result.healed + result.existingWakeSkipped).toBe(1);
+    expect((await svc.getById(dependent.id))?.status).toBe("todo");
+  });
+
+  it.each(["pending", "revision_requested"])("defers dispatch while a %s approval remains open", async status => {
+    await svc.update(blocker.id, { status: "done" });
+    const approval = await approvalWait(status);
+    heartbeat.wakeup.mockClear();
+    expect(await recover()).toMatchObject({ healed: 0, deferredOrFailed: 1 });
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+    expect((await intents())[0]?.status).toBe("pending_dependency_dispatch");
+    await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, approval.id));
+    deliverOnce();
+    expect(await recover()).toMatchObject({ healed: 1 });
+    expect(heartbeat.wakeup).toHaveBeenCalledTimes(1);
+    expect((await intents())[0]?.status).toBe("completed_dependency_dispatch");
+  });
+
+  it.each(["done", "cancelled"])("keeps a %s blocker unresolved until workspace finalization succeeds", async status => {
+    const [project] = await db.insert(projects).values({ companyId, name: "Workspace barrier" }).returning();
+    const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId: project!.id,
+      name: "Blocker workspace", mode: "isolated_workspace", strategyType: "git_worktree" }).returning();
+    await db.update(issues).set({ executionWorkspaceId: workspace!.id }).where(eq(issues.id, blocker.id));
+    const [operation] = await db.insert(workspaceOperations).values({ companyId, issueId: blocker.id,
+      executionWorkspaceId: workspace!.id, phase: "workspace_finalize", status: "running" }).returning();
+    await svc.update(blocker.id, { status });
+    expect(await svc.getDependencyReadiness(dependent.id)).toMatchObject({ isDependencyReady: false,
+      unresolvedBlockerIssueIds: [blocker.id], pendingFinalizeBlockerIssueIds: [blocker.id] });
+    expect((await svc.getById(dependent.id))?.status).toBe("blocked");
+    expect(await intents()).toEqual([]);
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+    expect(await recover()).toMatchObject({ healed: 0 });
+    await db.update(workspaceOperations).set({ status: "succeeded" }).where(eq(workspaceOperations.id, operation!.id));
+    deliverOnce();
+    const result = await recover();
+    expect(result.healed + result.existingWakeSkipped).toBe(1);
+    expect((await svc.getById(dependent.id))?.status).toBe("todo");
+    expect(heartbeat.wakeup).toHaveBeenCalledTimes(1);
   });
 
   it("rolls back the pending wake with the status transition", async () => {

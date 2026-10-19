@@ -2577,16 +2577,14 @@ async function listIssueDependencyReadinessMap(
       ),
     );
 
-  // Collect issue/workspace pairs of "done" blockers — these are the only ones
-  // subject to the workspace-finalize barrier. Blockers that aren't done already
-  // mark the dependent as not-ready and don't need a finalize check.
-  const doneBlockerWorkspacePairs: Array<{
+  // Resolved blockers must pass the workspace-finalize barrier.
+  const resolvedBlockerWorkspacePairs: Array<{
     blockerIssueId: string;
     executionWorkspaceId: string;
   }> = [];
   for (const row of blockerRows) {
-    if (row.blockerStatus === "done" && row.blockerExecutionWorkspaceId) {
-      doneBlockerWorkspacePairs.push({
+    if (blockerIsResolved(row.blockerStatus) && row.blockerExecutionWorkspaceId) {
+      resolvedBlockerWorkspacePairs.push({
         blockerIssueId: row.blockerIssueId,
         executionWorkspaceId: row.blockerExecutionWorkspaceId,
       });
@@ -2596,7 +2594,7 @@ async function listIssueDependencyReadinessMap(
     await listPendingFinalizeBlockerIssueIds(
       dbOrTx,
       companyId,
-      doneBlockerWorkspacePairs,
+      resolvedBlockerWorkspacePairs,
     );
 
   for (const row of blockerRows) {
@@ -2604,8 +2602,7 @@ async function listIssueDependencyReadinessMap(
       readinessMap.get(row.issueId) ??
       createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
-    // Only done blockers resolve dependents; cancelled blockers stay unresolved
-    // until an operator removes or replaces the blocker relationship explicitly.
+    // The switch also permits cancelled blockers to resolve dependents.
     if (!blockerIsResolved(row.blockerStatus)) {
       current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
       current.unresolvedBlockerCount += 1;
@@ -9033,8 +9030,8 @@ export function issueService(db: Db) {
       if (wakeableCandidates.length === 0) return [];
 
       // Defer to the unified readiness check so that a dependent only fires when
-      // (a) every blocker is done AND (b) every done blocker's workspace has
-      // recorded a successful workspace_finalize. The finalize hook also calls
+      // (a) every blocker is resolved AND (b) each workspace passes finalization.
+      // The finalize hook also calls
       // this function on completion, so a wake initially gated by an in-flight
       // sync-back will re-fire once the restore lands locally.
       const readinessMap = await listIssueDependencyReadinessMap(

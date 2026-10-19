@@ -37,9 +37,10 @@ After commit, dispatch applies the existing scheduler checks and the cycle wake 
 Failed or deferred dispatches remain pending. The periodic dependency check retries them for released `todo` issues.
 An expired dispatch claim also permits a retry. An existing wake prevents a duplicate dispatch.
 A new status transition or assignee change cancels an obsolete intent.
-A card or review wait that appears after release keeps the intent pending.
-Pending cards, outside waits, review handoffs, and open bridge holds preserve the blocked state.
-Workspace finalization remains a dependency barrier. Its existing wake path rechecks the dependent after synchronization.
+A card, approval, or review wait that appears after release keeps the intent pending.
+Pending cards, open approvals, outside waits, review handoffs, and open bridge holds preserve the blocked state.
+Both `pending` and `revision_requested` approvals remain open waits.
+Workspace finalization remains a dependency barrier for both `done` and `cancelled` blockers. Its existing wake path rechecks the dependent after synchronization.
 The periodic dependency check also respects these waits.
 
 No database migration is required. The descriptor uses the existing JSON column.
