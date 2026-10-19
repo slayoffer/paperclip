@@ -15,6 +15,7 @@ import {
 } from "./sandbox-managed-runtime.js";
 import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-restore-merge.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
+import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 
 // The fixed heavy-directory excludes every referenced project drops,
 // regardless of its ignore resolution. A `git`-resolved project additionally
@@ -106,7 +107,11 @@ export function remoteExecutionSessionMatches(saved: unknown, current: SshRemote
   );
 }
 
-export async function prepareRemoteManagedRuntime(input: {
+export function prepareRemoteManagedRuntime(input: Parameters<typeof prepareRemoteManagedRuntimeInner>[0]): Promise<PreparedRemoteManagedRuntime> {
+  return scheduleSshWorkspaceOperation(input.onProgress, "prepare", () => prepareRemoteManagedRuntimeInner(input));
+}
+
+async function prepareRemoteManagedRuntimeInner(input: {
   spec: SshRemoteExecutionSpec;
   runId: string;
   adapterKey: string;
@@ -147,7 +152,7 @@ export async function prepareRemoteManagedRuntime(input: {
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
-    ? await captureDirectorySnapshot(input.workspaceLocalDir, {
+    ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureDirectorySnapshot(input.workspaceLocalDir, {
         exclude: preparedWorkspace.gitBacked
           ? [
               ...GIT_ARCHIVE_EXCLUDES,
@@ -155,15 +160,15 @@ export async function prepareRemoteManagedRuntime(input: {
               ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : []),
             ]
           : [".paperclip-runtime", ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
-      })
+      }))
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
   for (const repository of projectRepositories) {
     repositoryBaselines.push({
       path: repository,
-      baselineSnapshot: await captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
+      baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
         exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"],
-      }),
+      })),
     });
   }
 
@@ -172,7 +177,7 @@ export async function prepareRemoteManagedRuntime(input: {
     for (const asset of input.assets ?? []) {
       const remoteDir = path.posix.join(runtimeRootDir, asset.key);
       assetDirs[asset.key] = remoteDir;
-      await syncDirectoryToSsh({
+      await timeWorkspaceStep(input.onProgress, `Asset ${asset.key} sync`, () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: asset.localDir,
         remoteDir,
@@ -180,7 +185,7 @@ export async function prepareRemoteManagedRuntime(input: {
         exclude: asset.exclude,
         onProgress: input.onProgress,
         progressLabel: asset.key,
-      });
+      }));
     }
   } catch (error) {
     if (preparedWorkspace && baselineSnapshot) {
@@ -227,14 +232,14 @@ export async function prepareRemoteManagedRuntime(input: {
         REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
         referencedSourceIgnoreExcludeEntries(ignoreResolution),
       );
-      await syncDirectoryToSsh({
+      await timeWorkspaceStep(input.onProgress, "Referenced project sync", () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: localPath,
         remoteDir,
         exclude,
         onProgress: input.onProgress,
         progressLabel: `project-${projectId}`,
-      });
+      }));
       additionalSourceDirs[projectId] = remoteDir;
     } catch (error) {
       console.warn(
@@ -250,7 +255,7 @@ export async function prepareRemoteManagedRuntime(input: {
     runtimeRootDir,
     assetDirs,
     additionalSourceDirs,
-    restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
+    restoreWorkspace: (onProgress?: RuntimeProgressSink) => scheduleSshWorkspaceOperation(onProgress, "restore", async () => {
       if (preparedWorkspace && baselineSnapshot) {
         await restoreWorkspaceFromSshExecution({
           spec: input.spec,
@@ -269,6 +274,6 @@ export async function prepareRemoteManagedRuntime(input: {
           readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
         });
       }
-    },
+    }),
   };
 }
