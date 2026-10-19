@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { constants as fsConstants, createReadStream, createWriteStream, promises as fs } from "node:fs";
+import { constants as fsConstants, createReadStream, promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
+import { createSshAuthArgs, shellQuote } from "./ssh-auth.js";
+import { streamSshToLocalFile } from "./ssh-download.js";
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
+export { shellQuote } from "./ssh-auth.js";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import {
   createUnrelatedHistoryGraftCommit,
@@ -14,7 +18,7 @@ import {
 } from "./git-workspace-sync.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
-import { mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
+import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import {
   createRuntimeProgressReporter,
   type RuntimeProgressDirection,
@@ -150,10 +154,6 @@ interface LocalGitWorkspaceSnapshot {
   headCommit: string;
   branchName: string | null;
   deletedPaths: string[];
-}
-
-export function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 function isValidShellEnvKey(value: string) {
@@ -355,60 +355,6 @@ async function resolveCommandPath(command: string): Promise<string | null> {
   }
 }
 
-async function withTempFile(
-  prefix: string,
-  contents: string,
-  mode: number,
-): Promise<{ path: string; cleanup: () => Promise<void> }> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  const filePath = path.join(dir, "payload");
-  const normalizedContents = contents.endsWith("\n") ? contents : `${contents}\n`;
-  await fs.writeFile(filePath, normalizedContents, { mode, encoding: "utf8" });
-  return {
-    path: filePath,
-    cleanup: async () => {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
-    },
-  };
-}
-
-async function createSshAuthArgs(
-  config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
-): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
-  const tempFiles: Array<() => Promise<void>> = [];
-  const sshArgs = [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=10",
-    "-o",
-    `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
-  ];
-
-  if (config.strictHostKeyChecking) {
-    if (config.knownHosts) {
-      const knownHosts = await withTempFile("paperclip-ssh-known-hosts-", config.knownHosts, 0o600);
-      tempFiles.push(knownHosts.cleanup);
-      sshArgs.push("-o", `UserKnownHostsFile=${knownHosts.path}`);
-    }
-  } else {
-    sshArgs.push("-o", "UserKnownHostsFile=/dev/null");
-  }
-
-  if (config.privateKey) {
-    const privateKey = await withTempFile("paperclip-ssh-key-", config.privateKey, 0o600);
-    tempFiles.push(privateKey.cleanup);
-    sshArgs.push("-i", privateKey.path);
-  }
-
-  return {
-    args: sshArgs,
-    cleanup: async () => {
-      await Promise.all(tempFiles.map((cleanup) => cleanup()));
-    },
-  };
-}
-
 function tarExcludeArgs(exclude: string[] | undefined): string[] {
   const combined = ["._*", ...(exclude ?? [])];
   return combined.flatMap((entry) => ["--exclude", entry]);
@@ -583,28 +529,14 @@ async function runSshScript(
   );
 }
 
-async function clearLocalDirectory(
-  localDir: string,
-  preserveEntries: string[] = [],
-): Promise<void> {
-  await fs.mkdir(localDir, { recursive: true });
-  const preserve = new Set(preserveEntries);
-  const entries = await fs.readdir(localDir);
-  await Promise.all(
-    entries
-      .filter((entry) => !preserve.has(entry))
-      .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
-  );
-}
-
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
-  await fs.mkdir(targetDir, { recursive: true });
   const entries = await fs.readdir(sourceDir);
   await Promise.all(entries.map(async (entry) => {
     await fs.cp(path.join(sourceDir, entry), path.join(targetDir, entry), {
       recursive: true,
       force: true,
       preserveTimestamps: true,
+      verbatimSymlinks: true,
     });
   }));
 }
@@ -699,63 +631,6 @@ async function streamLocalFileToSsh(input: {
         return;
       }
       resolve();
-    });
-  }).finally(auth.cleanup);
-}
-
-async function streamSshToLocalFile(input: {
-  spec: SshConnectionConfig;
-  remoteScript: string;
-  localFile: string;
-  progress?: TransferProgress;
-}): Promise<void> {
-  const auth = await createSshAuthArgs(input.spec);
-  const sshArgs = [
-    ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(input.remoteScript)}`,
-  ];
-
-  await new Promise<void>((resolve, reject) => {
-    const ssh = spawn("ssh", sshArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const sink = createWriteStream(input.localFile, { mode: 0o600 });
-
-    let sshStderr = "";
-    let settled = false;
-
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      ssh.kill("SIGTERM");
-      sink.destroy();
-      reject(error);
-    };
-
-    if (input.progress) {
-      input.progress.counter.on("error", fail);
-      ssh.stdout?.pipe(input.progress.counter).pipe(sink);
-    } else {
-      ssh.stdout?.pipe(sink);
-    }
-    ssh.stderr?.on("data", (chunk) => {
-      sshStderr += String(chunk);
-    });
-    ssh.on("error", fail);
-    sink.on("error", fail);
-    ssh.on("close", (code) => {
-      sink.end(() => {
-        if (settled) return;
-        settled = true;
-        if ((code ?? 0) !== 0) {
-          reject(new Error(sshStderr.trim() || `ssh exited with code ${code ?? -1}`));
-          return;
-        }
-        resolve();
-      });
     });
   }).finally(auth.cleanup);
 }
@@ -868,35 +743,44 @@ async function exportGitWorkspaceFromSsh(input: {
       'cat "$tmp_bundle"',
     ].join("\n");
 
-    // The remote bundle size isn't known before streaming, so report bytes
-    // received (MB mode) with a terminal completion line.
-    const progress = input.onProgress
-      ? createTransferProgress({
-        onProgress: input.onProgress,
-        phase: "Exporting git history",
-        direction: "from",
-        totalBytes: null,
-        estimated: false,
-      })
-      : null;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        // The remote bundle size isn't known before streaming, so report bytes
+        // received (MB mode) with a terminal completion line.
+        const progress = input.onProgress
+          ? createTransferProgress({
+            onProgress: input.onProgress,
+            phase: "Exporting git history",
+            direction: "from",
+            totalBytes: null,
+            estimated: false,
+          })
+          : null;
 
-    try {
-      await streamSshToLocalFile({
-        spec: input.spec,
-        remoteScript: exportScript,
-        localFile: bundlePath,
-        progress: progress ?? undefined,
-      });
-      await progress?.finish();
-    } catch (error) {
-      await progress?.fail();
-      throw error;
+        try {
+          await streamSshToLocalFile({
+            spec: input.spec,
+            remoteScript: exportScript,
+            localFile: bundlePath,
+            progress: progress ?? undefined,
+          });
+          await progress?.finish();
+        } catch (error) {
+          await progress?.fail();
+          throw error;
+        }
+
+        await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024,
+        });
+        break;
+      } catch (error) {
+        const failure = error as { message?: string; stderr?: string };
+        const detail = `${failure.message ?? ""}\n${failure.stderr ?? ""}`;
+        if (attempt !== 0 || !/early EOF|index-pack/i.test(detail)) throw error;
+      }
     }
-
-    await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
-      timeout: 60_000,
-      maxBuffer: 1024 * 1024,
-    });
     if (input.resetLocalWorkspace !== false) {
       await runLocalGit(input.localDir, ["reset", "--hard", importedRef], {
         timeout: 60_000,
@@ -1134,7 +1018,7 @@ async function transportGitWorkspaceToSsh(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir: input.remoteDir,
-    exclude: [".git", ".paperclip-runtime", ...(input.exclude ?? [])],
+    exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.exclude ?? [])],
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   });
@@ -1628,8 +1512,16 @@ export async function syncDirectoryFromSsh(input: {
     });
     await progress?.finish();
 
-    await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
-    await copyDirectoryContents(stagingDir, input.localDir);
+    await fs.mkdir(input.localDir, { recursive: true });
+    if ((await fs.readdir(input.localDir)).length === 0) {
+      // Managed restores use an empty staging target. Avoid a second manifest and fsync pass.
+      await copyDirectoryContents(stagingDir, input.localDir);
+    } else {
+      const baseline = await captureDirectorySnapshot(input.localDir, {
+        exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+      });
+      await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
+    }
   } catch (error) {
     await progress?.fail();
     throw error;
@@ -1689,7 +1581,7 @@ export async function prepareWorkspaceForSshExecution(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
-    exclude: [".paperclip-runtime", ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+    exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
     onProgress: input.onProgress,
     progressLabel: "workspace",
   });
@@ -1823,7 +1715,7 @@ async function restoreWorkspaceRootFromSsh(input: {
       spec: input.spec,
       remoteDir,
       localDir: input.localDir,
-      exclude: [".git", ".paperclip-runtime", ...projectRepositoryEntries],
+      exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...projectRepositoryEntries],
       preserveLocalEntries: [".git", ...projectRepositoryEntries],
       onProgress: input.onProgress,
       progressLabel: input.progressLabel,
@@ -1835,7 +1727,7 @@ async function restoreWorkspaceRootFromSsh(input: {
     spec: input.spec,
     remoteDir,
     localDir: input.localDir,
-    exclude: [".paperclip-runtime"],
+    exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   });
