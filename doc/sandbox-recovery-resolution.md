@@ -8,8 +8,8 @@ The run bridge permits these recovery routes:
 Both queue and HTTP/2 transports use the same route policy. The server checks
 company access, agent authority, and the run identifier. An assignee can resolve
 its recovery action, including a board-escalated disposition repair. The source
-issue must permit the requested status change. A conflicting checkout or
-execution run still prevents that change.
+issue must permit the requested status change. Existing checkout and execution
+authority checks still apply.
 
 For a completed task, the assignee can send this body to the resolution route:
 
@@ -25,6 +25,7 @@ For a completed task, the assignee can send this body to the resolution route:
 Use `done` only when the task requirements permit completion. Record verification
 limits on the task before resolution. A normal completion needs no board card
 for the recovery route itself. Existing task approval requirements still apply.
+The server records `owner_completed` when the assignee completes the task.
 
 The `false_positive` and `cancelled` outcomes remain board-only. The bridge does
 not permit the board-only workspace export retry route. This change grants no

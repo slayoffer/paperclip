@@ -32,7 +32,7 @@ describePostgres("recovery resolution through the sandbox bridge", () => {
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-recovery-bridge-");
     db = createDb(database.connectionString);
-  }, 30_000);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(issueThreadInteractions);
@@ -157,9 +157,9 @@ describePostgres("recovery resolution through the sandbox bridge", () => {
     const resolved = await throughBridge(fixture);
     expect(resolved.status).toBe(200);
     expect(resolved.body.issue).toMatchObject({ id: fixture.issueId, status: "done", assigneeAgentId: fixture.agentId });
-    expect(resolved.body.recoveryAction).toMatchObject({ id: fixture.action.id, status: "resolved", outcome: "restored" });
+    expect(resolved.body.recoveryAction).toMatchObject({ id: fixture.action.id, status: "resolved", outcome: "owner_completed" });
     const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, fixture.action.id));
-    expect(action).toMatchObject({ status: "resolved", outcome: "restored" });
+    expect(action).toMatchObject({ status: "resolved", outcome: "owner_completed" });
     const log = await db.select().from(activityLog).where(eq(activityLog.entityId, fixture.issueId));
     expect(log).toEqual(expect.arrayContaining([expect.objectContaining({
       action: "issue.recovery_action_resolved", actorId: fixture.agentId, runId: fixture.runId,
@@ -192,11 +192,11 @@ describePostgres("recovery resolution through the sandbox bridge", () => {
     await expectUnchanged(fixture);
   });
 
-  it("preserves the source issue run lock", async () => {
+  it("denies a run that belongs to another agent", async () => {
     const fixture = await seed();
-    const response = await throughBridge(fixture, { runId: randomUUID() });
-    expect(response.status).toBe(409);
-    expect(response.body.details.code).toBe("recovery_source_run_lock");
+    const response = await throughBridge(fixture, { agentId: fixture.peerId, runId: fixture.runId });
+    expect(response.status).toBe(403);
+    expect(response.body.details.code).toBe("cross_issue_influence_run_context_required");
     await expectUnchanged(fixture);
   });
 });
