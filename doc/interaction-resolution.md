@@ -52,6 +52,13 @@ A changed operation, answer body, revision, or actor under that interaction's sa
 returns HTTP `409` with `details.code: "interaction_idempotency_conflict"`.
 Receipts store a request digest. Reads do not expose the receipt.
 
+For revision or keyed requests, the answer transaction also saves its audit record and durable continuation intent.
+An audit failure rolls back the answer and its receipt. The same displayed revision remains valid after that rollback.
+Confirmation continuations use `interaction_resolution_outbox`. Question responses retain their existing delivery outbox.
+The startup and periodic delivery sweeps retry pending intents. An identical answer retry also attempts delivery.
+The wake queue's existing interaction keys prevent duplicate admission after a lost delivery response.
+Queue suppression keeps an intent pending. A successful HTTP answer does not mean the agent already started.
+
 Legacy callers can omit both fields. They retain pending-state, audience, expiry,
 and target checks, but receive no displayed-revision protection or keyed retry guarantee.
 Board clients send the displayed revision. A relay must require `expectedRevision`.

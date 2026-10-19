@@ -1,4 +1,5 @@
-import { checkInteractionAnswerPreconditions, isInteractionRevisionTransaction, needsInteractionRevisionLock, resolveWithInteractionRevision } from "./interaction-revision.js";
+import { resolveInteractionRevisionForService } from "./interaction-revision-service.js";
+import { checkInteractionAnswerPreconditions, isInteractionRevisionTransaction, needsInteractionRevisionLock } from "./interaction-revision.js";
 import { buildTaskCreationOrder, resolveSelectedSuggestedTasks, resolveSelectedCheckboxConfirmationOptions, resolveRequestItemVerdictSubmissions, normalizeQuestionAnswers, InteractionActor } from "./interaction-resolution-input.js";
 export { resolveSelectedSuggestedTasks } from "./interaction-resolution-input.js";
 import {
@@ -181,7 +182,8 @@ export type IssueThreadInteractionServiceOptions = {
 };
 
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
-type InteractionResolutionMutationOptions = {
+export type InteractionResolutionMutationOptions = {
+  afterRevisionResolveInTransaction?: (tx: Db, result: ResolvedInteractionResult) => Promise<void>;
   /** Confirmation accept/reject nested in an outer transaction must defer these
    * effects and flush them with the root database only after its commit. */
   deferConfirmationCommitEffects?: (effect: (committedDb: Db) => Promise<void>) => void;
@@ -340,7 +342,7 @@ type IssueWakeTarget = {
   workMode?: string;
 };
 
-type ResolvedInteractionResult = {
+export type ResolvedInteractionResult = {
   interaction: IssueThreadInteraction;
   createdIssues: IssueWakeTarget[];
   continuationIssue?: IssueWakeTarget | null;
@@ -1675,24 +1677,13 @@ export function issueThreadInteractionService(
     replay: (interaction: IssueThreadInteraction) => T,
     interaction: (result: T) => IssueThreadInteraction,
   ): Promise<T> {
-    const effects: Array<(committedDb: Db) => Promise<void>> = [];
-    const result = await resolveWithInteractionRevision({
-      db, issue, interactionId, input, operation, actor,
-      beforeLock: async (tx) => {
-        await assertInteractionRunWriteAllowed(tx, issue, actor);
-      },
+    return resolveInteractionRevisionForService({
+      db, issue, interactionId, input, operation, actor, mutationOptions, resolve, replay, interaction,
+      createService: (tx) => issueThreadInteractionService(tx, opts),
+      beforeLock: (tx) => assertInteractionRunWriteAllowed(tx, issue, actor),
       authorize: (row) => assertInteractionResolutionAllowed(row, actor),
-      hydrate: hydrateInteraction, replay, interaction,
-      resolve: (tx, fresh) => resolve(issueThreadInteractionService(tx, opts), fresh, {
-        ...mutationOptions,
-        deferConfirmationCommitEffects: (effect) => effects.push(effect),
-      }),
+      hydrate: hydrateInteraction,
     });
-    for (const effect of effects) {
-      if (mutationOptions.deferConfirmationCommitEffects) mutationOptions.deferConfirmationCommitEffects(effect);
-      else await effect(db);
-    }
-    return result;
   }
 
   const pullRequestStateCache = new Map<

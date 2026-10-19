@@ -1,3 +1,7 @@
+import type { IssueThreadInteraction } from "@paperclipai/shared";
+import { interactionResolutionOutboxService, persistInteractionResolutionWakes } from "../services/interaction-resolution-outbox.js";
+import { persistInteractionResolutionRouteEffects } from "../services/interaction-resolution-route-effects.js";
+import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
 import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
 import { readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
 import { setIssueTitle } from "../services/issue-title.js";
@@ -2407,7 +2411,7 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
 
 async function queueResolvedInteractionContinuationWakeup(input: {
   db: Db;
-  heartbeat: ReturnType<typeof heartbeatService>;
+  heartbeat: IssueAssignmentWakeupDeps;
   issue: {
     id: string;
     companyId: string;
@@ -3425,6 +3429,7 @@ export function issueRoutes(
   const decisionTrainingSvc = decisionTrainingService(db);
   const issueReferencesSvc = issueReferenceService(db);
   const issueThreadInteractionsSvc = issueThreadInteractionService(db);
+  const resolutionOutbox = interactionResolutionOutboxService(db, heartbeat);
   const questionResponseDeliveries = questionResponseDeliveryService(db, {
     heartbeat,
     resolveNativeQuestion: (interaction) =>
@@ -16067,6 +16072,26 @@ export function issueRoutes(
       if (!suggestedTaskEffectsAuthorized) return;
 
       const actor = getActorInfo(req);
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "accept",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = durableEffects ? {
+        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
+          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
+      } : {};
+
       if (
         current.kind === "request_confirmation" &&
         current.payload.toolAction
@@ -16101,8 +16126,12 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
-        });
-      if (isInteractionResolutionReplay(interaction)) { res.json(interaction); return; }
+        }, mutationOptions);
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(interaction); return;
+      }
       const toolAction =
         interaction.payload && typeof interaction.payload === "object"
           ? (
@@ -16250,107 +16279,10 @@ export function issueRoutes(
           }
         }
       }
-      const continuationWakeIssue = continuationIssue ?? issue;
-
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action:
-          interaction.status === "expired"
-            ? "issue.thread_interaction_expired"
-            : "issue.thread_interaction_accepted",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          createdTaskCount:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.createdTasks?.length ?? 0)
-              : 0,
-          skippedTaskCount:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.skippedClientKeys?.length ?? 0)
-              : 0,
-        },
-      });
-
-      if (continuationIssue) {
-        await logActivity(db, {
-          companyId: issue.companyId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: actor.agentId,
-          runId: actor.runId,
-          agentApiKeyId: actor.agentApiKeyId,
-          action: "issue.updated",
-          entityType: "issue",
-          entityId: issue.id,
-          details: {
-            identifier: issue.identifier,
-            status: continuationIssue.status,
-            ...(continuationIssue.workMode
-              ? { workMode: continuationIssue.workMode }
-              : {}),
-            assigneeAgentId: continuationIssue.assigneeAgentId ?? null,
-            assigneeUserId: continuationIssue.assigneeUserId ?? null,
-            source: "request_confirmation_accept",
-            interactionId: interaction.id,
-            _previous: {
-              status: issue.status,
-              workMode: issue.workMode,
-              assigneeAgentId: issue.assigneeAgentId ?? null,
-              assigneeUserId: issue.assigneeUserId ?? null,
-            },
-          },
-        });
-      }
-
-      for (const createdIssue of createdIssues) {
-        void queueIssueAssignmentWakeup({
-          heartbeat,
-          issue: createdIssue,
-          reason: "issue_assigned",
-          mutation: "interaction_accept",
-          contextSource: "issue.interaction.accept",
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-        });
-      }
-
-      const acceptedPlanTarget =
-        interaction.kind === "request_confirmation"
-          ? readAcceptedPlanConfirmationTarget(interaction.payload, issue.id)
-          : null;
-      const acceptedPlanConfirmation =
-        interaction.kind === "request_confirmation" &&
-        interaction.status === "accepted" &&
-        acceptedPlanTarget?.issueId === issue.id &&
-        acceptedPlanTarget.key === "plan";
-      await queueResolvedInteractionContinuationWakeup({
-        db,
-        heartbeat,
-        issue: { ...continuationWakeIssue, companyId: issue.companyId },
-        interaction: continuationInteraction,
-        actor,
-        source: "issue.interaction.accept",
-        forceFreshSession: acceptedPlanConfirmation,
-        workspaceRefreshReason: acceptedPlanConfirmation
-          ? "accepted_plan_confirmation"
-          : null,
-      });
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+      } else await persistEffects(db, { interaction: continuationInteraction, createdIssues, continuationIssue }, heartbeat);
 
       res.json(continuationInteraction);
     },
@@ -16386,6 +16318,26 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "reject",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = durableEffects ? {
+        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
+          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
+      } : {};
+
       if (
         current.kind === "request_confirmation" &&
         current.payload.toolAction
@@ -16419,52 +16371,19 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
+        mutationOptions,
       );
 
-      if (isInteractionResolutionReplay(interaction)) { res.json(interaction); return; }
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(interaction); return;
+      }
 
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action:
-          interaction.status === "expired"
-            ? "issue.thread_interaction_expired"
-            : "issue.thread_interaction_rejected",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          rejectionReason:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.rejectionReason ?? null)
-              : interaction.kind === "request_confirmation" ||
-                  interaction.kind === "request_checkbox_confirmation"
-                ? (interaction.result?.reason ?? null)
-                : null,
-        },
-      });
-
-      await queueResolvedInteractionContinuationWakeup({
-        db,
-        heartbeat,
-        issue,
-        interaction,
-        actor,
-        source: "issue.interaction.reject",
-      });
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+      } else await persistEffects(db, { interaction, createdIssues: [] }, heartbeat);
 
       res.json(interaction);
     },
@@ -16495,6 +16414,26 @@ export function issueRoutes(
         authorizedResolution;
 
       const actor = getActorInfo(req);
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "respond",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = durableEffects ? {
+        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
+          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
+      } : {};
+
       const interaction = await interactionSvc.answerQuestions(
         issue,
         interactionId,
@@ -16506,37 +16445,19 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
+        mutationOptions,
       );
 
-      if (isInteractionResolutionReplay(interaction)) { res.json(interaction); return; }
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(interaction); return;
+      }
 
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.thread_interaction_answered",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          answeredQuestionCount:
-            interaction.kind === "ask_user_questions"
-              ? (interaction.result?.answers?.length ?? 0)
-              : 0,
-        },
-      });
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+      } else await persistEffects(db, { interaction, createdIssues: [] }, heartbeat);
 
       await questionResponseDeliveries.deliver(interaction.id).catch((err) => {
         logger.warn(

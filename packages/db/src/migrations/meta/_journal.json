@@ -2136,6 +2136,13 @@
       "when": 1792402427336,
       "tag": "0306_omniscient_zaran",
       "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1792436923667,
+      "tag": "0307_flimsy_valeria_richards",
+      "breakpoints": true
     }
   ]
 }

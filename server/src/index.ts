@@ -88,7 +88,7 @@ import {
   toolAccessService,
   workspaceOperationService,
 } from "./services/index.js";
-import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
+import { interactionDeliveryService } from "./services/interaction-deliveries.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
@@ -1243,7 +1243,7 @@ async function startServerWithDatabaseTeardown(
   });
   server.on("close", unsubscribeChatCompletions);
   const connectionDeliveries = connectionIntentDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
-  const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
+  const questionResponseDeliveries = interactionDeliveryService(db as any, {
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
