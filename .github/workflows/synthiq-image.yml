@@ -122,7 +122,10 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d "${RUNNER_TEMP}/docker.XXXXXX")"
-          [ -n "$tmp" ] && [ -d "$tmp" ] || { echo "mktemp failed"; exit 1; }
+          if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+            echo "mktemp failed"
+            exit 1
+          fi
           export DOCKER_CONFIG="$tmp"
           trap 'rm -rf "$tmp"' EXIT
           printf '%s' "$REGISTRY_PASSWORD" | docker login registry.synthiq.ru -u "$REGISTRY_USER" --password-stdin
