@@ -2,6 +2,9 @@
 
 Target specification for the Paperclip control plane. Living document — updated incrementally during spec interviews.
 
+The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
+The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
+
 ---
 
 ## 1. Company Model [DRAFT]
