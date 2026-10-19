@@ -28,8 +28,16 @@ pnpm build
 
 Each check runs after a successful install, even when an earlier check fails.
 A failed check fails the job. The workflow does not suppress command exit codes.
-Typecheck and build each have a 20-minute limit. Tests have a 30-minute limit.
-The whole job has a 60-minute limit, including installation.
+Typecheck and build each have a 20-minute limit. Tests have a 150-minute limit.
+The whole job has a 180-minute limit, including installation.
+The first workflow run exceeded the original 30-minute test limit during its first group.
+Its typecheck and build passed. No test assertion failure appeared before the timeout.
+The recorded server timings total about 85 minutes across general and serialized suites.
+See `scripts/general-server-shard-durations.json` and `scripts/serialized-shard-durations.json`.
+These records omit newer suites and workspace checks, so the full command needs more time.
+The test runner executes all groups in order on this single runner.
+The larger limits retain finite execution bounds and leave coverage unchanged.
+The contract check rejects the original limits and an incorrect summary limit.
 A newer test event for the same pull request cancels its previous run.
 Ignored label events use separate concurrency groups and cannot cancel tests.
 These limits bound configured execution time. They do not guarantee a billing cap.

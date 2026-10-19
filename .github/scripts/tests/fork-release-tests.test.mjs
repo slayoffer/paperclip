@@ -23,7 +23,7 @@ function checkContract(source) {
   assert.doesNotMatch(text, /\b(write|write-all|read-all|secrets|environment|pull_request_target|workflow_run)\b/);
   assert.equal(lines.filter((line) => /^  [\w-]+:$/.test(line) && text.indexOf(line) > text.indexOf("jobs:")).length, 1);
   assert.match(text, /^    runs-on: ubuntu-24\.04$/m);
-  assert.match(text, /^    timeout-minutes: 60$/m);
+  assert.match(text, /^    timeout-minutes: 180$/m);
   assert.match(text, /^  cancel-in-progress: true$/m);
   assert.ok(lines.includes("  group: fork-release-tests-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'fork-release-tests' && github.run_id || 'checks' }}"));
   assert.doesNotMatch(text, /continue-on-error:|working-directory:|needs:|strategy:|container:|services:/);
@@ -43,7 +43,8 @@ function checkContract(source) {
     const step = steps.find((step) => step.split("\n").includes(`        run: ${command}`));
     assert.ok(step, `Missing command: ${command}`);
     assert.ok(step.split("\n").includes(`        if: ${guard}`), `Unsafe check condition: ${command}`);
-    assert.match(step, /^        timeout-minutes: (20|30)$/m);
+    const timeout = command === "pnpm test:run" ? 150 : 20;
+    assert.ok(step.split("\n").includes(`        timeout-minutes: ${timeout}`), `Incorrect time limit: ${command}`);
     assert.equal(step.split("\n").filter((line) => line.trimStart().startsWith("run:")).length, 1);
   }
   assert.match(text, /PR_HEAD: \$\{\{ github.event.pull_request.head.sha \}\}/);
@@ -51,6 +52,7 @@ function checkContract(source) {
   assert.match(text, /\$GITHUB_SERVER_URL\/\$GITHUB_REPOSITORY\/actions\/runs\/\$GITHUB_RUN_ID/);
   assert.match(text, /TYPECHECK_RESULT: \$\{\{ steps.typecheck.outcome \}\}/);
   assert.match(text, /TEST_RESULT: \$\{\{ steps.tests.outcome \}\}/);
+  assert.match(text, /Runner limit: one GitHub-hosted job, 180 minutes per run\./);
   assert.match(text, /BUILD_RESULT: \$\{\{ steps.build.outcome \}\}/);
   // Event data enters shell commands through environment variables.
   for (const step of steps) {
@@ -76,7 +78,11 @@ for (const [name, before, after] of [
   ["a nested permission override", "    steps:", "    permissions: write-all\n    steps:"],
   ["secret access", "    steps:", "    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps:"],
   ["a self-hosted runner", "runs-on: ubuntu-24.04", "runs-on: self-hosted"],
-  ["an unlimited job", "    timeout-minutes: 60\n", ""],
+  ["an unlimited job", "    timeout-minutes: 180\n", ""],
+  ["the old job limit", "    timeout-minutes: 180\n", "    timeout-minutes: 60\n"],
+  ["the old test limit", "        timeout-minutes: 150\n", "        timeout-minutes: 30\n"],
+  ["an unlimited test step", "        timeout-minutes: 150\n", ""],
+  ["an incorrect limit summary", "180 minutes per run.", "60 minutes per run."],
   ["a mutable action", actions[0], "actions/checkout@main"],
   ["an upstream workflow", "    steps:", "    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master\n    steps:"],
   ["an additional action", "    steps:", "    steps:\n      - uses: other/action@" + "a".repeat(40)],

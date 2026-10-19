@@ -18,7 +18,7 @@ jobs:
     name: Fork release checks
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
@@ -52,10 +52,11 @@ jobs:
         timeout-minutes: 20
         run: pnpm -r typecheck
 
+      # The complete serial suite exceeds the upstream shard time limits.
       - name: Run the repository tests
         id: tests
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        timeout-minutes: 30
+        timeout-minutes: 150
         run: pnpm test:run
 
       - name: Build the repository
@@ -84,5 +85,5 @@ jobs:
             echo "Typecheck: $TYPECHECK_RESULT"
             echo "Tests: $TEST_RESULT"
             echo "Build: $BUILD_RESULT"
-            echo 'Runner limit: one GitHub-hosted job, 60 minutes per run.'
+            echo 'Runner limit: one GitHub-hosted job, 180 minutes per run.'
           } >> "$GITHUB_STEP_SUMMARY"
