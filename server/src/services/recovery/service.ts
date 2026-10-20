@@ -1,3 +1,4 @@
+import { releaseReadyDependencyWait } from "../issue-dependency-release.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
@@ -5686,16 +5687,16 @@ export function recoveryService(
           continue;
         }
 
-        // Level-triggered dedup: key on the full blocker set (the current ready
-        // state), not on any single resolved edge. An older completed per-edge
-        // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+        // Reuse the dependency state key across release paths.
+        let idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
           blockedTransitionAt: candidate.blockedTransitionAt,
         });
+        if (!(await releaseReadyDependencyWait(db, companyId, candidate.id))) {
+          result.notReadySkipped += 1;
+          continue;
+        }
         const existingWake =
           await findExistingIssueBlockersResolvedWakeForReadyState(db, {
             companyId,
@@ -5703,10 +5704,11 @@ export function recoveryService(
             blockerIssueIds: readiness.blockerIssueIds,
             blockedTransitionAt: candidate.blockedTransitionAt,
           });
-        if (existingWake) {
+        if (existingWake && existingWake.status !== "completed") {
           result.existingWakeSkipped += 1;
           continue;
         }
+        if (existingWake) idempotencyKey += ":release";
 
         if (
           (await hasActiveExecutionPath(companyId, candidate.id, agentId)) ||
