@@ -1,3 +1,4 @@
+import { selectVaultConnectionGrant } from "./connection-vault-grant.js";
 import { AGGREGATOR_NAMES, isAppAggregator, type AggregatorAppsResponse, type ArcadeDiscoverySetupInput } from "@paperclipai/shared/aggregator-apps";
 import { resolveAggregatorApp, type AppCatalogAggregator } from "@paperclipai/shared/aggregator-app-catalog";
 import { AggregatorDiscoveryUnavailableError, discoverArcadeApps, discoverExecutorApps, type DiscoveredApp } from "./aggregator-app-discovery.js";
@@ -279,6 +280,8 @@ import {
 } from "./vercel-connect.js";
 
 type ActorInfo = {
+  /** Server-selected grant. The caller must check its audience before health testing. */
+  credentialGrantId?: string;
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   sessionId?: string | null;
@@ -6841,75 +6844,9 @@ export function toolAccessService(
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
   ): Promise<typeof connectionGrants.$inferSelect | null> {
-    const actorUserId =
-      actor?.actorType === "user" ? (actor.actorId ?? null) : null;
-    if (actorUserId) {
-      const [personal] = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.subjectUserId, actorUserId),
-          ),
-        )
-        .limit(1);
-      if (personal) {
-        if (personal.status !== "active") {
-          throw unprocessable("OAuth authorization must be reconnected", {
-            code: "oauth_reauthorization_required",
-            setupUrl: connectionSetupUrl(connection),
-            reconnectUrl: connectionReconnectUrl(connection),
-          });
-        }
-        return personal;
-      }
-    }
-    if (!actorUserId && connection.credentialPolicy === "per_user") {
-      // A personal-only connection is intentionally fixed to one identity.
-      // Background health/catalog checks have no acting user, but may safely
-      // exercise that sole owner-bound grant without turning it into a shared
-      // credential or making it available to a different caller.
-      const personalGrants = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.status, "active"),
-          ),
-        )
-        .limit(2);
-      if (personalGrants.length === 1) return personalGrants[0]!;
-    }
-    if (connection.credentialPolicy === "per_user") {
-      throw unprocessable(
-        "This connection needs the current user's authorization",
-        {
-          code: "user_authorization_required",
-          setupUrl: connectionSetupUrl(connection),
-          reconnectUrl: connectionReconnectUrl(connection),
-        },
-      );
-    }
-    const [organization] = await db
-      .select()
-      .from(connectionGrants)
-      .where(
-        and(
-          eq(connectionGrants.companyId, connection.companyId),
-          eq(connectionGrants.connectionId, connection.id),
-          eq(connectionGrants.kind, "organization"),
-          eq(connectionGrants.isDefault, true),
-        ),
-      )
-      .limit(1);
-    if (organization?.status === "active") return organization;
-    return null;
+    return selectVaultConnectionGrant(db, connection, actor, {
+      setupUrl: connectionSetupUrl(connection), reconnectUrl: connectionReconnectUrl(connection),
+    });
   }
 
   async function resolveCredentialHeaders(
@@ -7083,7 +7020,7 @@ export function toolAccessService(
     if (usedInitializedSession) {
       try {
         sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
           requestId: listRequestId });
         response = await sendToolsList(sessionHeaders);
       } catch (error) {
@@ -7116,7 +7053,7 @@ export function toolAccessService(
       forgetMcpHttpSessions(connection.id);
       await response.body?.cancel().catch(() => undefined);
       sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
         requestId: listRequestId });
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
@@ -7508,10 +7445,11 @@ export function toolAccessService(
   async function checkConnectionHealth(
     connectionId: string,
     actor?: ActorInfo,
-    options: { allowUnauthenticatedProbe?: boolean } = {},
+    options: { allowUnauthenticatedProbe?: boolean; grantId?: string } = {},
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
+    if (options.grantId) actor = { ...actor, credentialGrantId: options.grantId };
     try {
       assertSupportedConnection(connection);
       const config = asRecord(connection.config);
@@ -7538,8 +7476,9 @@ export function toolAccessService(
                   grant.subjectUserId === actor.actorId,
               )
             : null;
-        const grantsToCheck =
-          connection.credentialPolicy === "per_user" &&
+        const grantsToCheck = actor?.credentialGrantId
+          ? activeGrants.filter(grant => grant.id === actor?.credentialGrantId)
+          : connection.credentialPolicy === "per_user" &&
           actor?.actorType === "user"
             ? actorGrant
               ? [actorGrant]
@@ -7575,7 +7514,7 @@ export function toolAccessService(
               : undefined;
         await remoteTools(connection, credentialHeaders, actor);
       } else if (connection.transport === "local_stdio") {
-        await resolveCredentialHeaders(connection);
+        await resolveCredentialHeaders(connection, actor);
         await stdioTemplateId(connection.companyId, connection.config);
         await validateCogneeConnection(connection, actor, false);
       } else {

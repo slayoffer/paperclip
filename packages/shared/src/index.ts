@@ -1,5 +1,6 @@
 export type { LightIssue } from "./types/issue-light.js";
 export type * from "./types/issue-exports.js";
+export * from "./interaction-exports.js";
 export { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema, type ComposioAppSetupInput, type ComposioAppSetupResult, type ComposioAppAccountInput, type ComposioAppAccount, type ComposioAppSnapshot, type ComposioAppSyncState, type ComposioAppsResponse } from "./composio-app-setup.js";
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
@@ -1853,9 +1854,6 @@ export {
   issueCommentMetadataSectionSchema,
   issueCommentMetadataSchema,
   addIssueCommentSchema,
-  issueThreadInteractionStatusSchema,
-  issueThreadInteractionKindSchema,
-  issueThreadInteractionContinuationPolicySchema,
   connectionIntentPhaseSchema,
   connectionIntentPayloadSchema,
   connectionIntentResultSchema,
