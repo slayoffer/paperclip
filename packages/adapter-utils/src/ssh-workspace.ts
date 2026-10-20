@@ -178,6 +178,7 @@ async function restoreWorkspaceRootFromSsh(input: {
         baseline: input.baselineSnapshot,
         sourceDir: stagingDir,
         targetDir: input.localDir,
+        onProgress: input.onProgress,
         // Git history advances via integrateImportedGitHead; the working tree
         // still comes from the remote file snapshot so dirty remote edits win.
         beforeApply: importedHead

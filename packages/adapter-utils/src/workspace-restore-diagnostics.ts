@@ -32,6 +32,7 @@ const ERROR_CODES = new Set([
 type ErrorDiagnostic = Pick<WorkspaceRestoreDiagnostic, "errorCode" | "httpStatus" | "exitCode">;
 interface DiagnosticScope {
   active: boolean;
+  onProgress?: RuntimeProgressSink;
   sequence: number;
   failures: Map<unknown, {
     sequence: number;
@@ -41,6 +42,12 @@ interface DiagnosticScope {
   }>;
 }
 const activeDiagnostic = new AsyncLocalStorage<DiagnosticScope>();
+
+/** Use the active restore's log sink without changing transport signatures. */
+export function workspaceRestoreProgressSink(): RuntimeProgressSink | undefined {
+  const scope = activeDiagnostic.getStore();
+  return scope?.active ? scope.onProgress : undefined;
+}
 // Never attach a raw cause to an error just to retain a numeric Git exit code.
 const wrappedDiagnostics = new WeakMap<object, ErrorDiagnostic>();
 const restoreDiagnostics = new WeakMap<object, WorkspaceRestoreDiagnostic>();
@@ -222,7 +229,8 @@ export async function withWorkspaceRestoreDiagnostics<T>(
   // That task owns the diagnostic. Independent parallel tasks retain their own
   // async scopes, so two failed tasks still produce two diagnostic lines.
   const parent = activeDiagnostic.getStore();
-  const scope: DiagnosticScope = { active: true, sequence: 0, failures: new Map() };
+  const scope: DiagnosticScope = { active: true, onProgress: onProgress ?? (parent?.active ? parent.onProgress : undefined),
+    sequence: 0, failures: new Map() };
   return await activeDiagnostic.run(scope, async () => {
     try {
       return await operation();
