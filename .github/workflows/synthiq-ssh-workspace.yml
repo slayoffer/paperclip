@@ -13,6 +13,7 @@ on:
       - "server/src/services/environment-runtime.ts"
       - "server/src/services/heartbeat-github-launchers*"
       - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
+      - "server/src/__tests__/ssh-in-place-release.test.ts"
       - "server/src/__tests__/helpers/ssh-in-place-heartbeat.ts"
 
 permissions:
@@ -63,3 +64,4 @@ jobs:
           packages/adapter-utils/src/ssh-git-remotes.test.ts
           server/src/services/heartbeat-github-launchers.test.ts
           server/src/__tests__/heartbeat-ssh-in-place.test.ts
+          server/src/__tests__/ssh-in-place-release.test.ts

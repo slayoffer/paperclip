@@ -84,7 +84,6 @@ import { collectSecretRefPaths } from "./json-schema-secret-refs.js";
 import { buildWorkspaceRealizationRecordFromDriverInput } from "./workspace-realization.js";
 import {
   decideSshInPlaceRealization,
-  releaseSshInPlaceWorktreeLocksForLease,
 } from "./ssh-in-place-workspace.js";
 import {
   createSandboxOrphanCleanupSpool,
@@ -1221,12 +1220,9 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
     },
 
     async releaseRunLease(input) {
-      try {
-        return await environmentsSvc.releaseLease(input.lease.id, input.status);
-      } finally {
-        // The same-host in_place worktree lock belongs to the run lease.
-        releaseSshInPlaceWorktreeLocksForLease(input.lease.id);
-      }
+      // SSH client settlement does not prove that the remote writer stopped.
+      // Keep ownership until sshInPlaceLockChecks verifies a provider stop receipt.
+      return await environmentsSvc.releaseLease(input.lease.id, input.status);
     },
 
     async realizeWorkspace(input) {

@@ -36,10 +36,12 @@ import { heartbeatService } from "../services/heartbeat.ts";
 import {
   canonicalSshInPlaceLockKey,
   readSshInPlaceWorktreeLockHolder,
+  releaseSshInPlaceWorktreeLocksForLease,
   SSH_IN_PLACE_ENVIRONMENTS_ENV,
   SSH_IN_PLACE_LOCK_WAIT_MS_ENV,
 } from "../services/ssh-in-place-workspace.ts";
 import { environmentRuntimeService } from "../services/environment-runtime.ts";
+import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import {
   createGitRepo,
   deleteHeartbeatRowsAfterActivityLogDrains,
@@ -149,6 +151,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const tempRoots: string[] = [];
   const previousAllowlist = process.env[SSH_IN_PLACE_ENVIRONMENTS_ENV];
+  const previousLockWait = process.env[SSH_IN_PLACE_LOCK_WAIT_MS_ENV];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-ssh-in-place-");
@@ -157,9 +160,15 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
 
   afterEach(async () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
+    // Fixture adapters start no remote writer. Remove test ownership after settlement.
+    for (const lease of await db.select({ id: environmentLeases.id }).from(environmentLeases)) {
+      releaseSshInPlaceWorktreeLocksForLease(lease.id);
+    }
     vi.restoreAllMocks();
     if (previousAllowlist === undefined) delete process.env[SSH_IN_PLACE_ENVIRONMENTS_ENV];
     else process.env[SSH_IN_PLACE_ENVIRONMENTS_ENV] = previousAllowlist;
+    if (previousLockWait === undefined) delete process.env[SSH_IN_PLACE_LOCK_WAIT_MS_ENV];
+    else process.env[SSH_IN_PLACE_LOCK_WAIT_MS_ENV] = previousLockWait;
     sshCommands.length = 0;
     adapterExecute.mockReset();
     adapterExecute.mockImplementation(async () => ({
@@ -201,6 +210,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
   }, 60_000);
 
   async function setup(flagOn: boolean) {
+    process.env[SSH_IN_PLACE_LOCK_WAIT_MS_ENV] = "0";
     const repoRoot = await createGitRepo();
     const remoteBase = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-in-place-remote-"));
     tempRoots.push(repoRoot, remoteBase);
@@ -264,9 +274,9 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
 
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["succeeded"]);
-    // The lease release frees the worktree lock.
+    // Successful bookkeeping does not prove that a remote writer stopped.
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))).toBeNull();
+    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))?.runId).toBe(wake!.id);
   }, 20_000);
 
   it("records workspace_finalize=failed when the in_place run fails", async () => {
@@ -287,7 +297,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["failed"]);
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree!))).toBeNull();
+    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree!))?.runId).toBe(wake!.id);
   }, 20_000);
 
   it("stages managed GitHub launchers outside the repository during heartbeat preparation", async () => {
@@ -321,7 +331,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     expect(await readdir(worktree)).not.toContain(".paperclip-runtime");
   }, 20_000);
 
-  it.each([false, true])("keeps copy mode until driver release (status-only release: %s)", async (statusOnly) => {
+  it.each([false, true])("requires termination evidence after lease release (status-only: %s)", async (statusOnly) => {
     const { companyId, agentId, environmentId, remoteBase } = await setup(true);
     process.env[SSH_IN_PLACE_LOCK_WAIT_MS_ENV] = "300";
     try {
@@ -366,13 +376,20 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
         await db.update(environmentLeases).set({ status: "released" }).where(eq(environmentLeases.id, first.lease.id));
       } else {
         await runtime.releaseRunLeases(runIds[0]!);
+        // This fixture starts no writer. Supply a bound provider stop receipt.
+        await db.update(environmentLeases).set({ cleanupStatus: "success", metadata: {
+          ...first.lease.metadata,
+          remoteExecutionTermination: remoteTerminationReceipt(first.lease, {
+            providerLeaseId: first.lease.providerLeaseId, state: "stopped",
+          }),
+        } }).where(eq(environmentLeases.id, first.lease.id));
       }
       const third = await realize(runIds[2]!);
       const lockKey = await canonicalSshInPlaceLockKey(worktree);
       if (statusOnly) {
         expect(third.realization.mode).toBe("copy");
         expect(readSshInPlaceWorktreeLockHolder(lockKey)?.leaseId).toBe(first.lease.id);
-        // Restore the active fixture lease so the driver can release its own lock.
+        // Restore the fixture lease for bookkeeping cleanup. No writer started.
         await db.update(environmentLeases).set({ status: "active" }).where(eq(environmentLeases.id, first.lease.id));
         await runtime.releaseRunLeases(runIds[0]!);
       } else {
@@ -381,6 +398,8 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
       }
 
       await runtime.releaseRunLeases(runIds[2]!);
+      releaseSshInPlaceWorktreeLocksForLease(first.lease.id);
+      releaseSshInPlaceWorktreeLocksForLease(third.lease.id);
       expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))).toBeNull();
       await runtime.releaseRunLeases(runIds[1]!);
     } finally {

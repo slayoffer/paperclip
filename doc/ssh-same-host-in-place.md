@@ -85,7 +85,12 @@ copy mode").
   A server restart preserves the file.
   A lease timeout or a dead controller does not prove remote writer termination.
   Stale ownership transfers require an inactive lease and a bound provider termination receipt.
-  Missing termination evidence keeps the lock. Normal completion releases the current controller's lock.
+  Missing termination evidence keeps the lock, including after normal lease release.
+  SSH client exit, run success, failure, cancellation, and timeout do not prove writer termination.
+  The SSH driver only releases lease bookkeeping. It preserves durable worktree ownership.
+  A later acquisition can replace that ownership only with the bound provider termination receipt.
+  SSH currently supplies no such receipt. Later runs use copy mode until verified termination evidence exists.
+  Do not remove ownership files based only on a run status or elapsed time.
   An interrupted directory guard also stays closed. The server never removes it through a timeout.
 
 ## Rollback
