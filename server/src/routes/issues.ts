@@ -1,3 +1,4 @@
+import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { parseObject } from "../adapters/utils.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
@@ -16782,19 +16783,11 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/interactions", async (req, res) => {
-    const id = req.params.id as string;
-    const issue = await getAccessibleResource(
-      req,
-      res,
-      getIssueById(req, id),
-      "Issue not found",
-    );
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const interactions =
-      await issueThreadInteractionService(db).listForIssue(id);
-    res.json(interactions);
+  registerIssueInteractionReads(router, {
+    getIssue: (req, res) => getAccessibleResource(req, res,
+      getIssueById(req, req.params.id as string), "Issue not found"),
+    authorize: assertIssueReadAllowed,
+    service: issueThreadInteractionService(db),
   });
 
   router.post(

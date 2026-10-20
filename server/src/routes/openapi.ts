@@ -1,3 +1,4 @@
+import { issueInteractionReadApiPaths } from "./issue-interaction-read-api.js";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -7836,14 +7837,7 @@ registry.registerPath({
 
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
-registry.registerPath({
-  method: "get",
-  path: "/api/issues/{id}/interactions",
-  tags: ["issues"],
-  summary: "List issue thread interactions",
-  request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
-});
+for (const path of issueInteractionReadApiPaths) registry.registerPath(path);
 
 registry.registerPath({
   method: "post",
