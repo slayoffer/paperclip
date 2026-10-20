@@ -6622,6 +6622,48 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+/**
+ * Returns every issue that `issueId` blocks, directly or transitively, through
+ * "blocks" relations in the company. If one of these issues becomes a blocker
+ * of `issueId`, the relations contain a cycle. The blocking-cycle check and
+ * recovery use this one graph walk, so they agree on what a cycle is.
+ */
+export async function listIssuesTransitivelyBlockedBy(
+  dbOrTx: DbReader,
+  companyId: string,
+  issueId: string,
+): Promise<Set<string>> {
+  const rows = await dbOrTx
+    .select({
+      blockerIssueId: issueRelations.issueId,
+      blockedIssueId: issueRelations.relatedIssueId,
+    })
+    .from(issueRelations)
+    .where(
+      and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.type, "blocks"),
+      ),
+    );
+
+  const adjacency = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = adjacency.get(row.blockerIssueId) ?? [];
+    list.push(row.blockedIssueId);
+    adjacency.set(row.blockerIssueId, list);
+  }
+
+  const reachable = new Set<string>();
+  const queue = [...(adjacency.get(issueId) ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    queue.push(...(adjacency.get(current) ?? []));
+  }
+  return reachable;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -7391,38 +7433,13 @@ export function issueService(db: Db) {
   ) {
     if (blockerIssueIds.length === 0) return;
 
-    const rows = await dbOrTx
-      .select({
-        blockerIssueId: issueRelations.issueId,
-        blockedIssueId: issueRelations.relatedIssueId,
-      })
-      .from(issueRelations)
-      .where(
-        and(
-          eq(issueRelations.companyId, companyId),
-          eq(issueRelations.type, "blocks"),
-        ),
-      );
-
-    const adjacency = new Map<string, string[]>();
-    for (const row of rows) {
-      const list = adjacency.get(row.blockerIssueId) ?? [];
-      list.push(row.blockedIssueId);
-      adjacency.set(row.blockerIssueId, list);
-    }
-
-    for (const blockerIssueId of blockerIssueIds) {
-      const queue = [...(adjacency.get(issueId) ?? [])];
-      const visited = new Set<string>([issueId]);
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        if (current === blockerIssueId) {
-          throw unprocessable("Blocking relations cannot contain cycles");
-        }
-        if (visited.has(current)) continue;
-        visited.add(current);
-        queue.push(...(adjacency.get(current) ?? []));
-      }
+    const blockedByIssue = await listIssuesTransitivelyBlockedBy(
+      dbOrTx,
+      companyId,
+      issueId,
+    );
+    if (blockerIssueIds.some((blockerIssueId) => blockedByIssue.has(blockerIssueId))) {
+      throw unprocessable("Blocking relations cannot contain cycles");
     }
   }
 
