@@ -1,5 +1,6 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
+import { issueInteractionReadApiPaths } from "./issue-interaction-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { ATTENTION_SOURCE_KINDS } from "@paperclipai/shared";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
@@ -8322,14 +8323,7 @@ registry.registerPath({
   },
 });
 
-registry.registerPath({
-  method: "get",
-  path: "/api/issues/{id}/interactions",
-  tags: ["issues"],
-  summary: "List issue thread interactions",
-  request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
-});
+for (const path of issueInteractionReadApiPaths) registry.registerPath(path);
 
 registry.registerPath({
   method: "post",

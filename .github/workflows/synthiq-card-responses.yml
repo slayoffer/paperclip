@@ -8,6 +8,12 @@ on:
       - ".github/workflows/synthiq-card-responses.yml"
       - "packages/shared/src/**"
       - "server/src/routes/issues.ts"
+      - "server/src/routes/issue-interaction-read*.ts"
+      - "server/src/routes/openapi.ts"
+      - "server/src/__tests__/issue-interaction-reads.test.ts"
+      - "server/src/__tests__/issue-interactions-read-only-contract.test.ts"
+      - "server/src/__tests__/openapi-route*.ts"
+      - "server/src/services/native-runtime/approval-evidence-api.integration.test.ts"
       - "server/src/services/issues.ts"
       - "server/src/services/issue-thread-interactions.ts"
       - "server/src/services/question-interaction-answers*"
@@ -65,6 +71,10 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism
           packages/shared/src/issue-thread-interactions.test.ts
+          server/src/services/native-runtime/approval-evidence-api.integration.test.ts
+          server/src/__tests__/issue-interaction-reads.test.ts
+          server/src/__tests__/issue-interactions-read-only-contract.test.ts
+          server/src/__tests__/openapi-routes.test.ts
           server/src/__tests__/issue-thread-interaction-routes.test.ts
           server/src/__tests__/issue-thread-interactions-service.test.ts
           server/src/services/question-interaction-answers.test.ts
