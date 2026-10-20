@@ -73,6 +73,7 @@ jobs:
           server/src/__tests__/issue-thread-interactions-service.test.ts
           server/src/__tests__/interaction-revision-postgres.test.ts
           server/src/__tests__/interaction-resolution-outbox-postgres.test.ts
+          server/src/__tests__/interaction-binding-postgres.test.ts
           server/src/services/question-interaction-answers.test.ts
           server/src/__tests__/question-response-delivery.test.ts
           server/src/services/native-runtime/native-question-bridge.test.ts

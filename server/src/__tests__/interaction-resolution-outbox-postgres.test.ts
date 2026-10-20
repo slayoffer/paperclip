@@ -160,4 +160,43 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
       expect(await f.wakeRows()).toHaveLength(1); expect(await f.auditRows()).toHaveLength(1);
     } finally { await f.close(); }
   });
+  it.each(["suppressed", "failed"])("advances past fifty %s rows with equal timestamps", async (mode) => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Fairness fixture", issuePrefix: `F${companyId.slice(0, 7)}` });
+    const [agent] = await db.insert(agents).values({ companyId, name: "Fair target", role: "engineer",
+      adapterType: "process", status: "idle" }).returning();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Fair retry", status: "in_progress" }).returning();
+    const instant = new Date();
+    const ids = Array.from({ length: 51 }, () => randomUUID()).sort();
+    await db.insert(issueThreadInteractions).values(ids.map((id) => ({ id, companyId, issueId: issue.id,
+      kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "Continue?" } })));
+    await db.insert(interactionResolutionOutbox).values(ids.map((id) => ({ interactionId: id, companyId,
+      issueId: issue.id, createdAt: instant, wakes: [{ agentId: agent.id, options: { idempotencyKey: `interaction:${id}` } }] })));
+    const attempted = new Set<string>();
+    let suppress = true;
+    const wakeup = vi.fn(async (agentId: string, options: Record<string, unknown>) => {
+      const key = options.idempotencyKey as string;
+      attempted.add(key);
+      if (suppress && key !== `interaction:${ids[50]}`) {
+        if (mode === "failed") throw new Error("Transient admission failure");
+        return null;
+      }
+      await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation", status: "queued",
+        idempotencyKey: key }).onConflictDoNothing();
+      return null;
+    });
+    const worker = outbox.interactionResolutionOutboxService(db, { wakeup });
+    await worker.sweepPending();
+    await worker.sweepPending();
+    expect(attempted.size).toBe(51);
+    const entries = await db.select().from(interactionResolutionOutbox).where(eq(interactionResolutionOutbox.companyId, companyId));
+    expect(entries.find((row) => row.interactionId === ids[50])?.deliveredAt).not.toBeNull();
+    expect(entries.filter((row) => row.deliveredAt === null)).toHaveLength(50);
+    // Wrap to older rows after the cursor reaches the end. Preserve their intents.
+    suppress = false;
+    await worker.sweepPending();
+    expect(await db.select().from(interactionResolutionOutbox).where(and(
+      eq(interactionResolutionOutbox.companyId, companyId), isNull(interactionResolutionOutbox.deliveredAt)))).toHaveLength(0);
+  });
+
 });

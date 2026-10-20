@@ -66,3 +66,19 @@ A relay must not retry a conflict automatically.
 
 The schema migration installs a database trigger for revision changes.
 Tests apply it only to isolated databases. Production migration and deployment need their normal release gates.
+
+### Binding execution recovery and fair delivery
+
+A revision-protected acceptance saves its binding execution intent in the continuation outbox.
+It saves this intent even when no continuation wake is requested.
+A receipt retry or background delivery worker resumes the accepted binding before the continuation.
+The worker locks the issue and proposal in the existing order.
+It rechecks the linked target, issue state, expiry, and the original board user's current configuration permission.
+Binding approval and the execution result commit in one transaction.
+Database failures leave the intent pending. Checked permission or lifecycle failures record a failed execution.
+Concurrent retries cannot apply the binding twice.
+
+Each worker traverses pending rows by creation time and interaction identifier.
+It advances its cursor after suppressed admissions and failed attempts.
+It returns to the oldest pending rows after it reaches the end.
+The cursor belongs to the worker instance. A server restart starts traversal from the oldest pending row.

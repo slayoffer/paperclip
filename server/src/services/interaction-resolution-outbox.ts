@@ -1,9 +1,11 @@
-import { and, asc, eq, notInArray, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, or, notInArray, isNull } from "drizzle-orm";
 import { agentWakeupRequests, interactionResolutionOutbox, issueThreadInteractions, type Db } from "@paperclipai/db";
 import type { IssueThreadInteraction } from "@paperclipai/shared";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logger } from "../middleware/logger.js";
 import { readObject, readSecretProposalContinuationContext } from "../routes/interaction-continuation-context.js";
+
+import { resumeAcceptedBinding } from "./interaction-binding-execution.js";
 
 type Wakes = typeof interactionResolutionOutbox.$inferInsert.wakes;
 
@@ -21,16 +23,20 @@ export async function persistInteractionResolutionWakes(
       idempotencyKey: options.idempotencyKey ?? `interaction:${interaction.id}:assignment:${options.payload?.issueId}`,
     } });
   } });
-  if (wakes.length) await db.insert(interactionResolutionOutbox).values({
+  if (wakes.length || (interaction.status === "accepted" && readObject(interaction.payload).secretProposal)) await db.insert(interactionResolutionOutbox).values({
     interactionId: interaction.id, companyId: interaction.companyId, issueId: interaction.issueId, wakes,
   });
 }
 
 export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssignmentWakeupDeps) {
+  let cursor: { createdAt: Date; interactionId: string } | undefined;
+  let sweeping: Promise<void> | undefined;
+
   async function deliver(interactionId: string) {
     const [entry] = await db.select().from(interactionResolutionOutbox)
       .where(and(eq(interactionResolutionOutbox.interactionId, interactionId), isNull(interactionResolutionOutbox.deliveredAt)));
     if (!entry) return;
+    await resumeAcceptedBinding(db, entry);
     const [interaction] = await db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.id, entry.interactionId), eq(issueThreadInteractions.companyId, entry.companyId),
       eq(issueThreadInteractions.issueId, entry.issueId),
@@ -68,13 +74,28 @@ export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssig
       .where(and(eq(interactionResolutionOutbox.interactionId, interactionId), isNull(interactionResolutionOutbox.deliveredAt)));
   }
 
-  async function sweepPending(limit = 50) {
-    const entries = await db.select({ interactionId: interactionResolutionOutbox.interactionId })
-      .from(interactionResolutionOutbox).where(isNull(interactionResolutionOutbox.deliveredAt))
-      .orderBy(asc(interactionResolutionOutbox.createdAt)).limit(limit);
-    for (const entry of entries) await deliver(entry.interactionId).catch((err) => {
-      logger.warn({ err, interactionId: entry.interactionId }, "interaction continuation delivery remains pending");
-    });
+  async function sweepPage(limit: number) {
+    const page = () => db.select({ interactionId: interactionResolutionOutbox.interactionId,
+      createdAt: interactionResolutionOutbox.createdAt })
+      .from(interactionResolutionOutbox).where(and(isNull(interactionResolutionOutbox.deliveredAt),
+        cursor ? or(gt(interactionResolutionOutbox.createdAt, cursor.createdAt), and(
+          eq(interactionResolutionOutbox.createdAt, cursor.createdAt),
+          gt(interactionResolutionOutbox.interactionId, cursor.interactionId))) : undefined))
+      .orderBy(asc(interactionResolutionOutbox.createdAt), asc(interactionResolutionOutbox.interactionId)).limit(limit);
+    let entries = await page();
+    if (!entries.length && cursor) { cursor = undefined; entries = await page(); }
+    for (const entry of entries) {
+      // Advance even when admission is suppressed or binding execution fails.
+      // A later sweep wraps at the end. Pending rows retain their durable state.
+      cursor = entry;
+      await deliver(entry.interactionId).catch((err) => {
+        logger.warn({ err, interactionId: entry.interactionId }, "interaction continuation delivery remains pending");
+      });
+    }
+  }
+  function sweepPending(limit = 50) {
+    if (!sweeping) sweeping = sweepPage(limit).finally(() => { sweeping = undefined; });
+    return sweeping;
   }
   return { deliver, sweepPending };
 }

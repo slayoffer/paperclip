@@ -1,3 +1,4 @@
+import { HttpError } from "../errors.js";
 export function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
@@ -152,4 +153,12 @@ export function readSecretProposalContinuationContext(interaction: {
     instructions:
       "the binding was not created; inspect the failure comment and submit a fresh proposal after fixing the cause.",
   };
+}
+
+export function secretProposalExecutionErrorCode(error: unknown) {
+  if (error instanceof HttpError) {
+    const details = readObject(error.details);
+    return readNonEmptyString(details.code) ?? `http_${error.status}`;
+  }
+  return "secret_proposal_execution_failed";
 }

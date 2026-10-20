@@ -3,7 +3,7 @@ import { interactionResolutionOutboxService, persistInteractionResolutionWakes }
 import { persistInteractionResolutionRouteEffects } from "../services/interaction-resolution-route-effects.js";
 import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
 import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
-import { readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
+import { secretProposalExecutionErrorCode, readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -2387,13 +2387,6 @@ function isAssigneeSelfCommentOnTerminalIssue(input: {
   return input.actorId === input.assigneeAgentId;
 }
 
-function secretProposalExecutionErrorCode(error: unknown) {
-  if (error instanceof HttpError) {
-    const details = readObject(error.details);
-    return readNonEmptyString(details.code) ?? `http_${error.status}`;
-  }
-  return "secret_proposal_execution_failed";
-}
 
 const REQUEST_ITEM_VERDICTS_WAKE_COALESCE_WINDOW_MS = 2_000;
 
@@ -16130,7 +16123,13 @@ export function issueRoutes(
       if (isInteractionResolutionReplay(interaction)) {
         await resolutionOutbox.deliver(interaction.id);
         if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
-        res.json(interaction); return;
+        res.json(await interactionSvc.getById(interaction.id)); return;
+      }
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+        res.json(await interactionSvc.getById(interaction.id));
+        return;
       }
       const toolAction =
         interaction.payload && typeof interaction.payload === "object"
@@ -16279,10 +16278,7 @@ export function issueRoutes(
           }
         }
       }
-      if (durableEffects) {
-        for (const publication of publications) publishActivity(publication);
-        await resolutionOutbox.deliver(interaction.id);
-      } else await persistEffects(db, { interaction: continuationInteraction, createdIssues, continuationIssue }, heartbeat);
+      await persistEffects(db, { interaction: continuationInteraction, createdIssues, continuationIssue }, heartbeat);
 
       res.json(continuationInteraction);
     },
