@@ -1,5 +1,5 @@
+import { createOpenApiTestApp } from "./helpers/openapi-app.js";
 import { apiPrefixes } from "./openapi-route-prefixes.js";
-import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,8 +7,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { MUSE_ASSET_VERSION, MUSE_PUBLIC_ROUTES } from "@paperclipai/shared";
 import { COMPANY_IMPORT_TRANSFERS_ROUTE_PATH } from "@paperclipai/shared/company-import-transfer";
-import { errorHandler } from "../middleware/index.js";
-import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
+import { buildOpenApiSpec } from "../routes/openapi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
@@ -71,13 +70,6 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
 // now have request handlers, so the set is empty. A new contract-first route
 // belongs here only until its handler lands.
 const specOnlyContractFirstRoutes = new Set<string>([]);
-
-function createApp() {
-  const app = express();
-  app.use("/api", openApiRoutes());
-  app.use(errorHandler);
-  return app;
-}
 
 // Route files may compose paths from shared path constants inside template
 // literals; substitute the constants' values before normalizing.
@@ -377,7 +369,7 @@ describe("openapi routes", () => {
   });
 
   it("documents exact failed-run selection and durable accepted retry responses", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const wake = res.body.paths["/api/agents/{id}/wakeup"].post;
     expect(
       wake.requestBody.content["application/json"].schema.properties
@@ -396,7 +388,7 @@ describe("openapi routes", () => {
     expect(patch.description).toContain("send exactly status=todo and expectedStatusVersion");
   });
   it("serves the generated OpenAPI document", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
 
     expect(res.status).toBe(200);
     expect(res.body.openapi).toBe("3.0.0");
@@ -1196,7 +1188,7 @@ describe("openapi routes", () => {
 
 describe("heartbeat run ID OpenAPI contract", () => {
   it("publishes the runtime UUID constraint and 400 response on all agent-router run endpoints", async () => {
-    const response = await request(createApp()).get("/api/openapi.json");
+    const response = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     expect(response.status).toBe(200);
     const paths = response.body.paths;
     let checked = 0;

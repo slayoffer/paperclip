@@ -54,6 +54,9 @@ export const apiPrefixes: Record<string, string> = {
   "instance-database-backups.ts": "/api",
   "instance-settings.ts": "/api",
   "issues.ts": "/api",
+  "company-flow.ts": "/api",
+  "company-interaction-reads.ts": "/api",
+  "issue-interaction-reads.ts": "/api",
   "issue-tree-control.ts": "/api",
   "llms.ts": "/api",
   "managed-agent-profiles.ts": "/api",
@@ -78,5 +81,4 @@ export const apiPrefixes: Record<string, string> = {
   "voice-sessions.ts": "/api",
   "tool-gateway.ts": "/api",
   "user-profiles.ts": "/api",
-  "issue-interaction-reads.ts": "/api",
 };

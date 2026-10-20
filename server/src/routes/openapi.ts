@@ -1,6 +1,6 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
-import { issueInteractionReadApiPaths } from "./issue-interaction-read-api.js";
+import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
 import {
@@ -8000,7 +8000,7 @@ registry.registerPath({
 
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
-for (const path of issueInteractionReadApiPaths) registry.registerPath(path);
+for (const path of forkReadApiPaths) registry.registerPath(path);
 
 registry.registerPath({
   method: "post",

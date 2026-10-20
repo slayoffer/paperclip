@@ -1,4 +1,15 @@
 import { z } from "zod";
+import { listCompanyInteractionsQuerySchema } from "@paperclipai/shared";
+
+type ReadPath = {
+  method: "get";
+  path: string;
+  tags: string[];
+  summary: string;
+  description?: string;
+  request: { params: z.ZodTypeAny; query?: z.ZodTypeAny };
+  responses: Record<string, Record<string, unknown>>;
+};
 
 const issueReads = [
   "/api/issues/{id}/interactions",
@@ -23,8 +34,25 @@ const issueReads = [
   },
 }));
 
-export const issueInteractionReadApiPaths = [
+export const issueInteractionReadApiPaths: ReadPath[] = [
   ...issueReads,
+  {
+    method: "get" as const,
+    path: "/api/companies/{companyId}/interactions",
+    tags: ["issues"],
+    summary: "List readable interactions within a company",
+    description: "Filter status in SQL. Return readable cards in UUID order with a nextCursor. Reads preserve stored state.",
+    request: {
+      params: z.object({ companyId: z.string() }),
+      query: listCompanyInteractionsQuerySchema,
+    },
+    responses: {
+      200: { description: "Interaction page with issue identifiers", content: { "application/json": { schema: {} } } },
+      400: { description: "Invalid query" },
+      401: { description: "Authentication required" },
+      403: { description: "Company access denied" },
+    },
+  },
   {
     method: "get" as const,
     path: "/api/companies/{companyId}/interaction-locations/{interactionId}",

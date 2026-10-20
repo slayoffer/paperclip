@@ -1681,6 +1681,15 @@ export type IssueThreadInteraction =
   | RequestItemVerdictsInteraction
   | ConnectionIntentInteraction;
 
+export type CompanyIssueThreadInteraction = IssueThreadInteraction & {
+  issueIdentifier: string | null;
+};
+
+export interface CompanyIssueThreadInteractionPage {
+  items: CompanyIssueThreadInteraction[];
+  nextCursor: string | null;
+}
+
 export type IssueThreadInteractionPayload =
   | SuggestTasksPayload
   | AskUserQuestionsPayload
