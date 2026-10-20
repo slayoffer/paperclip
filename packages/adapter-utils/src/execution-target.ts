@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
+import { githubOperationLauncherDirectory, type GitHubLauncherLocation } from "./github-launcher-directory.js";
 import { githubLauncherSource } from "./github-launcher.js";
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import {
@@ -1582,18 +1583,6 @@ export function runtimeAssetDir(
   return prepared.assetDirs[key] ?? path.posix.join(fallbackRemoteCwd, ".paperclip-runtime", key);
 }
 
-type GitHubLauncherLocation = {
-  runId: string; target: AdapterExecutionTarget | null | undefined;
-};
-
-function githubOperationLauncherDirectory(input: GitHubLauncherLocation): string {
-  // Only controller-generated run IDs may name a removable directory.
-  if (!/^[a-zA-Z0-9_-]+$/.test(input.runId)) throw new Error("Invalid GitHub launcher run ID");
-  return input.target?.kind === "remote"
-    ? path.posix.join(input.target.remoteCwd, ".paperclip-runtime", "github", input.runId)
-    : path.join(os.tmpdir(), "paperclip-github-runtime", input.runId);
-}
-
 /** Call only after execution settles, before releasing its remote environment lease. */
 export async function cleanupGitHubOperationLaunchers(input: GitHubLauncherLocation): Promise<void> {
   const directory = githubOperationLauncherDirectory(input);
@@ -1766,8 +1755,7 @@ export async function prepareGitHubOperationLaunchers(input: {
     .join("");
   const profile = `export PATH=${shellQuote(managedPath)}\n${clearEmptyGitIdentity}`;
   const files: Record<string, string> = Object.fromEntries([
-    // Remote launchers live beneath the checkout. Pin their own package scope
-    // so an enclosing project's "type": "module" cannot reinterpret require().
+    // Pin the launcher package scope so an enclosing package cannot reinterpret require().
     ["package.json", '{"type":"commonjs"}\n'],
     ...["git", "gh"].map((name) => [name, githubLauncherSource()] as const),
     ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile] as const),
