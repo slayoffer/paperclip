@@ -124,8 +124,9 @@ async function mergeDirectoryWithBaselineInner(input: Parameters<typeof mergeDir
     // checks nanosecond metadata and hashes only files that changed meanwhile.
     if (!input.snapshots) warm = await captureDirectorySnapshot(input.targetDir,
       { ...currentOptions, cacheMetadata: true }).catch((error: NodeJS.ErrnoException) => {
-        // Another writer can rename a path during this optional scan.
-        if (["ENOENT", "ENOTDIR", "WORKSPACE_SNAPSHOT_CHANGED"].includes(error.code ?? "")) return undefined;
+        // Another writer can remove a path or change its type after lstat.
+        // Discard this optional cache and repeat the scan under the lock.
+        if (["ENOENT", "ENOTDIR", "EISDIR", "EINVAL", "WORKSPACE_SNAPSHOT_CHANGED"].includes(error.code ?? "")) return undefined;
         throw error;
       });
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {
