@@ -1741,7 +1741,8 @@ describeEmbeddedPostgres("tool gateway service", () => {
 
     const oauthGrantRefresher: NonNullable<ToolGatewayServiceOptions["oauthGrantRefresher"]> = vi.fn(async (input) => {
       if (input.forceRefresh) {
-        await secretService(db).rotate(accessSecret.id, { value: "fresh-customer-token" });
+        // Synthiq fork: the production refreshers mark an automatic token write.
+        await secretService(db).rotate(accessSecret.id, { value: "fresh-customer-token", preserveConnectionHealth: true });
       }
       return db.select().from(connectionGrants).where(eq(connectionGrants.id, input.grantId))
         .then((rows) => rows[0]!);

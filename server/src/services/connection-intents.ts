@@ -1,3 +1,4 @@
+import { sourceSlugForConnection, availableToolConnectionMethods, checkUncheckedIntentConnection } from "./connection-intent-source.js";
 import { updateAgentConfigurationInTransaction } from "./agent-configuration-transaction.js";
 import { emailChannelService } from "./email-channels.js";
 import { emailConnectionService } from "./email-connections.js";
@@ -68,29 +69,6 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function text(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function sourceSlugForApplication(application: ToolApplication | undefined) {
-  return text(application?.metadata?.sourceTemplateKey) ?? text(application?.metadata?.galleryKey);
-}
-
-function sourceSlugForConnection(
-  connection: ToolConnection,
-  applications: ReadonlyMap<string, ToolApplication>,
-) {
-  const source = text(connection.config?.sourceTemplateKey)
-    ?? text(connection.transportConfig?.sourceTemplateKey)
-    ?? sourceSlugForApplication(applications.get(connection.applicationId));
-  return source && getAppStoreDefinition(source) ? source : `connection:${connection.id}`;
-}
-
-
-function availableToolConnectionMethods(
-  app: (typeof CONNECTABLE_APP_DEFINITIONS)[number],
-) {
-  return getAvailableConnectionMethods(app).filter(
-    (method) => (method.purpose ?? "tool") === "tool" && method.transport !== "runtime_auth",
-  );
 }
 
 export function connectionIntentService(db: Db) {
@@ -969,6 +947,7 @@ export function connectionIntentService(db: Db) {
       options.bypassCurrentMembershipCheck,
     );
     const payload = connectionIntentPayloadSchema.parse(loaded.interaction.payload);
+    await checkUncheckedIntentConnection(access, loaded.issue, payload, connectionId, userId, options.canManageOrganizationGrant);
     return db.transaction(async (tx) => {
       const [task] = await tx.select().from(issues).where(and(eq(issues.id, loaded.issue.id), eq(issues.companyId, loaded.issue.companyId))).for("update");
       if (!task || task.assigneeAgentId !== payload.requestingAgentId || ["done", "cancelled"].includes(task.status)) throw conflict("Connection request no longer belongs to an active task");
@@ -1006,7 +985,7 @@ export function connectionIntentService(db: Db) {
       ) !== payload.serviceSlug) {
         throw notFound("Connection does not match this intent");
       }
-      if (selectedConnection.status !== "active" || !selectedConnection.enabled || isToolConnectionAttentionHealth(selectedConnection.healthStatus)) {
+      if (selectedConnection.status !== "active" || !selectedConnection.enabled || selectedConnection.healthStatus === "unchecked" || isToolConnectionAttentionHealth(selectedConnection.healthStatus)) {
         throw conflict("Finish and test this connection before using it for the task");
       }
 
