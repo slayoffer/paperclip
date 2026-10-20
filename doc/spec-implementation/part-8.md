@@ -146,6 +146,7 @@ Allowed states are `joined` and `left`. Endpoints require a concrete board user 
 
 - `GET /companies/:companyId/activity`
 - `GET /companies/:companyId/dashboard`
+- `GET /companies/:companyId/flow` ([board-only flow report](../company-flow.md))
 
 Dashboard payload must include:
 
