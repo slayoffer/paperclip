@@ -1,3 +1,4 @@
+export * from "./interaction-exports.js";
 // Public exports retain their declaration order across these modules.
 export * from "./exports/part-1.js";
 export * from "./exports/part-2.js";
