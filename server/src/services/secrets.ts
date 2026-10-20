@@ -1,3 +1,4 @@
+import { commitSecretRotation } from "./secret-rotation-commit.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, like, ne, notInArray, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -2526,62 +2527,9 @@ export function secretService(db: Db | DbTransaction) {
     }
 
     try {
-      // Lock and update the parent secret row before touching its version
-      // rows. A credential write-back locks the parent secret row first, then
-      // calls this function. If this transaction updated the version rows
-      // first instead, the two transactions would take their two row locks
-      // in opposite order and could deadlock. Matching the order here removes
-      // that risk: every caller now locks the parent row before the version
-      // rows, so a lock cycle between the two tables cannot form.
-      return await db.transaction(async (tx) => {
-        const updated = await tx
-          .update(companySecrets)
-          .set({
-            latestVersion: nextVersion,
-            aiSessionEpoch: input.preserveAiSessionEpoch ? secret.aiSessionEpoch : sql`${companySecrets.aiSessionEpoch} + 1`,
-            externalRef: prepared.externalRef,
-            providerConfigId,
-            lastRotatedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(companySecrets.id, secret.id),
-            // The compare-and-set guard. It matches the latest version, so a
-            // concurrent rotation that already bumped it fails this predicate.
-            input.expectedLatestVersion === undefined
-              ? undefined
-              : eq(companySecrets.latestVersion, input.expectedLatestVersion),
-          ))
-          .returning()
-          .then((rows) => rows[0] ?? null);
-
-        if (!updated) {
-          // The predicate matched no row. A supplied expected version means a
-          // concurrent rotation won the race; return the stale conflict. An
-          // unguarded rotation means the secret is gone. Neither version row
-          // has been touched yet, so there is nothing to undo here.
-          throw input.expectedLatestVersion === undefined
-            ? notFound("Secret not found")
-            : conflict(SECRET_VERSION_STALE_CONFLICT);
-        }
-
-        await tx
-          .update(companySecretVersions)
-          .set({ status: "previous" })
-          .where(and(
-            eq(companySecretVersions.secretId, secret.id),
-            ne(companySecretVersions.version, nextVersion),
-          ));
-        await tx
-          .update(companySecretVersions)
-          .set({ status: "current" })
-          .where(and(
-            eq(companySecretVersions.secretId, secret.id),
-            eq(companySecretVersions.version, nextVersion),
-          ));
-
-        return updated;
-      });
+      return await commitSecretRotation(db, { secret, input, nextVersion,
+        externalRef: prepared.externalRef, providerConfigId,
+        staleMessage: SECRET_VERSION_STALE_CONFLICT });
     } catch (error) {
       if (secret.managedMode !== "external_reference" || externalValueWrite) {
         const cleaned = await cleanupPreparedProviderWrite({

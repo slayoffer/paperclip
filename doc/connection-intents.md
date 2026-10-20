@@ -73,6 +73,18 @@ Catalog slugs remain stable. Search also returns `connection:<uuid>` for configu
 
 Task setup defaults to personal identity when supported and the requesting agent's install reach. Existing installs are additive. An OAuth callback from a task prepares the catalog without adding access. Intent completion validates the current task and identity, then adds the requesting agent’s binding and install in the resolution transaction. Callback messages do not establish authorization: the card reloads the durable server result. A blocked popup offers a new-tab fallback; closing or declining provider sign-in keeps the request retryable. Only the card's **Not now** action declines the request. Decline continuations are told to pursue alternatives and cannot immediately request the same service again.
 
+## Connection health
+
+A response above 1,000,000 bytes fails only that tool call. The gateway returns HTTP 502 with
+`mcp_remote_response_too_large`, `maxBytes`, and a hint to narrow the query. The connection keeps its health.
+Request-specific HTTP failures and JSON-RPC application errors also keep connection health unchanged.
+Authentication, transport, invalid JSON, and invalid protocol responses can change connection health.
+An expired MCP session permits an explicit retry. The gateway never repeats the original call automatically.
+
+Secret rotation marks affected tool connections as `unchecked`. This applies to references that select the latest version.
+Pinned versions and connections in other companies keep their health. Intent completion tests an unchecked connection before acceptance.
+A failed test keeps the intent pending. Existing grant, membership, assignment, and permission checks still apply.
+
 ## Verification
 
 Service and native-authority tests cover discovery, current identity, company boundaries, cross-run deduplication, additive grants and installs, permission denial, resolution atomicity, restart delivery and stale assignment. `tests/e2e/in-feed-native/playwright.config.ts` starts source `test-drive` instances with fresh data directories and a deterministic fake Codex provider plus MCP server. It exercises the real native runner and gateway; it is fixture proof, not live Notion or GitHub proof. Run with `pnpm exec playwright test -c tests/e2e/in-feed-native/playwright.config.ts`.

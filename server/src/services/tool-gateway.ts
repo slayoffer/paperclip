@@ -1,3 +1,4 @@
+import { ToolGatewayHttpError, MAX_REMOTE_MCP_RESPONSE_BYTES, responseTooLargeError, readBoundedRemoteResponse, malformedRemoteMcpResponse } from "./tool-gateway-errors.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
@@ -223,7 +224,6 @@ const ACTION_REQUEST_EXECUTION_WAIT_MS = APPROVED_EXECUTION_TIMEOUT_MS + 5_000;
 // treat an unsigned row as abandoned after this grace time from createdAt. This
 // grace must exceed the normal sign path (approval-snapshot fetch + interaction
 // create) so a live create keeps its own row.
-const MAX_REMOTE_MCP_RESPONSE_BYTES = 1_000_000;
 const ACTIVE_GATEWAY_RUN_STATUSES = new Set(["running"]);
 // A tool listing decides access for every tool in the company. The decisions
 // of one listing share a read cache, so this cap only limits how many of them
@@ -338,16 +338,7 @@ export interface ToolGatewaySession {
 
 export type ToolGatewayRuntimeSlot = ToolRuntimeSlotView;
 
-export class ToolGatewayHttpError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-    public readonly reasonCode: string,
-    public readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-  }
-}
+export { ToolGatewayHttpError } from "./tool-gateway-errors.js";
 
 interface ExecuteGatewayToolInput {
   sessionToken: string;
@@ -5622,40 +5613,6 @@ export function createToolGatewayService(
     };
   }
 
-  function responseTooLargeError() {
-    return new ToolGatewayHttpError(
-      502,
-      "Remote MCP response exceeded the gateway size limit",
-      "mcp_remote_response_too_large",
-      { maxBytes: MAX_REMOTE_MCP_RESPONSE_BYTES },
-    );
-  }
-
-  async function readBoundedRemoteResponse(
-    response: Response,
-  ): Promise<string> {
-    const contentLength = response.headers.get("content-length");
-    if (
-      contentLength &&
-      Number(contentLength) > MAX_REMOTE_MCP_RESPONSE_BYTES
-    ) {
-      throw responseTooLargeError();
-    }
-    const body = await response.text();
-    if (Buffer.byteLength(body, "utf8") > MAX_REMOTE_MCP_RESPONSE_BYTES) {
-      throw responseTooLargeError();
-    }
-    return body;
-  }
-
-  function malformedRemoteMcpResponse(): ToolGatewayHttpError {
-    return new ToolGatewayHttpError(
-      502,
-      "Remote MCP server returned a malformed tools/call response",
-      "remote_mcp_malformed_response",
-    );
-  }
-
   type McpElicitationRequest = {
     message: string;
     requestedSchema: Record<string, unknown> | null;
@@ -6187,9 +6144,9 @@ export function createToolGatewayService(
         });
       }
       if (!response.ok) {
-        // Session expiration is recoverable on an explicit retry. Marking the
-        // connection unhealthy here would hide every tool and prevent it.
-        if (!sessionExpired) {
+        // Authentication affects the connection. Other HTTP failures can affect one request.
+        // Session expiration permits an explicit retry with a new session.
+        if (response.status === 401 || response.status === 403) {
           await markRemoteConnectionHealth(connection, "error", "Remote MCP server returned an HTTP error.");
         }
         throw new ToolGatewayHttpError(
@@ -6243,11 +6200,9 @@ export function createToolGatewayService(
       }
       if (payloadRecord.error !== undefined) {
         const errorRecord = asRecord(payloadRecord.error);
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP server returned a JSON-RPC error.",
-        );
+        if ([-32700, -32600, -32601].includes(Number(errorRecord?.code))) {
+          await markRemoteConnectionHealth(connection, "error", "Remote MCP server returned a protocol error.");
+        }
         throw new ToolGatewayHttpError(
           502,
           "Remote MCP server returned an error",
@@ -6296,15 +6251,20 @@ export function createToolGatewayService(
         const failure = error.reason === "too_large" ? responseTooLargeError()
           : error.reason === "malformed_response" ? malformedRemoteMcpResponse()
           : new ToolGatewayHttpError(502, "Remote MCP server returned invalid JSON", "mcp_remote_invalid_json");
-        await markRemoteConnectionHealth(connection, "error", failure.message);
+        if (error.reason !== "too_large") {
+          await markRemoteConnectionHealth(connection, "error", failure.message);
+        }
         throw new ToolGatewayHttpError(failure.status, failure.message, failure.reasonCode, {
-          connectionId: connection.id, catalogEntryId: entry.id, execution,
+          ...failure.details, connectionId: connection.id, catalogEntryId: entry.id, execution,
         });
       }
       if (error instanceof RailwayError) {
         throw new ToolGatewayHttpError(error.status, error.message, error.code, { connectionId: connection.id, catalogEntryId: entry.id, execution });
       }
       if (error instanceof ToolGatewayHttpError) {
+        if (error.reasonCode === "remote_mcp_malformed_response") {
+          await markRemoteConnectionHealth(connection, "error", error.message);
+        }
         throw new ToolGatewayHttpError(
           error.status,
           error.message,
