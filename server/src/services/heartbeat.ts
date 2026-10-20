@@ -1,3 +1,4 @@
+import { recordCurrentRunRuntimeProgress, publishHeartbeatRunRuntimeProgress } from "./heartbeat-runtime-progress.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -8512,62 +8513,6 @@ function decorateHeartbeatRunRuntimeStatus<
   };
 }
 
-function publishHeartbeatRunRuntimeProgress(status: {
-  companyId: string;
-  runId: string;
-  agentId: string;
-  issueId: string | null;
-  phase: HeartbeatRunStatusPhase;
-  message: string;
-  updatedAt: Date;
-  currentToolName?: string | null;
-  lastAssistantSnippet?: string | null;
-  lastEventAt?: Date | null;
-}) {
-  publishLiveEvent({
-    companyId: status.companyId,
-    type: "heartbeat.run.progress",
-    payload: {
-      runId: status.runId,
-      agentId: status.agentId,
-      issueId: status.issueId,
-      phase: status.phase,
-      message: status.message,
-      currentToolName: status.currentToolName ?? null,
-      lastAssistantSnippet: status.lastAssistantSnippet ?? null,
-      lastEventAt: (status.lastEventAt ?? status.updatedAt).toISOString(),
-      updatedAt: status.updatedAt.toISOString(),
-    },
-  });
-}
-
-function recordHeartbeatRunRuntimeProgress(
-  run: Pick<
-    typeof heartbeatRuns.$inferSelect,
-    "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-  >,
-  update: RuntimeStatusUpdate,
-  issueId: string | null,
-) {
-  if (!isHeartbeatRunRuntimeStatusActive(run.status)) return null;
-  const status = setHeartbeatRunRuntimeStatus({
-    companyId: run.companyId,
-    issueId,
-    agentId: run.agentId,
-    runId: run.id,
-    phase: update.phase as HeartbeatRunStatusPhase,
-    message: update.message,
-    currentToolName: readNonEmptyString(update.currentToolName) ?? null,
-    lastAssistantSnippet:
-      readNonEmptyString(update.lastAssistantSnippet) ?? null,
-    lastEventAt: update.lastEventAt ? new Date(update.lastEventAt) : new Date(),
-  });
-  if (!status) return null;
-
-  publishHeartbeatRunRuntimeProgress(status);
-  return status;
-}
-
 function sanitizeLiveRunProgressText(
   value: string,
   maxChars: number,
@@ -10848,25 +10793,11 @@ export function heartbeatService(
   }
 
   async function recordCurrentHeartbeatRunRuntimeProgress(
-    run: Pick<
-      typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-    >,
+    run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "status">,
     update: RuntimeStatusUpdate,
     issueId: string | null,
   ) {
-    if (!isHeartbeatRunRuntimeStatusActive(run.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    const currentRun = await getRun(run.id);
-    if (!currentRun || !isHeartbeatRunRuntimeStatusActive(currentRun.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    return recordHeartbeatRunRuntimeProgress(currentRun, update, issueId);
+    return recordCurrentRunRuntimeProgress(db, run, update, issueId);
   }
 
   async function getRunLogAccess(runId: string) {

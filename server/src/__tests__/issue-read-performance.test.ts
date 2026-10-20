@@ -1,3 +1,4 @@
+import { recordCurrentRunRuntimeProgress } from "../services/heartbeat-runtime-progress.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import express from "express";
@@ -162,6 +163,20 @@ suite("issue read projections with large run payloads", () => {
     await expect(captureRunIdentity(db, { companyId, agentId, runId, includeContext: false })).rejects.toThrow("Run task identity is invalid");
     await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, conversationMode: true,
       padding: randomBytes(30000).toString("base64") } }).where(eq(heartbeatRuns.id, runId));
+  });
+
+  it("reads scalar state for runtime progress and refuses terminal runs", async () => {
+    queries.length = 0;
+    const input = { id: runId, companyId, agentId, status: "running" };
+    expect(await recordCurrentRunRuntimeProgress(db, input,
+      { phase: "config_sync", message: "Reading fixture state" }, issueId)).not.toBeNull();
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain('"result_json"');
+    expect(queries[0]).not.toContain('"context_snapshot"');
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runId));
+    expect(await recordCurrentRunRuntimeProgress(db, input,
+      { phase: "config_sync", message: "Late fixture update" }, issueId)).toBeNull();
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, runId));
   });
 
   it("reports HTTP latency with eight concurrent run readers", async () => {

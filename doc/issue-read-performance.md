@@ -14,7 +14,7 @@ The full read shares agent data within one request. The first agent lookup reads
 the company agents and monthly costs in two queries. Later lookups use that
 batch. The batch does not persist between requests or cross database connections.
 
-Run authentication, identity capture, event binding, and watchdog reads use
+Run authentication, identity capture, event binding, runtime progress, and watchdog reads use
 narrow projections. Authentication uses stored cancellation and conversation
 flags. Credential operations can still request the context they need.
 The activity query reads stored issue and task identifiers through the
