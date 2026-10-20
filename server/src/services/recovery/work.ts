@@ -11,6 +11,13 @@ type Entry = { id: string; companyId: string; dueAt: number };
 type Scope = { companyId: string; issueId: string; onDeferredDeadline: (at: number) => void };
 const PAGE_SIZE = 100;
 
+function requireSuccessfulRecoverySweep(result: unknown) {
+  if (result && typeof result === "object" && "failed" in result &&
+      typeof result.failed === "number" && result.failed > 0) {
+    throw new Error("Issue recovery sweep has unresolved failures");
+  }
+}
+
 export function registerIssueRecoveryWork(
   db: Db,
   coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
@@ -100,10 +107,15 @@ export function registerIssueRecoveryWork(
       },
     }, canRun);
   }
-  const assignments = register(DELIVERY_QUEUES.strandedAssignments, ["todo", "in_progress", "in_review"], owner.stranded);
-  const orphanBlockers = registerCompany(DELIVERY_QUEUES.orphanBlockers, "blockers", async scope => { await owner.orphanBlockers(scope); });
+  const assignments = register(DELIVERY_QUEUES.strandedAssignments, ["todo", "in_progress", "in_review"], async scope => {
+    requireSuccessfulRecoverySweep(await owner.stranded(scope));
+  });
+  const orphanBlockers = registerCompany(DELIVERY_QUEUES.orphanBlockers, "blockers", async scope => {
+    requireSuccessfulRecoverySweep(await owner.orphanBlockers(scope));
+  });
   const recoveryActions = registerCompany(DELIVERY_QUEUES.activeRecoveryActions, "actions", async scope => {
     const result = await owner.recoveryActions(scope);
+    requireSuccessfulRecoverySweep(result);
     // A stall wake that failed to enqueue must be retried, not dropped with the entry.
     const failures = result && typeof result === "object" && "blockerStallWakeFailures" in result
       ? Number(result.blockerStallWakeFailures) : 0;
