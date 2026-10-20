@@ -123,6 +123,13 @@ export interface AdapterWorkspaceRealization {
   authoritativeRoot: string;
   pathAliases: AdapterWorkspacePathAlias[];
   outboundRestorePaths: string[];
+  /**
+   * Host folder for this run's adapter runtime assets. Set only for an SSH
+   * `in_place` realization: the assets then stay outside the worktree, and the
+   * adapter removes the folder at run end. See
+   * `resolveAdapterExecutionTargetInPlaceRuntimeRootDir`.
+   */
+  runtimeRoot?: string | null;
 }
 
 interface AdapterExecutionTargetWorkspaceMetadata {
@@ -502,6 +509,24 @@ export function adapterExecutionTargetRemoteCwd(
   return target?.kind === "remote" ? target.remoteCwd : localCwd;
 }
 
+/**
+ * Return the host folder for this run's adapter runtime assets when the target
+ * is an SSH `in_place` realization with a per-run runtime root. Pass the result
+ * as `runtimeRootDir` to `prepareAdapterExecutionTargetRuntime`. Return null for
+ * every other target: the adapter then keeps the default runtime root.
+ */
+export function resolveAdapterExecutionTargetInPlaceRuntimeRootDir(
+  target: AdapterExecutionTarget | null | undefined,
+  adapterKey: string,
+): string | null {
+  if (!target || target.kind !== "remote" || target.transport !== "ssh") return null;
+  const realization = target.workspaceRealization;
+  if (realization?.mode !== "in_place") return null;
+  const runtimeRoot = realization.runtimeRoot?.trim();
+  if (!runtimeRoot || !path.posix.isAbsolute(runtimeRoot)) return null;
+  return path.posix.join(runtimeRoot, adapterKey);
+}
+
 export function overrideAdapterExecutionTargetRemoteCwd(
   target: AdapterExecutionTarget | null | undefined,
   remoteCwd: string | null | undefined,
@@ -510,7 +535,10 @@ export function overrideAdapterExecutionTargetRemoteCwd(
   if (!target || target.kind !== "remote" || !nextRemoteCwd) {
     return target;
   }
-  if (target.remoteCwd === nextRemoteCwd) {
+  if (
+    target.remoteCwd === nextRemoteCwd &&
+    (target.transport !== "ssh" || target.spec.remoteCwd === nextRemoteCwd)
+  ) {
     return target;
   }
   if (target.transport === "ssh") {
@@ -1429,6 +1457,12 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   timeoutSec?: number;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /**
+   * SSH only: a host folder that belongs to this run alone, for the runtime
+   * assets. `restoreWorkspace` removes it. See
+   * `resolveAdapterExecutionTargetInPlaceRuntimeRootDir`.
+   */
+  runtimeRootDir?: string | null;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
   workspaceBaseline?: DirectorySnapshot;
@@ -1477,6 +1511,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       workspaceLocalDir: input.workspaceLocalDir,
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,
+      runtimeRootDir: input.runtimeRootDir,
       workspaceFileMode: input.workspaceFileMode,
       workspaceExclude: input.workspaceExclude,
       assets: input.assets,

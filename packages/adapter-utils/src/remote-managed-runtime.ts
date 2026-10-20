@@ -118,6 +118,13 @@ async function prepareRemoteManagedRuntimeInner(input: {
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /**
+   * Explicit host folder for the runtime assets of this run. Use it only for a
+   * folder that belongs to this run alone (SSH `in_place`): `restoreWorkspace`
+   * removes it after the asset restore hooks ran. Without it, the root stays
+   * `<workspaceRemoteDir>/.paperclip-runtime/<adapterKey>` and nothing removes it.
+   */
+  runtimeRootDir?: string | null;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
   assets?: RemoteManagedRuntimeAsset[];
@@ -138,7 +145,23 @@ async function prepareRemoteManagedRuntimeInner(input: {
         "workspace",
       )
     : baseWorkspaceRemoteDir;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const explicitRuntimeRootDir = input.runtimeRootDir?.trim() || null;
+  if (explicitRuntimeRootDir && !path.posix.isAbsolute(explicitRuntimeRootDir)) {
+    throw new Error(`Remote runtime root is not an absolute path: ${explicitRuntimeRootDir}`);
+  }
+  const runtimeRootDir = explicitRuntimeRootDir ??
+    path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  // Remove the per-run runtime folder. Run it after the asset restore hooks,
+  // because a hook can read a file from the folder (Codex auth copy-back).
+  // The parent `runs/<runId>` folder is removed only when it is empty.
+  const removeExplicitRuntimeRoot = async () => {
+    if (!explicitRuntimeRootDir) return;
+    await runSshCommand(
+      input.spec,
+      `rm -rf -- ${shellQuote(explicitRuntimeRootDir)} && (rmdir -- ${shellQuote(path.posix.dirname(explicitRuntimeRootDir))} 2>/dev/null || true)`,
+      { timeoutMs: 60_000 },
+    );
+  };
 
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
@@ -199,6 +222,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
         repositories: repositoryBaselines,
       });
     }
+    await removeExplicitRuntimeRoot().catch(() => undefined);
     throw error;
   }
 
@@ -267,11 +291,18 @@ async function prepareRemoteManagedRuntimeInner(input: {
           repositories: repositoryBaselines,
         });
       }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+      try {
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } finally {
+        // Cleanup is best effort: a stale run folder must not fail the run.
+        await removeExplicitRuntimeRoot().catch((error) => {
+          console.warn(`[paperclip] Failed to remove run runtime folder ${explicitRuntimeRootDir}: ${String(error)}`);
         });
       }
     }),

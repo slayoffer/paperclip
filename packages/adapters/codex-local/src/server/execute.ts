@@ -15,6 +15,7 @@ import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
+  resolveAdapterExecutionTargetInPlaceRuntimeRootDir,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesPaperclipBridge,
@@ -823,6 +824,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 ? targetWorkspaceRealization.authoritativeRoot
                 : undefined,
             syncWorkspace: targetWorkspaceRealization?.mode !== "in_place",
+            // SSH in_place: keep CODEX_HOME in a per-run host folder outside the
+            // shared worktree; the restore step removes it.
+            runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "codex"),
             installCommand: SANDBOX_INSTALL_COMMAND,
             detectCommand: command,
             onProgress: (line) => onLog("stdout", line),

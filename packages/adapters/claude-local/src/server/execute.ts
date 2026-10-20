@@ -8,6 +8,7 @@ import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
+  resolveAdapterExecutionTargetInPlaceRuntimeRootDir,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesManagedHome,
@@ -606,11 +607,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? config.managedAiConnection ? sharedClaudeConfigDir : await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
+  // An `in_place` realization runs in the authoritative workspace root itself,
+  // so the run skips the workspace copy (same contract as codex-local).
+  const targetWorkspaceRealization = executionTarget?.workspaceRealization ?? null;
+  const workspaceInPlace = targetWorkspaceRealization?.mode === "in_place";
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
           "stdout",
-          `[paperclip] Syncing workspace and Claude runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+          `[paperclip] Syncing ${workspaceInPlace ? "Claude runtime assets" : "workspace and Claude runtime assets"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
         return await prepareAdapterExecutionTargetRuntime({
           runId,
@@ -618,6 +623,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           adapterKey: "claude",
           timeoutSec,
           workspaceLocalDir: cwd,
+          workspaceRemoteDir: workspaceInPlace ? targetWorkspaceRealization?.authoritativeRoot : undefined,
+          syncWorkspace: !workspaceInPlace,
+          // SSH in_place: keep the runtime assets in a per-run host folder
+          // outside the shared worktree; the restore step removes it.
+          runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "claude"),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           onProgress: (line) => onLog("stdout", line),

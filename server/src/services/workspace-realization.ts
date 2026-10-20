@@ -197,6 +197,7 @@ export function buildWorkspaceRealizationRecord(input: {
     input.request.source.localPath;
   const pathAliases = readPathAliases(realizationMetadata.pathAliases ?? realizationMetadata.workspaceAliases);
   const outboundRestorePaths = readStringArray(realizationMetadata.outboundRestorePaths);
+  const runtimeRoot = mode === "in_place" ? readString(realizationMetadata.runtimeRoot) : null;
 
   const provider =
     input.lease.provider ??
@@ -217,6 +218,7 @@ export function buildWorkspaceRealizationRecord(input: {
     authoritativeRoot,
     pathAliases,
     outboundRestorePaths,
+    ...(runtimeRoot ? { runtimeRoot } : {}),
     provider,
     environmentId: input.environment.id,
     leaseId: input.lease.id,
