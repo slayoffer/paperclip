@@ -261,6 +261,17 @@ vi.mock("../services/native-runtime/native-safe-replacement.js", () => ({
   reconcileSafeNativeReplacements: vi.fn(async () => ({ scanned: 0, scheduled: 0 })),
 }));
 
+// The pull queue imports the issue service, which reads table columns that
+// the @paperclipai/db mock above does not define. Startup only wires it.
+vi.mock("../services/pull-queue.js", () => ({
+  createHeartbeatPullQueue: vi.fn(() => ({
+    notify: vi.fn(async () => undefined),
+    reconcile: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+  })),
+  isPullQueueSignal: vi.fn(() => false),
+}));
+
 vi.mock("../config.js", () => ({
   loadConfig: loadConfigMock,
 }));
@@ -867,6 +878,27 @@ describe("startServer feedback export wiring", () => {
 
     expect(heartbeatServiceMock.reconcileHotRestartAdoption).toHaveBeenCalledTimes(1);
     expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the server up and runs later steps when a startup reconcile step throws", async () => {
+    // SYNA-2368: a 422 blocking-cycle error from the stranded-issue reconcile
+    // escaped startup recovery, exited the process and crash-looped it.
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      heartbeatSchedulerEnabled: true,
+      heartbeatSchedulerIntervalMs: 30000,
+    }));
+    heartbeatServiceMock.reconcileStrandedAssignedIssues.mockRejectedValueOnce(
+      new Error("Blocking relations cannot contain cycles"),
+    );
+
+    await expect(startServer()).resolves.toBeDefined();
+
+    expect(heartbeatServiceMock.reconcileStrandedAssignedIssues).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.reconcileResolvedDependencyWakes).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.reconcileTaskWatchdogs).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.scanSilentActiveRuns).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.sweepStaleIssueLocks).toHaveBeenCalledTimes(1);
+    expect(fakeServer.close).not.toHaveBeenCalled();
   });
 
   it("closes the bound listener when native startup recovery fails", async () => {
