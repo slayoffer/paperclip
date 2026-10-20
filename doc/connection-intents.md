@@ -79,8 +79,24 @@ New task setup must include the requesting agent, even when the human chooses a 
 
 Agent installation changes made by finishing setup use the same agent-edit checks as direct installation changes. Explicit task audiences are checked when saved and again at OAuth completion. Additive completion retains existing installations, including agents using a separate narrow profile; retaining an installation does not add those agents to the app's broader permission profile.
 
+## Connection health
+
+A response above 1,000,000 bytes fails only that tool call. The gateway returns HTTP 502 with
+`mcp_remote_response_too_large`, `maxBytes`, and a hint to narrow the query. The connection keeps its health.
+Request-specific HTTP failures and JSON-RPC application errors also keep connection health unchanged.
+An HTTP 2xx body that is not valid JSON or not a valid JSON-RPC response fails only that tool call. The next call starts a fresh MCP session.
+Authentication, transport, and JSON-RPC protocol errors can change connection health.
+An expired MCP session permits an explicit retry. The gateway never repeats the original call automatically.
+
+Secret rotation marks affected tool connections as `unchecked`. This applies to references that select the latest version.
+An automatic OAuth token refresh is not a credential change. It keeps connection health, so discovery keeps the tools.
+Pinned versions and connections in other companies keep their health. Intent completion tests an unchecked connection before acceptance.
+A failed test keeps the intent pending. Existing grant, membership, assignment, and permission checks still apply.
+
 ## Verification
 
 Service and native-authority tests cover discovery, current identity, company boundaries, cross-run deduplication, additive grants and installs, permission denial, resolution atomicity, restart delivery and stale assignment. `tests/e2e/in-feed-native/playwright.config.ts` starts source `test-drive` instances with fresh data directories and a deterministic fake Codex provider plus MCP server. It exercises the real native runner and gateway; it is fixture proof, not live Notion or GitHub proof. Run with `pnpm exec playwright test -c tests/e2e/in-feed-native/playwright.config.ts`.
 
 Offline Storybook examples live in `ui/storybook/stories/connection-setup/in-feed-connections.stories.tsx`. Build with `pnpm --filter @paperclipai/ui build-storybook`, then run `pnpm exec playwright test -c tests/storybook-visual/in-feed-connections.config.ts`. The suite checks every independently addressable story in both themes, catches play-function failures, and saves screenshots. Live provider acceptance additionally requires a model credential and a test workspace/account; do not describe fixture results or local-trusted testing as authenticated/cloud acceptance.
+
+The health test uses the authorized identity grant selected for completion. Dedicated agent grants retain their credentials during health tests and refresh. The lookup checks the grant company, connection, and active status again.

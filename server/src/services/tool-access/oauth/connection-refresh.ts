@@ -252,6 +252,7 @@ const oauthRefreshFlights = new Map<string, Promise<unknown>>();
         label: "OAuth refresh token",
         value: token.refreshToken,
         actor,
+        preserveConnectionHealth: true,
       });
     }
     const accessRef = await createOrRotateOAuthSecret({
@@ -261,6 +262,7 @@ const oauthRefreshFlights = new Map<string, Promise<unknown>>();
       label: "OAuth access token",
       value: token.accessToken,
       actor,
+      preserveConnectionHealth: true,
     });
     const nextCredentialSecretRefs = [
       ...connection.credentialSecretRefs.filter(

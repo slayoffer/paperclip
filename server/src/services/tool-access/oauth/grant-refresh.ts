@@ -202,13 +202,13 @@ export function createOAuthGrantRefresh(db: Db, { now, store, leases, currentClo
               const txSecrets = secretService(tx);
               await txSecrets.rotate(
                 accessRef.secretId,
-                { value: credentials.accessToken },
+                { value: credentials.accessToken, preserveConnectionHealth: true },
                 actorForSecret(credentialActor),
               );
               if (credentials.refreshToken) {
                 await txSecrets.rotate(
                   refreshRef.secretId,
-                  { value: credentials.refreshToken },
+                  { value: credentials.refreshToken, preserveConnectionHealth: true },
                   actorForSecret(credentialActor),
                 );
               }
@@ -458,6 +458,7 @@ export function createOAuthGrantRefresh(db: Db, { now, store, leases, currentClo
             label: "OAuth refresh token",
             value: token.refreshToken,
             actor: credentialActor,
+            preserveConnectionHealth: true,
             existingRefs: grant.credentialSecretRefs,
             ownerUserId:
               grant.kind === "user"
@@ -472,6 +473,7 @@ export function createOAuthGrantRefresh(db: Db, { now, store, leases, currentClo
           label: "OAuth access token",
           value: token.accessToken,
           actor: credentialActor,
+          preserveConnectionHealth: true,
           existingRefs: grant.credentialSecretRefs,
           ownerUserId:
             grant.kind === "user"
