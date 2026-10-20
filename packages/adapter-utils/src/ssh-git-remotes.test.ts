@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -34,7 +34,7 @@ function shell(script: string, stdin: Buffer | string = "", cwd?: string) {
   });
 }
 async function git(cwd: string, args: string[]) {
-  return (await runLocalGit(cwd, args)).stdout.trim();
+  return (await runLocalGit(cwd, args, { maxBuffer: 1024 * 1024 })).stdout.trim();
 }
 
 const roots: string[] = [];
@@ -108,6 +108,11 @@ describe("SSH workspace publication baselines", { timeout: 30_000 }, () => {
     expect(await git(f.copied, ["symbolic-ref", "refs/remotes/origin/HEAD"])).toBe("refs/remotes/origin/develop");
     expect(await git(f.copied, ["rev-parse", "origin/main"])).toBe(f.baseline);
     expect(await git(f.copied, ["rev-parse", "origin/develop"])).toBe(f.historical);
+    await git(f.source, ["update-ref", "--no-deref", "refs/remotes/origin/HEAD", f.head]);
+    await copy(f.source, f.copied);
+    expect(await git(f.copied, ["rev-parse", "origin/HEAD"])).toBe(f.head);
+    expect(await git(f.copied, ["rev-parse", "origin/develop"])).toBe(f.historical);
+    await expect(git(f.copied, ["symbolic-ref", "refs/remotes/origin/HEAD"])).rejects.toThrow();
   });
 
   it("copies a repository without remote references", async () => {
@@ -118,12 +123,24 @@ describe("SSH workspace publication baselines", { timeout: 30_000 }, () => {
     expect(await git(f.copied, ["rev-parse", "HEAD"])).toBe(f.head);
     expect(await git(f.copied, ["for-each-ref", "--format=%(refname)", "refs/remotes/"])).toBe("");
   });
+
+  it("copies many remote references without a large shell argument", async () => {
+    const f = await fixture();
+    const refs = Array.from({ length: 1000 }, (_, index) =>
+      `refs/remotes/origin/${"long-branch-".repeat(15)}${index}`);
+    const updates = refs.map((ref) => `update ${ref} ${f.baseline}\n`).join("");
+    expect((await shell("git update-ref --stdin", updates, f.source)).code).toBe(0);
+    await copy(f.source, f.copied);
+    expect(await git(f.copied, ["rev-parse", refs.at(-1)!])).toBe(f.baseline);
+    const imported = await git(f.copied, ["for-each-ref", "--format=%(refname)", "refs/remotes/"]);
+    expect(imported.split("\n")).toHaveLength(1003);
+  });
 });
 
 // Run with the installed, unchanged CodeGuard hook when it is available.
 // CI still runs the transport regressions above without operator tools.
 const hook = process.env.PAPERCLIP_TEST_PRE_PUSH_HOOK ?? path.resolve(".git/hooks/pre-push");
-const hookAvailable = existsSync(hook) && existsSync("/usr/local/bin/gitleaks");
+const hookAvailable = existsSync(hook) && spawnSync("gitleaks", ["version"], { stdio: "ignore" }).status === 0;
 it.skipIf(!hookAvailable)("the unchanged publication hook scans one candidate and rejects a new test secret", async () => {
   const f = await fixture();
   // The historical test credential must not enter the candidate range.

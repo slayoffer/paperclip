@@ -88,8 +88,7 @@ async function importGitWorkspaceToSsh(input: {
         const [name, target] = line.split("\t");
         return { name: name!, target: target || null };
       });
-    const directRefs = remoteRefs.filter((ref) => !ref.target);
-    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef, ...directRefs.map((ref) => ref.name)], {
+    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef, "--remotes"], {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
@@ -111,9 +110,15 @@ async function importGitWorkspaceToSsh(input: {
           `{ git -C ${shellQuote(input.remoteDir)} remote set-url origin ${shellQuote(originUrl)} >/dev/null 2>&1 || git -C ${shellQuote(input.remoteDir)} remote add origin ${shellQuote(originUrl)} >/dev/null 2>&1; } || true`,
         ]
         : []),
-      `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" ${[tempRef, ...directRefs.map((ref) => ref.name)].map((ref) => shellQuote(`${ref}:${ref}`)).join(" ")} >/dev/null`,
-      // Restore symbolic refs separately. Fetching through an old origin/HEAD
-      // could otherwise overwrite its previous target in a reused workspace.
+      // Remove old symbolic destinations before the wildcard fetch. Fetching
+      // through origin/HEAD could overwrite its previous target on reuse.
+      `for ref in $(git -C ${shellQuote(input.remoteDir)} for-each-ref --format='%(refname)' refs/remotes/); do`,
+      `  if git -C ${shellQuote(input.remoteDir)} symbolic-ref -q "$ref" >/dev/null; then`,
+      `    git -C ${shellQuote(input.remoteDir)} symbolic-ref --delete "$ref"`,
+      "  fi",
+      "done",
+      `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" '${tempRef}:${tempRef}' ${remoteRefs.length ? "'+refs/remotes/*:refs/remotes/*'" : ""} >/dev/null`,
+      // Bundles advertise symbolic refs as direct refs. Restore their targets.
       ...remoteRefs.filter((ref) => ref.target).map((ref) =>
         `git -C ${shellQuote(input.remoteDir)} symbolic-ref ${shellQuote(ref.name)} ${shellQuote(ref.target!)} >/dev/null`),
       input.snapshot.branchName
