@@ -1,4 +1,12 @@
 import {
+  isTerminalIssueStatus,
+  interactionNotFoundError,
+  interactionIssueClosedError,
+  interactionAlreadyResolvedError,
+  interactionTerminalError,
+} from "./issue-thread-interactions-state.js";
+import { createCompanyInteractionReader } from "./issue-thread-interactions-company.js";
+import {
   currentContinuationOrigins,
   deliveredContinuationCommentIds,
 } from "./execution-continuation.js";
@@ -759,60 +767,6 @@ async function touchIssue(db: IssueTouchDb, issueId: string) {
     .update(issues)
     .set({ updatedAt: new Date() })
     .where(eq(issues.id, issueId));
-}
-
-function isTerminalIssueStatus(status: string) {
-  return status === "done" || status === "cancelled";
-}
-
-function interactionNotFoundError() {
-  return notFound("Interaction not found", { code: "interaction_not_found" });
-}
-
-function interactionIssueClosedError() {
-  return issueThreadInteractionResolutionError(
-    409,
-    "interaction_issue_closed",
-    "Interaction is no longer actionable because the issue is closed",
-  );
-}
-
-function interactionAlreadyResolvedError() {
-  return issueThreadInteractionResolutionError(
-    409,
-    "interaction_already_resolved",
-    "Interaction has already been resolved",
-  );
-}
-
-function interactionTerminalError(row: { status: string; result?: unknown }) {
-  const result =
-    row.result && typeof row.result === "object" && !Array.isArray(row.result)
-      ? (row.result as unknown as Record<string, unknown>)
-      : null;
-  if (result?.outcome === "stale_target") {
-    return issueThreadInteractionResolutionError(
-      409,
-      "interaction_stale_target",
-      "Interaction target is stale",
-    );
-  }
-  if (
-    result?.outcome === "superseded_by_comment" ||
-    result?.outcome === "superseded_by_newer_request"
-  ) {
-    return issueThreadInteractionResolutionError(
-      409,
-      "interaction_superseded",
-      "Interaction has been superseded",
-    );
-  }
-  if (result?.outcome === "issue_closed") return interactionIssueClosedError();
-  return issueThreadInteractionResolutionError(
-    409,
-    "interaction_already_resolved",
-    "Interaction has already been resolved",
-  );
 }
 
 function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
@@ -3029,6 +2983,10 @@ export function issueThreadInteractionService(
         woken,
       };
     },
+    listForCompany: createCompanyInteractionReader(db, {
+      hydrateInteraction, isTerminalIssueStatus, buildAdministrativeOutcomeResult, withAcceptanceReadiness,
+    }),
+
     listForIssue: async (issueId: string) => {
       const [rows, issue] = await Promise.all([
         db
