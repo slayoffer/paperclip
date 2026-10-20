@@ -7,6 +7,7 @@ import {
   recoveryObservabilityService,
 } from "../services/recovery-observability.js";
 import { assertCompanyAccess } from "./authz.js";
+import { companyFlowRoutes } from "./company-flow.js";
 
 function parsePositiveNumber(
   value: unknown,
@@ -21,6 +22,7 @@ function parsePositiveNumber(
 
 export function dashboardRoutes(db: Db) {
   const router = Router();
+  router.use(companyFlowRoutes(db));
   const svc = dashboardService(db);
   const recoveryObservability = recoveryObservabilityService(db);
 

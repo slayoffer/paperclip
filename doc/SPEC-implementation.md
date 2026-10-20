@@ -11,6 +11,10 @@ Source inputs: `GOAL.md`, `PRODUCT.md`, `SPEC.md`, `DATABASE.md`, current monore
 This document is the concrete, build-ready V1 contract.
 When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
+The Synthiq fork provides an optional [guarded pull queue](pull-queue.md).
+`PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
+The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
+
 ## 2. V1 Outcomes
 
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
@@ -745,74 +749,8 @@ administrator remediation rather than promising a nonexistent approval step.
 
 ### 9.8.1 Issue-thread interaction resolver contract
 
-Interactions coordinate work. They grant no authority. Resolver policy defaults to
-`anyone`. Restrictions require explicit configuration. See the
-[answer preconditions](interaction-resolution.md).
-
-Question, confirmation, checkbox confirmation, and item verdict cards stay pending
-when a user sends an ordinary task comment. Their `supersedeOnUserComment` flag
-defaults to `false`. A creator may set it to `true` when a comment should replace
-the pending request, as the opening onboarding question does.
-
-Canonical resolver policies are:
-
-- `anyone`: any authenticated actor in the interaction's company who can read the
-  issue and use the normal resolution route. For agents this includes the creator
-  agent and the creating/source run.
-- `not_creator`: the explicit independent-review policy. It excludes the creator
-  agent and creating/source run while otherwise using the ordinary agent resolver
-  path.
-- `human_only`: only an authorized human/board actor may resolve the interaction.
-
-`board_or_agents` and `board_only` are deprecated migration and API-input aliases.
-For new writes they normalize to `anyone` and `human_only`, respectively. API reads
-return canonical requested/effective policies, compatibility aliases, and immutable
-provenance. The persisted provenance is `explicit`, `inherited`, or
-`legacy_inherited_restriction`; the effective-policy source is `requested`,
-`company_cap`, or `governed_action`.
-
-Historical rows predate explicit-vs-inherited provenance. Migration must never
-silently widen an ambiguous pending card: legacy `board_or_agents` rows retain the
-old creator-excluding behavior as canonical `not_creator`, legacy `board_only` rows
-become `human_only`, and both are marked `legacy_inherited_restriction`. Resolved
-outcomes and resolver attribution are immutable.
-
-An explicit named agent or user addressee and a company-configured cap may narrow
-the effective audience. Only the exact named addressee may resolve an addressed
-interaction; a human does not override a user addressee. Explicit user recipients
-must exist and be authorized to respond in the issue's company before creation.
-Ordinary Agent Chat questions derive their user recipient from the persisted
-conversation owner. A conflicting explicit user recipient is rejected; IDs are
-never guessed or repaired. Ordinary task questions keep optional addressing.
-A cap never widens the requested audience. Tool-action confirmations and
-other hard-governed action cards remain `human_only` (or move to the formal approval
-system) regardless of a requested open audience.
-
-Surfaces that offer a resolution must state the effective audience before the
-operator acts, from server metadata rather than a client-side policy inference.
-Issue-thread cards read it from the interaction snapshot; attention rows read it
-from the feed item's `resolverAudience` (canonical requested/effective policy,
-effective-policy source, provenance, and the addressee/creator identities the
-evaluator compares against), because a collapsed row carries decision verbs
-before the interaction itself is fetched. A failed resolution keeps the server's
-denial reason in visible, assertively announced feedback and names who may
-respond; an audience denial is permanent, so it must not degrade to a retry
-prompt. Neither surface may enable or disable a control on its own authority.
-
-Every resolution remains company-scoped, run-attributed for agent actors,
-low-trust/task-bridge contained, target-current, and exact-once. Target staleness,
-supersession, continuation idempotency, and activity attribution remain mandatory.
-An open audience is not an uncapped one: when an agent run resolves an interaction
-on an issue other than its own source issue, the resolution is a cross-issue
-mutation and consumes the per-run cross-issue influence budget in §9.3, charged
-after audience authorization and before the interaction mutation, child tasks,
-continuation, tool action, or wake. Same-issue resolutions and board/user
-resolutions are outside that counter.
-Accepting or answering an interaction records a response only: suggested-task
-creation, provider/tool calls, deployment, spend, hiring, secrets, execution-policy
-decisions, and every other downstream effect must re-run its own authorization and
-approval checks. Mislabeling a governed action as an open interaction grants no
-downstream capability.
+See [Issue-thread interactions](issue-thread-interactions.md) for read routes and resolver rules.
+See [Answer preconditions](interaction-resolution.md) for revision and retry rules.
 
 ## 9.9 Task Watchdog Authority Contract
 
@@ -1209,6 +1147,7 @@ Allowed states are `joined` and `left`. Endpoints require a concrete board user 
 
 - `GET /companies/:companyId/activity`
 - `GET /companies/:companyId/dashboard`
+- `GET /companies/:companyId/flow` ([board-only flow report](company-flow.md))
 
 Dashboard payload must include:
 
@@ -1217,13 +1156,10 @@ Dashboard payload must include:
 - month-to-date spend and budget utilization
 - pending approvals count
 
-The dashboard agent cards show each linked task at most once. The server selects
-distinct task cards from bounded active and recent run samples before it applies
-the dashboard card limit. When multiple runs belong to one task, an active run
-takes precedence over completed runs.
-Runs without a linked task remain separate cards. The dashboard keeps the
-count of additional distinct cards in its link to the live runs page, which
-can show every run.
+Dashboard cards show each task once. The server selects distinct tasks from bounded
+active and recent run samples before applying the card limit. Active runs take
+precedence over completed runs. Taskless runs remain separate cards. The live runs
+link counts additional distinct cards and opens the complete list.
 
 ## 10.10 Error Semantics
 

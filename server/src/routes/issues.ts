@@ -4,6 +4,8 @@ import { persistInteractionResolutionRouteEffects } from "../services/interactio
 import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
 import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
 import { secretProposalExecutionErrorCode, readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
+import { registerCompanyInteractionReads } from "./company-interaction-reads.js";
+import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -8233,27 +8235,6 @@ export function issueRoutes(
     res.json(result);
   });
 
-  // Exact-id card lookup: which issue owns this interaction. Lets a client open a card from its id without
-  // scanning issues. The response is a fixed v1 shape; unknown, foreign-company and unreadable ids are all 404.
-  router.get("/companies/:companyId/interaction-locations/:interactionId", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    const interactionId = req.params.interactionId as string;
-    assertCompanyAccess(req, companyId);
-    if (!isUuidLike(interactionId)) {
-      res.status(404).json({ error: "Interaction not found" });
-      return;
-    }
-    const interaction = await issueThreadInteractionService(db).getById(interactionId);
-    if (!interaction || interaction.companyId !== companyId) {
-      res.status(404).json({ error: "Interaction not found" });
-      return;
-    }
-    const issue = await getAccessibleResource(req, res, getIssueById(req, interaction.issueId), "Interaction not found");
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    res.json({ version: 1, companyId, interactionId: interaction.id, issueId: issue.id });
-  });
-
   router.post(
     "/companies/:companyId/labels",
     validate(createIssueLabelSchema),
@@ -15818,19 +15799,19 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/interactions", async (req, res) => {
-    const id = req.params.id as string;
-    const issue = await getAccessibleResource(
-      req,
-      res,
-      getIssueById(req, id),
-      "Issue not found",
-    );
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const interactions =
-      await issueThreadInteractionService(db).listForIssue(id);
-    res.json(interactions);
+  registerCompanyInteractionReads(router, {
+    service: issueThreadInteractionService(db), assertCompanyAccess,
+    companyScope: actorCanReadCompanyScope,
+    canReadIssue: async (req, issue) => (await decideIssueAccess(req, issue, "issue:read")).allowed,
+    getIssue: (req, res, id) => getAccessibleResource(req, res, getIssueById(req, id), "Interaction not found"),
+    authorize: assertIssueReadAllowed,
+  });
+
+  registerIssueInteractionReads(router, {
+    getIssue: (req, res) => getAccessibleResource(req, res,
+      getIssueById(req, req.params.id as string), "Issue not found"),
+    authorize: assertIssueReadAllowed,
+    service: issueThreadInteractionService(db),
   });
 
   router.post(

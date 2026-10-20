@@ -1549,21 +1549,7 @@ export type IssueThreadInteraction =
   | RequestItemVerdictsInteraction
   | ConnectionIntentInteraction;
 
-export type IssueThreadInteractionPayload =
-  | SuggestTasksPayload
-  | AskUserQuestionsPayload
-  | RequestConfirmationPayload
-  | RequestCheckboxConfirmationPayload
-  | RequestItemVerdictsPayload
-  | ConnectionIntentPayload;
-
-export type IssueThreadInteractionResult =
-  | SuggestTasksResult
-  | AskUserQuestionsResult
-  | RequestConfirmationResult
-  | RequestCheckboxConfirmationResult
-  | RequestItemVerdictsResult
-  | ConnectionIntentResult;
+export type { CompanyIssueThreadInteraction, CompanyIssueThreadInteractionPage, IssueThreadInteractionPayload, IssueThreadInteractionResult } from "./company-issue-interactions.js";
 
 export interface IssueAttachment {
   id: string;
