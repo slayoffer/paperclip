@@ -9,7 +9,8 @@ The [V1 implementation contract](SPEC-implementation.md) defines its default-off
 
 ## 1. Company Model [DRAFT]
 
-A Company is a first-order object. One Paperclip instance runs multiple Companies. A Company does not have a standalone "goal" field — its direction is defined by its set of Initiatives (see Task Hierarchy Mapping).
+An instance has multiple companies. Initiatives define direction, without a company goal field (see Task Hierarchy Mapping).
+The board [flow report](company-flow.md) shows queues and dependencies.
 
 ### Fields (Draft)
 
