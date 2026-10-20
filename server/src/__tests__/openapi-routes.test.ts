@@ -1,5 +1,5 @@
+import { createOpenApiTestApp } from "./helpers/openapi-app.js";
 import { apiPrefixes } from "./openapi-route-prefixes.js";
-import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,8 +7,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { MUSE_ASSET_VERSION, MUSE_PUBLIC_ROUTES } from "@paperclipai/shared";
 import { COMPANY_IMPORT_TRANSFERS_ROUTE_PATH } from "@paperclipai/shared/company-import-transfer";
-import { errorHandler } from "../middleware/index.js";
-import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
+import { buildOpenApiSpec } from "../routes/openapi.js";
 import { mcpDiscoveryDocuments } from "../services/public-mcp/discovery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -78,13 +77,6 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
 // now have request handlers, so the set is empty. A new contract-first route
 // belongs here only until its handler lands.
 const specOnlyContractFirstRoutes = new Set<string>([]);
-
-function createApp() {
-  const app = express();
-  app.use("/api", openApiRoutes());
-  app.use(errorHandler);
-  return app;
-}
 
 // Route files may compose paths from shared path constants inside template
 // literals; substitute the constants' values before normalizing.
@@ -492,7 +484,7 @@ describe("openapi routes", () => {
   });
 
   it("tells agents that Agent Chat is always on instead of advertising a retired toggle", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const experimental = res.body.paths["/api/instance/settings/experimental"];
     for (const operation of [experimental.get, experimental.patch]) {
       expect(operation.description).toContain("Agent Chat is always on");
@@ -502,7 +494,7 @@ describe("openapi routes", () => {
   });
 
   it("tells agents that archiving keeps a status card and where a person restores it", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const patch = res.body.paths["/api/status-cards/{id}"].patch;
     expect(patch.description).toContain("it is not deleted");
     expect(patch.description).toContain("give them the returned href as a Markdown link");
@@ -510,7 +502,7 @@ describe("openapi routes", () => {
   });
 
   it("documents exact failed-run selection and durable accepted retry responses", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const wake = res.body.paths["/api/agents/{id}/wakeup"].post;
     expect(
       wake.requestBody.content["application/json"].schema.properties
@@ -521,7 +513,7 @@ describe("openapi routes", () => {
     expect(wake.description).toContain("durable queued/deferred receipt");
   });
   it("advertises the guarded prepared-task promotion contract to API clients", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const patch = res.body.paths["/api/issues/{id}"].patch;
     expect(patch.requestBody.content["application/json"].schema.properties.expectedStatusVersion)
       .toMatchObject({ type: "integer", minimum: 0 });
@@ -529,7 +521,7 @@ describe("openapi routes", () => {
     expect(patch.description).toContain("send exactly status=todo and expectedStatusVersion");
   });
   it("serves the generated OpenAPI document", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
 
     expect(res.status).toBe(200);
     expect(res.body.openapi).toBe("3.0.0");
@@ -1363,7 +1355,7 @@ describe("openapi routes", () => {
 
 describe("heartbeat run ID OpenAPI contract", () => {
   it("publishes the runtime UUID constraint and 400 response on all agent-router run endpoints", async () => {
-    const response = await request(createApp()).get("/api/openapi.json");
+    const response = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     expect(response.status).toBe(200);
     const paths = response.body.paths;
     let checked = 0;

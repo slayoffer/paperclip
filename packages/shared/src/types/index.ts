@@ -815,6 +815,8 @@ export type {
   RequestCheckboxConfirmationInteraction,
   RequestItemVerdictsInteraction,
   ConnectionIntentInteraction,
+  CompanyIssueThreadInteraction,
+  CompanyIssueThreadInteractionPage,
   IssueThreadInteraction,
   IssueThreadInteractionPayload,
   IssueThreadInteractionResult,
