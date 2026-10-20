@@ -75,10 +75,12 @@ A receipt retry or background delivery worker resumes the accepted binding befor
 The worker locks the issue and proposal in the existing order.
 It rechecks the linked target, issue state, expiry, and the original board user's current configuration permission.
 Binding approval and the execution result commit in one transaction.
-Database failures leave the intent pending. Checked permission or lifecycle failures record a failed execution.
+Database failures leave the intent pending. Permission and proposal expiry failures can record a failed execution.
+Closed issues prevent binding execution.
 Concurrent retries cannot apply the binding twice.
 
 Each worker traverses pending rows by creation time and interaction identifier.
+PostgreSQL compares the exact timestamp precision.
 It advances its cursor after suppressed admissions and failed attempts.
 It returns to the oldest pending rows after it reaches the end.
 The cursor belongs to the worker instance. A server restart starts traversal from the oldest pending row.
