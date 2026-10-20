@@ -1,7 +1,7 @@
-import { listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { getRequestedBlockerDependencyReadiness, listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
-import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails, listUnresolvedBlockerIssueIds } from "./issue-blocker-details.js";
+import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
@@ -10501,15 +10501,13 @@ export function issueService(db: Db) {
                   [id],
                 )
               ).get(id)
-            : null;
-        const unresolvedBlockerIssueIds =
-          blockedByIssueIds !== undefined
-            ? await listUnresolvedBlockerIssueIds(
+            : await getRequestedBlockerDependencyReadiness(
                 dbOrTx,
                 existing.companyId,
+                id,
                 blockedByIssueIds,
-              )
-            : (dependencyReadiness?.unresolvedBlockerIssueIds ?? []);
+              );
+        const unresolvedBlockerIssueIds = dependencyReadiness?.unresolvedBlockerIssueIds ?? [];
         if (unresolvedBlockerIssueIds.length > 0) {
           const unresolvedBlockers = await listUnresolvedBlockerDetails(
             dbOrTx,

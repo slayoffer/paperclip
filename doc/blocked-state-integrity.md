@@ -43,6 +43,8 @@ Both `pending` and `revision_requested` approvals remain open waits.
 Workspace finalization remains a dependency barrier for both `done` and `cancelled` blockers. Its existing wake path rechecks the dependent after synchronization.
 Both update validators use canonical dependency readiness for saved links and proposed links.
 A blocked issue can receive title and wait-note updates while its blocker still needs workspace finalization.
+An `in_progress` update with explicit blocker links returns `422` until workspace finalization succeeds.
+Restoring completed blocker links does not send a dependency wake while a separate blocked wait remains.
 The periodic dependency check also respects these waits.
 
 No database migration is required. The descriptor uses the existing JSON column.

@@ -1,3 +1,4 @@
+import { getRestoredBlockedDependencyWake } from "../services/restored-dependency-wake.js";
 import { blockedStateIntegrityEnabled } from "../services/blocked-state-integrity.js";
 import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 import { setIssueTitle } from "../services/issue-title.js";
@@ -14827,35 +14828,14 @@ export function issueRoutes(
           }
         }
 
-        const restoredBlockedReadyDependency =
-          issue.status === "blocked" &&
-          issue.assigneeAgentId &&
-          (existing.status !== "blocked" ||
-            Array.isArray(req.body.blockedByIssueIds) ||
-            existing.assigneeAgentId !== issue.assigneeAgentId);
-        if (
-          restoredBlockedReadyDependency &&
-          typeof dependencyReadinessSvc.getDependencyReadiness === "function"
-        ) {
-          const readiness = await dependencyReadinessSvc.getDependencyReadiness(
-            issue.id,
-          );
-          const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;
-          if (
-            resolvedBlockerIssueId &&
-            readiness.isDependencyReady &&
-            readiness.blockerIssueIds.length > 0
-          ) {
-            await addDependencyResolvedWakeup({
-              agentId: issue.assigneeAgentId!,
-              dependentIssueId: issue.id,
-              resolvedBlockerIssueId,
-              blockerIssueIds: readiness.blockerIssueIds,
-              blockedTransitionAt: issue.blockedTransitionAt,
-              source: "issue.blockers_restored",
-              mutation: "blocked_dependency_restored",
-            });
-          }
+        const restoredDependencyWake = await getRestoredBlockedDependencyWake(db, {
+          existing,
+          issue,
+          blockersSupplied: Array.isArray(req.body.blockedByIssueIds),
+          getDependencyReadiness: dependencyReadinessSvc.getDependencyReadiness,
+        });
+        if (restoredDependencyWake) {
+          await addDependencyResolvedWakeup(restoredDependencyWake);
         }
 
         const stopRelay = stopRelayResult.value;

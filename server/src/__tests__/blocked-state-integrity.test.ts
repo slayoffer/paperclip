@@ -120,6 +120,29 @@ describeDatabase("blocked-state integrity", () => {
     expect((await db.select().from(issueComments)).some(row => row.body === manifest(source.identifier!))).toBe(true);
     expect(wakeup.mock.calls).toEqual([]);
   });
+  it.each(["done", "cancelled"])("does not wake an outside wait when a %s blocker link is restored", async status => {
+    vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", "true");
+    const blocker = await issue("SYNA-1780", status);
+    const unblockDescriptor = { ...descriptor("Wait for the vendor response"), kind: "external" as const };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "board", companyIds: [companyId], isInstanceAdmin: true,
+        source: "local_implicit" };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as never));
+    app.use(errorHandler);
+    const res = await request(app).patch(`/api/issues/${source.id}`).send({
+      status: "blocked", blockedByIssueIds: [blocker.id], unblockDescriptor,
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ status: "blocked", unblockDescriptor });
+    expect(await svc.getDependencyReadiness(source.id)).toMatchObject({ isDependencyReady: true });
+    expect(await hasNonDependencyBlockedWait(db, source.id)).toBe(true);
+    expect(routeHeartbeat.wakeup.mock.calls).toEqual([]);
+    expect(await db.select().from(agentWakeupRequests)).toEqual([]);
+  });
   it("does not accept a stale handoff after a rejected review", async () => {
     await db.insert(issueComments).values({ companyId, issueId: source.id, authorAgentId: agentId,
       createdAt: new Date(Date.now() - 1000), body: manifest(source.identifier!) });

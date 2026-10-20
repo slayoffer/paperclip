@@ -197,6 +197,13 @@ describeDatabase("durable dependency release wakes", () => {
         updateFields: { unblockDescriptor }, requestedBlockerIds, getDependencyReadiness: svc.getDependencyReadiness,
       })).resolves.toBeUndefined();
     }
+    for (const blockedByIssueIds of [undefined, [blocker.id]]) {
+      await expect(svc.update(dependent.id, { status: "in_progress", blockedByIssueIds }))
+        .rejects.toMatchObject({ status: 422, details: {
+          unresolvedBlockerIssueIds: [blocker.id],
+          unresolvedBlockers: [{ issueId: blocker.id, reason: "pending_finalize" }],
+        } });
+    }
     expect((await svc.getById(dependent.id))?.status).toBe("blocked");
     expect(await intents()).toEqual([]);
     expect(heartbeat.wakeup).not.toHaveBeenCalled();
@@ -207,6 +214,8 @@ describeDatabase("durable dependency release wakes", () => {
     expect(result.healed + result.existingWakeSkipped).toBe(1);
     expect((await svc.getById(dependent.id))?.status).toBe("todo");
     expect(heartbeat.wakeup).toHaveBeenCalledTimes(1);
+    await expect(svc.update(dependent.id, { status: "in_progress", blockedByIssueIds: [blocker.id] }))
+      .resolves.toMatchObject({ status: "in_progress" });
   });
 
   it("rolls back the pending wake with the status transition", async () => {
