@@ -7,6 +7,7 @@ import {
 } from "@paperclipai/db";
 import { publicationDispatchWithinDeadline, type PublicationBindings, type PublicationDecision } from "@paperclipai/shared";
 import { publicationAuthorityService } from "./publication-authority.js";
+import { publicationReconciliationService } from "./publication-authority-reconciliation.js";
 import { authorityFixture, startAuthorityDatabase } from "./publication-authority.test-fixture.js";
 
 describe("offline publication authority with durable PostgreSQL records", () => {
@@ -158,18 +159,20 @@ describe("offline publication authority with durable PostgreSQL records", () => 
     await f.service.request(f.identity, next);
     expect(await f.service.dispatch(f.identity, next)).toMatchObject({ reason: "reconciliation_required" });
     expect(await f.service.recordResult(f.identity, f.bindings, "refused")).toMatchObject({ state: "unknown" });
-    expect(await f.service.reconcile(f.identity, f.bindings)).toMatchObject({ reason: "verifier_unavailable" });
+    expect(await publicationReconciliationService(storage.db, {
+      companyId: f.identity.companyId, verifierId: randomUUID(),
+    }).reconcile(f.bindings)).toMatchObject({ reason: "verifier_unavailable" });
     const evidenceId = randomUUID();
     let result: "unknown" | "succeeded" = "unknown";
-    const restarted = publicationAuthorityService(createDb(storage.database.connectionString), {
-      clock: f.clock, reconcile: async () => ({ result, evidenceId }),
+    const restarted = publicationReconciliationService(createDb(storage.database.connectionString), {
+      companyId: f.identity.companyId, verifierId: randomUUID(), verify: async () => ({ result, evidenceId }),
     });
-    expect(await restarted.reconcile(f.identity, f.bindings)).toMatchObject({ reason: "result_uncertain" });
-    expect((await restarted.dispatch(f.identity, next)).dispatch).toBe(false);
+    expect(await restarted.reconcile(f.bindings)).toMatchObject({ reason: "result_uncertain" });
+    expect((await f.service.dispatch(f.identity, next)).dispatch).toBe(false);
     result = "succeeded";
-    expect(await restarted.reconcile(f.identity, f.bindings)).toMatchObject({ state: "succeeded", dispatch: false });
-    expect((await restarted.dispatch(f.identity, f.bindings)).dispatch).toBe(false);
-    expect((await restarted.dispatch(f.identity, next)).dispatch).toBe(true);
+    expect(await restarted.reconcile(f.bindings)).toMatchObject({ state: "succeeded", dispatch: false });
+    expect((await f.service.dispatch(f.identity, f.bindings)).dispatch).toBe(false);
+    expect((await f.service.dispatch(f.identity, next)).dispatch).toBe(true);
     const [row] = await storage.db.select().from(publicationRequests).where(eq(publicationRequests.id, f.bindings.requestId));
     expect(row!.reconciliationId).toBe(evidenceId);
   });
@@ -188,10 +191,9 @@ describe("offline publication authority with durable PostgreSQL records", () => 
   it("refuses missing authority records and uncertain time", async () => {
     for (const mode of ["clock", "broker", "request", "uncertain"] as const) {
       const f = await fixture();
-      await f.service.request(f.identity, f.bindings);
+      if (mode !== "request") await f.service.request(f.identity, f.bindings);
       if (mode === "clock") await storage.db.delete(publicationAuthorityClocks).where(eq(publicationAuthorityClocks.companyId, f.identity.companyId));
       if (mode === "broker") await storage.db.update(publicationBrokers).set({ issuerRevoked: true }).where(eq(publicationBrokers.id, f.identity.brokerId));
-      if (mode === "request") await storage.db.delete(publicationRequests).where(eq(publicationRequests.id, f.bindings.requestId));
       const service = mode === "uncertain" ? publicationAuthorityService(storage.db, { clock: async () => null }) : f.service;
       expect((await service.dispatch(f.identity, f.bindings)).dispatch).toBe(false);
     }

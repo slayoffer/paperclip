@@ -55,6 +55,9 @@ CREATE UNIQUE INDEX "publication_requests_outstanding_uq" ON "publication_reques
 -- Drizzle does not generate triggers. Preserve bindings, expiry, and single use at the storage boundary.
 CREATE FUNCTION "publication_request_preserve_authority"() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'Publication request history cannot be deleted';
+  END IF;
   IF ROW(NEW.id, NEW.company_id, NEW.broker_id, NEW.issue_id, NEW.agent_id, NEW.run_id,
          NEW.repository, NEW.branch, NEW.bindings, NEW.issued_at_ms, NEW.issued_monotonic_ms, NEW.expires_at_ms)
      IS DISTINCT FROM
@@ -83,5 +86,9 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER "publication_request_preserve_authority"
-BEFORE UPDATE ON "publication_requests"
+BEFORE UPDATE OR DELETE ON "publication_requests"
 FOR EACH ROW EXECUTE FUNCTION "publication_request_preserve_authority"();
+--> statement-breakpoint
+CREATE TRIGGER "publication_request_preserve_history"
+BEFORE TRUNCATE ON "publication_requests"
+FOR EACH STATEMENT EXECUTE FUNCTION "publication_request_preserve_authority"();

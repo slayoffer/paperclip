@@ -24,9 +24,18 @@ The company and agent must permit work.
 An existing request returns its state. It never returns another dispatch permission.
 A database trigger prevents changes to bindings, lifetime, dispatch time, and recorded revocation.
 The trigger also prevents state resets after dispatch.
+It rejects request deletion and table truncation. History remains after a definite result.
+These guards extend the unreleased initial migration. They do not upgrade databases that already applied its earlier draft.
 A partial unique index permits only one outstanding dispatch per company, repository, and branch.
 Unreported and unknown outcomes block subsequent requests at dispatch, including after expiry and revocation.
 A protected synthetic verifier must establish a definite result before reconciliation releases that block.
+`publicationReconciliationService` holds this separate capability. Broker services expose no reconciliation method.
+Protected construction supplies its company scope, verifier identifier, and observation callback.
+Request fields cannot select or replace that capability.
+Reconciliation checks the company and all stored bindings under request locks before and after observation.
+It works after certificate expiry, broker revocation, assignment changes, run completion, and clock uncertainty.
+It grants no dispatch permission and restores no broker authority.
+Its audit record names the protected verifier and retains the original agent and run identifiers.
 Broker result reports cannot resolve an unknown result. The old request never becomes reusable.
 Each request, dispatch, result, revocation, and reconciliation writes an activity record in the same transaction.
 
@@ -78,10 +87,12 @@ Run the focused tests on an approved build host with Node.js 24.11 or later:
 ```sh
 pnpm exec vitest run --project @paperclipai/server \
   server/src/services/publication-authority.test.ts \
-  server/src/services/publication-authority-races.test.ts
+  server/src/services/publication-authority-races.test.ts \
+  server/src/services/publication-authority-reconciliation.test.ts
 ```
 
 The tests start isolated PostgreSQL databases and apply the real migration chain.
+The fork workflow `synthiq-publication-authority.yml` runs all three suites on Node.js 24 for release-target pull requests.
 On a host with slow temporary disk storage, use `TMPDIR=/dev/shm` when sufficient memory exists.
 These tests prove transaction behavior and persistence across new service and connection instances.
 They do not prove power-loss durability, certificate authentication, host isolation, remote publication, or live containment.

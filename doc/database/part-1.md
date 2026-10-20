@@ -196,7 +196,7 @@ The offline publication authority also locks current issue, run, agent, company,
 and repository rows before its dispatch decision. Ordinary updates and deletions
 use incompatible row locks. Three new company-scoped tables store protected
 clock state, synthetic broker registrations, and immutable publication requests.
-A database trigger prevents binding changes and dispatch resets. A partial
+A database trigger prevents binding changes, dispatch resets, request deletion, and table truncation. A partial
 unique index blocks another outstanding dispatch to the same repository branch.
 This source has no production route. See [Offline publication authority](../publication-authority.md)
 for lock order, synthetic tests, clock limits, and remaining production work.

@@ -11,7 +11,6 @@ import {
 
 type Request = typeof publicationRequests.$inferSelect;
 type Result = "succeeded" | "refused" | "unknown";
-type Reconciliation = { result: Result; evidenceId: string };
 
 const deny = (reason: string, row?: Request): PublicationDecision => ({
   dispatch: false, state: row?.state ?? "denied", reason, remainingLifetimeMs: 0,
@@ -20,8 +19,6 @@ const deny = (reason: string, row?: Request): PublicationDecision => ({
 /** Offline source service. No production entry point imports or constructs this service. */
 export function publicationAuthorityService(db: Db, options: {
   clock?: AuthorityClock;
-  // A protected verifier supplies evidence. Broker result JSON cannot supply this callback.
-  reconcile?: (bindings: PublicationBindings) => Promise<Reconciliation>;
 } = {}) {
   const clock = options.clock ?? databaseAuthorityClock;
   const predicate = (b: PublicationBindings) => and(
@@ -126,28 +123,5 @@ export function publicationAuthorityService(db: Db, options: {
       });
     },
 
-    async reconcile(identity: PublicationIdentity, input: unknown): Promise<PublicationDecision> {
-      const b = publicationBindingsSchema.parse(input);
-      if (!options.reconcile) return deny("verifier_unavailable");
-      const unresolved = await db.transaction(async (tx) => {
-        const locked = await lockRequest(tx, identity, b);
-        return locked && ["unknown", "dispatched"].includes(locked.row.state);
-      });
-      if (!unresolved) return deny("authority_unavailable");
-      // Remote observations happen outside row locks. The transaction rechecks immutable bindings and state.
-      const proof = await options.reconcile(b);
-      if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(proof.evidenceId)
-        || !["succeeded", "refused"].includes(proof.result)) return deny("result_uncertain");
-      return db.transaction(async (tx) => {
-        const locked = await lockRequest(tx, identity, b);
-        if (!locked) return deny("authority_unavailable");
-        const { row } = locked;
-        if (!["unknown", "dispatched"].includes(row.state)) return deny("replay", row);
-        await tx.update(publicationRequests).set({ state: proof.result, reconciliationId: proof.evidenceId }).where(predicate(b));
-        // The verifier owns its evidence record. No arbitrary broker evidence enters the audit log.
-        await audit(tx, identity, b, "reconciled");
-        return deny("reconciled", { ...row, state: proof.result });
-      });
-    },
   };
 }
