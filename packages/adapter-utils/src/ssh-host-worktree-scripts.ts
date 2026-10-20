@@ -1,5 +1,6 @@
 import path from "node:path";
 import { shellQuote } from "./ssh-config.js";
+import { HOST_WORKTREE_INCOMING_WIP_REF, buildHostDirtyCheckScript } from "./ssh-host-worktree-snapshot-scripts.js";
 
 // Shell builders for persistent per-host git worktrees (SYNA-2273).
 // Every dynamic value goes through shellQuote, and every identifier is
@@ -216,9 +217,11 @@ export function buildHostMaterializeScript(input: {
       `if ! git -C ${bare} cat-file -e ${q(`${sha}^{commit}`)} 2>/dev/null; then ${errorLine("host_missing_objects", q(sha))}; exit 0; fi`,
       `git -C ${bare} update-ref ${q(`refs/paperclip/known/${sha}`)} ${q(sha)}`,
     ]),
+    `rm -f "$tmp_bundle" "$tmp_bundle.refs"`,
     `git -C ${bare} worktree prune`,
     `if [ -e ${q(`${input.worktreePath}/.git`)} ]; then`,
-    `  if [ -n "$(git -C ${wt} status --porcelain=v1 --untracked-files=normal)" ] && [ ${input.allowDirtyReset ? "1" : "0"} != 1 ]; then`,
+    ...buildHostDirtyCheckScript(input.worktreePath).map((line) => `  ${line}`),
+    `  if [ "$dirty" = 1 ] && [ ${input.allowDirtyReset ? "1" : "0"} != 1 ]; then`,
     `    ${errorLine("host_worktree_dirty", `"$(git -C ${wt} rev-parse HEAD)"`)}; exit 0`,
     "  fi",
     `  ${checkout}`,
@@ -238,6 +241,9 @@ export function buildHostMaterializeScript(input: {
         `git -C ${wt} reset -q ${head}`,
       ]
       : []),
+    ...(input.wipSha
+      ? [`git -C ${wt} update-ref ${q(HOST_WORKTREE_INCOMING_WIP_REF)} ${q(input.wipSha)}`]
+      : [`git -C ${wt} update-ref -d ${q(HOST_WORKTREE_INCOMING_WIP_REF)}`]),
     `printf '${HOST_WORKTREE_MARKER_MATERIALIZE}\\t%s\\t%s\\n' "$(git -C ${wt} rev-parse HEAD)" "$action"`,
   ].join("\n");
 }
@@ -257,7 +263,7 @@ export function buildHostInspectScript(input: { worktreePath: string }): string 
     `if [ ! -e ${q(`${input.worktreePath}/.git`)} ]; then printf '${HOST_WORKTREE_MARKER_INSPECT}\\tabsent\\n'; exit 0; fi`,
     `head=$(git -C ${wt} rev-parse --verify HEAD)`,
     `branch=$(git -C ${wt} symbolic-ref -q --short HEAD || true)`,
-    `if [ -n "$(git -C ${wt} status --porcelain=v1 --untracked-files=normal)" ]; then dirty=1; else dirty=0; fi`,
+    ...buildHostDirtyCheckScript(input.worktreePath),
     `printf '${HOST_WORKTREE_MARKER_INSPECT}\\tpresent\\t%s\\t%s\\t%s\\n' "$head" "$dirty" "$branch"`,
   ].join("\n");
 }
@@ -280,7 +286,8 @@ export function buildHostRemoveScript(input: {
     `  ${done("absent")}; exit 0`,
     "fi",
     `if [ "$(git -C ${wt} rev-parse --verify HEAD)" != ${q(input.expectedHeadSha)} ]; then ${done("head_mismatch")}; exit 0; fi`,
-    `if [ -n "$(git -C ${wt} status --porcelain=v1 --untracked-files=normal)" ]; then ${done("dirty")}; exit 0; fi`,
+    ...buildHostDirtyCheckScript(input.worktreePath),
+    `if [ "$dirty" = 1 ]; then ${done("dirty")}; exit 0; fi`,
     `git -C ${bare} worktree remove --force ${wt}`,
     `git -C ${bare} worktree prune`,
     `rm -f ${q(input.statePath)}`,

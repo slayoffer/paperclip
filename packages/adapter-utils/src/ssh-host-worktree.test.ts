@@ -88,10 +88,15 @@ describe("ssh host worktrees", () => {
     if (skipped("WIP round trip test")) return;
     const c = makeCase()!;
     const server = await makeServerRepo();
+    await commit(server, ".gitignore", "*.cache\nnode_modules/\n", "ignore generated files");
+    await writeFile(path.join(server, "generated.cache"), "server generated\n");
+    await git(server, ["add", "-f", "generated.cache"]);
+    const serverIndex = await readFile(path.join(server, ".git", "index"));
     await writeFile(path.join(server, "a.txt"), "server edit\n");
     await writeFile(path.join(server, "new.txt"), "untracked\n");
     const { headSha, wipSha } = await snapshotLocalWorkspaceWip({ localDir: server });
     expect(wipSha).not.toBeNull();
+    expect(await readFile(path.join(server, ".git", "index"))).toEqual(serverIndex);
     expect(await git(server, ["status", "--porcelain"])).toContain("a.txt");
 
     await materializeHostWorktree({ ...c.target, localDir: server, headSha, branch: "w", wipSha });
@@ -100,14 +105,20 @@ describe("ssh host worktrees", () => {
     expect(await git(c.worktree, ["diff", "--cached", "--name-only"])).toBe("");
     expect(await git(c.worktree, ["rev-parse", "HEAD"])).toBe(headSha);
 
+    expect(await readFile(path.join(c.worktree, "generated.cache"), "utf8")).toBe("server generated\n");
+    await writeFile(path.join(c.worktree, "generated.cache"), "host generated\n");
     const hostCommit = await commit(c.worktree, "host.txt", "host\n", "host work");
     await writeFile(path.join(c.worktree, "a.txt"), "host edit\n");
+    const hostIndexPath = path.resolve(c.worktree, await git(c.worktree, ["rev-parse", "--git-path", "index"]));
+    const hostIndex = await readFile(hostIndexPath);
     const exported = await exportHostWorktree({ ...c.target, runId: "run-wip", startHeadSha: headSha, localDir: server });
     expect(exported).toMatchObject({ headSha: hostCommit, dirty: true, branch: "w" });
     expect(await git(server, ["rev-parse", exported.importedHeadRef])).toBe(hostCommit);
     expect(await git(server, ["show", `${exported.wipSha}:a.txt`])).toBe("host edit");
     expect(await git(server, ["show", `${exported.wipSha}:new.txt`])).toBe("untracked");
+    expect(await git(server, ["show", `${exported.wipSha}:generated.cache`])).toBe("host generated");
     expect(await git(server, ["rev-parse", `${exported.wipSha}^`])).toBe(hostCommit);
+    expect(await readFile(hostIndexPath)).toEqual(hostIndex);
     // The host branch and index stay untouched by the snapshot.
     expect(await git(c.worktree, ["rev-parse", "HEAD"])).toBe(hostCommit);
     expect(await git(c.worktree, ["diff", "--cached", "--name-only"])).toBe("");

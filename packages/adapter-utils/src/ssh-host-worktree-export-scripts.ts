@@ -1,6 +1,7 @@
 import { GIT_SYNC_COMMIT_IDENTITY_ARGS } from "./git-workspace-sync.js";
 import { shellQuote } from "./ssh-config.js";
-import { HOST_WORKTREE_MARKER_ERROR, HOST_WORKTREE_MARKER_EXPORT, HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS } from "./ssh-host-worktree-constants.js";
+import { HOST_WORKTREE_MARKER_ERROR, HOST_WORKTREE_MARKER_EXPORT } from "./ssh-host-worktree-constants.js";
+import { buildHostWipIndexScript } from "./ssh-host-worktree-snapshot-scripts.js";
 
 const q = shellQuote;
 const identity = GIT_SYNC_COMMIT_IDENTITY_ARGS.map(q).join(" ");
@@ -19,14 +20,11 @@ export function buildHostExportPrepareScript(input: {
   wipMaxBytes: number;
   forceFullBundle: boolean;
 }): string {
-  const wipExcludes = HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS.map(q).join(" ");
   const wt = q(input.worktreePath);
   const runDir = q(input.runDir);
   const wipRef = q(`refs/paperclip/wip/${input.runId}`);
   const exportRef = q(`refs/paperclip/export/${input.runId}`);
   const bundle = q(`${input.runDir}/export.bundle`);
-  const idx = q(`${input.runDir}/wip.index`);
-  const sizes = q(`${input.runDir}/wip.sizes`);
   const manifest = q(`${input.runDir}/export.refs`);
   const cap = Math.max(0, Math.trunc(input.wipMaxBytes));
   const start = input.startHeadSha ? q(input.startHeadSha) : null;
@@ -34,28 +32,16 @@ export function buildHostExportPrepareScript(input: {
     "set -e",
     `if [ ! -e ${q(`${input.worktreePath}/.git`)} ]; then ${errorLine("host_worktree_missing", wt)}; exit 0; fi`,
     `mkdir -p ${runDir}`,
-    `idx=${idx}`,
-    `sizes=${sizes}`,
-    `paths=${q(`${input.runDir}/wip.paths`)}`,
-    `staged=${q(`${input.runDir}/wip.staged`)}`,
-    `rm -f "$idx" "$sizes" ${bundle}`,
-    `trap 'rm -f "$idx" "$sizes" "$paths" "$staged"' EXIT`,
-    `head=$(git -C ${wt} rev-parse --verify HEAD)`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} read-tree "$head"`,
-    `git -C ${wt} ls-files --stage -z -- . ${wipExcludes} > "$staged"`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} update-index -z --index-info < "$staged"`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} ls-files -z --cached --others --exclude-standard -- . ${wipExcludes} > "$paths"`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} --literal-pathspecs add -A -f --pathspec-from-file="$paths" --pathspec-file-nul`,
-    `tree=$(GIT_INDEX_FILE=${idx} git -C ${wt} write-tree)`,
-    `head_tree=$(git -C ${wt} rev-parse "$head^{tree}")`,
+    `rm -f ${bundle}`,
+    ...buildHostWipIndexScript(input.worktreePath),
     `git -C ${wt} update-ref -d ${wipRef} >/dev/null 2>&1 || true`,
     'wip=""',
     'if [ "$tree" != "$head_tree" ]; then',
-    `  git -C ${wt} diff-tree -r --no-renames "$head_tree" "$tree" | awk -F '\\t' '{ split($1, m, " "); if (m[5] != "D" && m[2] != "160000") print m[4] " " $2 }' | git -C ${wt} cat-file --batch-check='%(objectsize) %(rest)' > ${sizes}`,
-    `  if awk -v cap=${cap} '{ s += $1 } END { exit !(s > cap) }' ${sizes}; then`,
-    `    total=$(awk '{ s += $1 } END { printf "%.0f", s }' ${sizes})`,
+    `  git -C ${wt} diff-tree -r --no-renames "$head_tree" "$tree" | awk -F '\\t' '{ split($1, m, " "); if (m[5] != "D" && m[2] != "160000") print m[4] " " $2 }' | git -C ${wt} cat-file --batch-check='%(objectsize) %(rest)' > "$sizes"`,
+    `  if awk -v cap=${cap} '{ s += $1 } END { exit !(s > cap) }' "$sizes"; then`,
+    `    total=$(awk '{ s += $1 } END { printf "%.0f", s }' "$sizes")`,
     `    printf '${HOST_WORKTREE_MARKER_ERROR}\\twip_too_large\\t%s' "$total"`,
-    `    sort -rn ${sizes} | head -n 10 | while IFS= read -r line; do printf '\\t%s' "$line"; done`,
+    `    sort -rn "$sizes" | head -n 10 | while IFS= read -r line; do printf '\\t%s' "$line"; done`,
     "    printf '\\n'",
     "    exit 0",
     "  fi",

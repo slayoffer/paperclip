@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   acquireHostWorktreeLock, buildHostLockReleaseScript, exportHostWorktree, hostLockDir,
-  materializeHostWorktree, snapshotLocalWorkspaceWip,
+  inspectHostWorktree, materializeHostWorktree, removeHostWorktree, snapshotLocalWorkspaceWip,
 } from "./ssh-host-worktree.js";
 import { shellQuote } from "./ssh-config.js";
 import { TIMEOUT_MS, EW, commit, git, makeServerRepo, hostWorktreeFixture } from "./ssh-host-worktree-test-helpers.js";
@@ -86,6 +86,53 @@ describe("host worktree review regressions", () => {
       expect(await git(server, ["show", `${snapshot.wipSha}:tracked.cache`])).toBe("changed ignored file");
       expect(await git(server, ["show", `${snapshot.wipSha}:a.txt`])).toBe("unstaged");
     }
+  }, TIMEOUT_MS);
+
+  it("preserves transferred ignored edits through repeated exports and safety checks", async () => {
+    if (skipped("transferred ignored safety checks")) return;
+    const c = makeCase()!;
+    const server = await makeServerRepo();
+    const head = await commit(server, ".gitignore", "*.cache\nnode_modules/\n", "ignore generated files");
+    const file = "generated cache.cache";
+    await writeFile(path.join(server, file), "server generated\n");
+    await git(server, ["add", "-f", file]);
+    const snapshot = await snapshotLocalWorkspaceWip({ localDir: server });
+    await materializeHostWorktree({ ...c.target, localDir: server, headSha: head, wipSha: snapshot.wipSha, branch: "w" });
+    const before = await indexBytes(c.worktree);
+    const sibling = { ...c.target, worktreeName: `${c.target.worktreeName}-sibling` };
+    await materializeHostWorktree({ ...sibling, localDir: server, headSha: head, branch: null });
+    expect(await inspectHostWorktree(sibling)).toMatchObject({ dirty: false });
+    const siblingExport = await exportHostWorktree({ ...sibling, runId: "ignored-sibling", startHeadSha: head, localDir: server });
+    expect(siblingExport).toMatchObject({ dirty: false, wipSha: null, bundleBytes: 0 });
+    expect(await git(c.worktree, ["diff", "--cached", "--name-only"])).toBe("");
+    // These are ignored and absent from the real index after materialization.
+    await writeFile(path.join(c.worktree, "omitted.cache"), "unstaged ignored\n");
+    for (const excluded of ["node_modules", ".paperclip-runtime", ".worktrees"]) {
+      await mkdir(path.join(c.worktree, excluded), { recursive: true });
+      await writeFile(path.join(c.worktree, excluded, "sentinel.cache"), "runtime data\n");
+    }
+    for (const content of ["host edit", "later host edit"]) {
+      await writeFile(path.join(c.worktree, file), content + "\n");
+      expect(await inspectHostWorktree(c.target)).toMatchObject({ dirty: true });
+      expect(await removeHostWorktree({ ...c.target, ewId: EW, expectedHeadSha: head })).toBe("dirty");
+      await expect(materializeHostWorktree({ ...c.target, localDir: server, headSha: head, branch: "w" }))
+        .rejects.toMatchObject({ code: "host_worktree_dirty" });
+      const exported = await exportHostWorktree({ ...c.target, runId: "ignored-round-trip", startHeadSha: head, localDir: server });
+      expect(exported).toMatchObject({ dirty: true, headSha: head });
+      expect(exported.bundleBytes).toBeGreaterThan(0);
+      expect(await git(server, ["show", `${exported.wipSha}:${file}`])).toBe(content);
+      const paths = await git(server, ["ls-tree", "-r", "--name-only", exported.wipSha!]);
+      expect(paths).not.toContain("sentinel.cache");
+      expect(paths).not.toContain("omitted.cache");
+      expect(await indexBytes(c.worktree)).toEqual(before);
+    }
+    // Deleting a new incoming path restores the HEAD tree.
+    await rm(path.join(c.worktree, file));
+    expect(await inspectHostWorktree(c.target)).toMatchObject({ dirty: false });
+    const clean = await exportHostWorktree({ ...c.target, runId: "ignored-deleted", startHeadSha: head, localDir: server });
+    expect(clean).toMatchObject({ dirty: false, wipSha: null, bundleBytes: 0 });
+    expect(await indexBytes(c.worktree)).toEqual(before);
+    expect(await removeHostWorktree({ ...c.target, ewId: EW, expectedHeadSha: head })).toBe("removed");
   }, TIMEOUT_MS);
 
   it("exports divergent branches, annotated tags, and remote references into a scoped manifest", async () => {
