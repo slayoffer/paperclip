@@ -49,6 +49,10 @@ The merge commit includes the target branch and the pull request head.
 A successful contract check alone does not prove the repository checks passed.
 A timeout or failed installation also does not prove a test failure.
 Read the command outcomes and logs before making a release decision.
+GitHub check annotations identify assertion failures without downloading the complete job log.
+The first complete run found two stale board-wake expectations in `agent-live-run-routes.test.ts`.
+Those expectations now require the existing `issueBudgetOverride: true` field.
+The route behavior and budget rules remain unchanged.
 
 ## Action references
 
