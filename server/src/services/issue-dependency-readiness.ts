@@ -15,6 +15,13 @@ export type IssueDependencyReadiness = {
   isDependencyReady: boolean;
 };
 
+type BlockerReadinessRow = {
+  issueId: string;
+  blockerIssueId: string;
+  blockerStatus: string;
+  blockerExecutionWorkspaceId: string | null;
+};
+
 async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -129,11 +136,7 @@ export async function listIssueDependencyReadinessMap(
   issueIds: string[],
 ) {
   const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
-  const readinessMap = new Map<string, IssueDependencyReadiness>();
-  for (const issueId of uniqueIssueIds) {
-    readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
-  }
-  if (uniqueIssueIds.length === 0) return readinessMap;
+  if (uniqueIssueIds.length === 0) return new Map<string, IssueDependencyReadiness>();
 
   const blockerRows = await dbOrTx
     .select({
@@ -147,10 +150,42 @@ export async function listIssueDependencyReadinessMap(
     .where(
       and(
         eq(issueRelations.companyId, companyId),
+        eq(issues.companyId, companyId),
         eq(issueRelations.type, "blocks"),
         inArray(issueRelations.relatedIssueId, uniqueIssueIds),
       ),
     );
+
+  return computeDependencyReadinessMap(dbOrTx, companyId, uniqueIssueIds, blockerRows);
+}
+
+/** Evaluate proposed blocker links before the update stores them. */
+export async function getRequestedBlockerDependencyReadiness(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+  blockerIds: string[],
+) {
+  const blockers = blockerIds.length === 0 ? [] : await dbOrTx.select({
+    blockerIssueId: issues.id,
+    blockerStatus: issues.status,
+    blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+  }).from(issues).where(and(eq(issues.companyId, companyId), inArray(issues.id, blockerIds)));
+  const readiness = await computeDependencyReadinessMap(dbOrTx, companyId, [issueId],
+    blockers.map(blocker => ({ ...blocker, issueId })));
+  return readiness.get(issueId)!;
+}
+
+async function computeDependencyReadinessMap(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueIds: string[],
+  blockerRows: BlockerReadinessRow[],
+) {
+  const readinessMap = new Map<string, IssueDependencyReadiness>();
+  for (const issueId of issueIds) {
+    readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
+  }
 
   // Resolved blockers must pass the workspace-finalize barrier.
   const resolvedBlockerWorkspacePairs: Array<{

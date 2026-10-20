@@ -41,6 +41,8 @@ A card, approval, or review wait that appears after release keeps the intent pen
 Pending cards, open approvals, outside waits, review handoffs, and open bridge holds preserve the blocked state.
 Both `pending` and `revision_requested` approvals remain open waits.
 Workspace finalization remains a dependency barrier for both `done` and `cancelled` blockers. Its existing wake path rechecks the dependent after synchronization.
+Both update validators use canonical dependency readiness for saved links and proposed links.
+A blocked issue can receive title and wait-note updates while its blocker still needs workspace finalization.
 The periodic dependency check also respects these waits.
 
 No database migration is required. The descriptor uses the existing JSON column.

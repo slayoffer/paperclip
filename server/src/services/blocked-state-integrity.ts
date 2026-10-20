@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, like, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvals, issueApprovals, issueComments, issueRelations, issues, issueThreadInteractions } from "@paperclipai/db";
+import { approvals, issueApprovals, issueComments, issues, issueThreadInteractions } from "@paperclipai/db";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -62,16 +62,15 @@ export async function blockedWaitFacts(
   requestedBlockerIds?: string[],
   commentBody?: string | null,
 ) {
-  const blockerQuery = db.select({ id: issues.id, identifier: issues.identifier }).from(issues);
-  const blockers = requestedBlockerIds !== undefined
-    ? requestedBlockerIds.length === 0 ? [] : await blockerQuery.where(and(
-      eq(issues.companyId, issue.companyId), inArray(issues.id, requestedBlockerIds),
-      notInArray(issues.status, ["done", "cancelled"]),
-    ))
-    : await blockerQuery.innerJoin(issueRelations, eq(issueRelations.issueId, issues.id)).where(and(
-      eq(issueRelations.companyId, issue.companyId), eq(issueRelations.relatedIssueId, issue.id),
-      eq(issueRelations.type, "blocks"), eq(issues.companyId, issue.companyId),
-      notInArray(issues.status, ["done", "cancelled"]),
+  // Readiness also includes terminal blockers whose workspace finalization is unfinished.
+  const { getRequestedBlockerDependencyReadiness, listIssueDependencyReadinessMap } =
+    await import("./issue-dependency-readiness.js");
+  const readiness = requestedBlockerIds !== undefined
+    ? await getRequestedBlockerDependencyReadiness(db, issue.companyId, issue.id, requestedBlockerIds)
+    : (await listIssueDependencyReadinessMap(db, issue.companyId, [issue.id])).get(issue.id)!;
+  const blockers = readiness.unresolvedBlockerIssueIds.length === 0 ? [] :
+    await db.select({ identifier: issues.identifier }).from(issues).where(and(
+      eq(issues.companyId, issue.companyId), inArray(issues.id, readiness.unresolvedBlockerIssueIds),
     ));
   const [interaction, approval, review, holds] = await Promise.all([
     db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(

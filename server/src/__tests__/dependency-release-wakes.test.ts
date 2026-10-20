@@ -179,12 +179,24 @@ describeDatabase("durable dependency release wakes", () => {
     const [project] = await db.insert(projects).values({ companyId, name: "Workspace barrier" }).returning();
     const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId: project!.id,
       name: "Blocker workspace", mode: "isolated_workspace", strategyType: "git_worktree" }).returning();
-    await db.update(issues).set({ executionWorkspaceId: workspace!.id }).where(eq(issues.id, blocker.id));
+    const blockerIdentifier = "DEP-1";
+    await db.update(issues).set({ executionWorkspaceId: workspace!.id, identifier: blockerIdentifier })
+      .where(eq(issues.id, blocker.id));
     const [operation] = await db.insert(workspaceOperations).values({ companyId, issueId: blocker.id,
       executionWorkspaceId: workspace!.id, phase: "workspace_finalize", status: "running" }).returning();
     await svc.update(blocker.id, { status });
     expect(await svc.getDependencyReadiness(dependent.id)).toMatchObject({ isDependencyReady: false,
       unresolvedBlockerIssueIds: [blocker.id], pendingFinalizeBlockerIssueIds: [blocker.id] });
+    await expect(svc.update(dependent.id, { title: "Updated during finalization" }))
+      .resolves.toMatchObject({ title: "Updated during finalization", status: "blocked" });
+    const unblockDescriptor = { owner: { agentId }, action: `Wait for ${blockerIdentifier} workspace finalization` };
+    await expect(svc.update(dependent.id, { unblockDescriptor })).resolves.toMatchObject({ unblockDescriptor });
+    for (const requestedBlockerIds of [undefined, [blocker.id]]) {
+      await expect(assertBlockedIssueUpdate({ db,
+        actor: { type: "agent", companyId, agentId, source: "agent_jwt" }, existing: dependent,
+        updateFields: { unblockDescriptor }, requestedBlockerIds, getDependencyReadiness: svc.getDependencyReadiness,
+      })).resolves.toBeUndefined();
+    }
     expect((await svc.getById(dependent.id))?.status).toBe("blocked");
     expect(await intents()).toEqual([]);
     expect(heartbeat.wakeup).not.toHaveBeenCalled();
