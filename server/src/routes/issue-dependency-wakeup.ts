@@ -23,7 +23,7 @@ export async function createDependencyResolvedWakeup(db: Db, companyId: string,
   let idempotencyKey = buildIssueBlockersResolvedWakeStateKey(input);
   try {
     const existing = await findExistingIssueBlockersResolvedWakeForReadyState(db, { companyId, ...input });
-    if (existing && existing.status !== "completed") return null;
+    if (existing && (existing.status !== "completed" || existing.idempotencyKey?.endsWith(":release"))) return null;
     if (existing) idempotencyKey += ":release";
   } catch (err) {
     logger.warn({ err, issueId: input.dependentIssueId, idempotencyKey }, "failed to check an existing dependency wake");
