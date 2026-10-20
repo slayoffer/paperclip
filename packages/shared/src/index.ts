@@ -1,4 +1,5 @@
 export * from "./slack-app-manifest.js";
+export * from "./interaction-exports.js";
 export { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema, type ComposioAppSetupInput, type ComposioAppSetupResult, type ComposioAppAccountInput, type ComposioAppAccount, type ComposioAppSnapshot, type ComposioAppSyncState, type ComposioAppsResponse } from "./composio-app-setup.js";
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
@@ -1229,16 +1230,6 @@ export type {
   AcceptedPlanDecompositionResult,
   AcceptedPlanDecompositionChildIssue,
   AcceptedPlanDecompositionSummary,
-  IssueThreadInteractionBase,
-  SuggestTasksInteraction,
-  AskUserQuestionsInteraction,
-  RequestConfirmationInteraction,
-  RequestCheckboxConfirmationInteraction,
-  RequestItemVerdictsInteraction,
-  ConnectionIntentInteraction,
-  IssueThreadInteraction,
-  IssueThreadInteractionPayload,
-  IssueThreadInteractionResult,
   IssueDocument,
   IssueDocumentSummary,
   DocumentRevision,
@@ -2008,9 +1999,6 @@ export {
   issueCommentMetadataSectionSchema,
   issueCommentMetadataSchema,
   addIssueCommentSchema,
-  issueThreadInteractionStatusSchema,
-  issueThreadInteractionKindSchema,
-  issueThreadInteractionContinuationPolicySchema,
   connectionIntentPhaseSchema,
   connectionIntentPayloadSchema,
   connectionIntentResultSchema,
