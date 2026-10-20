@@ -115,13 +115,41 @@ describe("SSH workspace publication baselines", { timeout: 30_000 }, () => {
     await expect(git(f.copied, ["symbolic-ref", "refs/remotes/origin/HEAD"])).rejects.toThrow();
   });
 
-  it("copies a repository without remote references", async () => {
+  it.each([false, true])("replaces obsolete remote reference namespaces (packed: %s)", async (packed) => {
     const f = await fixture();
+    const topic = "refs/remotes/origin/topic";
+    const child = `${topic}/child`;
+    await git(f.source, ["update-ref", topic, f.baseline]);
+    await copy(f.source, f.copied);
+    if (packed) await git(f.copied, ["pack-refs", "--all"]);
+
+    await git(f.source, ["update-ref", "-d", topic]);
+    await git(f.source, ["update-ref", child, f.historical]);
+    await copy(f.source, f.copied);
+    expect(await git(f.copied, ["rev-parse", child])).toBe(f.historical);
+    await expect(git(f.copied, ["show-ref", "--verify", topic])).rejects.toThrow();
+
+    if (packed) await git(f.copied, ["pack-refs", "--all"]);
+    await git(f.source, ["update-ref", "-d", child]);
+    await git(f.source, ["update-ref", topic, f.head]);
+    await copy(f.source, f.copied);
+    expect(await git(f.copied, ["rev-parse", topic])).toBe(f.head);
+    await expect(git(f.copied, ["show-ref", "--verify", child])).rejects.toThrow();
+    expect(await git(f.copied, ["rev-parse", "origin/main"])).toBe(f.baseline);
+  });
+
+  it("copies a repository without remote references and removes obsolete references on reuse", async () => {
+    const f = await fixture();
+    await copy(f.source, f.copied);
     await git(f.source, ["remote", "remove", "origin"]);
     await git(f.source, ["update-ref", "-d", "refs/remotes/backup/release"]);
     await copy(f.source, f.copied);
     expect(await git(f.copied, ["rev-parse", "HEAD"])).toBe(f.head);
     expect(await git(f.copied, ["for-each-ref", "--format=%(refname)", "refs/remotes/"])).toBe("");
+    const fresh = path.join(f.root, "fresh");
+    await copy(f.source, fresh);
+    expect(await git(fresh, ["rev-parse", "HEAD"])).toBe(f.head);
+    expect(await git(fresh, ["for-each-ref", "--format=%(refname)", "refs/remotes/"])).toBe("");
   });
 
   it("copies many remote references without a large shell argument", async () => {

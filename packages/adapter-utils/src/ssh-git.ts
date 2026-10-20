@@ -117,7 +117,9 @@ async function importGitWorkspaceToSsh(input: {
       `    git -C ${shellQuote(input.remoteDir)} symbolic-ref --delete "$ref"`,
       "  fi",
       "done",
-      `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" '${tempRef}:${tempRef}' ${remoteRefs.length ? "'+refs/remotes/*:refs/remotes/*'" : ""} >/dev/null`,
+      // Prune before fetching to permit topic <-> topic/child replacements.
+      // Keep the wildcard even for an empty source to remove obsolete refs.
+      `git -C ${shellQuote(input.remoteDir)} fetch --force --prune "$tmp_bundle" '${tempRef}:${tempRef}' '+refs/remotes/*:refs/remotes/*' >/dev/null`,
       // Bundles advertise symbolic refs as direct refs. Restore their targets.
       ...remoteRefs.filter((ref) => ref.target).map((ref) =>
         `git -C ${shellQuote(input.remoteDir)} symbolic-ref ${shellQuote(ref.name)} ${shellQuote(ref.target!)} >/dev/null`),
