@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/synthiq-connection-health.yml
       - server/src/services/connection-health-credentials.ts
+      - server/src/services/tool-access.ts
+      - server/src/services/connection-vault-grant.ts
       - server/src/services/connection-intent-source.ts
       - server/src/services/connection-intents.ts
       - server/src/services/secret-rotation-commit.ts

@@ -8,6 +8,7 @@ import {
 } from "@paperclipai/db";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { connectionIntentService } from "../services/connection-intents.js";
+import { selectVaultConnectionGrant } from "../services/connection-vault-grant.js";
 import { secretService } from "../services/secrets.js";
 import type { RuntimeToolsTokenClaims } from "../runtime-tools-token.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -21,7 +22,7 @@ suite("connection health isolation", () => {
   beforeAll(async () => {
     temp = await startEmbeddedPostgresTestDatabase("paperclip-connection-health-");
     db = createDb(temp.connectionString);
-  }, 20_000);
+  }, 60_000);
   afterAll(async () => { await temp?.cleanup(); });
   afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
@@ -86,7 +87,7 @@ suite("connection health isolation", () => {
       expect(tool).toBeDefined();
       return gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} });
     }
-    return { companyId, connection: connection!, grant: grant!, complete, stored, execute };
+    return { companyId, userId, agent: agent!, connection: connection!, grant: grant!, complete, stored, execute };
   }
 
   it.each(["json", "sse", "content-length", "error-body"])("keeps health and intent completion after an oversized %s response", async (kind) => {
@@ -171,6 +172,79 @@ suite("connection health isolation", () => {
       expect((await f.stored()).healthStatus).toBe("error");
     }
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["dedicated", "organization-decoy", "retry"])("tests a rotated dedicated OAuth grant: %s", async (kind) => {
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "a".repeat(64));
+    const f = await fixture();
+    const vault = secretService(db);
+    const secret = await vault.create(f.companyId, { name: "Dedicated token", provider: "local_encrypted", value: "old-agent-value" });
+    await db.insert(companySecretBindings).values({
+      companyId: f.companyId, secretId: secret.id, targetType: "tool_connection", targetId: f.connection.id, configPath: "oauth.access_token",
+    });
+    await db.update(toolConnections).set({
+      credentialPolicy: "per_agent", authKind: "oauth", credentialSource: "paperclip_vault", healthStatus: "error",
+      credentialRefs: [{ name: "oauth.access_token", placement: "header", key: "Authorization", prefix: "Bearer ", secretId: randomUUID(), version: "latest" }],
+    }).where(eq(toolConnections.id, f.connection.id));
+    await db.update(connectionGrants).set({
+      kind: "agent", subjectAgentId: f.agent.id, isDefault: false,
+      credentialSecretRefs: [{ secretId: secret.id, versionSelector: "latest", configPath: "oauth.access_token" }],
+    }).where(eq(connectionGrants.id, f.grant.id));
+    if (kind !== "dedicated") await db.insert(connectionGrants).values({
+      companyId: f.companyId, connectionId: f.connection.id, kind: "organization", status: "active", isDefault: true,
+    });
+    await vault.rotate(secret.id, { value: "new-agent-value" });
+    expect((await f.stored()).healthStatus).toBe("unchecked");
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer new-agent-value");
+      const { id, method } = JSON.parse(String(init.body));
+      expect(method).toBe("tools/list");
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id, result: { tools: [] } }), {
+        status: kind === "retry" && fetchMock.mock.calls.length === 1 ? 401 : 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(f.complete(false)).resolves.toMatchObject({ status: "accepted" });
+    expect((await f.stored()).healthStatus).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(kind === "retry" ? 2 : 1);
+  });
+
+  it.each(["foreign-agent", "inactive"])("refuses a %s dedicated grant before health testing", async (kind) => {
+    const f = await fixture();
+    await db.update(toolConnections).set({ credentialPolicy: "per_agent", healthStatus: "unchecked" })
+      .where(eq(toolConnections.id, f.connection.id));
+    const [foreign] = await db.insert(agents).values({ companyId: f.companyId, name: "Other agent", role: "engineer", adapterType: "process" }).returning();
+    await db.update(connectionGrants).set({
+      kind: "agent", subjectAgentId: kind === "foreign-agent" ? foreign!.id : f.agent.id,
+      status: kind === "inactive" ? "revoked" : "active", isDefault: false,
+    }).where(eq(connectionGrants.id, f.grant.id));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(f.complete()).rejects.toThrow("no usable identity grant");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await f.stored()).healthStatus).toBe("unchecked");
+  });
+
+  it.each(["company", "connection", "status"])("rechecks the selected grant %s without identity fallback", async (field) => {
+    const f = await fixture();
+    const foreign = await fixture();
+    const [row] = await db.select().from(toolConnections).where(eq(toolConnections.id, f.connection.id));
+    let grantId = foreign.grant.id;
+    if (field === "connection") {
+      const [other] = await db.insert(toolConnections).values({
+        ...f.connection, id: randomUUID(), uid: randomUUID(),
+      }).returning();
+      const [grant] = await db.insert(connectionGrants).values({
+        companyId: f.companyId, connectionId: other!.id, kind: "organization", status: "active", isDefault: true,
+      }).returning();
+      grantId = grant!.id;
+    } else if (field === "status") {
+      await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, f.grant.id));
+      grantId = f.grant.id;
+    }
+    await expect(selectVaultConnectionGrant(db, row!, {
+      actorType: "user", actorId: f.userId, credentialGrantId: grantId,
+    }, { setupUrl: "/setup", reconnectUrl: "/reconnect" })).rejects.toThrow("selected authorization is no longer active");
   });
 
   it("invalidates latest references and preserves pinned or foreign references", async () => {

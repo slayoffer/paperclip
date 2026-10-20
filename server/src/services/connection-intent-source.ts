@@ -53,13 +53,11 @@ export async function checkUncheckedIntentConnection(
     if (!canManageOrganizationGrant) throw forbidden("Granting agent tool access requires connection-management authority");
   }
   const { grants } = await access.listConnectionGrants(connectionId, task.companyId);
-  const personal = grants.some(grant => grant.status === "active" && (
-    (grant.kind === "user" && grant.subjectUserId === userId)
-    || (grant.kind === "agent" && grant.subjectAgentId === payload.requestingAgentId)
-  ));
-  if (!personal && !canManageOrganizationGrant) throw forbidden("Sharing a company connection requires connection-management authority");
-  if (!personal && !grants.some(grant => grant.kind === "organization" && grant.status === "active")) {
-    throw conflict("This connection has no usable identity grant");
-  }
-  await access.checkHealth(connectionId, { actorType: "user", actorId: userId });
+  const personal = grants.find(grant => grant.status === "active" && grant.kind === "user" && grant.subjectUserId === userId);
+  const dedicated = grants.find(grant => grant.status === "active" && grant.kind === "agent" && grant.subjectAgentId === payload.requestingAgentId);
+  const organization = grants.find(grant => grant.status === "active" && grant.kind === "organization");
+  if (!personal && !dedicated && !canManageOrganizationGrant) throw forbidden("Sharing a company connection requires connection-management authority");
+  const selected = candidate.credentialPolicy === "per_agent" ? dedicated : personal ?? dedicated ?? organization;
+  if (!selected) throw conflict("This connection has no usable identity grant");
+  await access.checkHealth(connectionId, { actorType: "user", actorId: userId }, { grantId: selected.id });
 }
