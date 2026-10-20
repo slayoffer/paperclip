@@ -17,6 +17,10 @@ The shared validator binds company, broker, agent, run, issue, repository, opera
 Pushes also bind the expected old commit.
 Pull requests bind the source repository, branch, head, and number when present.
 The repository must match a stored workspace of the current issue's project.
+Bindings accept only lowercase `owner/name` identities without the `.git` suffix.
+Workspace URLs may include `.git`. That suffix does not create a separate request identity.
+Database checks enforce the same canonical form and require repository columns and bindings to match.
+Pull request source bindings must use that same identity.
 The branch must be `review/<issue identifier>`.
 The issue must belong to the current agent and running run, including both execution and checkout locks.
 The company and agent must permit work.
@@ -88,11 +92,13 @@ Run the focused tests on an approved build host with Node.js 24.11 or later:
 pnpm exec vitest run --project @paperclipai/server \
   server/src/services/publication-authority.test.ts \
   server/src/services/publication-authority-races.test.ts \
-  server/src/services/publication-authority-reconciliation.test.ts
+  server/src/services/publication-authority-reconciliation.test.ts \
+  server/src/services/publication-authority-repositories.test.ts
 ```
 
 The tests start isolated PostgreSQL databases and apply the real migration chain.
-The fork workflow `synthiq-publication-authority.yml` runs all three suites on Node.js 24 for release-target pull requests.
+The fork workflow `synthiq-publication-authority.yml` runs all four suites on Node.js 24 for release-target pull requests.
+Repository tests cover aliases, direct database writes, outstanding uniqueness, and protected reconciliation after unresolved results.
 On a host with slow temporary disk storage, use `TMPDIR=/dev/shm` when sufficient memory exists.
 These tests prove transaction behavior and persistence across new service and connection instances.
 They do not prove power-loss durability, certificate authentication, host isolation, remote publication, or live containment.

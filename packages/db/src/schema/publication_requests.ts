@@ -50,6 +50,8 @@ export const publicationRequests = pgTable("publication_requests", {
 }, (t) => ({
   brokerFk: foreignKey({ columns: [t.companyId, t.brokerId], foreignColumns: [publicationBrokers.companyId, publicationBrokers.id] }),
   issueFk: foreignKey({ columns: [t.companyId, t.issueId], foreignColumns: [issues.companyId, issues.id] }),
+  repositoryCanonical: check("publication_requests_repository_canonical", sql`${t.repository} ~ '^[a-z0-9_.-]+/[a-z0-9_.-]+$' and ${t.repository} !~ '[.]git$'`),
+  repositoryBindings: check("publication_requests_repository_bindings", sql`(${t.bindings}->>'repository') is not distinct from ${t.repository} and (${t.bindings}->>'operation' = 'push' or (${t.bindings}->>'sourceRepository') is not distinct from ${t.repository})`),
   lifetime: check("publication_requests_lifetime", sql`${t.expiresAtMs} > ${t.issuedAtMs} and ${t.expiresAtMs} <= ${t.issuedAtMs} + 30000`),
   stateCheck: check("publication_requests_state", sql`${t.state} in ('pending', 'dispatched', 'unknown', 'succeeded', 'refused', 'revoked')`),
   dispatchCheck: check("publication_requests_dispatch", sql`(${t.state} in ('pending', 'revoked') and ${t.dispatchedAtMs} is null) or (${t.state} in ('dispatched', 'unknown', 'succeeded', 'refused') and ${t.dispatchedAtMs} is not null)`),

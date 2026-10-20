@@ -2136,6 +2136,13 @@
       "when": 1792433293974,
       "tag": "0306_exotic_magus",
       "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0307_simple_sleeper",
+      "breakpoints": true
     }
   ]
 }

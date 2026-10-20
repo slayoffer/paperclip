@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
-const repository = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+// One GitHub identity for bindings, workspace checks, and outstanding writes.
+// A workspace URL may contain .git. A bound repository must not contain that transport suffix.
+const repository = z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/)
+  .refine((value) => !value.endsWith(".git"), "Use a lowercase repository without the .git suffix");
 const branch = z.string().regex(/^review\/[A-Z][A-Z0-9]*-[1-9][0-9]*$/);
 const common = {
   requestId: z.string().uuid(),

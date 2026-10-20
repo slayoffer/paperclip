@@ -44,6 +44,7 @@ export async function lockPublicationContext(tx: PublicationTransaction, b: Publ
     eq(projectWorkspaces.companyId, identity.companyId), eq(projectWorkspaces.projectId, issue.projectId),
     ...(issue.projectWorkspaceId ? [eq(projectWorkspaces.id, issue.projectWorkspaceId)] : []),
   )).for("no key update");
+  // Bindings accept only the lowercase identity without .git. URL suffixes do not create new identities.
   if (!workspaces.some((w) => w.repoUrl === `https://github.com/${b.repository}`
     || w.repoUrl === `https://github.com/${b.repository}.git`)) return "repository_denied";
   if (b.operation !== "push" && (b.sourceRepository !== b.repository
