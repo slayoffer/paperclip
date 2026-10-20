@@ -9,10 +9,12 @@ It reconstructs the previous envelope from the saved interaction and answers.
 It sends the current envelope after either digest matches.
 It preserves the stored digest, resolver policy, claim fence, and duplicate protection.
 A different digest produces `question_response_payload_digest_mismatch` before delivery.
+Continuation authorization and source retirement use the same digest matcher.
+They preserve company, correlation, actor, and cancellation checks.
 This compatibility check needs no migration or stored answer change.
 
 Run the delivery regression tests with:
 
 ```sh
-pnpm exec vitest run server/src/__tests__/question-response-delivery.test.ts
+pnpm exec vitest run server/src/__tests__/question-response-delivery.test.ts server/src/__tests__/question-response-legacy-authorization.test.ts
 ```
