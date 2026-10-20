@@ -137,7 +137,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     if (usedInitializedSession) {
       try {
         sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
           requestId: listRequestId });
         response = await sendToolsList(sessionHeaders);
       } catch (error) {
@@ -170,7 +170,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       forgetMcpHttpSessions(connection.id);
       await response.body?.cancel().catch(() => undefined);
       sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
         requestId: listRequestId });
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);

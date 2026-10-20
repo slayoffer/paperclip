@@ -3,6 +3,7 @@ import { promptInjectionPreventionService } from "./prompt-injection-prevention.
 import { adapterExecutionControls } from "./adapter-execution-control.js";
 import type { BudgetServiceHooks } from "./budgets.js";
 import type { PromptInjectionDetectorMetadata } from "@paperclipai/shared";
+import { ToolGatewayHttpError, MAX_REMOTE_MCP_RESPONSE_BYTES, responseTooLargeError, readBoundedRemoteResponse, malformedRemoteMcpResponse } from "./tool-gateway-errors.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
 import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
@@ -242,7 +243,6 @@ const ACTION_REQUEST_EXECUTION_WAIT_MS = APPROVED_EXECUTION_TIMEOUT_MS + 5_000;
 // treat an unsigned row as abandoned after this grace time from createdAt. This
 // grace must exceed the normal sign path (approval-snapshot fetch + interaction
 // create) so a live create keeps its own row.
-const MAX_REMOTE_MCP_RESPONSE_BYTES = 1_000_000;
 const ACTIVE_GATEWAY_RUN_STATUSES = new Set(["running"]);
 // A tool listing decides access for every tool in the company. The decisions
 // of one listing share a read cache, so this cap only limits how many of them
@@ -358,16 +358,7 @@ export interface ToolGatewaySession {
 
 export type ToolGatewayRuntimeSlot = ToolRuntimeSlotView;
 
-export class ToolGatewayHttpError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-    public readonly reasonCode: string,
-    public readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-  }
-}
+export { ToolGatewayHttpError } from "./tool-gateway-errors.js";
 
 /** Repeated discovery rows are one tool; conflicting bindings stay ambiguous. */
 export function deduplicateToolDescriptors(tools: readonly ToolGatewayDescriptor[]): ToolGatewayDescriptor[] {
@@ -3952,12 +3943,13 @@ export function createToolGatewayService(
           profile: connectorProfile,
           refreshToken,
         });
+        // Synthiq fork: an automatic refresh keeps connection health.
         await secrets.rotate(accessRef.secretId, {
-          value: credentials.accessToken,
+          value: credentials.accessToken, preserveConnectionHealth: true,
         });
         if (credentials.refreshToken) {
           await secrets.rotate(refreshRef.secretId, {
-            value: credentials.refreshToken,
+            value: credentials.refreshToken, preserveConnectionHealth: true,
           });
         }
         const providerTenant = {
@@ -5768,40 +5760,6 @@ export function createToolGatewayService(
     };
   }
 
-  function responseTooLargeError() {
-    return new ToolGatewayHttpError(
-      502,
-      "Remote MCP response exceeded the gateway size limit. Request a smaller result, for example a narrower query or a smaller page size.",
-      "mcp_remote_response_too_large",
-      { maxBytes: MAX_REMOTE_MCP_RESPONSE_BYTES },
-    );
-  }
-
-  async function readBoundedRemoteResponse(
-    response: Response,
-  ): Promise<string> {
-    const contentLength = response.headers.get("content-length");
-    if (
-      contentLength &&
-      Number(contentLength) > MAX_REMOTE_MCP_RESPONSE_BYTES
-    ) {
-      throw responseTooLargeError();
-    }
-    const body = await response.text();
-    if (Buffer.byteLength(body, "utf8") > MAX_REMOTE_MCP_RESPONSE_BYTES) {
-      throw responseTooLargeError();
-    }
-    return body;
-  }
-
-  function malformedRemoteMcpResponse(): ToolGatewayHttpError {
-    return new ToolGatewayHttpError(
-      502,
-      "Remote MCP server returned a malformed tools/call response",
-      "remote_mcp_malformed_response",
-    );
-  }
-
   type McpElicitationRequest = {
     message: string;
     requestedSchema: Record<string, unknown> | null;
@@ -6426,6 +6384,9 @@ export function createToolGatewayService(
       }
       if (payloadRecord.error !== undefined) {
         const errorRecord = asRecord(payloadRecord.error);
+        if ([-32700, -32600, -32601].includes(Number(errorRecord?.code))) {
+          await markCallHealth( "error", "Remote MCP server returned a protocol error.");
+        }
         throw new ToolGatewayHttpError(
           502,
           "Remote MCP server returned an error",
@@ -6487,6 +6448,9 @@ export function createToolGatewayService(
         throw new ToolGatewayHttpError(error.status, error.message, error.code, { connectionId: connection.id, catalogEntryId: entry.id, execution });
       }
       if (error instanceof ToolGatewayHttpError) {
+        if (error.reasonCode === "remote_mcp_malformed_response") {
+          await markRemoteConnectionHealth(connection, "error", error.message);
+        }
         throw new ToolGatewayHttpError(
           error.status,
           error.message,

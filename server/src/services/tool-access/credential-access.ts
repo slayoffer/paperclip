@@ -1,7 +1,7 @@
+import { selectVaultConnectionGrant } from "../connection-vault-grant.js";
 import type { ActorInfo } from "./types.js";
 import { oauthConfig } from "./oauth/metadata.js";
 import { remoteEndpoint } from "./connection-methods.js";
-import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { connectionGrants, toolConnections } from "@paperclipai/db";
 import { badRequest, HttpError, unprocessable } from "../../errors.js";
@@ -38,75 +38,9 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
   ): Promise<typeof connectionGrants.$inferSelect | null> {
-    const actorUserId =
-      actor?.actorType === "user" ? (actor.actorId ?? null) : null;
-    if (actorUserId) {
-      const [personal] = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.subjectUserId, actorUserId),
-          ),
-        )
-        .limit(1);
-      if (personal) {
-        if (personal.status !== "active") {
-          throw unprocessable("OAuth authorization must be reconnected", {
-            code: "oauth_reauthorization_required",
-            setupUrl: connectionSetupUrl(connection),
-            reconnectUrl: connectionReconnectUrl(connection),
-          });
-        }
-        return personal;
-      }
-    }
-    if (!actorUserId && connection.credentialPolicy === "per_user") {
-      // A personal-only connection is intentionally fixed to one identity.
-      // Background health/catalog checks have no acting user, but may safely
-      // exercise that sole owner-bound grant without turning it into a shared
-      // credential or making it available to a different caller.
-      const personalGrants = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.status, "active"),
-          ),
-        )
-        .limit(2);
-      if (personalGrants.length === 1) return personalGrants[0]!;
-    }
-    if (connection.credentialPolicy === "per_user") {
-      throw unprocessable(
-        "This connection needs the current user's authorization",
-        {
-          code: "user_authorization_required",
-          setupUrl: connectionSetupUrl(connection),
-          reconnectUrl: connectionReconnectUrl(connection),
-        },
-      );
-    }
-    const [organization] = await db
-      .select()
-      .from(connectionGrants)
-      .where(
-        and(
-          eq(connectionGrants.companyId, connection.companyId),
-          eq(connectionGrants.connectionId, connection.id),
-          eq(connectionGrants.kind, "organization"),
-          eq(connectionGrants.isDefault, true),
-        ),
-      )
-      .limit(1);
-    if (organization?.status === "active") return organization;
-    return null;
+    return selectVaultConnectionGrant(db, connection, actor, {
+      setupUrl: connectionSetupUrl(connection), reconnectUrl: connectionReconnectUrl(connection),
+    });
   }
 
   async function resolveCredentialHeaders(

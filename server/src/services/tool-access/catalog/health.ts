@@ -74,10 +74,11 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
   async function checkConnectionHealth(
     connectionId: string,
     actor?: ActorInfo,
-    options: { allowUnauthenticatedProbe?: boolean } = {},
+    options: { allowUnauthenticatedProbe?: boolean; grantId?: string } = {},
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
+    if (options.grantId) actor = { ...actor, credentialGrantId: options.grantId };
     await assertConnectorConnectionSetupEnabled(connection);
     const unavailableServices: string[] = [];
     try {
@@ -106,8 +107,9 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
                   grant.subjectUserId === actor.actorId,
               )
             : null;
-        const grantsToCheck =
-          connection.credentialPolicy === "per_user" &&
+        const grantsToCheck = actor?.credentialGrantId
+          ? activeGrants.filter(grant => grant.id === actor?.credentialGrantId)
+          : connection.credentialPolicy === "per_user" &&
           actor?.actorType === "user"
             ? actorGrant
               ? [actorGrant]
@@ -143,7 +145,7 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
               : undefined;
         await remoteTools(connection, credentialHeaders, actor, undefined, unavailableServices);
       } else if (connection.transport === "local_stdio") {
-        await resolveCredentialHeaders(connection);
+        await resolveCredentialHeaders(connection, actor);
         await stdioTemplateId(connection.companyId, connection.config);
         await validateCogneeConnection(connection, actor, false);
       } else {
