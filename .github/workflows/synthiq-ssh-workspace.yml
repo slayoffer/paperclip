@@ -47,5 +47,6 @@ jobs:
           packages/adapter-utils/src/remote-managed-runtime.test.ts
           packages/adapter-utils/src/workspace-restore-merge.test.ts
           packages/adapter-utils/src/workspace-restore-contention.test.ts
+          packages/adapter-utils/src/workspace-restore-scan-races.test.ts
           packages/adapter-utils/src/directory-merge-lock.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
