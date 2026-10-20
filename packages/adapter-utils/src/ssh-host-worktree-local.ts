@@ -49,10 +49,12 @@ export async function snapshotLocalWorkspaceWip(input: {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-wip-index-"));
   const indexFile = path.join(tempDir, "index");
   try {
-    const realIndex = path.resolve(input.localDir, (await runLocalGit(input.localDir, ["rev-parse", "--git-path", "index"])).stdout.trim());
-    await fs.copyFile(realIndex, indexFile).catch(() => undefined);
     const env = { ...process.env, GIT_INDEX_FILE: indexFile };
-    await runLocalGit(input.localDir, ["add", "-A", "--", ".", ...HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS], { env, timeout: 120_000 });
+    await runLocalGit(input.localDir, ["read-tree", headSha], { env });
+    const paths = (await runLocalGit(input.localDir, [
+      "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".", ...HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS,
+    ], { env, maxBuffer: 16 * 1024 * 1024 })).stdout;
+    await runGitWithInput(input.localDir, ["--literal-pathspecs", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], paths, env);
     const tree = (await runLocalGit(input.localDir, ["write-tree"], { env })).stdout.trim();
     const headTree = (await runLocalGit(input.localDir, ["rev-parse", `${headSha}^{tree}`])).stdout.trim();
     if (tree === headTree) return { headSha, wipSha: null };

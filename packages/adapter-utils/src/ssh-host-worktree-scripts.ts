@@ -1,5 +1,4 @@
 import path from "node:path";
-import { GIT_SYNC_COMMIT_IDENTITY_ARGS } from "./git-workspace-sync.js";
 import { shellQuote } from "./ssh-config.js";
 
 // Shell builders for persistent per-host git worktrees (SYNA-2273).
@@ -7,21 +6,8 @@ import { shellQuote } from "./ssh-config.js";
 // validated before it reaches a builder. The scripts print one marker line
 // on stdout (PAPERCLIP_HOST_*), so the TypeScript side never parses free text.
 
-export const HOST_WORKTREE_ROOT_DIR = ".paperclip-host";
-export const HOST_WORKTREE_MARKER_ERROR = "PAPERCLIP_HOST_ERROR";
-export const HOST_WORKTREE_MARKER_LOCK = "PAPERCLIP_HOST_LOCK";
-export const HOST_WORKTREE_MARKER_MATERIALIZE = "PAPERCLIP_HOST_MATERIALIZE";
-export const HOST_WORKTREE_MARKER_EXPORT = "PAPERCLIP_HOST_EXPORT";
-export const HOST_WORKTREE_MARKER_INSPECT = "PAPERCLIP_HOST_INSPECT";
-export const HOST_WORKTREE_MARKER_REMOVE = "PAPERCLIP_HOST_REMOVE";
-export const HOST_WORKTREE_DEFAULT_WIP_MAX_BYTES = 50 * 1024 * 1024;
-
-/** WIP snapshots never include dependency folders or nested agent clones. */
-export const HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS = [
-  ":(exclude,glob)**/node_modules/**",
-  ":(exclude,glob).worktrees/**",
-  ":(exclude,glob).paperclip-runtime/**",
-] as const;
+export * from "./ssh-host-worktree-constants.js";
+import { HOST_WORKTREE_ROOT_DIR, HOST_WORKTREE_MARKER_ERROR, HOST_WORKTREE_MARKER_LOCK, HOST_WORKTREE_MARKER_MATERIALIZE, HOST_WORKTREE_MARKER_INSPECT, HOST_WORKTREE_MARKER_REMOVE } from "./ssh-host-worktree-constants.js";
 
 export interface HostWorktreeLayout {
   basePath: string;
@@ -114,11 +100,25 @@ export function hostRunDir(layout: HostWorktreeLayout, runId: string, adapterKey
 }
 
 const q = shellQuote;
-const identity = GIT_SYNC_COMMIT_IDENTITY_ARGS.map((arg) => q(arg)).join(" ");
-const wipExcludes = HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS.map((spec) => q(spec)).join(" ");
 
 function errorLine(code: string, detailExpr = "''"): string {
   return `printf '${HOST_WORKTREE_MARKER_ERROR}\\t%s\\t%s\\n' ${q(code)} ${detailExpr}`;
+}
+
+/** Serialize lock creation and removal. A crashed guard fails closed. */
+function lockMutationGuard(lockDir: string): string[] {
+  const guard = q(`${lockDir}.guard`);
+  return [
+    `guard=${guard}`,
+    "attempt=0",
+    `until mkdir ${guard} 2>/dev/null; do`,
+    "  attempt=$((attempt + 1))",
+    `  if [ "$attempt" -ge 100 ]; then ${errorLine("host_lock_timeout", q("Lock mutation guard is busy"))}; exit 0; fi`,
+    "  sleep 0.1",
+    "done",
+    `trap 'rmdir "$guard"' EXIT`,
+    "trap 'exit 1' HUP INT TERM",
+  ];
 }
 
 /** `mkdir` lock: macOS has no flock(1). Prints `acquired` or `held <ageSeconds> <owner.json>`. */
@@ -127,6 +127,7 @@ export function buildHostLockAcquireScript(input: { layout: HostWorktreeLayout; 
   return [
     "set -e",
     `mkdir -p ${q(input.layout.locksDir)}`,
+    ...lockMutationGuard(input.lockDir),
     `if mkdir ${lock} 2>/dev/null; then`,
     `  printf '%s' ${q(input.ownerJson)} > ${q(`${input.lockDir}/owner.json.tmp`)}`,
     `  mv -f ${q(`${input.lockDir}/owner.json.tmp`)} ${q(`${input.lockDir}/owner.json`)}`,
@@ -149,6 +150,8 @@ export function buildHostLockReleaseScript(input: { lockDir: string; expectedOwn
   const minAge = Math.max(0, Math.trunc(input.minAgeSeconds ?? 0));
   return [
     "set -e",
+    `mkdir -p ${q(path.posix.dirname(input.lockDir))}`,
+    ...lockMutationGuard(input.lockDir),
     `if [ ! -d ${lock} ]; then printf '${HOST_WORKTREE_MARKER_LOCK}\\tabsent\\n'; exit 0; fi`,
     `current=$(cat ${q(`${input.lockDir}/owner.json`)} 2>/dev/null || true)`,
     "now=$(date +%s)",
@@ -189,10 +192,6 @@ export function buildHostMaterializeScript(input: {
   const wt = q(input.worktreePath);
   const head = q(input.headSha);
   const shas = [input.headSha, ...(input.wipSha ? [input.wipSha] : [])];
-  const refspecs = [
-    q(`+${input.bundleHeadRef}:refs/paperclip/known/${input.headSha}`),
-    ...(input.wipSha && input.bundleWipRef ? [q(`+${input.bundleWipRef}:refs/paperclip/known/${input.wipSha}`)] : []),
-  ].join(" ");
   const checkout = input.branch
     ? `git -C ${wt} checkout -q --force --ignore-other-worktrees -B ${q(input.branch)} ${head}`
     : `git -C ${wt} -c advice.detachedHead=false checkout -q --force --detach ${head}`;
@@ -208,7 +207,11 @@ export function buildHostMaterializeScript(input: {
     `tmp_bundle=$(mktemp ${q(`${input.bareRepo}/paperclip-incoming-XXXXXX`)})`,
     `trap 'rm -f "$tmp_bundle"' EXIT`,
     'cat > "$tmp_bundle"',
-    `if [ -s "$tmp_bundle" ]; then git -C ${bare} fetch -q --force "$tmp_bundle" ${refspecs}; fi`,
+    `if [ -s "$tmp_bundle" ]; then`,
+    `  git -C ${bare} bundle list-heads "$tmp_bundle" > "$tmp_bundle.refs"`,
+    `  trap 'rm -f "$tmp_bundle" "$tmp_bundle.refs"' EXIT`,
+    `  while read -r sha ref; do git -C ${bare} fetch -q --no-tags --force "$tmp_bundle" "+$ref:refs/paperclip/known/$sha"; done < "$tmp_bundle.refs"`,
+    "fi",
     ...shas.flatMap((sha) => [
       `if ! git -C ${bare} cat-file -e ${q(`${sha}^{commit}`)} 2>/dev/null; then ${errorLine("host_missing_objects", q(sha))}; exit 0; fi`,
       `git -C ${bare} update-ref ${q(`refs/paperclip/known/${sha}`)} ${q(sha)}`,
@@ -239,82 +242,7 @@ export function buildHostMaterializeScript(input: {
   ].join("\n");
 }
 
-/**
- * Snapshot WIP with a temporary index (the real index and branch stay
- * untouched), cap its size, and write a delta bundle of HEAD + WIP
- * `--not <start head>` into `<runDir>/export.bundle`.
- */
-export function buildHostExportPrepareScript(input: {
-  worktreePath: string;
-  runDir: string;
-  runId: string;
-  startHeadSha: string | null;
-  wipMaxBytes: number;
-  forceFullBundle: boolean;
-}): string {
-  const wt = q(input.worktreePath);
-  const runDir = q(input.runDir);
-  const wipRef = q(`refs/paperclip/wip/${input.runId}`);
-  const exportRef = q(`refs/paperclip/export/${input.runId}`);
-  const bundle = q(`${input.runDir}/export.bundle`);
-  const idx = q(`${input.runDir}/wip.index`);
-  const sizes = q(`${input.runDir}/wip.sizes`);
-  const cap = Math.max(0, Math.trunc(input.wipMaxBytes));
-  const start = input.startHeadSha ? q(input.startHeadSha) : null;
-  return [
-    "set -e",
-    `if [ ! -e ${q(`${input.worktreePath}/.git`)} ]; then ${errorLine("host_worktree_missing", wt)}; exit 0; fi`,
-    `mkdir -p ${runDir}`,
-    `idx=${idx}`,
-    `sizes=${sizes}`,
-    `rm -f "$idx" "$sizes" ${bundle}`,
-    `trap 'rm -f "$idx" "$sizes"' EXIT`,
-    `head=$(git -C ${wt} rev-parse --verify HEAD)`,
-    `real_index=$(git -C ${wt} rev-parse --git-path index)`,
-    `case "$real_index" in /*) ;; *) real_index=${wt}/"$real_index" ;; esac`,
-    `if [ -f "$real_index" ]; then cp "$real_index" ${idx}; fi`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} add -A -- . ${wipExcludes}`,
-    `tree=$(GIT_INDEX_FILE=${idx} git -C ${wt} write-tree)`,
-    `head_tree=$(git -C ${wt} rev-parse "$head^{tree}")`,
-    `git -C ${wt} update-ref -d ${wipRef} >/dev/null 2>&1 || true`,
-    'wip=""',
-    'if [ "$tree" != "$head_tree" ]; then',
-    `  git -C ${wt} diff-tree -r --no-renames "$head_tree" "$tree" | awk -F '\\t' '{ split($1, m, " "); if (m[5] != "D" && m[2] != "160000") print m[4] " " $2 }' | git -C ${wt} cat-file --batch-check='%(objectsize) %(rest)' > ${sizes}`,
-    `  if awk -v cap=${cap} '{ s += $1 } END { exit !(s > cap) }' ${sizes}; then`,
-    `    total=$(awk '{ s += $1 } END { printf "%.0f", s }' ${sizes})`,
-    `    printf '${HOST_WORKTREE_MARKER_ERROR}\\twip_too_large\\t%s' "$total"`,
-    `    sort -rn ${sizes} | head -n 10 | while IFS= read -r line; do printf '\\t%s' "$line"; done`,
-    "    printf '\\n'",
-    "    exit 0",
-    "  fi",
-    `  wip=$(git -C ${wt} ${identity} commit-tree "$tree" -p "$head" -m ${q(`Paperclip host WIP snapshot ${input.runId}`)})`,
-    `  git -C ${wt} update-ref ${wipRef} "$wip"`,
-    "fi",
-    `branch=$(git -C ${wt} symbolic-ref -q --short HEAD || true)`,
-    `git -C ${wt} update-ref ${exportRef} "$head"`,
-    `refs=${exportRef}`,
-    `if [ -n "$wip" ]; then refs="$refs ${`refs/paperclip/wip/${input.runId}`}"; fi`,
-    'base=""',
-    ...(start && !input.forceFullBundle
-      ? [`if git -C ${wt} cat-file -e ${q(`${input.startHeadSha}^{commit}`)} 2>/dev/null; then base=$(git -C ${wt} merge-base ${start} "$head" 2>/dev/null || true); fi`]
-      : []),
-    'if [ -n "$base" ]; then',
-    `  count=$(git -C ${wt} rev-list --count $refs --not "$base")`,
-    "else",
-    `  count=$(git -C ${wt} rev-list --count $refs)`,
-    "fi",
-    'if [ "$count" -gt 0 ]; then',
-    `  if [ -n "$base" ]; then git -C ${wt} bundle create ${bundle} $refs --not "$base" >/dev/null 2>&1; else git -C ${wt} bundle create ${bundle} $refs >/dev/null 2>&1; fi`,
-    "else",
-    `  : > ${bundle}`,
-    "fi",
-    `git -C ${wt} update-ref -d ${exportRef} >/dev/null 2>&1 || true`,
-    `git -C ${wt} update-ref "refs/paperclip/known/$head" "$head"`,
-    `if [ -n "$wip" ]; then git -C ${wt} update-ref "refs/paperclip/known/$wip" "$wip"; fi`,
-    `size=$(wc -c < ${bundle} | tr -d ' ')`,
-    `printf '${HOST_WORKTREE_MARKER_EXPORT}\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$head" "$wip" "$([ -n "$wip" ] && echo 1 || echo 0)" "$size" "$branch"`,
-  ].join("\n");
-}
+export { buildHostExportPrepareScript } from "./ssh-host-worktree-export-scripts.js";
 
 /** Streams the prepared bundle on stdout and deletes it. */
 export function buildHostExportStreamScript(input: { runDir: string }): string {

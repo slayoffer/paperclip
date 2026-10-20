@@ -53,6 +53,7 @@ export function parseHostMarker(stdout: string, marker: string): string[] {
     const [, code = "host_protocol_error", ...details] = failure.split("\t");
     const known: HostWorktreeErrorCode[] = [
       "wip_too_large", "host_worktree_dirty", "host_worktree_missing", "host_worktree_path_conflict", "host_missing_objects",
+      "host_lock_timeout",
     ];
     const errorCode = (known as string[]).includes(code) ? code as HostWorktreeErrorCode : "host_protocol_error";
     const message = errorCode === "wip_too_large"

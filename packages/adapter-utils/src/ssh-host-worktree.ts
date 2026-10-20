@@ -30,7 +30,8 @@ import {
   hostWorktreePath,
 } from "./ssh-host-worktree-scripts.js";
 import { HostWorktreeError, type HostWorktreeState, parseHostMarker, readHostWorktreeState, runHostScript } from "./ssh-host-worktree-lock.js";
-import { filterLocalCommits, localCommitExists } from "./ssh-host-worktree-local.js";
+import { filterLocalCommits } from "./ssh-host-worktree-local.js";
+import { importHostWorktreeReferences, type HostWorktreeReference } from "./ssh-host-worktree-refs.js";
 import { createTransferProgress, streamSshToLocalFile } from "./ssh-transfer-progress.js";
 
 // Persistent per-host git worktrees for SSH runs (SYNA-2273, PR 1).
@@ -39,6 +40,7 @@ import { createTransferProgress, streamSshToLocalFile } from "./ssh-transfer-pro
 
 export * from "./ssh-host-worktree-scripts.js";
 export * from "./ssh-host-worktree-lock.js";
+export type { HostWorktreeReference } from "./ssh-host-worktree-refs.js";
 export { snapshotLocalWorkspaceWip } from "./ssh-host-worktree-local.js";
 
 const BUNDLE_TIMEOUT_MS = 10 * 60_000;
@@ -202,6 +204,7 @@ export interface ExportHostWorktreeResult {
   bundleBytes: number;
   importedHeadRef: string;
   importedWipRef: string | null;
+  references: HostWorktreeReference[];
 }
 
 /**
@@ -226,7 +229,7 @@ export async function exportHostWorktree(input: {
 }): Promise<ExportHostWorktreeResult> {
   const runId = assertHostWorktreeId("run id", input.runId);
   const startHeadSha = input.startHeadSha ? assertGitSha("start head sha", input.startHeadSha) : null;
-  const prefix = input.importRefPrefix ?? `refs/paperclip/host-worktree/imported/${runId}`;
+  const prefix = input.importRefPrefix ?? `refs/paperclip/host-worktree/imported/${assertHostWorktreeId("repo key", input.repoKey)}/${input.worktreeName}/${runId}`;
   const runDir = hostRunDir(input.layout, runId);
   const worktreePath = hostWorktreePath(input.layout, input.repoKey, input.worktreeName);
   const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-host-export-"));
@@ -247,20 +250,10 @@ export async function exportHostWorktree(input: {
     const bundleBytes = (await fs.stat(bundlePath)).size;
     const importedHeadRef = `${prefix}/head`;
     const importedWipRef = wipSha ? `${prefix}/wip` : null;
-    if (bundleBytes > 0) {
-      await runLocalGit(input.localDir, [
-        "fetch", "--force", bundlePath, `+refs/paperclip/export/${runId}:${importedHeadRef}`,
-        ...(importedWipRef ? [`+refs/paperclip/wip/${runId}:${importedWipRef}`] : []),
-      ], { timeout: BUNDLE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
-    }
-    for (const [ref, sha] of [[importedHeadRef, headSha], [importedWipRef, wipSha]] as const) {
-      if (!ref || !sha) continue;
-      if (!(await localCommitExists(input.localDir, sha))) {
-        throw new HostWorktreeError("host_export_incomplete", `Local checkout lacks exported commit ${sha.slice(0, 12)}.`, [sha]);
-      }
-      await runLocalGit(input.localDir, ["update-ref", ref, sha]);
-    }
-    return { headSha, branch: branch || null, dirty: dirty === "1", wipSha: wipSha || null, bundleBytes, importedHeadRef, importedWipRef };
+    const references = await importHostWorktreeReferences({
+      localDir: input.localDir, bundlePath, bundleBytes, prefix, runId, headSha, wipSha, stdout,
+    });
+    return { headSha, branch: branch || null, dirty: dirty === "1", wipSha: wipSha || null, bundleBytes, importedHeadRef, importedWipRef, references };
   };
 
   try {
