@@ -39,11 +39,15 @@ An expired dispatch claim also permits a retry. An existing wake prevents a dupl
 A new status transition or assignee change cancels an obsolete intent.
 A card, approval, or review wait that appears after release keeps the intent pending.
 Pending cards, open approvals, outside waits, review handoffs, and open bridge holds preserve the blocked state.
+A typed wait whose action names only other issues is stale when all of those issues are complete or cancelled.
+The release ignores a stale wait and clears it. An action with other words, for example a vendor reply, stays an outside wait.
 Both `pending` and `revision_requested` approvals remain open waits.
 Workspace finalization remains a dependency barrier for both `done` and `cancelled` blockers. Its existing wake path rechecks the dependent after synchronization.
 Both update validators use canonical dependency readiness for saved links and proposed links.
 A blocked issue can receive title and wait-note updates while its blocker still needs workspace finalization.
 An `in_progress` update with explicit blocker links returns `422` until workspace finalization succeeds.
+An `in_progress` update also checks each open bridge hold that the blocker sync keeps. It returns `422` while a hold is open.
+The update checks the saved links again in its transaction.
 Restoring completed blocker links does not send a dependency wake while a separate blocked wait remains.
 The periodic dependency check also respects these waits.
 
@@ -51,5 +55,5 @@ No database migration is required. The descriptor uses the existing JSON column.
 Disable the environment switch to restore the previous rules.
 This source change does not enable the switch or deploy the server.
 
-Verification uses `server/src/__tests__/blocked-state-integrity.test.ts` and `server/src/__tests__/dependency-release-wakes.test.ts`.
+Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`, `server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts`, and `server/src/__tests__/dependency-release-wakes.test.ts`.
 The test uses a temporary PostgreSQL database.

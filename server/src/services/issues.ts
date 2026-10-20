@@ -1,9 +1,10 @@
-import { getRequestedBlockerDependencyReadiness, listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
 import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
+import { assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -10492,34 +10493,7 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       if (patch.status === "in_progress") {
-        const dependencyReadiness =
-          blockedByIssueIds === undefined
-            ? (
-                await listIssueDependencyReadinessMap(
-                  dbOrTx,
-                  existing.companyId,
-                  [id],
-                )
-              ).get(id)
-            : await getRequestedBlockerDependencyReadiness(
-                dbOrTx,
-                existing.companyId,
-                id,
-                blockedByIssueIds,
-              );
-        const unresolvedBlockerIssueIds = dependencyReadiness?.unresolvedBlockerIssueIds ?? [];
-        if (unresolvedBlockerIssueIds.length > 0) {
-          const unresolvedBlockers = await listUnresolvedBlockerDetails(
-            dbOrTx,
-            existing.companyId,
-            unresolvedBlockerIssueIds,
-            dependencyReadiness?.pendingFinalizeBlockerIssueIds,
-          );
-          throw unprocessable("Issue is blocked by unresolved blockers", {
-            unresolvedBlockerIssueIds,
-            unresolvedBlockers,
-          });
-        }
+        await assertIssueReadyToStart(dbOrTx, existing.companyId, id, blockedByIssueIds);
       }
       const shouldValidateNextAssignee =
         Boolean(nextAssigneeAgentId) &&
@@ -10885,6 +10859,8 @@ export function issueService(db: Db) {
             tx,
           );
         }
+        // Recheck the saved links under the row locks. The sync keeps open bridge holds.
+        if (patch.status === "in_progress") await assertIssueReadyToStart(tx, existing.companyId, id);
         await assertRealBlockedWait(tx, updated, actorAgentId === updated.assigneeAgentId ? blockedWaitCommentBody : null);
         if (
           issueData.executionWorkspaceSettings !== undefined &&

@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, like, notInArray } from "drizzle-or
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issueComments, issues, issueThreadInteractions } from "@paperclipai/db";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
+import { isPullQueueEnabled } from "./pull-queue-policy.js";
 
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PAPERCLIP_BLOCKED_STATE_INTEGRITY === "true";
@@ -15,6 +16,38 @@ export function hasOutsideWait(descriptor: IssueUnblockDescriptor | null | undef
   if (!descriptor?.action.trim()) return false;
   if (descriptor.kind === "external" || descriptor.kind === "human") return true;
   return descriptor.kind === "date" && Boolean(descriptor.until && Date.parse(descriptor.until) > Date.now());
+}
+
+const ISSUE_REFERENCE = /\b[A-Z][A-Z0-9]*-\d+\b/g;
+/** Words that only frame issue references, for example "Wait for SYNA-1780 and SYNA-1781 to finish". */
+const ISSUE_REFERENCE_FRAME = new Set(["wait", "waits", "waiting", "for", "on", "until", "after", "blocked", "blocker",
+  "blockers", "by", "issue", "issues", "task", "tasks", "and", "or", "the", "to", "be", "is", "are", "of", "complete",
+  "completed", "completion", "finish", "finishes", "finished", "done", "resolve", "resolved", "close", "closed"]);
+
+export function issueReferences(action: string | null | undefined): string[] {
+  return action?.match(ISSUE_REFERENCE) ?? [];
+}
+
+/** True when the action names issues and no other wait. */
+export function namesOnlyIssueReferences(action: string): boolean {
+  if (!issueReferences(action).length) return false;
+  return action.replace(ISSUE_REFERENCE, " ").toLowerCase().split(/[^a-z0-9]+/)
+    .every(word => !word || ISSUE_REFERENCE_FRAME.has(word));
+}
+
+/**
+ * A typed wait whose action names only other issues is stale when all of them are complete.
+ * Cancelled issues count as complete under the same rules as dependency readiness.
+ */
+async function isStaleIssueOnlyWait(db: Pick<Db, "select">, issue: WaitIssue, descriptor: IssueUnblockDescriptor) {
+  if (descriptor.kind === "date" || !namesOnlyIssueReferences(descriptor.action)) return false;
+  const references = [...new Set(issueReferences(descriptor.action))].filter(identifier => identifier !== issue.identifier);
+  if (!references.length) return false;
+  const rows = await db.select({ status: issues.status }).from(issues).where(and(
+    eq(issues.companyId, issue.companyId), inArray(issues.identifier, references),
+  ));
+  return rows.length === references.length &&
+    rows.every(row => blockerIsResolved(row.status) || (isPullQueueEnabled() && row.status === "cancelled"));
 }
 
 type WaitIssue = Pick<typeof issues.$inferSelect, "id" | "companyId" | "identifier" | "assigneeAgentId" | "unblockDescriptor">;
@@ -85,10 +118,10 @@ export async function blockedWaitFacts(
     openBridgeHoldIds(db, issue),
   ]);
   const linkedIdentifiers = new Set(blockers.map(row => row.identifier));
-  const mentions = descriptor?.action.match(/\b[A-Z][A-Z0-9]*-\d+\b/g) ?? [];
+  const mentions = issueReferences(descriptor?.action);
   return {
     hasTarget: blockers.length > 0 || interaction.length > 0 || approval.length > 0 || review || holds.length > 0,
-    outside: hasOutsideWait(descriptor),
+    outside: hasOutsideWait(descriptor) && !await isStaleIssueOnlyWait(db, issue, descriptor!),
     unlinkedReferences: mentions.filter(identifier => !linkedIdentifiers.has(identifier) && identifier !== issue.identifier),
   };
 }
