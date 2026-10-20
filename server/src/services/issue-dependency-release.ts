@@ -1,9 +1,33 @@
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { approvals, heartbeatRuns, issueApprovals, issueRecoveryActions, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
+import { activityLog, approvals, heartbeatRuns, issueApprovals, issueRecoveryActions, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { listIssueDependencyReadinessMap } from "./issue-dependency-readiness.js";
 import { resolveSuppressedDependencyRecoveries } from "./dependency-recovery-resolution.js";
 import { persistActivity, publishActivity } from "./activity-log.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+
+/** The release audit row commits with the status change and survives enqueue failure. */
+export function dependencyReleaseRetryCondition() {
+  return sql`(${issues.status} = 'todo' and exists (
+    select 1 from ${activityLog}
+    where ${activityLog.companyId} = ${issues.companyId}
+      and ${activityLog.entityType} = 'issue'
+      and ${activityLog.entityId} = ${issues.id}::text
+      and ${activityLog.action} = 'issue.updated'
+      and ${activityLog.actorType} = 'system'
+      and ${activityLog.actorId} = 'dependency_release'
+      and ${activityLog.details}->>'reason' = 'issue_blockers_resolved'
+      and ${activityLog.details}->>'dependencyReleaseStatusVersion' = ${issues.statusVersion}::text
+  ) and not exists (
+    select 1 from ${activityLog}
+    where ${activityLog.companyId} = ${issues.companyId}
+      and ${activityLog.entityType} = 'issue'
+      and ${activityLog.entityId} = ${issues.id}::text
+      and ${activityLog.action} = 'issue.blockers_resolved_wake_emitted'
+      and ${activityLog.actorType} = 'system'
+      and ${activityLog.actorId} = 'issue_graph_liveness_backstop'
+      and ${activityLog.details}->>'dependencyReleaseStatusVersion' = ${issues.statusVersion}::text
+  ))`;
+}
 
 /** Only the dependency relation can be the remaining declared wait. */
 export async function releaseReadyDependencyWait(db: Db, companyId: string, issueId: string): Promise<boolean> {
@@ -39,7 +63,7 @@ export async function releaseReadyDependencyWait(db: Db, companyId: string, issu
     return persistActivity(tx as unknown as Db, { companyId, actorType: "system", actorId: "dependency_release",
       action: "issue.updated", entityType: "issue", entityId: issueId,
       details: { status: "todo", previousStatus: "blocked", reason: "issue_blockers_resolved",
-        blockerIssueIds: readiness.blockerIssueIds } });
+        blockerIssueIds: readiness.blockerIssueIds, dependencyReleaseStatusVersion: issue.statusVersion + 1 } });
   });
   if (result && result !== true) publishActivity(result.publication);
   return Boolean(result);

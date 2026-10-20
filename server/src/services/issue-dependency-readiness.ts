@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { heartbeatRuns, issueRelations, issues, workspaceOperations, type Db } from "@paperclipai/db";
 import { isWorkspaceFinalizationOperationActive } from "./workspace-finalization-activity.js";
 
@@ -112,17 +112,14 @@ async function listPendingFinalizeBlockerIssueIds(
     }
   }
 
-  const runs = await dbOrTx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status,
+  // A later suppressed retry does not own an earlier workspace operation.
+  const runIds = [...new Set(rows.flatMap(row => row.heartbeatRunId ? [row.heartbeatRunId] : []))];
+  const runs = runIds.length ? await dbOrTx.select({
+    id: heartbeatRuns.id,
+    status: heartbeatRuns.status,
     issueId: sql<string>`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId')`,
-  }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
-    or(inArray(heartbeatRuns.nativeIssueId, blockerIssueIds),
-      inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, blockerIssueIds)),
-  )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-  const latestRunByPair = new Map<string, (typeof runs)[number]>();
-  for (const run of runs) {
-    const key = run.issueId;
-    if (!latestRunByPair.has(key)) latestRunByPair.set(key, run);
-  }
+  }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, runIds))) : [];
+  const runsById = new Map(runs.map(run => [run.id, run]));
 
   for (const pair of blockerWorkspacePairs) {
     const latest =
@@ -130,20 +127,29 @@ async function listPendingFinalizeBlockerIssueIds(
         `${pair.blockerIssueId}:${pair.executionWorkspaceId}`,
       ) ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
     if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
-    if (latest.phase === "workspace_finalize" && latest.status === "succeeded")
+    const relevantRows = rows.filter(row => row.executionWorkspaceId === pair.executionWorkspaceId
+      && (!row.issueId || row.issueId === pair.blockerIssueId));
+    const liveWork = relevantRows.some(row => {
+      if (!row.heartbeatRunId) return false;
+      if (row.phase === "workspace_finalize" && isWorkspaceFinalizationOperationActive({
+        operationId: row.id, companyId, runId: row.heartbeatRunId, issueId: pair.blockerIssueId,
+      })) return true;
+      const owner = runsById.get(row.heartbeatRunId);
+      return owner && ["queued", "running", "scheduled_retry"].includes(owner.status)
+        && !relevantRows.some(finalize => finalize.heartbeatRunId === row.heartbeatRunId
+          && finalize.phase === "workspace_finalize" && finalize.status === "succeeded"
+          && finalize.startedAt >= row.startedAt);
+    });
+    if (liveWork) {
+      pending.add(pair.blockerIssueId);
       continue;
-    const laterSuccessfulFinalize = latestSuccessfulFinalizeByWorkspace.get(
-      pair.executionWorkspaceId,
-    );
-    if (laterSuccessfulFinalize && laterSuccessfulFinalize > latest.startedAt)
-      continue;
-    const run = latestRunByPair.get(pair.blockerIssueId);
-    const liveFinalize = rows.some(row => row.phase === "workspace_finalize"
-      && row.heartbeatRunId && row.issueId === pair.blockerIssueId
-      && isWorkspaceFinalizationOperationActive({ operationId: row.id, companyId,
-        runId: row.heartbeatRunId, issueId: pair.blockerIssueId }));
-    if (!liveFinalize && run
-      && ["failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) continue;
+    }
+    if (latest.phase === "workspace_finalize" && latest.status === "succeeded") continue;
+    const laterSuccessfulFinalize = latestSuccessfulFinalizeByWorkspace.get(pair.executionWorkspaceId);
+    if (laterSuccessfulFinalize && laterSuccessfulFinalize > latest.startedAt) continue;
+    const owner = latest.heartbeatRunId ? runsById.get(latest.heartbeatRunId) : null;
+    if (owner?.issueId === pair.blockerIssueId
+      && ["failed", "cancelled", "timed_out", "interrupted"].includes(owner.status)) continue;
     pending.add(pair.blockerIssueId);
   }
 

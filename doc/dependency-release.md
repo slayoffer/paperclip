@@ -2,14 +2,20 @@
 
 An issue relation declares a dependency. A cancelled blocker voids that dependency.
 A done blocker releases its dependent when workspace synchronization settles.
-Failed or cancelled runs cannot start missing finalization work.
-Their recorded workspace operations no longer block a done issue.
-A live finalizer still blocks release.
+Workspace operations use their owning run to determine settlement.
+A later cancelled retry cannot settle an older live preparation, provider execution, or export.
+Failed or cancelled owners release their unfinished records after active exports stop.
+Missing ownership evidence preserves the barrier.
 
 The completion route, finalization hook, and periodic release check use the same readiness function.
 The release path moves eligible dependents from `blocked` to `todo` before the dependency wake.
 It preserves other waits, including descriptors, pending questions, approvals, pause holds, active runs, monitors, and recovery holds.
-The release writes an activity record and advances the status version.
+The release writes an activity record and advances the status version in one transaction.
+That record preserves a pending wake until enqueue succeeds.
+The periodic sweep retries pending releases after enqueue errors, deferred requests, and server restarts.
+A delivery record closes the receipt for that status version.
+The release key prevents duplicate wakes when enqueue succeeds before the delivery record commits.
+A later status cycle expires the old receipt.
 
 `GET /api/issues/:id` includes `dependencyReadiness`.
 It contains `isDependencyReady`, `unresolvedBlockerIds`, and the existing detailed readiness fields.

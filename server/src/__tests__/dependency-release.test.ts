@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, agentWakeupRequests, companies, createDb, executionWorkspaces, heartbeatRunEvents, heartbeatRuns,
   issueRecoveryActions, issueRelations, issues, issueThreadInteractions, projects, workspaceOperations } from "@paperclipai/db";
@@ -206,4 +206,84 @@ suite("dependency release", () => {
     expect(await releaseReadyDependencyWait(db, f.companyId, f.dependentId)).toBe(false);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.dependentId))).toHaveLength(1);
   });
+  it("retries dependency wake after enqueue failure and service restart", async () => {
+    const f = await fixture("cancelled");
+    const enqueueWakeup = vi.fn().mockRejectedValueOnce(new Error("queue temporarily unavailable"))
+      .mockResolvedValue({ id: randomUUID() });
+    const recovery = recoveryService(db, { enqueueWakeup });
+    const first = await recovery.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId, blockerIssueId: f.blockerId });
+    const status = (await issueService(db).getById(f.dependentId))?.status;
+    expect(first.enqueueFailed).toBe(1);
+    expect(status).toBe("todo");
+    const restarted = recoveryService(db, { enqueueWakeup });
+    const second = await restarted.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId });
+    expect(second.healed).toBe(1);
+    await restarted.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId });
+    expect(enqueueWakeup).toHaveBeenCalledTimes(2);
+    expect(enqueueWakeup.mock.calls[0][1].idempotencyKey).toBe(enqueueWakeup.mock.calls[1][1].idempotencyKey);
+  });
+  it.each(["queued", "running", "scheduled_retry"])("preserves an older %s workspace after a cancelled retry", async status => {
+    const f = await fixture();
+    await stoppedRun(f, status);
+    await db.insert(heartbeatRuns).values({ companyId:f.companyId, agentId:f.agentId, status:"cancelled",
+      invocationSource:"automation",runtimeMode:"legacy", contextSnapshot:{issueId:f.blockerId},
+      createdAt:new Date(Date.now()+1000),finishedAt:new Date() });
+    const readiness=await issueService(db).getDependencyReadiness(f.dependentId);
+    expect(readiness.isDependencyReady).toBe(false);
+    expect(await releaseReadyDependencyWait(db, f.companyId, f.dependentId)).toBe(false);
+  });
+  it("preserves an older live workspace after a newer failed preparation", async () => {
+    const f = await fixture();
+    await stoppedRun(f, "running");
+    const retry = { ...f, runId: randomUUID() };
+    await stoppedRun(retry, "failed");
+    expect(await releaseReadyDependencyWait(db, f.companyId, f.dependentId)).toBe(false);
+  });
+
+  it("retries a deferred enqueue without repeating a delivered wake", async () => {
+    const f = await fixture("cancelled");
+    const enqueueWakeup = vi.fn().mockResolvedValueOnce(null).mockResolvedValue({ id: randomUUID() });
+    const recovery = recoveryService(db, { enqueueWakeup });
+    expect((await recovery.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId })).deferredOrFailed).toBe(1);
+    const restarted = recoveryService(db, { enqueueWakeup });
+    expect((await restarted.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId })).healed).toBe(1);
+    await restarted.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId });
+    expect(enqueueWakeup).toHaveBeenCalledTimes(2);
+  });
+
+  it("deduplicates a persisted wake when its delivery audit fails", async () => {
+    const f = await fixture("cancelled");
+    await releaseReadyDependencyWait(db, f.companyId, f.dependentId);
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: f.dependentId,
+      blockerIssueIds: [f.blockerId] }) + ":release";
+    await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId,
+      status: "completed", source: "automation", reason: "issue_blockers_resolved", payload: { issueId: f.dependentId }, idempotencyKey });
+    const enqueueWakeup = vi.fn();
+    const recovery = recoveryService(db, { enqueueWakeup });
+    expect((await recovery.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId })).existingWakeSkipped).toBe(1);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not select an ordinary todo issue as a pending release", async () => {
+    const f = await fixture("cancelled");
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.dependentId));
+    const enqueueWakeup = vi.fn();
+    const recovery = recoveryService(db, { enqueueWakeup });
+    expect((await recovery.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId })).checked).toBe(0);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it("expires a release receipt after another status cycle", async () => {
+    const f = await fixture("cancelled");
+    await releaseReadyDependencyWait(db, f.companyId, f.dependentId);
+    await db.update(issues).set({ status: "in_progress", statusVersion: sql`${issues.statusVersion} + 1` })
+      .where(eq(issues.id, f.dependentId));
+    await db.update(issues).set({ status: "todo", statusVersion: sql`${issues.statusVersion} + 1` })
+      .where(eq(issues.id, f.dependentId));
+    const enqueueWakeup = vi.fn();
+    const recovery = recoveryService(db, { enqueueWakeup });
+    expect((await recovery.reconcileResolvedDependencyWakeBackstop({ companyId: f.companyId })).checked).toBe(0);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
 });
