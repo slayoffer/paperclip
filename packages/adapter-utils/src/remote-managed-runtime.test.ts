@@ -90,6 +90,7 @@ describe("remote managed runtime", () => {
         strictHostKeyChecking: true,
       },
       runId: "run-in-place",
+      companyId: "company-1",
       adapterKey: "codex",
       workspaceLocalDir: workspaceDir,
       workspaceRemoteDir: "/app",
@@ -133,7 +134,7 @@ describe("remote managed runtime", () => {
 
     const order: string[] = [];
     vi.mocked(runSshCommand).mockImplementation(async (_spec: unknown, command: string) => {
-      order.push(command.startsWith("rm -rf") ? "remove" : "read");
+      if (!command.startsWith("set -eu")) order.push(command.startsWith("rm -rf") ? "remove" : "read");
       return { stdout: Buffer.from('{"token":"remote"}\n').toString("base64"), stderr: "" };
     });
     const runtimeRootDir = "/home/u/work/.paperclip-runtime/runs/run-in-place/codex";
@@ -149,6 +150,7 @@ describe("remote managed runtime", () => {
         strictHostKeyChecking: true,
       },
       runId: "run-in-place",
+      companyId: "company-1",
       adapterKey: "codex",
       workspaceLocalDir: "/srv/worktrees/SYNA-1",
       workspaceRemoteDir: "/srv/worktrees/SYNA-1",
@@ -188,7 +190,10 @@ describe("remote managed runtime", () => {
   });
 
   it("does not fail the restore when the per-run folder cannot be removed", async () => {
-    vi.mocked(runSshCommand).mockRejectedValue(new Error("ssh dropped"));
+    vi.mocked(runSshCommand).mockImplementation(async (_spec: unknown, command: string) => {
+      if (command.startsWith("rm -rf")) throw new Error("ssh dropped");
+      return { stdout: "", stderr: "" };
+    });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const prepared = await prepareRemoteManagedRuntime({
       spec: {

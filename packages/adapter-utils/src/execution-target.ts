@@ -1453,15 +1453,12 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   runId: string;
   target: AdapterExecutionTarget | null | undefined;
   adapterKey: string;
+  companyId?: string;
   workspaceLocalDir: string;
   timeoutSec?: number;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
-  /**
-   * SSH only: a host folder that belongs to this run alone, for the runtime
-   * assets. `restoreWorkspace` removes it. See
-   * `resolveAdapterExecutionTargetInPlaceRuntimeRootDir`.
-   */
+  /** SSH per-run assets. Cleanup preserves company-scoped provider transcripts. */
   runtimeRootDir?: string | null;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
@@ -1508,6 +1505,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       spec: target.spec,
       runId: input.runId,
       adapterKey: input.adapterKey,
+      companyId: input.companyId,
       workspaceLocalDir: input.workspaceLocalDir,
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,

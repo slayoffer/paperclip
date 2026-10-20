@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile, symlink, mkdir, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -49,7 +49,7 @@ const tempRoots: string[] = [];
 const heldLeases: string[] = [];
 
 async function makeTempDir(prefix: string) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
   tempRoots.push(dir);
   return dir;
 }
@@ -96,6 +96,7 @@ describe("decideSshInPlaceRealization", () => {
     runId?: string;
     runSsh?: typeof runLocally;
     isHolderActive?: () => Promise<boolean>;
+    isHolderStopped?: () => Promise<boolean>;
   }) {
     let sshCalls = 0;
     const runSsh = input.runSsh ?? runLocally;
@@ -108,9 +109,11 @@ describe("decideSshInPlaceRealization", () => {
       runId: input.runId ?? "run-1",
       resolveConfig: async () => fakeConfig,
       isHolderActive: input.isHolderActive ?? (async () => true),
+      isHolderStopped: input.isHolderStopped,
       env: input.env ?? { [SSH_IN_PLACE_ENVIRONMENTS_ENV]: "env-1", [SSH_IN_PLACE_LOCK_WAIT_MS_ENV]: "200" },
       lockPollMs: 20,
       runSsh: async (config, command) => {
+        if (command.includes("canonical_directory")) return runLocally(config, command);
         sshCalls += 1;
         return runSsh(config, command);
       },
@@ -224,6 +227,30 @@ describe("decideSshInPlaceRealization", () => {
     expect(decision).toEqual({ mode: "copy", reason: "runtime_root_inside_worktree", warn: true });
   });
 
+  it("rejects a runtime base that aliases the worktree through a symlink", async () => {
+    const root = await makeTempDir("in-place-alias-");
+    const worktree = path.join(root, "worktree");
+    await mkdir(worktree);
+    const alias = path.join(root, "alias");
+    await symlink(worktree, alias);
+    const { decision } = await decide({ localPath: worktree, remoteCwd: path.join(alias, "new-directory"),
+      leaseId: leaseId("alias") });
+    expect(decision).toEqual({ mode: "copy", reason: "runtime_root_inside_worktree", warn: true });
+    expect(await readdir(worktree)).toEqual([]);
+  });
+
+  it("checks aliases in an existing runtime ancestor", async () => {
+    const root = await makeTempDir("in-place-ancestor-");
+    const worktree = path.join(root, "worktree");
+    const remote = path.join(root, "remote");
+    await mkdir(worktree);
+    await mkdir(remote);
+    await symlink(worktree, path.join(remote, ".paperclip-runtime"));
+    const { decision } = await decide({ localPath: worktree, remoteCwd: remote,
+      leaseId: leaseId("ancestor") });
+    expect(decision).toEqual({ mode: "copy", reason: "runtime_root_inside_worktree", warn: true });
+  });
+
   it("makes a second run wait for the lock, then use the copy mode", async () => {
     const worktree = await makeTempDir("in-place-worktree-");
     const remote = await makeTempDir("in-place-remote-");
@@ -254,7 +281,7 @@ describe("decideSshInPlaceRealization", () => {
     expect(second.decision).toMatchObject({ mode: "in_place", authoritativeRoot: worktree });
   });
 
-  it("takes the lock from a holder whose lease is no longer active", async () => {
+  it("requires termination evidence before replacing an inactive holder", async () => {
     const worktree = await makeTempDir("in-place-worktree-");
     const remote = await makeTempDir("in-place-remote-");
     await decide({ localPath: worktree, remoteCwd: remote, leaseId: leaseId("stale"), runId: "run-1" });
@@ -265,14 +292,16 @@ describe("decideSshInPlaceRealization", () => {
       leaseId: id,
       runId: "run-2",
       isHolderActive: async () => false,
+      isHolderStopped: async () => true,
     });
     expect(second.decision.mode).toBe("in_place");
     expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))?.leaseId).toBe(id);
   });
 
   it("re-enters the lock for the same lease", async () => {
+    const key = await canonicalSshInPlaceLockKey(await makeTempDir("in-place-reentry-"));
     const result = await acquireSshInPlaceWorktreeLock({
-      key: "/k",
+      key,
       leaseId: leaseId("same"),
       runId: "run-1",
       waitMs: 0,
@@ -280,7 +309,7 @@ describe("decideSshInPlaceRealization", () => {
     });
     expect(result.acquired).toBe(true);
     const again = await acquireSshInPlaceWorktreeLock({
-      key: "/k",
+      key,
       leaseId: heldLeases[heldLeases.length - 1]!,
       runId: "run-1",
       waitMs: 0,

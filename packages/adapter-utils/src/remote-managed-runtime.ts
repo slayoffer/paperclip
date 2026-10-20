@@ -1,4 +1,6 @@
 import path from "node:path";
+import { sshRuntimeIsolationScript } from "./ssh-runtime-isolation.js";
+import { linkSshProviderSessionScript, sshProviderSessionDirectories } from "./ssh-provider-sessions.js";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -115,6 +117,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
   spec: SshRemoteExecutionSpec;
   runId: string;
   adapterKey: string;
+  companyId?: string;
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
@@ -151,6 +154,21 @@ async function prepareRemoteManagedRuntimeInner(input: {
   }
   const runtimeRootDir = explicitRuntimeRootDir ??
     path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const providerSessions = explicitRuntimeRootDir ? sshProviderSessionDirectories({
+    runtimeRoot: explicitRuntimeRootDir,
+    adapterKey: input.adapterKey,
+    companyId: input.companyId,
+    workspace: workspaceRemoteDir,
+    assetKeys: (input.assets ?? []).map((asset) => asset.key),
+  }) : [];
+  if (explicitRuntimeRootDir) {
+    // Check the host view before any credential or configuration upload.
+    await runSshCommand(input.spec, sshRuntimeIsolationScript(workspaceRemoteDir,
+      [explicitRuntimeRootDir,
+        ...(input.assets ?? []).map((asset) => path.posix.join(explicitRuntimeRootDir, asset.key)),
+        ...providerSessions.map((session) => session.directory)]),
+    { timeoutMs: 30_000 });
+  }
   // Remove the per-run runtime folder. Run it after the asset restore hooks,
   // because a hook can read a file from the folder (Codex auth copy-back).
   // The parent `runs/<runId>` folder is removed only when it is empty.
@@ -199,16 +217,23 @@ async function prepareRemoteManagedRuntimeInner(input: {
   try {
     for (const asset of input.assets ?? []) {
       const remoteDir = path.posix.join(runtimeRootDir, asset.key);
+      const sessionExcludes = providerSessions.filter((session) => session.assetKey === asset.key)
+        .flatMap((session) => [session.name, `${session.name}/*`]);
       assetDirs[asset.key] = remoteDir;
       await timeWorkspaceStep(input.onProgress, `Asset ${asset.key} sync`, () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: asset.localDir,
         remoteDir,
         followSymlinks: asset.followSymlinks,
-        exclude: asset.exclude,
+        exclude: sessionExcludes.length ? [...(asset.exclude ?? []), ...sessionExcludes] : asset.exclude,
         onProgress: input.onProgress,
         progressLabel: asset.key,
       }));
+      for (const session of providerSessions.filter((session) => session.assetKey === asset.key)) {
+        await runSshCommand(input.spec,
+          linkSshProviderSessionScript(path.posix.join(remoteDir, session.name), session.directory),
+          { timeoutMs: 30_000 });
+      }
     }
   } catch (error) {
     if (preparedWorkspace && baselineSnapshot) {

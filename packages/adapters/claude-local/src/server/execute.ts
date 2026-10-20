@@ -621,12 +621,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           runId,
           target: executionTarget,
           adapterKey: "claude",
+          companyId: agent.companyId,
           timeoutSec,
           workspaceLocalDir: cwd,
           workspaceRemoteDir: workspaceInPlace ? targetWorkspaceRealization?.authoritativeRoot : undefined,
           syncWorkspace: !workspaceInPlace,
-          // SSH in_place: keep the runtime assets in a per-run host folder
-          // outside the shared worktree; the restore step removes it.
+          // Temporary assets stay outside the worktree. Transcripts persist separately.
           runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "claude"),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,

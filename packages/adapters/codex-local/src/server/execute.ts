@@ -817,6 +817,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             runId,
             target: executionTarget,
             adapterKey: "codex",
+            companyId: agent.companyId,
             timeoutSec,
             workspaceLocalDir: cwd,
             workspaceRemoteDir:
@@ -824,8 +825,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 ? targetWorkspaceRealization.authoritativeRoot
                 : undefined,
             syncWorkspace: targetWorkspaceRealization?.mode !== "in_place",
-            // SSH in_place: keep CODEX_HOME in a per-run host folder outside the
-            // shared worktree; the restore step removes it.
+            // Temporary assets stay outside the worktree. Transcripts persist separately.
             runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "codex"),
             installCommand: SANDBOX_INSTALL_COMMAND,
             detectCommand: command,

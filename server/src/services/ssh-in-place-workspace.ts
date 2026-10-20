@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { sshRuntimeIsolationScript } from "@paperclipai/adapter-utils/ssh-runtime-isolation";
+import {
+  acquireSshInPlaceWorktreeLock,
+  releaseSshInPlaceWorktreeLocksForLease,
+  type SshInPlaceLockHolder,
+} from "./ssh-in-place-lock.js";
+export type { SshInPlaceLockHolder } from "./ssh-in-place-lock.js";
 import {
   runSshCommand,
   shellQuote,
@@ -20,7 +27,6 @@ import {
 export const SSH_IN_PLACE_ENVIRONMENTS_ENV = "PAPERCLIP_SSH_IN_PLACE_ENVIRONMENTS";
 export const SSH_IN_PLACE_LOCK_WAIT_MS_ENV = "PAPERCLIP_SSH_IN_PLACE_LOCK_WAIT_MS";
 export const DEFAULT_SSH_IN_PLACE_LOCK_WAIT_MS = 30_000;
-const LOCK_POLL_MS = 250;
 const PROBE_TIMEOUT_MS = 30_000;
 
 /**
@@ -62,86 +68,14 @@ export function buildSshInPlaceRuntimeRoot(remoteCwd: string, runId: string): st
   return path.posix.join(remoteCwd, ".paperclip-runtime", "runs", runId);
 }
 
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.posix.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.posix.isAbsolute(relative));
-}
-
-/**
- * The worktree lock.
- *
- * Two runs must not work in one worktree at the same time (a child issue can
- * reuse its parent's execution workspace). Every SSH run starts from this one
- * server process, so an in-process lock is sufficient: a server restart ends
- * every run and also clears the lock. The lock is keyed by the real path of the
- * worktree and is owned by the environment lease of the run. The SSH driver
- * releases it when it releases that lease. A holder whose lease is no longer
- * active is stale, and the next run takes the lock from it.
- */
-export interface SshInPlaceLockHolder {
-  leaseId: string;
-  runId: string | null;
-  acquiredAt: number;
-}
-
-const worktreeLockHolders = new Map<string, SshInPlaceLockHolder>();
+export {
+  acquireSshInPlaceWorktreeLock,
+  readSshInPlaceWorktreeLockHolder,
+  releaseSshInPlaceWorktreeLocksForLease,
+} from "./ssh-in-place-lock.js";
 
 export async function canonicalSshInPlaceLockKey(worktreePath: string): Promise<string> {
-  try {
-    return await fs.realpath(worktreePath);
-  } catch {
-    return path.resolve(worktreePath);
-  }
-}
-
-export async function acquireSshInPlaceWorktreeLock(input: {
-  key: string;
-  leaseId: string;
-  runId: string | null;
-  waitMs: number;
-  pollMs?: number;
-  isHolderActive: (holder: SshInPlaceLockHolder) => Promise<boolean>;
-}): Promise<{ acquired: true } | { acquired: false; holder: SshInPlaceLockHolder }> {
-  const deadline = Date.now() + Math.max(0, input.waitMs);
-  const pollMs = Math.max(1, input.pollMs ?? LOCK_POLL_MS);
-  for (;;) {
-    const current = worktreeLockHolders.get(input.key);
-    if (!current || current.leaseId === input.leaseId) {
-      worktreeLockHolders.set(input.key, { leaseId: input.leaseId, runId: input.runId, acquiredAt: Date.now() });
-      return { acquired: true };
-    }
-    let active = true;
-    try {
-      active = await input.isHolderActive(current);
-    } catch {
-      // A failed check keeps the holder: a wrong steal is worse than a copy run.
-      active = true;
-    }
-    if (!active && worktreeLockHolders.get(input.key) === current) {
-      worktreeLockHolders.delete(input.key);
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      return { acquired: false, holder: worktreeLockHolders.get(input.key) ?? current };
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
-  }
-}
-
-export function releaseSshInPlaceWorktreeLocksForLease(leaseId: string): number {
-  let released = 0;
-  for (const [key, holder] of worktreeLockHolders) {
-    if (holder.leaseId === leaseId) {
-      worktreeLockHolders.delete(key);
-      released += 1;
-    }
-  }
-  return released;
-}
-
-/** Test helper: the current holder of a worktree lock. */
-export function readSshInPlaceWorktreeLockHolder(key: string): SshInPlaceLockHolder | null {
-  return worktreeLockHolders.get(key) ?? null;
+  return await fs.realpath(worktreePath);
 }
 
 /**
@@ -242,6 +176,7 @@ export async function decideSshInPlaceRealization(input: {
   runId: string | null;
   resolveConfig: () => Promise<SshConnectionConfig>;
   isHolderActive: (holder: SshInPlaceLockHolder) => Promise<boolean>;
+  isHolderStopped?: (holder: SshInPlaceLockHolder) => Promise<boolean>;
   env?: NodeJS.ProcessEnv;
   runSsh?: SshCommandRunner;
   lockPollMs?: number;
@@ -258,21 +193,42 @@ export async function decideSshInPlaceRealization(input: {
   if (!localPath || !remoteCwd || !input.runId) {
     return { mode: "copy", reason: "missing_paths", warn: true };
   }
-  const runtimeRoot = buildSshInPlaceRuntimeRoot(remoteCwd, input.runId);
-  if (isPathInside(localPath, runtimeRoot)) {
-    // The runtime root must stay outside the tracked worktree.
-    return { mode: "copy", reason: "runtime_root_inside_worktree", warn: true };
+  let runtimeRoot: string;
+  let key: string;
+  let config: SshConnectionConfig;
+  try {
+    key = await canonicalSshInPlaceLockKey(localPath);
+  } catch {
+    return { mode: "copy", reason: "local_missing", warn: true };
   }
-
-  const key = await canonicalSshInPlaceLockKey(localPath);
-  const lock = await acquireSshInPlaceWorktreeLock({
-    key,
-    leaseId: input.leaseId,
-    runId: input.runId,
-    waitMs: readSshInPlaceLockWaitMs(env),
-    pollMs: input.lockPollMs,
-    isHolderActive: input.isHolderActive,
-  });
+  try {
+    config = await input.resolveConfig();
+    const result = await (input.runSsh ?? runSshCommand)(config,
+      sshRuntimeIsolationScript(localPath, [buildSshInPlaceRuntimeRoot(remoteCwd, input.runId)]),
+      { timeoutMs: PROBE_TIMEOUT_MS });
+    runtimeRoot = result.stdout.trim();
+    if (!path.posix.isAbsolute(runtimeRoot) || runtimeRoot.includes("\n")) {
+      return { mode: "copy", reason: "runtime_path_unresolved", warn: true };
+    }
+  } catch (error) {
+    const output = String((error as { stdout?: string }).stdout ?? "").trim();
+    return { mode: "copy", reason: output.startsWith("runtime_root_inside_")
+      ? output : "runtime_path_unresolved", warn: true };
+  }
+  let lock: Awaited<ReturnType<typeof acquireSshInPlaceWorktreeLock>>;
+  try {
+    lock = await acquireSshInPlaceWorktreeLock({
+      key,
+      leaseId: input.leaseId,
+      runId: input.runId,
+      waitMs: readSshInPlaceLockWaitMs(env),
+      pollMs: input.lockPollMs,
+      isHolderActive: input.isHolderActive,
+      isHolderStopped: input.isHolderStopped,
+    });
+  } catch {
+    return { mode: "copy", reason: "worktree_lock_unavailable", warn: true };
+  }
   if (!lock.acquired) {
     return { mode: "copy", reason: `worktree_busy:${lock.holder.runId ?? lock.holder.leaseId}`, warn: true };
   }
@@ -280,7 +236,7 @@ export async function decideSshInPlaceRealization(input: {
   let probe: SshInPlaceProbeResult;
   try {
     probe = await probeSshInPlaceWorkspace({
-      config: await input.resolveConfig(),
+      config,
       localPath,
       runSsh: input.runSsh,
     });

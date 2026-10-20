@@ -1,3 +1,4 @@
+import { sshInPlaceLockChecks } from "./ssh-in-place-lock-checks.js";
 import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, settleStopOnlyCleanup, stopOnlyCleanupKey } from "./sandbox-stop-and-retain.js";
 import { readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -1254,14 +1255,7 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
           }
           return parsed.config;
         },
-        isHolderActive: async (holder) => {
-          const rows = await db
-            .select({ status: environmentLeases.status })
-            .from(environmentLeases)
-            .where(eq(environmentLeases.id, holder.leaseId))
-            .limit(1);
-          return rows[0]?.status === "active";
-        },
+        ...sshInPlaceLockChecks(db, input.lease.companyId),
       });
       if (decision.mode === "in_place") {
         // Same-host in_place: the run works in the server's worktree at the

@@ -21,7 +21,11 @@ realization:
   per-run folder outside the worktree:
   `<remoteCwd>/.paperclip-runtime/runs/<runId>/<adapter>`. The adapter removes
   this folder at run end. (`remoteCwd` is the environment's resolved
-  `remoteWorkspacePath`.)
+  `remoteWorkspacePath`.) Provider transcripts persist outside this folder.
+  Their path is `.paperclip-runtime/provider-sessions/<companyId>/<workspaceHash>/<adapter>`.
+  Codex links `home/sessions` and `home/archived_sessions` to that path.
+  Managed Claude links `config-seed/projects` to that path.
+  Credentials and configuration stay in temporary runtime assets.
 - `workspace_finalize` is recorded at run end with a terminal status on success
   and on failure, the same as in the copy mode. So `workspace_sync_pending`
   clears and cards do not wait.
@@ -70,13 +74,19 @@ copy mode").
   `git rev-parse` works there (for a git workspace). The server removes the probe
   file at once. Reasons: `local_missing`, `host_missing`, `host_not_writable`,
   `host_path_mismatch`, `host_git_unusable`, `probe_failed`.
-- Worktree lock: two runs must not work in one worktree at the same time (a child
-  issue can reuse its parent's execution workspace). The lock is in the server
-  process, keyed by the real path of the worktree, and held for the life of the
-  run's environment lease. A second run waits up to the lock wait, then uses the
-  copy mode (reason `worktree_busy:<runId>`). A holder whose lease is no longer
-  `active` is stale, and the next run takes the lock. A server restart clears all
-  locks (it also ends all runs).
+- Runtime isolation: the host resolves existing ancestors before the containment check.
+  This check detects symlinks in the remote base and runtime paths.
+  Runtime assets and provider sessions must stay outside repository trees.
+  A failed path check selects copy mode before any runtime upload.
+- Worktree lock: a durable file records the lease and controller identity.
+  The file sits in `.paperclip-in-place-locks` beside the canonical worktree.
+  An exclusive directory guard serializes ownership changes across server processes.
+  A second run waits for the configured interval, then selects copy mode.
+  A server restart preserves the file.
+  A lease timeout or a dead controller does not prove remote writer termination.
+  Stale ownership transfers require an inactive lease and a bound provider termination receipt.
+  Missing termination evidence keeps the lock. Normal completion releases the current controller's lock.
+  An interrupted directory guard also stays closed. The server never removes it through a timeout.
 
 ## Rollback
 
@@ -89,6 +99,11 @@ server worktree was the run's workspace the whole time.
 - A run in `in_place` mode and a copy-mode run of a different environment can
   still work on one worktree at the same time. The copy run's restore merge then
   sees the in_place run's edits as local changes.
+- SSH does not currently produce provider termination receipts. After an unclean server exit,
+  the worktree therefore uses copy mode until an operator checks termination and removes its stale lock.
+  This recovery operation requires separate authorization.
+- Provider transcripts remain on the SSH host until an operator removes them.
+  Per-run cleanup does not delete transcripts.
 - Per-run folders of copy-mode runs (`.paperclip-runtime/runs/<runId>/workspace`)
   are not removed by this change.
 
