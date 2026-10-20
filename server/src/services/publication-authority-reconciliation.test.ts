@@ -1,3 +1,4 @@
+import { clearCompanyFixtures } from "../__tests__/helpers/clear-company-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -155,6 +156,21 @@ describe("protected reconciliation preserves single use without old broker autho
     const [row] = await storage.db.select().from(publicationRequests).where(eq(publicationRequests.id, next.bindings.requestId));
     expect(row).toMatchObject({ state: "dispatched", reconciliationId: null });
     expect(await reconciler(next).reconcile(next.bindings)).toMatchObject({ reason: "reconciled" });
+  });
+
+  it("refuses fixture cleanup with protected history and rolls back earlier deletion", async () => {
+    const f = await fixture();
+    await dispatch(f);
+    const before = await storage.db.select().from(activityLog);
+    expect(before.length).toBeGreaterThan(0);
+    await expect(clearCompanyFixtures(storage.db)).rejects.toMatchObject({
+      cause: { code: "23503", constraint_name: "publication_requests_run_id_heartbeat_runs_id_fk" },
+    });
+    expect(await storage.db.select().from(activityLog)).toEqual(before);
+    const [row] = await storage.db.select().from(publicationRequests)
+      .where(eq(publicationRequests.id, f.bindings.requestId));
+    expect(row).toMatchObject({ state: "dispatched" });
+    expect(await f.service.request(f.identity, f.bindings)).toMatchObject({ reason: "replay" });
   });
 
   it.each(["dispatched", "unknown"] as const)("prevents deletion and recreation after %s", async (state) => {
