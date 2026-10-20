@@ -14,3 +14,10 @@ Snapshot formats and restore merge rules stay the same.
 Run logs show queue wait times and elapsed times for Git import, workspace sync,
 baseline capture, and asset sync. Each step reports its start and its result.
 The queue does not change the agent run cap or execution leases.
+
+SSH Git imports preserve the source repository's remote tracking references.
+The bundle includes their history and restores symbolic references such as `origin/HEAD`.
+Repeated imports prune obsolete remote references before they import replacements, including replacements with conflicting reference names.
+This includes packed references from linked worktrees.
+Publication hooks can use these references to select the candidate commit range.
+The import does not contact the upstream repository or create a baseline that the source lacks.
