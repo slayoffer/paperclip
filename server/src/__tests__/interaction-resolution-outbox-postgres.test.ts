@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, activityLog, agents, agentWakeupRequests, companies,
@@ -172,6 +172,10 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
       kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "Continue?" } })));
     await db.insert(interactionResolutionOutbox).values(ids.map((id) => ({ interactionId: id, companyId,
       issueId: issue.id, createdAt: instant, wakes: [{ agentId: agent.id, options: { idempotencyKey: `interaction:${id}` } }] })));
+    // Database defaults retain microseconds. Keep that precision in this test.
+    await db.update(interactionResolutionOutbox).set({
+      createdAt: sql`${instant.toISOString()}::timestamptz + interval '123 microseconds'`,
+    }).where(eq(interactionResolutionOutbox.companyId, companyId));
     const attempted = new Set<string>();
     let suppress = true;
     const wakeup = vi.fn(async (agentId: string, options: Record<string, unknown>) => {

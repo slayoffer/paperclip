@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, or, notInArray, isNull } from "drizzle-orm";
+import { and, asc, eq, sql, notInArray, isNull } from "drizzle-orm";
 import { agentWakeupRequests, interactionResolutionOutbox, issueThreadInteractions, type Db } from "@paperclipai/db";
 import type { IssueThreadInteraction } from "@paperclipai/shared";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
@@ -29,7 +29,7 @@ export async function persistInteractionResolutionWakes(
 }
 
 export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssignmentWakeupDeps) {
-  let cursor: { createdAt: Date; interactionId: string } | undefined;
+  let cursor: string | undefined;
   let sweeping: Promise<void> | undefined;
 
   async function deliver(interactionId: string) {
@@ -75,19 +75,19 @@ export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssig
   }
 
   async function sweepPage(limit: number) {
-    const page = () => db.select({ interactionId: interactionResolutionOutbox.interactionId,
-      createdAt: interactionResolutionOutbox.createdAt })
+    const page = () => db.select({ interactionId: interactionResolutionOutbox.interactionId })
       .from(interactionResolutionOutbox).where(and(isNull(interactionResolutionOutbox.deliveredAt),
-        cursor ? or(gt(interactionResolutionOutbox.createdAt, cursor.createdAt), and(
-          eq(interactionResolutionOutbox.createdAt, cursor.createdAt),
-          gt(interactionResolutionOutbox.interactionId, cursor.interactionId))) : undefined))
+        // Read the cursor timestamp inside PostgreSQL. A JavaScript Date loses
+        // microseconds and can repeat the same full page forever.
+        cursor ? sql`(${interactionResolutionOutbox.createdAt}, ${interactionResolutionOutbox.interactionId}) >
+          (select created_at, interaction_id from interaction_resolution_outbox where interaction_id = ${cursor})` : undefined))
       .orderBy(asc(interactionResolutionOutbox.createdAt), asc(interactionResolutionOutbox.interactionId)).limit(limit);
     let entries = await page();
     if (!entries.length && cursor) { cursor = undefined; entries = await page(); }
     for (const entry of entries) {
       // Advance even when admission is suppressed or binding execution fails.
       // A later sweep wraps at the end. Pending rows retain their durable state.
-      cursor = entry;
+      cursor = entry.interactionId;
       await deliver(entry.interactionId).catch((err) => {
         logger.warn({ err, interactionId: entry.interactionId }, "interaction continuation delivery remains pending");
       });
