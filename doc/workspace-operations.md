@@ -27,6 +27,13 @@ They fetch only references that a delta bundle advertises, then check objects be
 Exports include a manifest of branches, tags, and remote-tracking references.
 The default import namespace includes the repository key, worktree name, and run identifier.
 Snapshot indexes start from `HEAD` and include only permitted files. The real index stays unchanged.
+Snapshots include permitted files that the user explicitly stages, including new ignored files.
+Unstaged ignored files and excluded runtime paths remain outside the snapshot.
+
+Host exports fetch into a unique temporary reference namespace before replacing the imported manifest.
+The importer preserves the previous and desired objects under `refs/paperclip/host-import/<id>/` during replacement.
+It removes obsolete references before installing conflicting ancestor or descendant names, including packed references.
+Successful imports remove these temporary references. Failed imports retain them for recovery.
 
 Host lock creation and ownership-checked removal share a short directory guard.
 Each operation removes its guard when it exits normally or receives a handled signal.

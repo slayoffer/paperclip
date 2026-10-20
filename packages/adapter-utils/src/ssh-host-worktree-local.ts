@@ -51,10 +51,16 @@ export async function snapshotLocalWorkspaceWip(input: {
   try {
     const env = { ...process.env, GIT_INDEX_FILE: indexFile };
     await runLocalGit(input.localDir, ["read-tree", headSha], { env });
+    // Merge permitted real-index entries so newly staged ignored files become
+    // tracked here. The following add also handles their working-tree deletions.
+    const stagedEntries = (await runLocalGit(input.localDir, [
+      "ls-files", "--stage", "-z", "--", ".", ...HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS,
+    ], { maxBuffer: 16 * 1024 * 1024 })).stdout;
+    await runGitWithInput(input.localDir, ["update-index", "-z", "--index-info"], stagedEntries, env);
     const paths = (await runLocalGit(input.localDir, [
       "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".", ...HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS,
     ], { env, maxBuffer: 16 * 1024 * 1024 })).stdout;
-    await runGitWithInput(input.localDir, ["--literal-pathspecs", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], paths, env);
+    await runGitWithInput(input.localDir, ["--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], paths, env);
     const tree = (await runLocalGit(input.localDir, ["write-tree"], { env })).stdout.trim();
     const headTree = (await runLocalGit(input.localDir, ["rev-parse", `${headSha}^{tree}`])).stdout.trim();
     if (tree === headTree) return { headSha, wipSha: null };

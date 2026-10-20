@@ -37,12 +37,15 @@ export function buildHostExportPrepareScript(input: {
     `idx=${idx}`,
     `sizes=${sizes}`,
     `paths=${q(`${input.runDir}/wip.paths`)}`,
+    `staged=${q(`${input.runDir}/wip.staged`)}`,
     `rm -f "$idx" "$sizes" ${bundle}`,
-    `trap 'rm -f "$idx" "$sizes" "$paths"' EXIT`,
+    `trap 'rm -f "$idx" "$sizes" "$paths" "$staged"' EXIT`,
     `head=$(git -C ${wt} rev-parse --verify HEAD)`,
     `GIT_INDEX_FILE=${idx} git -C ${wt} read-tree "$head"`,
+    `git -C ${wt} ls-files --stage -z -- . ${wipExcludes} > "$staged"`,
+    `GIT_INDEX_FILE=${idx} git -C ${wt} update-index -z --index-info < "$staged"`,
     `GIT_INDEX_FILE=${idx} git -C ${wt} ls-files -z --cached --others --exclude-standard -- . ${wipExcludes} > "$paths"`,
-    `GIT_INDEX_FILE=${idx} git -C ${wt} --literal-pathspecs add -A --pathspec-from-file="$paths" --pathspec-file-nul`,
+    `GIT_INDEX_FILE=${idx} git -C ${wt} --literal-pathspecs add -A -f --pathspec-from-file="$paths" --pathspec-file-nul`,
     `tree=$(GIT_INDEX_FILE=${idx} git -C ${wt} write-tree)`,
     `head_tree=$(git -C ${wt} rev-parse "$head^{tree}")`,
     `git -C ${wt} update-ref -d ${wipRef} >/dev/null 2>&1 || true`,
@@ -88,4 +91,3 @@ export function buildHostExportPrepareScript(input: {
     `rm -f ${manifest}`,
   ].join("\n");
 }
-

@@ -16,4 +16,3 @@ export const HOST_WORKTREE_WIP_EXCLUDE_PATHSPECS = [
   ":(exclude,glob).paperclip-runtime",
   ":(exclude,glob).paperclip-runtime/**",
 ] as const;
-
