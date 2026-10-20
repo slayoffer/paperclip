@@ -77,7 +77,19 @@ async function importGitWorkspaceToSsh(input: {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
-    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef], {
+    // Git bundles advertise only the requested refs. Import remote tracking
+    // refs too, so publication hooks can select a baseline without a fetch.
+    // Query Git instead of .git/refs: worktrees can share packed refs.
+    const remoteRefsResult = await runLocalGit(input.localDir, [
+      "for-each-ref", "--format=%(refname)%09%(symref)", "refs/remotes/",
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const remoteRefs = remoteRefsResult.stdout.trim().split("\n").filter(Boolean)
+      .map((line) => {
+        const [name, target] = line.split("\t");
+        return { name: name!, target: target || null };
+      });
+    const directRefs = remoteRefs.filter((ref) => !ref.target);
+    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef, ...directRefs.map((ref) => ref.name)], {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
@@ -99,7 +111,11 @@ async function importGitWorkspaceToSsh(input: {
           `{ git -C ${shellQuote(input.remoteDir)} remote set-url origin ${shellQuote(originUrl)} >/dev/null 2>&1 || git -C ${shellQuote(input.remoteDir)} remote add origin ${shellQuote(originUrl)} >/dev/null 2>&1; } || true`,
         ]
         : []),
-      `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" '${tempRef}:${tempRef}' >/dev/null`,
+      `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" ${[tempRef, ...directRefs.map((ref) => ref.name)].map((ref) => shellQuote(`${ref}:${ref}`)).join(" ")} >/dev/null`,
+      // Restore symbolic refs separately. Fetching through an old origin/HEAD
+      // could otherwise overwrite its previous target in a reused workspace.
+      ...remoteRefs.filter((ref) => ref.target).map((ref) =>
+        `git -C ${shellQuote(input.remoteDir)} symbolic-ref ${shellQuote(ref.name)} ${shellQuote(ref.target!)} >/dev/null`),
       input.snapshot.branchName
         ? `git -C ${shellQuote(input.remoteDir)} checkout --force -B ${shellQuote(input.snapshot.branchName)} ${shellQuote(input.snapshot.headCommit)} >/dev/null`
         : `git -C ${shellQuote(input.remoteDir)} -c advice.detachedHead=false checkout --force --detach ${shellQuote(input.snapshot.headCommit)} >/dev/null`,
