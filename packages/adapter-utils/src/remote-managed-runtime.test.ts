@@ -11,7 +11,7 @@ const {
 } = vi.hoisted(() => ({
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
-  runSshCommand: vi.fn(async () => ({
+  runSshCommand: vi.fn(async (_spec: unknown, _command: string, _options?: unknown) => ({
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),

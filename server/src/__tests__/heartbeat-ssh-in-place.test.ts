@@ -25,6 +25,7 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  workspaceOperations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -78,14 +79,19 @@ vi.mock("@paperclipai/adapter-utils/ssh", async (importOriginal) => {
         args?: string[];
         cwd?: string | null;
         env?: Record<string, string>;
+        stdin?: string | null;
       }) => {
         const startedAt = new Date().toISOString();
         try {
-          const { stdout, stderr } = await run(commandInput.command, commandInput.args ?? [], {
+          const execution = run(commandInput.command, commandInput.args ?? [], {
             cwd: commandInput.cwd?.trim() || input.defaultCwd?.trim() || input.spec.remoteCwd,
             env: { ...process.env, ...(commandInput.env ?? {}) },
             maxBuffer: 8 * 1024 * 1024,
           });
+          // File staging reads its body from standard input. Hash skips can close it early.
+          execution.child.stdin?.on("error", () => undefined);
+          execution.child.stdin?.end(commandInput.stdin ?? "");
+          const { stdout, stderr } = await execution;
           return { exitCode: 0, signal: null, timedOut: false, stdout, stderr, pid: null, startedAt };
         } catch (error) {
           const failure = error as { code?: number; stdout?: string; stderr?: string };
