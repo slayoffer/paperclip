@@ -101,6 +101,16 @@ Every value you enter becomes a Paperclip secret. Values are write-only: they
 never appear in stored config JSON, logs, activity details, API responses after
 write, or UI readback. Only header *names* are shown in review and diagnostics.
 
+Reconnect saves shared credentials and their default organization grant references
+in one transaction. Direct credential updates use the same transaction boundary.
+Other connections and personal grants keep their references.
+
+A declared header requires a matching reference in the selected grant. If that
+reference is missing, the gateway returns `422` with `mcp_remote_missing_secret`.
+It sends no remote request. It records a failed-call audit event and sets the
+connection health to `missing_secret`. Reconnect the connection to repair its
+shared grant references.
+
 Paperclip refuses to send header names it manages or that belong to the
 transport — `Host`, `Cookie`, `Content-Length`, `Transfer-Encoding`,
 hop-by-hop headers, and anything under `Proxy-*` or `Sec-*` — and rejects
