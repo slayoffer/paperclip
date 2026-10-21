@@ -17,6 +17,8 @@ export const issueThreadInteractions = pgTable(
   "issue_thread_interactions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    revision: uuid("revision").notNull().defaultRandom(),
+    resolutionRequest: jsonb("resolution_request").$type<{ key: string; fingerprint: string }>(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
     issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
     kind: text("kind").notNull(),

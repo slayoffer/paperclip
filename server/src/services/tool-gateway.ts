@@ -1,3 +1,6 @@
+import { isInteractionResolutionReplay } from "./interaction-revision.js";
+import { buildHumanizedActionPreview, ToolGatewayDescriptor, isIdentifierArgumentKey, humanizeArgumentValue, humanizeArgumentKey, REDACTED_ARGUMENT_SENTINEL, ToolGatewayProviderType, ConnectedMcpGatewayMetadata } from "./tool-action-preview.js";
+export type { ToolGatewayProviderType, ConnectedMcpGatewayMetadata, ToolGatewayDescriptor } from "./tool-action-preview.js";
 import { markToolConnectionHealth } from "./tool-connection-health.js";
 import { ToolGatewayHttpError, MAX_REMOTE_MCP_RESPONSE_BYTES, responseTooLargeError, readBoundedRemoteResponse, malformedRemoteMcpResponse } from "./tool-gateway-errors.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
@@ -265,53 +268,6 @@ const DEFAULT_MCP_GATEWAY_PROTOCOL_LIMITS: McpGatewayProtocolLimitOptions = {
 };
 const TOOL_APPROVAL_DESCRIPTION_SUFFIX =
   "Requires human approval: calling it posts an approval card on your task and you will be woken with the result once decided.";
-
-export type ToolGatewayProviderType =
-  | "mcp_http_fixture"
-  | "mcp_stdio_fixture"
-  | "provider_rest"
-  | "mcp_remote_http"
-  | "mcp_local_stdio"
-  | "paperclip_self"
-  | "paperclip_plugin"
-  | "paperclip_virtual"
-  | "paperclip_github_chat"
-  | "paperclip_slack_chat"
-  | "paperclip_speko_voice";
-
-export interface ConnectedMcpGatewayMetadata {
-  applicationId: string;
-  applicationKey: string | null;
-  applicationDisplayName: string;
-  connectionId: string;
-  catalogEntryId: string;
-  transport: "mcp_remote" | "local_stdio" | "rest_api";
-  gatewayToolName: string;
-  upstreamToolName: string;
-  catalogName: string;
-  inputSchema: Record<string, unknown>;
-  outputSchema: Record<string, unknown> | null;
-  annotations: Record<string, unknown>;
-  risk: {
-    level: string;
-    isReadOnly: boolean;
-    isWrite: boolean;
-    isDestructive: boolean;
-  };
-  onDemandTools?: boolean;
-}
-
-export interface ToolGatewayDescriptor extends AgentToolDescriptor {
-  providerType: ToolGatewayProviderType;
-  risk: "read" | "write" | "destructive";
-  applicationId?: string | null;
-  applicationKey?: string | null;
-  applicationDisplayName?: string | null;
-  connectionId?: string | null;
-  catalogEntryId?: string | null;
-  upstreamToolName?: string | null;
-  providerMetadata?: ConnectedMcpGatewayMetadata | Record<string, unknown>;
-}
 
 export interface ToolGatewaySession {
   id: string;
@@ -868,79 +824,6 @@ type ConnectedCredentialVersionSnapshot = {
   versionSelector: string;
   resolvedVersion: number;
 };
-
-const REDACTED_ARGUMENT_SENTINEL = "***REDACTED***";
-
-/** Turn a machine field key (`note_body`, `noteBody`, `note-body`) into a Title-Cased label. */
-function humanizeArgumentKey(key: string): string {
-  const words = key
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (words.length === 0) return key;
-  return words
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-/** Identifier-ish fields leak raw IDs into the prosumer card; the vocab gate forbids them. */
-function isIdentifierArgumentKey(key: string): boolean {
-  return /(^|[_-])(id|ids|uuid|guid|key|token|hash|sha\d*)$/i.test(key);
-}
-
-/** Render a single argument value as short, plain text — or null if it shouldn't be shown. */
-function humanizeArgumentValue(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (trimmed === REDACTED_ARGUMENT_SENTINEL) return "hidden for privacy";
-    return trimmed.length > 140 ? `${trimmed.slice(0, 137)}…` : trimmed;
-  }
-  if (typeof value === "number" || typeof value === "boolean")
-    return String(value);
-  return null;
-}
-
-/**
- * Build the prosumer-facing "Ask first" preview (M5/M7/M9). Deliberately free of the
- * words tool/risk/transport/arguments and of raw JSON — those only belong on the
- * Advanced surfaces (M8a/M8b) and the board-only formal-approval interaction.
- */
-function buildHumanizedActionPreview(input: {
-  tool: ToolGatewayDescriptor;
-  argumentsSummary: ReturnType<typeof summarizeToolValue>;
-}): string {
-  const actionName = input.tool.displayName?.trim() || input.tool.name;
-  const trustLine =
-    input.tool.risk === "destructive"
-      ? `${actionName}. This can permanently change or remove data.`
-      : actionName;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.argumentsSummary.summary);
-  } catch {
-    return trustLine;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    return trustLine;
-
-  const fieldLines: string[] = [];
-  for (const [key, value] of Object.entries(
-    parsed as Record<string, unknown>,
-  )) {
-    if (fieldLines.length >= 6) break;
-    if (isIdentifierArgumentKey(key)) continue;
-    const rendered = humanizeArgumentValue(value);
-    if (rendered === null) continue;
-    fieldLines.push(`**${humanizeArgumentKey(key)}:** ${rendered}`);
-  }
-
-  if (fieldLines.length === 0) return trustLine;
-  return [trustLine, ...fieldLines].join(" · ");
-}
 
 const BUILTIN_TOOLS: ToolGatewayDescriptor[] = [
   {
@@ -9556,6 +9439,8 @@ export function createToolGatewayService(
 
     async approveActionRequest(input: {
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       rememberAction?: boolean;
       issueId?: string;
       interactionId?: string;
@@ -9624,6 +9509,10 @@ export function createToolGatewayService(
             "action_context_mismatch",
           );
         }
+      }
+      if (actionRequest.status !== "pending" && (input.expectedRevision !== undefined || input.idempotencyKey !== undefined)) {
+        const replay = await commitToolActionReview(db, { ...input, decision: "approved" });
+        if (isInteractionResolutionReplay(replay)) return actionRequestResolution(replay);
       }
       if (
         ["executing", "executed", "failed"].includes(actionRequest.status) &&
@@ -9796,6 +9685,7 @@ export function createToolGatewayService(
         ...input,
         decision: "approved",
       });
+      if (isInteractionResolutionReplay(updated)) return actionRequestResolution(updated);
       await reflectToolActionInteractionLifecycle({
         actionRequestId: updated.id,
         status: "approved",
@@ -9830,6 +9720,8 @@ export function createToolGatewayService(
 
     async declineActionRequest(input: {
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
@@ -9840,6 +9732,7 @@ export function createToolGatewayService(
         ...input,
         decision: "rejected",
       });
+      if (isInteractionResolutionReplay(updated)) return updated;
       await options
         .onToolActionSettled?.(updated.id)
         .catch((error) =>

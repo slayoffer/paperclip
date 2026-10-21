@@ -1,4 +1,5 @@
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
+import { checkInteractionAnswerPreconditions, interactionAnswerReceipt, markInteractionResolutionReplay } from "./interaction-revision.js";
 import { and, eq } from "drizzle-orm";
 import {
   issues,
@@ -27,6 +28,8 @@ export async function commitToolActionReview(
     issueId?: string;
     interactionId?: string;
     decision: "approved" | "rejected";
+    expectedRevision?: string;
+    idempotencyKey?: string;
     rememberAction?: boolean;
     reason?: string;
     actor: { agentId?: string | null; userId?: string | null };
@@ -85,6 +88,21 @@ export async function commitToolActionReview(
       )
       .for("update");
     if (!current) throw notFound("Tool action request not found");
+    const receipt = interactionAnswerReceipt(input.decision, input, input.actor);
+    if (interaction) {
+      assertIssueThreadInteractionResolverAudience({
+        actor: { type: "user", userId: input.actor.userId ?? "board" },
+        interaction, governedAction: true,
+      });
+      if (checkInteractionAnswerPreconditions(interaction, input, receipt)) {
+        markInteractionResolutionReplay(current);
+        return current;
+      }
+      if (input.expectedRevision !== undefined && interaction.status !== "pending")
+        throw conflict("This review has already been resolved");
+    } else if (input.expectedRevision !== undefined || input.idempotencyKey !== undefined) {
+      throw conflict("The interaction is unavailable");
+    }
     if (current.status !== "pending") {
       if (
         (input.decision === "approved" &&
@@ -189,6 +207,7 @@ export async function commitToolActionReview(
         .update(issueThreadInteractions)
         .set({
           status: input.decision === "approved" ? "accepted" : "rejected",
+          ...(receipt ? { resolutionRequest: receipt } : {}),
           resolvedByUserId: input.actor.userId ?? "board",
           resolvedAt: now,
           updatedAt: now,
