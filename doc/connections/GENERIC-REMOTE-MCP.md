@@ -62,6 +62,16 @@ back that step while retaining the established draft identity.
 Later health checks still require the user's authorization and return an
 actionable `422` error when it is missing.
 
+### Shared credentials after revocation
+
+Repeating a credential policy or reference does not restore revoked access.
+Reference labels, reference order, and omitted default versions do not replace credentials.
+Removing credentials also preserves revocation.
+Use reconnect or replace a credential to authorize the connection again.
+Shared credential changes update the execution grant in the same database transaction.
+A declared header without a grant reference fails before any provider request.
+Paperclip records the failure and sets the connection health to `missing_secret`.
+
 ### Personal apps on shared agents
 
 Installing a personal app on an agent does not require every user who runs that
@@ -100,6 +110,16 @@ Collapsed by default. Open it when the server's docs are specific:
 Every value you enter becomes a Paperclip secret. Values are write-only: they
 never appear in stored config JSON, logs, activity details, API responses after
 write, or UI readback. Only header *names* are shown in review and diagnostics.
+
+Reconnect saves shared credentials and their default organization grant references
+in one transaction. Direct credential updates use the same transaction boundary.
+Other connections and personal grants keep their references.
+
+A declared header requires a matching reference in the selected grant. If that
+reference is missing, the gateway returns `422` with `mcp_remote_missing_secret`.
+It sends no remote request. It records a failed-call audit event and sets the
+connection health to `missing_secret`. Reconnect the connection to repair its
+shared grant references.
 
 Paperclip refuses to send header names it manages or that belong to the
 transport — `Host`, `Cookie`, `Content-Length`, `Transfer-Encoding`,
