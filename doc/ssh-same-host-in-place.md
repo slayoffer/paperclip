@@ -88,6 +88,9 @@ copy mode").
   Missing termination evidence keeps the lock, including after normal lease release.
   SSH client exit, run success, failure, cancellation, and timeout do not prove writer termination.
   On supported Linux hosts, each provider invocation starts in a unique systemd scope.
+  The scope uses the static description `Paperclip SSH writer`.
+  Its unit name contains only a random invocation identifier.
+  These properties keep provider arguments and environment values out of systemd journal descriptions.
   The scope uses a control group in version 2 of the Linux control group filesystem.
   Descendants remain in that group when they create new sessions or process groups.
   The launcher records the control group and kernel boot identity before provider execution.

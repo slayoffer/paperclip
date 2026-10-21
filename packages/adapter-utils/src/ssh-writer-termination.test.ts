@@ -67,6 +67,42 @@ it.skipIf(!containmentSupported)("preserves provider exit status, including when
   expect(await stopped(base)).toBe(true);
 });
 
+it.skipIf(!containmentSupported)("keeps provider credentials out of scope properties and the journal", async () => {
+  const base = await root();
+  const stop = path.join(base, "stop");
+  const sentinel = "REVIEW_SENTINEL_NOT_A_SECRET";
+  const provider = "const fs = require('node:fs'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) clearInterval(timer); }, 20); setTimeout(() => clearInterval(timer), 15000).unref();";
+  const script = trackSshWriterCommand(
+    `exec env PAPERCLIP_API_KEY=${sentinel} ${shellQuote(process.execPath)} -e ${shellQuote(provider)} ${shellQuote(stop)}`,
+    base,
+    "run",
+  );
+  const unit = script.match(/paperclip-writer-[0-9a-f-]+\.scope/)![0];
+  const env = { ...process.env, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.()}` };
+  const child = spawn("sh", ["-c", script], { env, stdio: "ignore" });
+  const exited = once(child, "exit");
+  try {
+    // Inspect the real unit while the provider runs. Check all properties for argv or env leaks.
+    await expect.poll(() => exec("systemctl", ["--user", "show", unit], { env })
+      .then(r => r.stdout, () => "")).toContain("ActiveState=active");
+    const properties = (await exec("systemctl", ["--user", "show", unit], { env })).stdout;
+    expect.soft(properties).toContain("Description=Paperclip SSH writer\n");
+    expect.soft(properties).not.toContain(sentinel);
+    expect.soft(properties).not.toContain("PAPERCLIP_API_KEY");
+  } finally {
+    await writeFile(stop, "stop");
+    expect((await exited)[0]).toBe(0);
+  }
+  // Require actual lifecycle records, so an empty or unreadable journal cannot pass.
+  await expect.poll(() => exec("journalctl", ["--user", "-u", unit, "--no-pager", "--output=json"], { env })
+    .then(r => r.stdout, () => "")).toContain(unit);
+  const journal = (await exec("journalctl", ["--user", "-u", unit, "--no-pager", "--output=json"], { env })).stdout;
+  expect.soft(journal).toContain("Paperclip SSH writer");
+  expect.soft(journal).not.toContain(sentinel);
+  expect.soft(journal).not.toContain("PAPERCLIP_API_KEY");
+  expect(await stopped(base)).toBe(true);
+});
+
 it.skipIf(!containmentSupported)("keeps a detached Node writer busy after its launcher exits", async () => {
   const base = await root();
   const output = path.join(base, "writes");
