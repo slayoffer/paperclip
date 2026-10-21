@@ -1,3 +1,11 @@
+import { isClosedIssueStatus, shouldImplicitlyMoveCommentedIssueToTodo, shouldHumanCommentResumeInProgressScheduledRetry, isExplicitResumeCapableStatus, isAssigneeSelfCommentOnTerminalIssue } from "./issue-comment-lifecycle.js";
+import type { IssueThreadInteraction } from "@paperclipai/shared";
+import { interactionResolutionOutboxService } from "../services/interaction-resolution-outbox.js";
+import { interactionResolutionMutationOptions } from "../services/interaction-resolution-mutation-options.js";
+import { persistInteractionResolutionRouteEffects } from "../services/interaction-resolution-route-effects.js";
+import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
+import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
+import { secretProposalExecutionErrorCode, readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
 import { compactIssueProject, compactIssueProjectWorkspace, compactIssueExecutionWorkspace } from "./issue-read-projections.js";
 import { withCompanyAgentReadBatch } from "../services/agent-read-batch.js";
 import { createDependencyResolvedWakeup } from "./issue-dependency-wakeup.js";
@@ -304,7 +312,6 @@ import { createRunSecretRedactionRegistry } from "../services/run-secret-redacti
 import {
   deliverNativeQuestionResponse,
   requestNativeQuestionRunCancellation,
-  validateNativeQuestionResponseInput,
 } from "../services/native-runtime/native-question-bridge.js";
 import {
   createCompanySearchRateLimiter,
@@ -686,18 +693,6 @@ const ISSUE_WORKSPACE_AUDIT_FIELDS = new Set([
   "executionWorkspacePreference",
   "executionWorkspaceSettings",
 ]);
-
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
-function readObject(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
 
 function hasOwn(record: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(record, key);
@@ -2298,257 +2293,7 @@ function summarizeExecutionParticipants(
   );
 }
 
-function isClosedIssueStatus(
-  status: string | null | undefined,
-): status is "done" | "cancelled" {
-  return status === "done" || status === "cancelled";
-}
 
-function shouldImplicitlyMoveCommentedIssueToTodo(input: {
-  issueStatus: string | null | undefined;
-  assigneeAgentId: string | null | undefined;
-  actorType: "agent" | "user";
-  actorId: string;
-  actorRunId: string | null | undefined;
-  checkoutRunId: string | null | undefined;
-  executionRunId: string | null | undefined;
-  requestAddsExplicitBlockers?: boolean;
-}) {
-  // A request that wires a non-empty blockedByIssueIds list is declaring that
-  // the issue is waiting on other work. The implicit reopen exists for plain
-  // conversational comments ("please continue"), not structured dependency
-  // edits — flipping to todo here would contradict the caller's stated intent
-  // in the same request.
-  if (input.requestAddsExplicitBlockers) return false;
-  // Local-CLI agents post comments under user auth, so the actor.type is "user"
-  // even though the comment originates from the same heartbeat run that owns
-  // the issue lock. Without this guard, an agent that closes its own issue and
-  // then posts a follow-up comment in the same run silently reopens it.
-  // Suppress the implicit move whenever the comment's source run matches the
-  // issue's checkout/execution run.
-  if (
-    typeof input.actorRunId === "string" &&
-    input.actorRunId.length > 0 &&
-    (input.actorRunId === input.checkoutRunId ||
-      input.actorRunId === input.executionRunId)
-  ) {
-    return false;
-  }
-  // Only human comments should implicitly reopen finished work.
-  // Agent-authored comments remain communicative unless reopen was explicit.
-  if (input.actorType !== "user") return false;
-  if (
-    !isClosedIssueStatus(input.issueStatus) &&
-    input.issueStatus !== "blocked"
-  )
-    return false;
-  if (
-    typeof input.assigneeAgentId !== "string" ||
-    input.assigneeAgentId.length === 0
-  )
-    return false;
-  return true;
-}
-
-function shouldHumanCommentResumeInProgressScheduledRetry(input: {
-  hasComment: boolean;
-  issueStatus: string | null | undefined;
-  assigneeAgentId: string | null | undefined;
-  actorType: "agent" | "user";
-}) {
-  if (!input.hasComment) return false;
-  if (input.actorType !== "user") return false;
-  if (input.issueStatus !== "in_progress") return false;
-  return (
-    typeof input.assigneeAgentId === "string" &&
-    input.assigneeAgentId.length > 0
-  );
-}
-
-function isExplicitResumeCapableStatus(status: string | null | undefined) {
-  return (
-    status === "done" ||
-    status === "cancelled" ||
-    status === "blocked" ||
-    status === "todo" ||
-    status === "in_progress"
-  );
-}
-
-// Log-class comment from the assignee agent on a terminal (done/cancelled)
-// issue is not a reopen signal. When the caller did not pass `resume: true`,
-// this forces the reopen path off even if `reopen: true` was sent.
-function isAssigneeSelfCommentOnTerminalIssue(input: {
-  hasCommentBody: boolean;
-  resumeRequested: boolean;
-  issueStatus: string | null | undefined;
-  assigneeAgentId: string | null | undefined;
-  actorType: "agent" | "user";
-  actorId: string;
-}) {
-  if (!input.hasCommentBody) return false;
-  if (input.resumeRequested) return false;
-  if (!isClosedIssueStatus(input.issueStatus)) return false;
-  if (
-    typeof input.assigneeAgentId !== "string" ||
-    input.assigneeAgentId.length === 0
-  )
-    return false;
-  if (input.actorType !== "agent") return false;
-  return input.actorId === input.assigneeAgentId;
-}
-
-function readToolActionExecutionStatus(value: unknown) {
-  return value === "approved" ||
-    value === "executing" ||
-    value === "executed" ||
-    value === "failed" ||
-    value === "expired"
-    ? value
-    : null;
-}
-
-function secretProposalExecutionErrorCode(error: unknown) {
-  if (error instanceof HttpError) {
-    const details = readObject(error.details);
-    return readNonEmptyString(details.code) ?? `http_${error.status}`;
-  }
-  return "secret_proposal_execution_failed";
-}
-
-function readToolActionContinuationContext(interaction: {
-  status: string;
-  payload?: unknown;
-  result?: unknown;
-}) {
-  const payload = readObject(interaction.payload);
-  const toolActionPayload = readObject(payload.toolAction);
-  const toolName = readNonEmptyString(toolActionPayload.toolName);
-  const actionRequestId = readNonEmptyString(toolActionPayload.actionRequestId);
-  if (!toolName || !actionRequestId) return null;
-
-  const result = readObject(interaction.result);
-  const toolActionResult = readObject(result.toolAction);
-  const declineReason =
-    interaction.status === "rejected"
-      ? readNonEmptyString(result.reason)
-      : null;
-  const error = readNonEmptyString(toolActionResult.errorMessage);
-  const resultSummary = readNonEmptyString(toolActionResult.resultSummary);
-
-  if (interaction.status === "rejected") {
-    return {
-      toolName,
-      actionRequestId,
-      decision: "rejected",
-      executionStatus: "rejected",
-      ...(declineReason ? { declineReason } : {}),
-      instructions: `the action was declined${declineReason ? `: ${declineReason}` : ""}; do not retry the same call — adjust your approach or mark the task blocked/in_review with the decline reason.`,
-    };
-  }
-
-  if (interaction.status !== "accepted") return null;
-  const executionStatus = readToolActionExecutionStatus(
-    toolActionResult.status,
-  );
-  if (!executionStatus) return null;
-
-  if (executionStatus === "executed") {
-    return {
-      toolName,
-      actionRequestId,
-      decision: "accepted",
-      executionStatus,
-      ...(resultSummary ? { resultSummary } : {}),
-      instructions: `the approved ${toolName} action already ran — do not call the tool again; continue with this result.`,
-    };
-  }
-
-  if (executionStatus === "failed") {
-    const failureMessage = error ?? "an unknown error";
-    return {
-      toolName,
-      actionRequestId,
-      decision: "accepted",
-      executionStatus,
-      ...(error ? { error } : {}),
-      instructions: `the approved action ran and failed with ${failureMessage}; adjust your approach — a fresh call will open a new approval.`,
-    };
-  }
-
-  if (executionStatus === "expired") {
-    const expirationMessage = error ? `: ${error}` : "";
-    return {
-      toolName,
-      actionRequestId,
-      decision: "accepted",
-      executionStatus,
-      ...(error ? { error } : {}),
-      instructions: `the approved ${toolName} action expired before execution${expirationMessage}; if the task still requires it, call the tool again to request a fresh approval.`,
-    };
-  }
-
-  return {
-    toolName,
-    actionRequestId,
-    decision: "accepted",
-    executionStatus,
-    instructions: `the approved ${toolName} action is ${executionStatus}; do not call the tool again while this approval is being processed.`,
-  };
-}
-
-function readSecretProposalContinuationContext(interaction: {
-  status: string;
-  payload?: unknown;
-  result?: unknown;
-}) {
-  const payload = readObject(interaction.payload);
-  const proposal = readObject(payload.secretProposal);
-  const proposalId = readNonEmptyString(proposal.proposalId);
-  const configPath = readNonEmptyString(proposal.configPath);
-  if (!proposalId || !configPath) return null;
-  const result = readObject(interaction.result);
-  const execution = readObject(result.secretProposal);
-  const executionStatus = readNonEmptyString(execution.status);
-  const errorCode = readNonEmptyString(execution.errorCode);
-  const sourceSecretLabel = readNonEmptyString(proposal.sourceSecretLabel);
-
-  if (interaction.status === "rejected") {
-    return {
-      proposalId,
-      configPath,
-      decision: "rejected",
-      executionStatus: "rejected",
-      instructions:
-        "the secret binding proposal was rejected; do not assume the alias exists.",
-    };
-  }
-  if (
-    interaction.status !== "accepted" ||
-    (executionStatus !== "executed" && executionStatus !== "failed")
-  ) {
-    return null;
-  }
-  if (executionStatus === "executed") {
-    return {
-      proposalId,
-      configPath,
-      decision: "accepted",
-      executionStatus,
-      ...(sourceSecretLabel ? { sourceSecretLabel } : {}),
-      instructions: `the binding was created at ${configPath}; verify it with GET /api/agents/me/secrets before using it.`,
-    };
-  }
-  return {
-    proposalId,
-    configPath,
-    decision: "accepted",
-    executionStatus,
-    ...(errorCode ? { errorCode } : {}),
-    instructions:
-      "the binding was not created; inspect the failure comment and submit a fresh proposal after fixing the cause.",
-  };
-}
 
 const REQUEST_ITEM_VERDICTS_WAKE_COALESCE_WINDOW_MS = 2_000;
 
@@ -2566,7 +2311,7 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
 
 async function queueResolvedInteractionContinuationWakeup(input: {
   db: Db;
-  heartbeat: ReturnType<typeof heartbeatService>;
+  heartbeat: IssueAssignmentWakeupDeps;
   issue: {
     id: string;
     companyId: string;
@@ -3507,6 +3252,8 @@ export function issueRoutes(
     issueListDiagnostics?: IssueListDiagnostics;
     declineToolActionRequest?: (input: {
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
@@ -3516,6 +3263,8 @@ export function issueRoutes(
     approveToolActionRequest?: (input: {
       rememberAction?: boolean;
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       issueId: string;
       interactionId: string;
       actionRequestId: string;
@@ -3580,6 +3329,7 @@ export function issueRoutes(
   const decisionTrainingSvc = decisionTrainingService(db);
   const issueReferencesSvc = issueReferenceService(db);
   const issueThreadInteractionsSvc = issueThreadInteractionService(db);
+  const resolutionOutbox = interactionResolutionOutboxService(db, heartbeat);
   const questionResponseDeliveries = questionResponseDeliveryService(db, {
     heartbeat,
     resolveNativeQuestion: (interaction) =>
@@ -16029,6 +15779,23 @@ export function issueRoutes(
       if (!suggestedTaskEffectsAuthorized) return;
 
       const actor = getActorInfo(req);
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "accept",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
+
       if (
         current.kind === "request_confirmation" &&
         current.payload.toolAction
@@ -16036,6 +15803,8 @@ export function issueRoutes(
         if (!opts.approveToolActionRequest)
           throw unprocessable("Tool review resolution is unavailable");
         await opts.approveToolActionRequest({
+          expectedRevision: req.body.expectedRevision,
+          idempotencyKey: req.body.idempotencyKey,
           companyId: issue.companyId,
           issueId: issue.id,
           interactionId: current.id,
@@ -16061,7 +15830,18 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
-        });
+        }, mutationOptions);
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(await interactionSvc.getById(interaction.id)); return;
+      }
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+        res.json(await interactionSvc.getById(interaction.id));
+        return;
+      }
       const toolAction =
         interaction.payload && typeof interaction.payload === "object"
           ? (
@@ -16209,107 +15989,7 @@ export function issueRoutes(
           }
         }
       }
-      const continuationWakeIssue = continuationIssue ?? issue;
-
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action:
-          interaction.status === "expired"
-            ? "issue.thread_interaction_expired"
-            : "issue.thread_interaction_accepted",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          createdTaskCount:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.createdTasks?.length ?? 0)
-              : 0,
-          skippedTaskCount:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.skippedClientKeys?.length ?? 0)
-              : 0,
-        },
-      });
-
-      if (continuationIssue) {
-        await logActivity(db, {
-          companyId: issue.companyId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: actor.agentId,
-          runId: actor.runId,
-          agentApiKeyId: actor.agentApiKeyId,
-          action: "issue.updated",
-          entityType: "issue",
-          entityId: issue.id,
-          details: {
-            identifier: issue.identifier,
-            status: continuationIssue.status,
-            ...(continuationIssue.workMode
-              ? { workMode: continuationIssue.workMode }
-              : {}),
-            assigneeAgentId: continuationIssue.assigneeAgentId ?? null,
-            assigneeUserId: continuationIssue.assigneeUserId ?? null,
-            source: "request_confirmation_accept",
-            interactionId: interaction.id,
-            _previous: {
-              status: issue.status,
-              workMode: issue.workMode,
-              assigneeAgentId: issue.assigneeAgentId ?? null,
-              assigneeUserId: issue.assigneeUserId ?? null,
-            },
-          },
-        });
-      }
-
-      for (const createdIssue of createdIssues) {
-        void queueIssueAssignmentWakeup({
-          heartbeat,
-          issue: createdIssue,
-          reason: "issue_assigned",
-          mutation: "interaction_accept",
-          contextSource: "issue.interaction.accept",
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-        });
-      }
-
-      const acceptedPlanTarget =
-        interaction.kind === "request_confirmation"
-          ? readAcceptedPlanConfirmationTarget(interaction.payload, issue.id)
-          : null;
-      const acceptedPlanConfirmation =
-        interaction.kind === "request_confirmation" &&
-        interaction.status === "accepted" &&
-        acceptedPlanTarget?.issueId === issue.id &&
-        acceptedPlanTarget.key === "plan";
-      await queueResolvedInteractionContinuationWakeup({
-        db,
-        heartbeat,
-        issue: { ...continuationWakeIssue, companyId: issue.companyId },
-        interaction: continuationInteraction,
-        actor,
-        source: "issue.interaction.accept",
-        forceFreshSession: acceptedPlanConfirmation,
-        workspaceRefreshReason: acceptedPlanConfirmation
-          ? "accepted_plan_confirmation"
-          : null,
-      });
+      await persistEffects(db, { interaction: continuationInteraction, createdIssues, continuationIssue }, heartbeat);
 
       res.json(continuationInteraction);
     },
@@ -16345,6 +16025,23 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "reject",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
+
       if (
         current.kind === "request_confirmation" &&
         current.payload.toolAction
@@ -16352,6 +16049,8 @@ export function issueRoutes(
         if (!opts.declineToolActionRequest)
           throw unprocessable("Tool review resolution is unavailable");
         await opts.declineToolActionRequest({
+          expectedRevision: req.body.expectedRevision,
+          idempotencyKey: req.body.idempotencyKey,
           companyId: issue.companyId,
           issueId: issue.id,
           interactionId: current.id,
@@ -16376,50 +16075,19 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
+        mutationOptions,
       );
 
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action:
-          interaction.status === "expired"
-            ? "issue.thread_interaction_expired"
-            : "issue.thread_interaction_rejected",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          rejectionReason:
-            interaction.kind === "suggest_tasks"
-              ? (interaction.result?.rejectionReason ?? null)
-              : interaction.kind === "request_confirmation" ||
-                  interaction.kind === "request_checkbox_confirmation"
-                ? (interaction.result?.reason ?? null)
-                : null,
-        },
-      });
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(interaction); return;
+      }
 
-      await queueResolvedInteractionContinuationWakeup({
-        db,
-        heartbeat,
-        issue,
-        interaction,
-        actor,
-        source: "issue.interaction.reject",
-      });
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+      } else await persistEffects(db, { interaction, createdIssues: [] }, heartbeat);
 
       res.json(interaction);
     },
@@ -16450,9 +16118,23 @@ export function issueRoutes(
         authorizedResolution;
 
       const actor = getActorInfo(req);
-      if (current.kind === "ask_user_questions") {
-        await validateNativeQuestionResponseInput(current, req.body);
-      }
+      const durableEffects = req.body.expectedRevision !== undefined || req.body.idempotencyKey !== undefined;
+      const publications: ActivityPublication[] = [];
+      const persistEffects = async (tx: Db, result: {
+        interaction: IssueThreadInteraction;
+        createdIssues: Array<{ id: string; assigneeAgentId: string | null; status: string }>;
+        continuationIssue?: { id: string; assigneeAgentId: string | null; status: string; workMode?: string } | null;
+      }, wake: IssueAssignmentWakeupDeps) => {
+        const target = readAcceptedPlanConfirmationTarget(result.interaction.payload, issue.id);
+        await persistInteractionResolutionRouteEffects({
+          db: tx, heartbeat: wake, issue, ...result, actor, operation: "respond",
+          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
+          queueContinuation: queueResolvedInteractionContinuationWakeup, publications: durableEffects ? publications : undefined,
+          acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
+        });
+      };
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
+
       const interaction = await interactionSvc.answerQuestions(
         issue,
         interactionId,
@@ -16464,35 +16146,19 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
+        mutationOptions,
       );
 
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.thread_interaction_answered",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          interactionId: interaction.id,
-          interactionKind: interaction.kind,
-          interactionStatus: interaction.status,
-          resolutionActorKind: actor.actorType,
-          requestedResolverPolicy: interaction.requestedResolverPolicy,
-          effectiveResolverPolicy: interaction.effectiveResolverPolicy,
-          resolverPolicyProvenance: interaction.resolverPolicyProvenance,
-          effectiveResolverPolicySource:
-            interaction.effectiveResolverPolicySource,
-          resolverAuthorizationReason: resolutionAuthorization.decision.reason,
-          answeredQuestionCount:
-            interaction.kind === "ask_user_questions"
-              ? (interaction.result?.answers?.length ?? 0)
-              : 0,
-        },
-      });
+      if (isInteractionResolutionReplay(interaction)) {
+        await resolutionOutbox.deliver(interaction.id);
+        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
+        res.json(interaction); return;
+      }
+
+      if (durableEffects) {
+        for (const publication of publications) publishActivity(publication);
+        await resolutionOutbox.deliver(interaction.id);
+      } else await persistEffects(db, { interaction, createdIssues: [] }, heartbeat);
 
       await questionResponseDeliveries.deliver(interaction.id).catch((err) => {
         logger.warn(
