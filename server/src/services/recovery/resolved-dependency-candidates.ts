@@ -1,5 +1,5 @@
 import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
-import { issueRelations, issues, type Db } from "@paperclipai/db";
+import { issueRecoveryActions, issueRelations, issues, type Db } from "@paperclipai/db";
 import { dependencyReleaseRetryCondition } from "../issue-dependency-release.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 
@@ -10,7 +10,17 @@ export function queryResolvedDependencyCandidates(db: Db,
   afterIssueId: string | null,
 ) {
   const filters = [
-    or(eq(issues.status, "blocked"), dependencyReleaseRetryCondition())!,
+    or(eq(issues.status, "blocked"), dependencyReleaseRetryCondition(),
+      and(eq(issues.status, "todo"), sql`exists (
+        select 1 from ${issueRecoveryActions}
+        where ${issueRecoveryActions.companyId} = ${issues.companyId}
+          and ${issueRecoveryActions.sourceIssueId} = ${issues.id}
+          and ${issueRecoveryActions.kind} = 'active_run_watchdog'
+          and ${issueRecoveryActions.cause} = 'legacy_execution_requires_reconciliation'
+          and (${issueRecoveryActions.status} in ('active', 'escalated')
+            or (${issueRecoveryActions.status} = 'resolved'
+              and ${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'))
+      )`))!,
     isNull(issues.conversationAgentId),
     visibleIssueCondition(),
     sql`${issues.assigneeAgentId} is not null`,

@@ -16,7 +16,8 @@ export async function resolveSuppressedDependencyRecoveries(db: Db, companyId: s
         eq(issueRecoveryActions.kind, "active_run_watchdog"),
         eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
         or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-          sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+          and(eq(issueRecoveryActions.status, "resolved"),
+            sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`)),
         eq(heartbeatRuns.errorCode, "issue_dependencies_blocked"),
       )).for("update", { of: issueRecoveryActions });
     let resolved = 0;
