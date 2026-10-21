@@ -1,3 +1,13 @@
+import {
+  issueThreadInteractionStatusSchema,
+  issueThreadInteractionKindSchema,
+  issueThreadInteractionCanonicalResolverPolicySchema,
+  issueThreadInteractionResolverPolicySchema,
+  issueThreadInteractionResolverPolicyProvenanceSchema,
+  issueThreadInteractionEffectiveResolverPolicySourceSchema,
+  issueThreadInteractionContinuationPolicySchema,
+} from "./interaction-query.js";
+export * from "./interaction-query.js";
 import { z } from "zod";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
@@ -24,13 +34,6 @@ import {
   ISSUE_WORK_MODES,
   clampIssueRequestDepth,
   ISSUE_STATUSES,
-  ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
-  ISSUE_THREAD_INTERACTION_CANONICAL_RESOLVER_POLICIES,
-  ISSUE_THREAD_INTERACTION_EFFECTIVE_RESOLVER_POLICY_SOURCES,
-  ISSUE_THREAD_INTERACTION_KINDS,
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES,
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICY_PROVENANCES,
-  ISSUE_THREAD_INTERACTION_STATUSES,
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
@@ -1066,30 +1069,6 @@ export const addIssueCommentSchema = z.object({
 });
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
-
-export const issueThreadInteractionStatusSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_STATUSES,
-);
-export const issueThreadInteractionKindSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_KINDS,
-);
-export const issueThreadInteractionCanonicalResolverPolicySchema = z
-  .enum(ISSUE_THREAD_INTERACTION_CANONICAL_RESOLVER_POLICIES)
-  .describe("Canonical resolver audience: anyone, not_creator, or human_only.");
-export const issueThreadInteractionResolverPolicySchema = z
-  .enum(ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES)
-  .describe(
-    "Resolver audience. Use anyone, not_creator, or human_only; board_or_agents and board_only are deprecated compatibility aliases.",
-  );
-export const issueThreadInteractionResolverPolicyProvenanceSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICY_PROVENANCES,
-);
-export const issueThreadInteractionEffectiveResolverPolicySourceSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_EFFECTIVE_RESOLVER_POLICY_SOURCES,
-);
-export const issueThreadInteractionContinuationPolicySchema = z.enum(
-  ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
-);
 
 export const connectionIntentPhaseSchema = z.enum([
   "requested",
@@ -2135,13 +2114,30 @@ export type WithdrawIssueThreadInteraction = z.infer<
   typeof withdrawIssueThreadInteractionSchema
 >;
 
+const respondQuestionAnswerSchema = askUserQuestionsAnswerSchema.extend({
+  optionIds: askUserQuestionsAnswerSchema.shape.optionIds.default([]),
+  text: askUserQuestionsAnswerSchema.shape.otherText.optional(),
+}).superRefine((answer, ctx) => {
+  if (answer.text != null && answer.otherText != null && answer.text !== answer.otherText) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "Use text or otherText for the answer. If both fields exist, their values must match.",
+    });
+  }
+}).transform(({ text, ...answer }) => ({
+  ...answer,
+  ...(text != null ? { otherText: text } : {}),
+}));
+
 export const respondIssueThreadInteractionSchema = z.object({
-  answers: z.array(askUserQuestionsAnswerSchema).max(20),
+  answers: z.array(respondQuestionAnswerSchema).max(20),
   summaryMarkdown: multilineTextSchema
     .pipe(z.string().max(20000))
     .nullable()
     .optional(),
 });
+export type RespondIssueThreadInteractionInput = z.input<typeof respondIssueThreadInteractionSchema>;
 export type RespondIssueThreadInteraction = z.infer<
   typeof respondIssueThreadInteractionSchema
 >;

@@ -842,6 +842,23 @@ describe("issue thread interaction routes", () => {
     );
   });
 
+  it.each([
+    { questionId: "scope", text: "Selected files" },
+    { questionId: "scope", optionIds: ["paperclip_custom_answer"], otherText: "Selected files" },
+  ])("normalizes API text and custom answers before persistence: %j", async (answer) => {
+    const app = await createApp();
+    const response = await request(app)
+      .post(`/api/issues/${ISSUE_ID}/interactions/interaction-2/respond`)
+      .send({ answers: [answer] });
+    expect(response.status).toBe(200);
+    expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(
+      expect.anything(), "interaction-2", {
+        answers: [{ questionId: "scope", optionIds: answer.optionIds ?? [], otherText: "Selected files" }],
+      }, expect.anything(),
+    );
+    expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
+  });
+
   it.each(["paperclip-id:chat-owner", "chat-owner", "paperclip-id:another-user"])("keeps chat response delivery limited to the exact owner: %s", async (userId) => {
     const issue = createIssue({ conversationAgentId: ASSIGNEE_AGENT_ID, conversationUserId: "paperclip-id:chat-owner" });
     mockIssueService.getById.mockResolvedValue(issue);

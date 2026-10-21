@@ -1,4 +1,4 @@
-import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchWaitVerified } from "./pre-dispatch-review-wait.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
@@ -57,7 +57,7 @@ export function legacyExecutionNeedsReconciliation(
 /** Review-wait receipts are only exempt after retained execution evidence agrees.
  * The synchronous classifier stays conservative for callers without a DB proof. */
 export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run: Run): Promise<boolean> {
-  return legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run));
+  return legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchWaitVerified(db, run));
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
@@ -118,6 +118,7 @@ export async function terminalizeLegacyExecution(input: {
         .update(issues)
         .set({ checkoutRunId: null })
         .where(eq(issues.id, task.id));
+    if (await isPreDispatchWaitVerified(tx as unknown as Db, updated)) return updated;
     const review = task?.status === "in_review" ? parseIssueExecutionState(task.executionState) : null;
     const isCurrentReviewer = review?.status === "pending" &&
       review.currentParticipant?.type === "agent" && review.currentParticipant.agentId === run.agentId;
@@ -134,8 +135,10 @@ export async function terminalizeLegacyExecution(input: {
         .from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, run.companyId),
           eq(issueRecoveryActions.sourceIssueId, task.id),
-          eq(issueRecoveryActions.status, "resolved"),
           or(
+            and(eq(issueRecoveryActions.kind, "active_run_watchdog"),
+              eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
+              eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`)),
             sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
             and(
               sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,

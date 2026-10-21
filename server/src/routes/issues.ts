@@ -1,3 +1,6 @@
+import { createDependencyResolvedWakeup } from "./issue-dependency-wakeup.js";
+import { registerCompanyInteractionReads } from "./company-interaction-reads.js";
+import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -273,8 +276,6 @@ import {
 } from "../services/onboarding-first-task-assets.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  buildIssueBlockersResolvedWakeStateKey,
-  findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
@@ -333,6 +334,7 @@ import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
 import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled, skipSelfUnblockWake } from "../services/self-block-guard.js";
+import { hasSavedReviewWait } from "../services/review-wait.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -8386,27 +8388,6 @@ export function issueRoutes(
     res.json(result);
   });
 
-  // Exact-id card lookup: which issue owns this interaction. Lets a client open a card from its id without
-  // scanning issues. The response is a fixed v1 shape; unknown, foreign-company and unreadable ids are all 404.
-  router.get("/companies/:companyId/interaction-locations/:interactionId", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    const interactionId = req.params.interactionId as string;
-    assertCompanyAccess(req, companyId);
-    if (!isUuidLike(interactionId)) {
-      res.status(404).json({ error: "Interaction not found" });
-      return;
-    }
-    const interaction = await issueThreadInteractionService(db).getById(interactionId);
-    if (!interaction || interaction.companyId !== companyId) {
-      res.status(404).json({ error: "Interaction not found" });
-      return;
-    }
-    const issue = await getAccessibleResource(req, res, getIssueById(req, interaction.issueId), "Interaction not found");
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    res.json({ version: 1, companyId, interactionId: interaction.id, issueId: issue.id });
-  });
-
   router.post(
     "/companies/:companyId/labels",
     validate(createIssueLabelSchema),
@@ -13394,7 +13375,12 @@ export function issueRoutes(
         const owner = descriptor.owner;
         if (
           req.actor.type === "agent" &&
-          (owner === "board" || "userId" in owner)
+          (owner === "board" || "userId" in owner) &&
+          !(await hasSavedReviewWait(db, {
+            ...existing,
+            assigneeAgentId: updateFields.assigneeAgentId === undefined
+              ? existing.assigneeAgentId : updateFields.assigneeAgentId,
+          }, req.actor.agentId === existing.assigneeAgentId ? req.actor.agentId : undefined, descriptor))
         ) {
           throw forbidden(
             "Agents may only name themselves as an unblock owner",
@@ -14724,48 +14710,9 @@ export function issueRoutes(
           source: string;
           mutation: string;
         }) => {
-          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          try {
-            const existingWake =
-              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-                companyId: issue.companyId,
-                dependentIssueId: input.dependentIssueId,
-                blockerIssueIds: input.blockerIssueIds,
-                blockedTransitionAt: input.blockedTransitionAt,
-              });
-            if (existingWake) return;
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check existing dependency wake before issue update wake",
-            );
-          }
-          addWakeup(input.agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            payload: {
-              issueId: input.dependentIssueId,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-              mutation: input.mutation,
-            },
-            idempotencyKey,
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: input.dependentIssueId,
-              taskId: input.dependentIssueId,
-              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-              source: input.source,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-            },
-          });
+          const wakeup = await createDependencyResolvedWakeup(db, issue.companyId, actor, input,
+            typeof svc.releaseDependencyWait === "function" ? () => svc.releaseDependencyWait(issue.companyId, input.dependentIssueId) : undefined);
+          if (wakeup) addWakeup(input.agentId, wakeup);
         };
 
         if (executionStageWakeup && deferWakeForGoal !== true) {
@@ -14924,9 +14871,9 @@ export function issueRoutes(
           }
         }
 
-        const becameDone =
-          existing.status !== "done" && issue.status === "done";
-        if (becameDone) {
+        const blockerEnded =
+          existing.status !== issue.status && ["done", "cancelled"].includes(issue.status);
+        if (blockerEnded) {
           const dependents = await svc.listWakeableBlockedDependents(issue.id);
           for (const dependent of dependents) {
             await addDependencyResolvedWakeup({
@@ -15971,19 +15918,19 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/interactions", async (req, res) => {
-    const id = req.params.id as string;
-    const issue = await getAccessibleResource(
-      req,
-      res,
-      getIssueById(req, id),
-      "Issue not found",
-    );
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const interactions =
-      await issueThreadInteractionService(db).listForIssue(id);
-    res.json(interactions);
+  registerCompanyInteractionReads(router, {
+    service: issueThreadInteractionService(db), assertCompanyAccess,
+    companyScope: actorCanReadCompanyScope,
+    canReadIssue: async (req, issue) => (await decideIssueAccess(req, issue, "issue:read")).allowed,
+    getIssue: (req, res, id) => getAccessibleResource(req, res, getIssueById(req, id), "Interaction not found"),
+    authorize: assertIssueReadAllowed,
+  });
+
+  registerIssueInteractionReads(router, {
+    getIssue: (req, res) => getAccessibleResource(req, res,
+      getIssueById(req, req.params.id as string), "Issue not found"),
+    authorize: assertIssueReadAllowed,
+    service: issueThreadInteractionService(db),
   });
 
   router.post(
@@ -18201,48 +18148,9 @@ export function issueRoutes(
           blockerIssueIds: string[];
           blockedTransitionAt?: Date | string | null;
         }) => {
-          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          try {
-            const existingWake =
-              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-                companyId: currentIssue.companyId,
-                dependentIssueId: input.dependentIssueId,
-                blockerIssueIds: input.blockerIssueIds,
-                blockedTransitionAt: input.blockedTransitionAt,
-              });
-            if (existingWake) return;
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check existing dependency wake before issue comment wake",
-            );
-          }
-          addWakeup(input.agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            payload: {
-              issueId: input.dependentIssueId,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-              mutation: "comment",
-            },
-            idempotencyKey,
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: input.dependentIssueId,
-              taskId: input.dependentIssueId,
-              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-              source: "issue.blockers_resolved",
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-            },
-          });
+          const wakeup = await createDependencyResolvedWakeup(db, currentIssue.companyId, actor, { ...input, source: "issue.blockers_resolved", mutation: "comment" },
+            typeof svc.releaseDependencyWait === "function" ? () => svc.releaseDependencyWait(currentIssue.companyId, input.dependentIssueId) : undefined);
+          if (wakeup) addWakeup(input.agentId, wakeup);
         };
 
         if (commentDecisionStageWakeup) {
