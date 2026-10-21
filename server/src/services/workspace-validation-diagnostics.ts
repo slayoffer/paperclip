@@ -7,7 +7,7 @@ export type PersistedWorkspaceSourceReasonCode = typeof PERSISTED_WORKSPACE_SOUR
 
 export const MANAGED_GIT_WORKTREE_REASON_CODES = [
   "missing_worktree", "not_a_git_checkout", "not_registered",
-  "wrong_repository_root", "branch_mismatch", "git_inspection_failed",
+  "wrong_repository_root", "wrong_git_directory", "branch_mismatch", "git_inspection_failed",
 ] as const;
 
 export type ManagedGitInspectionDiagnostic = {
