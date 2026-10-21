@@ -1,4 +1,5 @@
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { taskDrainService, taskDrainBlocksAdmission } from "./task-drain.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
 import { externalObjectService } from "./external-objects.js";
@@ -9625,6 +9626,7 @@ export function heartbeatService(
 ) {
   let shutdownInProgress = false;
   const instanceSettings = instanceSettingsService(db);
+  const durableTaskDrain = taskDrainService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
@@ -9678,9 +9680,16 @@ export function heartbeatService(
   };
   const getSchedulingSuppression = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
-    return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
+    const local = resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,
     });
+    if (local.suppressed) return local;
+    // Read durable state before every admission, including the first admission
+    // after server recreation. A storage failure keeps queued work pending.
+    if (await durableTaskDrain.blocksAdmission()) {
+      return { suppressed: true, reason: "task_drain" as const };
+    }
+    return local;
   };
   const getWorktreeExecutionCutoff = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
@@ -17759,6 +17768,7 @@ export function heartbeatService(
       !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
         ? await db
             .transaction(async (tx) => {
+              if (await taskDrainBlocksAdmission(tx)) return { kind: "stale" as const, run: null };
               // Match the queue-edit lock order: issue, wake, then run. Once the
               // run becomes running, a concurrent discard must observe the
               // claimed wake and return an explicit conflict; if discard wins,
@@ -18065,7 +18075,9 @@ export function heartbeatService(
     }
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) => {
+      : await withChatControlRecoveryGate(run, "claim", async (gateDb) => gateDb.transaction(async (transaction) => {
+          const tx = transaction as unknown as Db;
+          if (await taskDrainBlocksAdmission(tx)) return null;
           const claimValues = {
             status: "running",
             runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
@@ -18093,7 +18105,7 @@ export function heartbeatService(
             await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
             return claimedRun;
           });
-        });
+        }));
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -27345,11 +27357,11 @@ export function heartbeatService(
 
     const schedulingSuppression = await getSchedulingSuppression();
     // A task drain holds ADMISSION, not the request. The drain is a
-    // process-local pre-restart hold, so a wake that arrives while it is
+    // persistent admission hold, so a wake that arrives while it is
     // active still names real work that must run once the process comes
     // back: leave it in the durable queue and let the dispatch-side checks
     // (startNextQueuedRunForAgent / executeRun) keep it from starting until
-    // the drain lifts or the restart clears it. Writing it as `skipped`
+    // the lease expires or its owner releases it. Writing it as `skipped`
     // here dropped the wake permanently — an accepted plan whose
     // continuation wake landed mid-drain left its issue in `todo` with no
     // run and no path until a person noticed.
@@ -30569,7 +30581,7 @@ export function heartbeatService(
     drainActiveRunExecutions,
     startTaskDrain,
     stopTaskDrain,
-    getTaskDrainStatus,
+    getTaskDrainStatus: () => durableTaskDrain.status(getTaskDrainStatus()),
     computeTaskDrain,
     applyTaskDrain,
 

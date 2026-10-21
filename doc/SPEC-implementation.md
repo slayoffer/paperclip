@@ -13,6 +13,10 @@ The Synthiq fork provides an optional [guarded pull queue](pull-queue.md).
 `PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
 The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
 
+The Synthiq fork supports [persistent owned task drains](task-drain.md).
+A finite lease blocks admission across server recreation.
+Lease release requires the authenticated owner and the matching lease ID.
+
 ## 2. V1 Outcomes
 
 See [details](spec-implementation/part-1.md#2-v1-outcomes).

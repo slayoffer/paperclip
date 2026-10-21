@@ -5,7 +5,9 @@ import {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
   startTaskDrainRequestSchema,
+  stopTaskDrainRequestSchema,
 } from "@paperclipai/shared";
+import { taskDrainService } from "../services/task-drain.js";
 import { forbidden } from "../errors.js";
 import {
   cloudTenantPrimaryCompanyId,
@@ -92,36 +94,12 @@ function assertCanManageInstanceSettings(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
-// A task-drain start or stop reads the live drain state, writes an audit
-// transaction, and only then mutates the process-local drain state. The
-// audit write is an async gap: two overlapping requests can commit their
-// transactions in one order but reach the in-memory mutation in the other
-// order, so a stale transition would win, the audit log would not match the
-// live state, and the response for the newer request would not match what
-// actually ended up live. Run each request's whole read-audit-apply
-// sequence through this queue so overlapping requests execute one at a
-// time, in the order they enter it: audit order and apply order then always
-// agree, and each response reports exactly the state its own request
-// produced.
-let taskDrainTransitionQueue: Promise<void> = Promise.resolve();
-
-function withTaskDrainTransition<T>(run: () => Promise<T>): Promise<T> {
-  const turn = taskDrainTransitionQueue.then(run);
-  // Normalize to a settled void promise for the next caller in line, so a
-  // rejected transition (a failed audit write, for example) cannot wedge
-  // every later transition behind it.
-  taskDrainTransitionQueue = turn.then(
-    () => undefined,
-    () => undefined,
-  );
-  return turn;
-}
-
 export function instanceSettingsRoutes(db: Db) {
   const router = Router();
   const svc = instanceSettingsService(db);
   const environments = environmentService(db);
   const heartbeat = heartbeatService(db);
+  const drain = taskDrainService(db);
 
   router.get("/instance/settings", async (req, res) => {
     assertBoardOrgAccess(req);
@@ -297,115 +275,46 @@ export function instanceSettingsRoutes(db: Db) {
 
   router.get("/instance/task-drain", async (req, res) => {
     assertBoardOrgAccess(req);
-    res.json(heartbeat.getTaskDrainStatus());
+    res.json(await heartbeat.getTaskDrainStatus());
   });
 
-  router.post(
-    "/instance/task-drain",
-    validate(startTaskDrainRequestSchema),
-    async (req, res) => {
-      assertCanManageInstanceSettings(req);
-      const actor = getActorInfo(req);
-      const companyIds = await svc.listCompanyIds();
-      const ttlMs = req.body.ttlMs ?? null;
-      // The whole read-audit-apply sequence runs as one queued transition
-      // (see withTaskDrainTransition above), so an overlapping start or
-      // stop cannot commit its audit row, or apply its live state, out of
-      // order against this one. computeTaskDrain runs inside the turn so
-      // startedAt reflects the moment this request actually took effect,
-      // not the moment it arrived and was queued behind another transition.
-      const drain = await withTaskDrainTransition(async () => {
-        const computed = heartbeat.computeTaskDrain({ ttlMs });
-        // One transaction for every company's audit row, so a write that
-        // succeeds for one company and fails for another never leaves a
-        // partial activity history behind — either every company gets the
-        // record, or none does. The drain mutation below runs only after
-        // this transaction commits, so a failed write leaves the live
-        // drain untouched and there is no partial state to roll back.
-        const postCommitActivityPublications: ActivityPublication[] = [];
-        await db.transaction((tx) =>
-          Promise.all(
-            companyIds.map((companyId) =>
-              logActivity(tx as unknown as Db, {
-                companyId,
-                actorType: actor.actorType,
-                actorId: actor.actorId,
-                agentId: actor.agentId,
-                runId: actor.runId,
-                agentApiKeyId: actor.agentApiKeyId,
-                action: "instance.task_drain.started",
-                entityType: "instance_settings",
-                entityId: "default",
-                details: {
-                  startedAt: computed.startedAt,
-                  expiresAt: computed.expiresAt,
-                },
-              }, postCommitActivityPublications),
-            ),
-          ),
-        );
-        heartbeat.applyTaskDrain(computed);
-        // The audit record already committed, so a failure to publish it
-        // here is not a reason to undo the drain: reverting the in-memory
-        // state at this point would desync it from the committed row.
-        // Swallow a publish failure so it cannot turn a committed mutation
-        // into a false 500.
-        publishActivitiesBestEffort(postCommitActivityPublications, "instance.task_drain.started");
-        return computed;
-      });
-      res.json(drain);
-    },
-  );
-
-  router.delete("/instance/task-drain", async (req, res) => {
-    assertCanManageInstanceSettings(req);
+  function drainAudit(req: Request, action: string, publications: ActivityPublication[]) {
     const actor = getActorInfo(req);
-    const companyIds = await svc.listCompanyIds();
-    // See the POST handler above for why the whole read-audit-apply
-    // sequence runs inside withTaskDrainTransition: it queues this stop
-    // behind any transition already in flight, so it cannot read a status
-    // an overlapping request is about to make stale, and its audit row and
-    // its live-state mutation always land in the same order as every other
-    // queued transition.
-    const wasActive = await withTaskDrainTransition(async () => {
-      const priorStatus = heartbeat.getTaskDrainStatus();
-      // Read wasActive once, here, and use this same value for the audit
-      // detail and the response body below. A TTL that expires between two
-      // separate reads would otherwise make the two values disagree.
-      const wasActive = priorStatus.draining;
-      // See the POST handler above for why this is one transaction, and why
-      // the drain mutation runs only after it commits.
-      const postCommitActivityPublications: ActivityPublication[] = [];
-      await db.transaction((tx) =>
-        Promise.all(
-          companyIds.map((companyId) =>
-            logActivity(tx as unknown as Db, {
-              companyId,
-              actorType: actor.actorType,
-              actorId: actor.actorId,
-              agentId: actor.agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "instance.task_drain.stopped",
-              entityType: "instance_settings",
-              entityId: "default",
-              details: {
-                wasActive,
-              },
-            }, postCommitActivityPublications),
-          ),
-        ),
-      );
-      heartbeat.stopTaskDrain();
-      // See the POST handler above for why a publish failure here is
-      // swallowed instead of failing the route: the audit record already
-      // committed, so a publish failure here must not undo a drain-stop
-      // that is already correct in the database, and must not report the
-      // stop as failed when it succeeded.
-      publishActivitiesBestEffort(postCommitActivityPublications, "instance.task_drain.stopped");
-      return wasActive;
-    });
-    res.json({ wasActive });
+    return async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0], details: Record<string, unknown>) => {
+      const companyIds = await instanceSettingsService(tx as unknown as Db).listCompanyIds();
+      for (const companyId of companyIds) {
+        await logActivity(tx as unknown as Db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action,
+          entityType: "instance_settings",
+          entityId: "task-drain",
+          details,
+        }, publications);
+      }
+    };
+  }
+
+  router.post("/instance/task-drain", validate(startTaskDrainRequestSchema), async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const publications: ActivityPublication[] = [];
+    const action = "instance.task_drain.started";
+    const lease = await drain.acquire(getActorInfo(req).actorId, req.body, drainAudit(req, action, publications));
+    publishActivitiesBestEffort(publications, action);
+    res.json(lease);
+  });
+
+  router.delete("/instance/task-drain", validate(stopTaskDrainRequestSchema), async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const publications: ActivityPublication[] = [];
+    const action = "instance.task_drain.stopped";
+    const result = await drain.release(getActorInfo(req).actorId, req.body.leaseId, drainAudit(req, action, publications));
+    publishActivitiesBestEffort(publications, action);
+    res.json(result);
   });
 
   // Cloud lifecycle read-back: the harness answers a tenant's archive

@@ -53,11 +53,15 @@ jobs:
       - name: Check server types
         working-directory: server
         run: corepack pnpm exec tsc --noEmit
-      - name: Test queue and execution rules
+      - name: Test queue, drain, and execution rules
         run: >-
           corepack pnpm exec vitest run --project @paperclipai/server
           server/src/__tests__/heartbeat-pull-queue.test.ts
           server/src/services/agent-wip-limit.test.ts
           server/src/__tests__/issue-execution-policy.test.ts
           server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+          server/src/__tests__/task-drain-persistence.test.ts
+          server/src/__tests__/heartbeat-task-drain.test.ts
+          server/src/__tests__/heartbeat-task-drain-admission-release.test.ts
+          server/src/__tests__/instance-settings-routes.test.ts
           --maxWorkers=1
