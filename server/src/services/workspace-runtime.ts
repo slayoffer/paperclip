@@ -4036,6 +4036,10 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
 }) {
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
+  // Environment bindings borrow the source checkout. Only its owner removes it.
+  if (typeof input.workspace.metadata?.taskEnvironmentSourceWorkspaceId === "string") {
+    return { cleanedPath: workspacePath, cleaned: false, warnings };
+  }
   const repoRoot = input.workspace.providerType === "git_worktree" && workspacePath
     ? await resolveGitRepoRootForWorkspaceCleanup(
       workspacePath,

@@ -138,7 +138,12 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
-import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import {
+  mergeExecutionWorkspaceConfig,
+  readExecutionWorkspaceConfig,
+  requiresTaskEnvironmentBinding,
+} from "./execution-workspaces.js";
+import { removeIsolatedWorkspaceControls } from "./issue-workspace-settings.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
 import { readChatControlChronology } from "./chat-control-chronology.js";
 import { authorizeChatConversationForBoundRun } from "./native-runtime/chat-attachment-reuse.js";
@@ -434,7 +439,6 @@ function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
   settings: ReturnType<typeof parseIssueExecutionWorkspaceSettings>,
 ) {
   return {
-    environmentId: settings?.environmentId ?? null,
     provisionCommand: settings?.workspaceStrategy?.provisionCommand ?? null,
     runtimeProvisionCommand:
       settings?.workspaceStrategy?.runtimeProvisionCommand ?? null,
@@ -9394,9 +9398,7 @@ export function issueService(db: Db) {
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
       if (data.assigneeAgentId && data.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
@@ -10323,9 +10325,7 @@ export function issueService(db: Db) {
       // opt-in UI for creating isolated worktrees. Public updates still obey
       // the feature gate; only the internal shared-workspace binding bypasses it.
       if (!isolatedWorkspacesEnabled && !options.bindRuntimeSharedWorkspace) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
 
       if (issueData.status) {
@@ -10412,9 +10412,11 @@ export function issueService(db: Db) {
         issueData.executionWorkspaceSettings !== undefined
           ? parseIssueExecutionWorkspaceSettings(
               issueData.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             )
           : parseIssueExecutionWorkspaceSettings(
               existing.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             );
       if (issueData.executionWorkspaceSettings !== undefined) {
         patch.executionWorkspaceSettings = nextExecutionWorkspaceSettings
@@ -10762,7 +10764,13 @@ export function issueService(db: Db) {
               (rows: Array<{ id: string; metadata: unknown }>) =>
                 rows[0] ?? null,
             );
-          if (workspace) {
+          if (
+            workspace &&
+            !requiresTaskEnvironmentBinding(
+              { config: readExecutionWorkspaceConfig(workspace.metadata as Record<string, unknown> | null) },
+              nextExecutionWorkspaceSettings?.environmentId,
+            )
+          ) {
             await tx
               .update(executionWorkspaces)
               .set({

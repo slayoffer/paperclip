@@ -4,10 +4,8 @@ import { compactRecoveryPresentation, recoveryCauseTitle, recoveryNoticeMetadata
 import { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS, CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE } from "./failure-classification.js";
 export { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "./failure-classification.js";
 export type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
-import { dispatchPendingDependencyReleaseWakes } from "../dependency-release-wakes.js";
-import { hasNonDependencyBlockedWait, blockedStateIntegrityEnabled } from "../blocked-state-integrity.js";
-import { queryResolvedDependencyCandidates, RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT } from "./resolved-dependency-candidates.js";
-import { releaseReadyDependencyWait } from "../issue-dependency-release.js";
+import { createResolvedDependencyWakeBackstop } from "./resolved-dependency-backstop.js";
+import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
 import { externalConversationStateSql } from "../slack-conversation-state.js";
@@ -121,11 +119,6 @@ import {
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
 } from "../issue-execution-policy.js";
-import {
-  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  buildIssueBlockersResolvedWakeStateKey,
-  findExistingIssueBlockersResolvedWakeForReadyState,
-} from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
@@ -213,20 +206,10 @@ type RecoveryWakeupOptions = {
   };
 };
 
-type RecoveryWakeup = (
+export type RecoveryWakeup = (
   agentId: string,
   opts?: RecoveryWakeupOptions,
 ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
-
-type ResolvedDependencyWakeBackstopSource =
-  "issue_graph_liveness.backstop" | "workspace.finalize";
-
-type ResolvedDependencyWakeBackstopOptions = {
-  runId?: string | null;
-  companyId?: string | null;
-  blockerIssueId?: string | null;
-  source?: ResolvedDependencyWakeBackstopSource;
-};
 
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & {
   status: "succeeded";
@@ -579,7 +562,6 @@ export function recoveryService(
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);
-  let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
 
   async function getAgent(agentId: string) {
     return db
@@ -5274,253 +5256,12 @@ export function recoveryService(
     return result;
   }
 
-  async function reconcileResolvedDependencyWakeBackstop(
-    opts?: ResolvedDependencyWakeBackstopOptions,
-  ) {
-    const result = {
-      checked: 0,
-      healed: 0,
-      existingWakeSkipped: 0,
-      livePathSkipped: 0,
-      interactionSkipped: 0,
-      pauseHoldSkipped: 0,
-      notReadySkipped: 0,
-      candidateLimitSkipped: 0,
-      deferredOrFailed: 0,
-      enqueueFailed: 0,
-      issueIds: [] as string[],
-    };
-
-    const dispatch = await dispatchPendingDependencyReleaseWakes(db, deps.enqueueWakeup, opts);
-    result.checked += dispatch.checked;
-    result.healed += dispatch.healed;
-    result.deferredOrFailed += dispatch.deferredOrFailed;
-    result.enqueueFailed += dispatch.enqueueFailed;
-    result.issueIds.push(...dispatch.issueIds);
-    const source = opts?.source ?? "issue_graph_liveness.backstop";
-    const requestedByActorId =
-      source === "workspace.finalize"
-        ? "heartbeat_finalize"
-        : "issue_graph_liveness_backstop";
-    const payloadBackstop =
-      source === "workspace.finalize"
-        ? "workspace_finalize_reconciliation"
-        : "issue_graph_liveness_reconciliation";
-    const useCursor = !opts?.blockerIssueId;
-
-    const queryCandidates = (afterIssueId: string | null) =>
-      queryResolvedDependencyCandidates(db, opts, afterIssueId);
-
-    let candidateRows = await queryCandidates(
-      useCursor ? resolvedDependencyWakeBackstopCandidateCursor : null,
-    );
-    if (
-      useCursor &&
-      candidateRows.length === 0 &&
-      resolvedDependencyWakeBackstopCandidateCursor
-    ) {
-      resolvedDependencyWakeBackstopCandidateCursor = null;
-      candidateRows = await queryCandidates(null);
-    }
-    const totalCandidateCount = candidateRows[0]?.totalCount ?? 0;
-    const candidates = candidateRows.map(
-      ({ totalCount: _totalCount, ...candidate }) => candidate,
-    );
-    result.checked += candidates.length;
-    result.candidateLimitSkipped = Math.max(
-      0,
-      totalCandidateCount - candidates.length,
-    );
-    const lastCandidate = candidates[candidates.length - 1] ?? null;
-    if (useCursor) {
-      resolvedDependencyWakeBackstopCandidateCursor =
-        result.candidateLimitSkipped > 0 && lastCandidate
-          ? lastCandidate.id
-          : null;
-    }
-    if (result.candidateLimitSkipped > 0) {
-      logger.warn(
-        {
-          processed: candidates.length,
-          skipped: result.candidateLimitSkipped,
-          limit: RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT,
-          nextCursor: useCursor
-            ? resolvedDependencyWakeBackstopCandidateCursor
-            : null,
-          source,
-          blockerIssueId: opts?.blockerIssueId ?? null,
-        },
-        "issue graph liveness backstop deferred resolved dependency wake candidates past page limit",
-      );
-    }
-
-    const candidatesByCompany = new Map<string, typeof candidates>();
-    for (const candidate of candidates) {
-      const companyCandidates =
-        candidatesByCompany.get(candidate.companyId) ?? [];
-      companyCandidates.push(candidate);
-      candidatesByCompany.set(candidate.companyId, companyCandidates);
-    }
-
-    for (const [
-      companyId,
-      companyCandidates,
-    ] of candidatesByCompany.entries()) {
-      const readinessMap = await issuesSvc.listDependencyReadiness(
-        companyId,
-        companyCandidates.map((candidate) => candidate.id),
-      );
-
-      for (const candidate of companyCandidates) {
-        const agentId = candidate.assigneeAgentId;
-        if (!agentId) continue;
-
-        const readiness = readinessMap.get(candidate.id);
-        const resolvedBlockerIssueId = readiness?.blockerIssueIds[0] ?? null;
-        if (
-          !readiness ||
-          !readiness.isDependencyReady ||
-          readiness.blockerIssueIds.length === 0 ||
-          !resolvedBlockerIssueId
-        ) {
-          result.notReadySkipped += 1;
-          continue;
-        }
-
-        if (await hasNonDependencyBlockedWait(db, candidate.id)) {
-          result.notReadySkipped += 1;
-          continue;
-        }
-        if (blockedStateIntegrityEnabled()) await issuesSvc.listWakeableBlockedDependents(resolvedBlockerIssueId);
-
-        // Level-triggered dedup: key on the full blocker set (the current ready
-        // state), not on any single resolved edge. An older completed per-edge
-        // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-          dependentIssueId: candidate.id,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        }) + (blockedStateIntegrityEnabled() ? "" : ":release");
-        if (!(await releaseReadyDependencyWait(db, companyId, candidate.id))) {
-          result.notReadySkipped += 1;
-          continue;
-        }
-        const existingWake =
-          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId,
-            dependentIssueId: candidate.id,
-            blockerIssueIds: readiness.blockerIssueIds,
-            blockedTransitionAt: candidate.blockedTransitionAt,
-          });
-        if (existingWake && (blockedStateIntegrityEnabled() || existingWake.status !== "completed" || existingWake.idempotencyKey?.endsWith(":release"))) {
-          result.existingWakeSkipped += 1;
-          continue;
-        }
-
-        if (
-          (await hasActiveExecutionPath(companyId, candidate.id, agentId)) ||
-          (await hasQueuedIssueWake(companyId, candidate.id, agentId))
-        ) {
-          result.livePathSkipped += 1;
-          continue;
-        }
-
-        if (await hasPendingWakeInteraction(companyId, candidate.id)) {
-          result.interactionSkipped += 1;
-          continue;
-        }
-
-        if (
-          await isAutomaticRecoverySuppressedByPauseHold(
-            db,
-            companyId,
-            candidate.id,
-            treeControlSvc,
-          )
-        ) {
-          result.pauseHoldSkipped += 1;
-          continue;
-        }
-
-        try {
-          const wake = await deps.enqueueWakeup(agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            payload: {
-              issueId: candidate.id,
-              resolvedBlockerIssueId,
-              blockerIssueIds: readiness.blockerIssueIds,
-              backstop: payloadBackstop,
-            },
-            idempotencyKey,
-            requestedByActorType: "system",
-            requestedByActorId,
-            contextSnapshot: {
-              issueId: candidate.id,
-              taskId: candidate.id,
-              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-              source,
-              resolvedBlockerIssueId,
-              blockerIssueIds: readiness.blockerIssueIds,
-            },
-          });
-          if (!wake) {
-            // enqueueWakeup returns null for normal deferred/skipped paths
-            // such as disabled wake-on-demand or concurrency gating. That is
-            // not an enqueue error, but the backstop still did not heal now.
-            result.deferredOrFailed += 1;
-            continue;
-          }
-
-          result.healed += 1;
-          result.issueIds.push(candidate.id);
-
-          await logActivity(db, {
-            companyId,
-            actorType: "system",
-            actorId: "issue_graph_liveness_backstop",
-            agentId,
-            runId: opts?.runId ?? null,
-            action: "issue.blockers_resolved_wake_emitted",
-            entityType: "issue",
-            entityId: candidate.id,
-            details: {
-              source,
-              dependencyReleaseStatusVersion: candidate.releaseStatusVersion,
-              wakeupRunId: wake.id,
-              idempotencyKey,
-              resolvedBlockerIssueId,
-              blockerIssueIds: readiness.blockerIssueIds,
-            },
-          });
-        } catch (err) {
-          result.deferredOrFailed += 1;
-          result.enqueueFailed += 1;
-          logger.warn(
-            { err, issueId: candidate.id, agentId, idempotencyKey, source },
-            "failed to enqueue dependency wake from issue graph liveness backstop",
-          );
-        }
-      }
-    }
-
-    if (result.healed > 0) {
-      logger.warn(
-        {
-          healed: result.healed,
-          issueIds: result.issueIds,
-          source,
-          blockerIssueId: opts?.blockerIssueId ?? null,
-        },
-        "issue graph liveness backstop healed resolved blocked dependency wakes",
-      );
-    }
-
-    return result;
-  }
+  const reconcileResolvedDependencyWakeBackstop = createResolvedDependencyWakeBackstop(db, {
+    enqueueWakeup: deps.enqueueWakeup,
+    hasActiveExecutionPath,
+    hasQueuedIssueWake,
+    hasPendingWakeInteraction,
+  });
 
   function readRecoveryTimerIntervalMs(raw: unknown, fallback: number) {
     return Math.max(1, Math.floor(asNumber(raw, fallback)));

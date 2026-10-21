@@ -540,6 +540,49 @@ describe("execution workspace policy helpers", () => {
     });
   });
 
+  it("selects the task environment before all defaults", () => {
+    expect(resolveExecutionWorkspaceEnvironmentId({
+      taskEnvironmentId: "18371c35-0974-424d-aa10-fd08096e27aa",
+      agentDefaultEnvironmentId: "home-pc",
+      instanceDefaultEnvironmentId: "instance-env",
+      localDefaultEnvironmentId: "local-env",
+    })).toEqual({ environmentId: "18371c35-0974-424d-aa10-fd08096e27aa", source: "task" });
+  });
+
+  it.each([undefined, null])("preserves defaults for an unset task environment (%s)", (taskEnvironmentId) => {
+    expect(resolveExecutionWorkspaceEnvironmentId({
+      taskEnvironmentId,
+      agentDefaultEnvironmentId: "home-pc",
+      instanceDefaultEnvironmentId: "instance-env",
+      localDefaultEnvironmentId: "local-env",
+    })).toEqual({ environmentId: "home-pc", source: "agent" });
+  });
+
+  it("validates persisted task environment selections", () => {
+    for (const environmentId of ["", "mac-spike", 42, {}, " "]) {
+      expect(() => parseIssueExecutionWorkspaceSettings({ environmentId }, { includeEnvironmentId: true })).toThrow();
+    }
+  });
+
+  it("keeps task environment selection when isolated workspaces are disabled", () => {
+    const environmentId = "18371c35-0974-424d-aa10-fd08096e27aa";
+    expect(selectEnvironmentExecutionWorkspaceSettings({ mode: "isolated_workspace", environmentId }, false))
+      .toEqual({ environmentId });
+  });
+
+  it("enforces managed sandbox policy for task environment selection", () => {
+    const input = {
+      taskEnvironmentId: "local-env",
+      agentDefaultEnvironmentId: "home-pc",
+      instanceDefaultEnvironmentId: null,
+      localDefaultEnvironmentId: "local-env",
+      managedSandboxOnly: true,
+    };
+    expect(() => resolveExecutionWorkspaceEnvironmentId(input)).toThrow(ManagedSandboxUnavailableError);
+    expect(resolveExecutionWorkspaceEnvironmentId({ ...input, managedSandboxEnvironmentId: "managed-env" }))
+      .toEqual({ environmentId: "managed-env", source: "managed" });
+  });
+
   it("falls back to the instance default environment when the agent has none", () => {
     expect(
       resolveExecutionWorkspaceEnvironmentId({
