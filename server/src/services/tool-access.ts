@@ -1,4 +1,4 @@
-import { upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
+import { resolveConnectionCredentialUpdate, upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
 import { selectVaultConnectionGrant } from "./connection-vault-grant.js";
 import { AGGREGATOR_NAMES, isAppAggregator, type AggregatorAppsResponse, type ArcadeDiscoverySetupInput } from "@paperclipai/shared/aggregator-apps";
 import { resolveAggregatorApp, type AppCatalogAggregator } from "@paperclipai/shared/aggregator-app-catalog";
@@ -18659,22 +18659,8 @@ export function toolAccessService(
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, {
         excludeConnectionId: existing.id,
       });
-      const credentialPolicy = input.credentialPolicy ?? existing.credentialPolicy;
-      const credentialRefs = input.credentialRefs ?? existing.credentialRefs;
-      const credentialSecretRefs: ToolCredentialSecretRef[] = input.credentialSecretRefs ?? (
-        input.credentialRefs !== undefined && credentialPolicy === "shared"
-          ? [
-              ...existing.credentialSecretRefs.filter((ref) =>
-                ![...existing.credentialRefs, ...credentialRefs].some((placement) => credentialRefConfigPath(placement) === ref.configPath)),
-              ...credentialRefs.map((ref) => ({
-                ...existing.credentialSecretRefs.find((previous) => previous.configPath === credentialRefConfigPath(ref)),
-                configPath: credentialRefConfigPath(ref),
-                secretId: ref.secretId,
-                versionSelector: ref.version ?? "latest",
-              })),
-            ]
-          : existing.credentialSecretRefs
-      );
+      const { credentialPolicy, credentialRefs, credentialSecretRefs, changed, replaced } =
+        resolveConnectionCredentialUpdate(existing, input);
       await assertSecretRefs(existing.companyId, [
         ...credentialRefs,
         ...credentialSecretRefs,
@@ -18698,10 +18684,9 @@ export function toolAccessService(
           })
           .where(eq(toolConnections.id, connectionId))
           .returning();
-        if (updated.credentialPolicy === "shared" &&
-          (input.credentialRefs !== undefined || input.credentialSecretRefs !== undefined ||
-            input.credentialPolicy !== undefined)) {
-          await ensureDefaultOrganizationGrant(updated, tx);
+        if (updated.credentialPolicy === "shared" && changed) {
+          await upsertDefaultOrganizationGrant(tx, updated,
+            isRailwayConnection(updated) ? [RAILWAY_SSH_SECRET_PATH] : [], undefined, replaced);
         }
         await syncConnectionCredentialBindings(tx, updated);
         return updated;

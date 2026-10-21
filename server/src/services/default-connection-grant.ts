@@ -1,16 +1,70 @@
 import { and, eq } from "drizzle-orm";
 import { connectionGrants, type Db, type toolConnections } from "@paperclipai/db";
+import { connectionCredentialConfigPath, type ToolCredentialSecretRef, type UpdateToolConnection } from "@paperclipai/shared";
+
+type Connection = typeof toolConnections.$inferSelect;
+
+export function resolveConnectionCredentialUpdate(existing: Connection, input: UpdateToolConnection) {
+  const credentialPolicy = input.credentialPolicy ?? existing.credentialPolicy;
+  const credentialRefs = input.credentialRefs ?? existing.credentialRefs;
+  const credentialSecretRefs: ToolCredentialSecretRef[] = input.credentialSecretRefs ?? (
+    input.credentialRefs !== undefined && credentialPolicy === "shared"
+      ? [
+          ...existing.credentialSecretRefs.filter((ref) =>
+            ![...existing.credentialRefs, ...credentialRefs].some((placement) => connectionCredentialConfigPath(placement) === ref.configPath)),
+          ...credentialRefs.map((ref) => ({
+            ...existing.credentialSecretRefs.find((previous) => previous.configPath === connectionCredentialConfigPath(ref)),
+            configPath: connectionCredentialConfigPath(ref),
+            secretId: ref.secretId,
+            versionSelector: ref.version ?? "latest",
+          })),
+        ]
+      : existing.credentialSecretRefs
+  );
+  const credentials = { credentialPolicy, credentialRefs, credentialSecretRefs };
+  // Placement metadata, reference order, and default version spelling do not
+  // replace credentials. Repeating them must preserve revoked authorization.
+  const identities = (value: Pick<Connection, "credentialRefs" | "credentialSecretRefs">, includePath = true) =>
+    [...new Set([
+      ...value.credentialRefs.map((ref) => JSON.stringify([
+        includePath ? connectionCredentialConfigPath(ref) : null, ref.secretId, ref.version ?? "latest",
+      ])),
+      ...value.credentialSecretRefs.map((ref) => JSON.stringify([
+        includePath ? ref.configPath : null, ref.secretId, ref.versionSelector ?? "latest",
+      ])),
+    ])].sort();
+  const previous = identities(existing);
+  const next = identities(credentials);
+  const previousSecrets = identities(existing, false);
+  return {
+    ...credentials,
+    changed: JSON.stringify(next) !== JSON.stringify(previous),
+    replaced: identities(credentials, false).some((identity) => !previousSecrets.includes(identity)),
+  };
+}
 
 type GrantMutation = {
   previous: typeof connectionGrants.$inferSelect | null;
   current: typeof connectionGrants.$inferSelect;
 };
 
+type Grant = typeof connectionGrants.$inferSelect;
+type GrantDb = Pick<Db, "select" | "insert" | "update">;
+
+export function upsertDefaultOrganizationGrant(
+  dbClient: GrantDb, connection: Connection, preserveConfigPaths?: string[],
+  onMutation?: (mutation: GrantMutation) => void,
+): Promise<Grant>;
+export function upsertDefaultOrganizationGrant(
+  dbClient: GrantDb, connection: Connection, preserveConfigPaths: string[],
+  onMutation: ((mutation: GrantMutation) => void) | undefined, allowReauthorization: boolean,
+): Promise<Grant | null>;
 export async function upsertDefaultOrganizationGrant(
-  dbClient: Pick<Db, "select" | "insert" | "update">,
-  connection: typeof toolConnections.$inferSelect,
+  dbClient: GrantDb,
+  connection: Connection,
   preserveConfigPaths: string[] = [],
   onMutation?: (mutation: GrantMutation) => void,
+  allowReauthorization = true,
 ) {
   const [existing] = await dbClient
     .select()
@@ -24,6 +78,9 @@ export async function upsertDefaultOrganizationGrant(
       ),
     )
     .limit(1);
+  // Removing credentials can synchronize an active grant. Only reconnect or
+  // credential replacement can create authorization after revocation.
+  if (!allowReauthorization && existing?.status !== "active") return null;
   if (existing) {
     // OAuth connections create their organization grant before the browser
     // callback has issued any credentials. Reconnects can rotate those

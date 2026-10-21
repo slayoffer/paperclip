@@ -87,7 +87,7 @@ describePostgres("shared connection credential synchronization", () => {
     } else {
       const secret = await secretService(db).create(company.id, {
         provider: "local_encrypted", key: `replacement.${randomUUID()}`,
-        name: "Replacement", value: "fixture-replacement",
+        name: `Replacement ${randomUUID()}`, value: "fixture-replacement",
       });
       await access.updateConnection(connection.id, {
         credentialRefs: [{ name: "credentials.authorization", secretId: secret.id,
@@ -134,12 +134,78 @@ describePostgres("shared connection credential synchronization", () => {
     expect((await context.access.getConnection(context.connection.id)).credentialSecretRefs).toEqual([]);
   });
 
-  it("preserves revoked grants during a connection metadata update", async () => {
+  it.each(["metadata", "policy", "placements", "secret references", "reference labels", "default version",
+    "reference order", "reference path", "credential removal", "policy transition"])(
+    "preserves revoked access during a %s update", async (field) => {
+      const context = await fixture();
+      await replaceCredential(context, "update");
+      let connection = await context.access.getConnection(context.connection.id);
+      if (field === "reference order") {
+        await context.access.updateConnection(connection.id, { credentialRefs: [
+          ...connection.credentialRefs,
+          { ...connection.credentialRefs[0], name: "credentials.secondary", key: "X-Secondary" },
+        ] });
+        connection = await context.access.getConnection(connection.id);
+      }
+      await context.access.revokeConnectionGrant(context.connection.id, context.grant.id, {
+        actorType: "user", actorId: "board",
+      });
+      const before = await db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, context.connection.id));
+      expect(before).toHaveLength(1);
+      expect(before[0]).toMatchObject({ status: "revoked", isDefault: false });
+      if (field === "policy transition") {
+        await context.access.updateConnection(connection.id, { credentialPolicy: "per_user" });
+      }
+      await context.access.updateConnection(context.connection.id, {
+        name: "Renamed connection",
+        ...(field === "policy" || field === "policy transition" ? { credentialPolicy: "shared" as const } : {}),
+        ...(field === "placements" ? { credentialRefs: connection.credentialRefs } : {}),
+        ...(field === "secret references" ? { credentialSecretRefs: connection.credentialSecretRefs } : {}),
+        ...(field === "reference labels" ? {
+          credentialSecretRefs: connection.credentialSecretRefs.map((ref) => ({ ...ref, label: "New label" })),
+        } : {}),
+        ...(field === "default version" ? {
+          credentialRefs: connection.credentialRefs.map(({ version: _version, ...ref }) => ref),
+        } : {}),
+        ...(field === "reference order" ? {
+          credentialRefs: [...connection.credentialRefs].reverse(),
+          credentialSecretRefs: [...connection.credentialSecretRefs].reverse(),
+        } : {}),
+        ...(field === "reference path" ? {
+          credentialRefs: connection.credentialRefs.map((ref) => ({ ...ref, name: "credentials.renamed" })),
+          credentialSecretRefs: connection.credentialSecretRefs.map((ref) => ({ ...ref, configPath: "credentials.renamed" })),
+        } : {}),
+        ...(field === "credential removal" ? { credentialRefs: [] } : {}),
+      });
+      const after = await db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, context.connection.id));
+      expect(after).toEqual(before);
+      expect(after.filter((grant) => grant.status === "active" && grant.isDefault)).toEqual([]);
+      context.calls.length = 0;
+      await expect(context.gateway.executeTool({
+        sessionToken: context.session.token, tool: context.tool.name, parameters: {},
+      })).rejects.toThrow();
+      expect(context.calls).toEqual([]);
+    },
+  );
+
+  it.each(["reconnect", "update", "header-only update"])("%s restores access after revocation", async (operation) => {
     const context = await fixture();
-    await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, context.grant.id));
-    await context.access.updateConnection(context.connection.id, { name: "Renamed connection" });
-    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, context.grant.id));
-    expect(grant.status).toBe("revoked");
+    await replaceCredential(context, "update");
+    await context.access.revokeConnectionGrant(context.connection.id, context.grant.id, {
+      actorType: "user", actorId: "board",
+    });
+    await replaceCredential(context, operation);
+    const grants = await db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, context.connection.id));
+    const active = grants.filter((grant) => grant.status === "active" && grant.isDefault);
+    expect(active).toHaveLength(1);
+    expect(active[0].credentialSecretRefs).toEqual((await context.access.getConnection(context.connection.id)).credentialSecretRefs);
+    context.calls.length = 0;
+    await expect(context.gateway.executeTool({
+      sessionToken: context.session.token, tool: context.tool.name, parameters: {},
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(context.calls.filter((call) => call.method === "tools/call")).toEqual([
+      { method: "tools/call", authorization: "Bearer fixture-replacement" },
+    ]);
   });
 
   it("rejects a missing grant reference before any remote request and records health and audit", async () => {
