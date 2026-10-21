@@ -920,10 +920,10 @@ describe("agent live run routes", () => {
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(202);
-    // Optional wake fields retain their existing shape; execution identity
-    // always comes from the authenticated caller.
+    // The board caller supplies identity and the budget override.
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(routeAgentId, {
       manualUserWake: true,
+      issueBudgetOverride: true,
       source: "on_demand",
       triggerDetail: "manual",
       reason: "issue_assigned",
@@ -944,7 +944,7 @@ describe("agent live run routes", () => {
     });
   });
 
-  it("calls heartbeat.wakeup with the legacy minimal shape when the body is empty", async () => {
+  it("includes the board budget override when the body is empty", async () => {
     const res = await requestApp(await createApp(), (baseUrl) =>
       request(baseUrl)
         .post(
@@ -956,6 +956,7 @@ describe("agent live run routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(202);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(routeAgentId, {
       manualUserWake: true,
+      issueBudgetOverride: true,
       source: "on_demand",
       triggerDetail: "manual",
       requestedByActorType: "user",
