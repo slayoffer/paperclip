@@ -1,3 +1,4 @@
+import { sshWriterDirectory } from "@paperclipai/adapter-utils/ssh-writer-termination";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -204,7 +205,8 @@ export async function decideSshInPlaceRealization(input: {
   try {
     config = await input.resolveConfig();
     const result = await (input.runSsh ?? runSshCommand)(config,
-      sshRuntimeIsolationScript(localPath, [buildSshInPlaceRuntimeRoot(remoteCwd, input.runId)]),
+      `(${sshRuntimeIsolationScript(localPath, [sshWriterDirectory(remoteCwd, input.runId)])}) >/dev/null &&\n` +
+        sshRuntimeIsolationScript(localPath, [buildSshInPlaceRuntimeRoot(remoteCwd, input.runId)]),
       { timeoutMs: PROBE_TIMEOUT_MS });
     runtimeRoot = result.stdout.trim();
     if (!path.posix.isAbsolute(runtimeRoot) || runtimeRoot.includes("\n")) {
