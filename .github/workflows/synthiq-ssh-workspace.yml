@@ -11,9 +11,10 @@ on:
       - "packages/adapters/claude-local/**"
       - "server/src/services/ssh-in-place-*.ts"
       - "server/src/services/environment-runtime.ts"
+      - "server/src/services/environment-ssh-driver.ts"
       - "server/src/services/heartbeat-github-launchers*"
       - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
-      - "server/src/__tests__/ssh-in-place-release.test.ts"
+      - "server/src/__tests__/ssh-in-place-*.test.ts"
       - "server/src/__tests__/helpers/ssh-in-place-heartbeat.ts"
 
 permissions:
@@ -50,6 +51,9 @@ jobs:
           corepack pnpm --filter @paperclipai/plugin-sdk build
       - name: Check adapter types
         run: corepack pnpm --filter @paperclipai/adapter-utils typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
       - name: Test workspace preparation and restore
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000
@@ -65,3 +69,8 @@ jobs:
           server/src/services/heartbeat-github-launchers.test.ts
           server/src/__tests__/heartbeat-ssh-in-place.test.ts
           server/src/__tests__/ssh-in-place-release.test.ts
+          server/src/__tests__/ssh-in-place-termination.test.ts
+          server/src/__tests__/ssh-in-place-workspace.test.ts
+          server/src/__tests__/ssh-in-place-lock.test.ts
+          packages/adapter-utils/src/ssh-writer-termination.test.ts
+          server/src/__tests__/ssh-in-place-lock-checks.test.ts
