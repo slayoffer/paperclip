@@ -3510,6 +3510,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           eligible: 0,
           archived: 0,
           cleanupFailed: 0,
+          skippedConcurrentSweep: 1,
+          skippedGitInspection: 0,
+          skippedDirty: 0,
           skippedActiveRun: 0,
           skippedNonTerminalTree: 0,
           skippedUndelivered: 0,
@@ -3589,6 +3592,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         ? sql`(${executionWorkspaces.updatedAt}, ${executionWorkspaces.id}) > (${cursor.updatedAt}::timestamptz, ${cursor.id}::uuid)`
         : undefined;
       const scanFilter = and(baseCandidateFilter, boundaryFilter, cursorFilter);
+      // Keep the database timestamp as text. JavaScript Date truncates its
+      // microseconds and can make the last row appear again on every page.
       const candidates = await db
         .select({ workspace: executionWorkspaces, cursorAt: sql<string>`${executionWorkspaces.updatedAt}::text` })
         .from(executionWorkspaces)
@@ -3610,6 +3615,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         eligible: 0,
         archived: 0,
         cleanupFailed: 0,
+        skippedConcurrentSweep: 0,
+        skippedGitInspection: 0,
+        skippedDirty: 0,
         skippedActiveRun: 0,
         skippedNonTerminalTree: 0,
         skippedUndelivered: 0,
@@ -3998,6 +4006,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         if (!statusInspectionSucceeded) {
           if (remoteWorkspace) terminalWorkspaceDeadlines.delete(workspace.id);
           if ("failure" in inspected) await backOffTerminalWorkspace(workspace, inspected.failure);
+          result.skippedGitInspection += 1;
           result.skippedUndelivered += 1;
           continue;
         }
@@ -4030,6 +4039,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         if (assessment.workspaceDirty) {
+          result.skippedDirty += 1;
           result.skippedUndelivered += 1;
           continue;
         }

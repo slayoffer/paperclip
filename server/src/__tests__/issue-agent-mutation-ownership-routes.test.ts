@@ -3300,7 +3300,7 @@ describe("agent issue mutation checkout ownership", () => {
       mockHeartbeatService.cancelRun.mockResolvedValue({ ...nativeRun, status: "cancelled" });
       const handoff = { assigneeAgentId: null, assigneeUserId: "board-user", status: "in_review" };
 
-      const res = await request(createApp(runActor(), createRunContextDb({}, ownerAgentId, ownerRunId, [], true)))
+      const res = await request(createApp(runActor(), createRunContextDb({}, ownerAgentId, ownerRunId, [], [], true)))
         .patch(`/api/issues/${issueId}`).send(handoff);
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);

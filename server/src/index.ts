@@ -70,6 +70,7 @@ import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWo
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
 import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
+import { createTerminalWorkspaceSweepReporter } from "./services/terminal-workspace-sweep-report.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
@@ -1601,7 +1602,7 @@ async function startServerWithDatabaseTeardown(
         },
       }).unsubscribe;
     }
-    let lastTerminalWorkspaceSkipLogAt = 0;
+    const reportTerminalWorkspaceSweep = createTerminalWorkspaceSweepReporter(logger);
     const terminalWorkspaceWorker = registerTerminalWorkspaceWork(deliveryWork, {
       ...terminalWorkspaces,
       terminalWorkspaceWorkSettled: (hints) => {
@@ -1610,12 +1611,7 @@ async function startServerWithDatabaseTeardown(
       },
       sweepTerminalWorkspaces: async (limit, signal, options) => {
         const result = await terminalWorkspaces.sweepTerminalWorkspaces(limit, signal, options);
-        if (result.archived > 0 || result.cleanupFailed > 0 || result.compacted > 0 || result.compactionFailed > 0) {
-          logger.info(result, "terminal issue workspace reaper changed workspace state");
-        } else if (result.checked > 0 && Date.now() - lastTerminalWorkspaceSkipLogAt >= 10 * 60 * 1000) {
-          lastTerminalWorkspaceSkipLogAt = Date.now();
-          logger.info(result, "terminal issue workspace reaper skipped all candidates");
-        }
+        reportTerminalWorkspaceSweep(result);
         return result;
       },
     }, () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
