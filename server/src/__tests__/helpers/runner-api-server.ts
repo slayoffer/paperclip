@@ -1,9 +1,10 @@
+import { clearCompanyFixtures } from "./clear-company-fixtures.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, projects, projectWorkspaces, activityLog, issueComments, assets, goals, approvals, documents, documentRevisions, issueDocuments, issueRelations, issueThreadInteractions, connectionIntentDeliveries, toolApplications, toolConnections, toolConnectionInstalls, connectionGrants, toolCatalogEntries, toolProfiles, toolProfileBindings } from "@paperclipai/db";
 import { documentService } from "../../services/documents.js";
 import { connectionIntentService } from "../../services/connection-intents.js";
@@ -56,7 +57,7 @@ export async function startRunnerApiTestServer(options: {
       if (options.reset) {
         for (let attempt = 0; ; attempt += 1) {
           try {
-            await db.execute(sql`TRUNCATE companies CASCADE`);
+            await clearCompanyFixtures(db);
             break;
           } catch (error) {
             const code =

@@ -2133,15 +2133,29 @@
     {
       "idx": 306,
       "version": "7",
-      "when": 1792402427336,
-      "tag": "0306_omniscient_zaran",
+      "when": 1792433293974,
+      "tag": "0306_exotic_magus",
       "breakpoints": true
     },
     {
       "idx": 307,
       "version": "7",
-      "when": 1792436923667,
-      "tag": "0307_flimsy_valeria_richards",
+      "when": 1792488075066,
+      "tag": "0307_simple_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 308,
+      "version": "7",
+      "when": 1792559738522,
+      "tag": "0308_familiar_amazoness",
+      "breakpoints": true
+    },
+    {
+      "idx": 309,
+      "version": "7",
+      "when": 1792559759318,
+      "tag": "0309_warm_tyrannus",
       "breakpoints": true
     }
   ]

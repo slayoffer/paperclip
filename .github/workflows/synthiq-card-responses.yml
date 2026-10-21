@@ -9,6 +9,13 @@ on:
       - "packages/shared/src/**"
       - "packages/db/src/**"
       - "server/src/index.ts"
+      - "server/src/startup-heartbeat-recovery.ts"
+      - "server/src/routes/issue-comment-lifecycle.ts"
+      - "server/src/__tests__/server-startup-feedback-export.test.ts"
+      - "server/src/__tests__/helpers/server-startup-config.ts"
+      - "server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts"
+      - "server/src/__tests__/issue-comment-reopen-routes.test.ts"
+      - "server/src/__tests__/issue-queued-comments-routes.test.ts"
       - "server/src/routes/issues.ts"
       - "server/src/routes/issue-interaction-read*.ts"
       - "server/src/routes/openapi.ts"
@@ -98,3 +105,7 @@ jobs:
           ui/src/components/AttentionQueueRow.test.tsx
           ui/src/components/AttentionInteractionResolver.test.tsx
           ui/src/pages/Pipelines.test.tsx
+          server/src/__tests__/server-startup-feedback-export.test.ts
+          server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+          server/src/__tests__/issue-comment-reopen-routes.test.ts
+          server/src/__tests__/issue-queued-comments-routes.test.ts
