@@ -26,7 +26,11 @@ describePostgres("already available connection requests", () => {
     db = createDb(temp.connectionString);
     await db.insert(authUsers).values({ id: "connection-owner", name: "Owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() });
   }, 20_000);
-  beforeEach(async () => { await db.execute(sql`truncate table companies cascade`); });
+  beforeEach(async () => { await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies cascade`);
+    }); });
   afterAll(async () => { await db.$client.end({ timeout: 1 }); await temp?.cleanup(); });
 
   async function seed() {

@@ -106,7 +106,11 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
   });
   beforeEach(async () => {
     vi.mocked(publishLiveEvent).mockClear();
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
   });
 
   async function fixture(patch: Partial<typeof heartbeatRuns.$inferInsert> = {}) {

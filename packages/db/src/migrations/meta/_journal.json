@@ -2325,6 +2325,20 @@
       "when": 1791781882729,
       "tag": "0333_normal_wild_pack",
       "breakpoints": true
+    },
+    {
+      "idx": 334,
+      "version": "7",
+      "when": 1792433293974,
+      "tag": "0334_exotic_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 335,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0335_simple_sleeper",
+      "breakpoints": true
     }
   ]
 }
