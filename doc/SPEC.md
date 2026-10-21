@@ -35,6 +35,8 @@ awareness is supplied by the harness; compatible session continuations carry
 fresh routing information and changed facts, with full context retained for
 new sessions and resume failure.
 
+Tasks support validated [environment selection](workspace-operations.md#task-environment-selection) without changing inherited workspace bindings or agent defaults.
+
 The fork permits [saved review waits](review-waits.md) with a board owner and an exact saved head.
 
 ---

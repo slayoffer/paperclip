@@ -6,6 +6,8 @@
 This document is the concrete, build-ready V1 contract.
 When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
+Task-only [environment selection](../workspace-operations.md#task-environment-selection) precedes defaults and preserves inherited workspace bindings.
+
 The fork also supports [saved review waits](../review-waits.md).
 An agent can record a board-owned wait for its latest saved review handoff.
 
