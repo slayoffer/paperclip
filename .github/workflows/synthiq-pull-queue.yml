@@ -67,3 +67,9 @@ jobs:
           server/src/__tests__/task-drain-openapi.test.ts
           server/src/__tests__/instance-settings-routes.test.ts
           --maxWorkers=1
+      - name: Test retained cleanup during drain
+        run: >-
+          corepack pnpm exec vitest run --project @paperclipai/server
+          server/src/__tests__/heartbeat-process-recovery.test.ts
+          -t 'joins startup and reap retained cleanup'
+          --maxWorkers=1
