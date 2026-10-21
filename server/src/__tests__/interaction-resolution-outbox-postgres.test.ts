@@ -169,7 +169,7 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
     const instant = new Date();
     const ids = Array.from({ length: 51 }, () => randomUUID()).sort();
     await db.insert(issueThreadInteractions).values(ids.map((id) => ({ id, companyId, issueId: issue.id,
-      kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "Continue?" } })));
+      kind: "request_confirmation", status: "accepted", payload: { version: 1 as const, prompt: "Continue?" } })));
     await db.insert(interactionResolutionOutbox).values(ids.map((id) => ({ interactionId: id, companyId,
       issueId: issue.id, createdAt: instant, wakes: [{ agentId: agent.id, options: { idempotencyKey: `interaction:${id}` } }] })));
     // Database defaults retain microseconds. Keep that precision in this test.

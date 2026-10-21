@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Request } from "express";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -8,7 +8,6 @@ import {
   companyMemberships, instanceUserRoles, companySecretProposals, companySecrets, heartbeatRuns, principalPermissionGrants,
   createDb, interactionResolutionOutbox, issues, issueThreadInteractions,
 } from "@paperclipai/db";
-import type { AuthorizationActor } from "../services/authorization.js";
 import { assertCanResolveProposal } from "../services/secret-proposal-authorization.js";
 import * as audit from "../services/activity-log.js";
 import * as heartbeats from "../services/heartbeat.js";
@@ -32,7 +31,7 @@ describe("binding recovery with PostgreSQL", () => {
   afterAll(async () => { await db?.$client.end(); await temporary?.cleanup(); });
 
   async function fixture(continuationPolicy: "wake_assignee" | "none" = "wake_assignee", options: {
-    source?: AuthorizationActor["source"]; role?: string; grant?: boolean;
+    source?: Request["actor"]["source"]; role?: string; grant?: boolean;
     legacyAdmin?: boolean; ignoreInstanceAdmin?: boolean; interrupt?: boolean;
   } = {}) {
     const userId = randomUUID();
@@ -50,8 +49,9 @@ describe("binding recovery with PostgreSQL", () => {
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: agent.id, status: "succeeded" }).returning();
     // Synthetic reference only. No secret value, provider call, or live credential exists.
     const [secret] = await db.insert(companySecrets).values({ companyId, key: "TEST_REFERENCE", name: "fixture/reference" }).returning();
+    const configPath = "env.TEST_REFERENCE";
     const [proposal] = await db.insert(companySecretProposals).values({ companyId, kind: "binding", justification: "Fixture",
-      targetType: "agent", targetId: agent.id, configPath: "env.TEST_REFERENCE", secretId: secret.id,
+      targetType: "agent", targetId: agent.id, configPath, secretId: secret.id,
       proposedByAgentId: agent.id, originIssueId: issue.id, originRunId: run.id,
       bindingTargetPolicySnapshot: "self_and_reports", targetAncestorIdsSnapshot: [],
       expiresAt: new Date(Date.now() + 600_000) }).returning();
@@ -59,7 +59,7 @@ describe("binding recovery with PostgreSQL", () => {
       kind: "request_confirmation", status: "pending", continuationPolicy,
       requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only", resolverPolicyProvenance: "explicit",
       effectiveResolverPolicySource: "governed_action", payload: { version: 1, prompt: "Bind the fixture reference?",
-        secretProposal: { version: 1, proposalId: proposal.id, configPath: proposal.configPath, targetAgentId: agent.id,
+        secretProposal: { version: 1, proposalId: proposal.id, configPath, targetAgentId: agent.id,
           targetAgentName: agent.name, sourceSecretLabel: secret.name, justification: "Fixture",
           expiresAt: proposal.expiresAt.toISOString() } } }).returning();
     await db.update(companySecretProposals).set({ interactionId: card.id }).where(eq(companySecretProposals.id, proposal.id));
@@ -79,7 +79,7 @@ describe("binding recovery with PostgreSQL", () => {
       return null;
     });
     vi.spyOn(heartbeats, "heartbeatService").mockReturnValue({ wakeup } as never);
-    const actor: AuthorizationActor = {
+    const actor: Request["actor"] = {
       type: "board", source: options.source ?? "session", userId, companyIds: [companyId],
       isInstanceAdmin: false, ignoreInstanceAdmin: options.ignoreInstanceAdmin,
       memberships: options.source === "local_implicit" ? [] : [

@@ -2706,6 +2706,7 @@ async function listIssueDependencyReadinessMap(
   companyId: string,
   issueIds: string[],
   lockSources = false,
+  proposedBlockers?: { issueId: string; blockerIssueIds: string[] },
 ) {
   const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
   const readinessMap = new Map<string, IssueDependencyReadiness>();
@@ -2713,25 +2714,35 @@ async function listIssueDependencyReadinessMap(
     readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
   }
   if (uniqueIssueIds.length === 0) return readinessMap;
+  if (proposedBlockers?.blockerIssueIds.length === 0) return readinessMap;
 
-  const blockerQuery = dbOrTx
-    .select({
-      issueId: issueRelations.relatedIssueId,
-      blockerIssueId: issueRelations.issueId,
-      blockerStatus: issues.status,
-      blockerExecutionWorkspaceId: issues.executionWorkspaceId,
-    })
-    .from(issueRelations)
-    .innerJoin(issues, eq(issueRelations.issueId, issues.id))
-    .where(
-      and(
-        eq(issueRelations.companyId, companyId),
-        eq(issueRelations.type, "blocks"),
-        inArray(issueRelations.relatedIssueId, uniqueIssueIds),
-      ),
-    );
-
-
+  const blockerQuery = proposedBlockers
+    ? dbOrTx
+        .select({
+          issueId: sql<string>`${proposedBlockers.issueId}::uuid`,
+          blockerIssueId: issues.id,
+          blockerStatus: issues.status,
+          blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+        })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, companyId),
+          inArray(issues.id, [...new Set(proposedBlockers.blockerIssueIds)]),
+        ))
+    : dbOrTx
+        .select({
+          issueId: issueRelations.relatedIssueId,
+          blockerIssueId: issueRelations.issueId,
+          blockerStatus: issues.status,
+          blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+        })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.type, "blocks"),
+          inArray(issueRelations.relatedIssueId, uniqueIssueIds),
+        ));
 
   const blockerRows = await (lockSources ? blockerQuery.for("update", { noWait: true }) : blockerQuery);
 
@@ -9441,12 +9452,10 @@ export function issueService(db: Db) {
       };
     },
 
-
-
     getDependencyReadiness: async (
       issueId: string,
       dbOrTx: any = db,
-      options: { lockSources?: boolean } = {},
+      options: { lockSources?: boolean; blockerIssueIds?: string[] } = {},
     ) => {
       const issue = await dbOrTx
         .select({ id: issues.id, companyId: issues.companyId })
@@ -9461,6 +9470,9 @@ export function issueService(db: Db) {
         issue.companyId,
         [issueId],
         options.lockSources,
+        options.blockerIssueIds === undefined
+          ? undefined
+          : { issueId, blockerIssueIds: options.blockerIssueIds },
       );
       return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
     },
