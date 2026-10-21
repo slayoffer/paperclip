@@ -1,5 +1,6 @@
 import { interactionResolverAudience } from "./attention-interaction-audience.js";
 export { interactionResolverAudience } from "./attention-interaction-audience.js";
+import { listNewerAgentRunActivity } from "./agent-run-activity.js";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -1651,21 +1652,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         ),
         issueImageMap(db, companyId, failedIssueIds),
         oldestFailedRunCreatedAt && failedAgentIds.length > 0
-          ? db
-            .select({
-              agentId: heartbeatRuns.agentId,
-              createdAt: heartbeatRuns.createdAt,
-              // Project just the ids readRunIssueId needs; pulling the whole
-              // context_snapshot detoasts megabytes per feed build.
-              runIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
-              runTaskId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'taskId'`,
-            })
-            .from(heartbeatRuns)
-            .where(and(
-              eq(heartbeatRuns.companyId, companyId),
-              inArray(heartbeatRuns.agentId, failedAgentIds),
-              gt(heartbeatRuns.createdAt, oldestFailedRunCreatedAt),
-            ))
+          ? listNewerAgentRunActivity(db, companyId, failedAgentIds, oldestFailedRunCreatedAt)
           : Promise.resolve([]),
       ]);
       const latestRunCreatedAtByKey = new Map<string, Date>();
