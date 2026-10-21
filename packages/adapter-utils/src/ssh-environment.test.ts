@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { buildSshSpawnTarget, createSshCommandManagedRuntimeRunner, runSshCommand } from "./ssh-command.js";
 import { stageSshEnvironment } from "./ssh-environment.js";
@@ -75,17 +76,52 @@ it("cleans a staged file when the upload connection fails", async () => {
   await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-it("disables profile tracing before reading environment values", async () => {
+it.each(["set -x;", "set -v\n", "set -xv\n"])("disables profile tracing before reading environment values (%s)", async (profile) => {
   const environment = await stageSshEnvironment({ CUSTOM_BINDING: special, PAPERCLIP_API_KEY: sentinel }, async (command, stdin) => {
     const result = await shell(command, stdin);
     if (stdin) directories.push(command.match(/paperclip_env_dir='([^']+)'/)![1]);
     return result;
   });
   try {
-    const result = await shell(`set -x; ${environment.wrap('test -n "$CUSTOM_BINDING" && test -n "$PAPERCLIP_API_KEY"')}`);
+    const result = await shell(`${profile}${environment.wrap('test -n "$CUSTOM_BINDING" && test -n "$PAPERCLIP_API_KEY"')}`);
     expect(result.stderr).not.toContain(sentinel);
     expect(result.stderr).not.toContain(special);
   } finally { await environment.cleanup(); }
+});
+
+it.each([0, 255])("rejects an early SSH input closure without crashing (exit %s)", async (exitCode) => {
+  const calls = path.join(root, "ssh-calls");
+  await writeFile(path.join(root, "bin/ssh"), `#!/bin/sh
+for arg do command=$arg; done
+printf '%s\\n' "$command" >> '${calls}'
+case "$command" in
+  *'cat >'*) exit ${exitCode} ;;
+  *) exec /bin/sh -c "$command" ;;
+esac
+`, { mode: 0o700 });
+  // A separate process proves that an unhandled stream error cannot escape the caller.
+  const source = new URL("./ssh-command.ts", import.meta.url).href;
+  const script = `
+    const { runSshCommand } = await import(${JSON.stringify(source)});
+    const env = Object.fromEntries(Array.from({ length: 64 }, (_, i) => ['BUFFER_' + i, 'x'.repeat(8192)]));
+    try {
+      await runSshCommand(${JSON.stringify(localSshSpec(root))}, 'true', { env });
+      process.exitCode = 99;
+    } catch (error) {
+      console.log(JSON.stringify({ code: error.code, message: error.message }));
+    }
+  `;
+  const loader = new URL("../../../cli/node_modules/tsx/dist/loader.mjs", import.meta.url).href;
+  const result = await promisify(execFile)(process.execPath, ["--import", loader, "--input-type=module", "-e", script]);
+  const failure = JSON.parse(result.stdout.trim());
+  expect(failure.code).toBe(exitCode === 0 ? "EPIPE" : exitCode);
+  expect(failure.message).toMatch(exitCode === 0 ? /EPIPE|pipe/i : /255/);
+  expect(result.stderr).not.toContain("Unhandled");
+  const commands = await readFile(calls, "utf8");
+  expect(commands).toContain("cat >");
+  expect(commands).toContain("/bin/rm -f");
+  const directory = commands.match(/paperclip_env_dir='([^']+)'/)![1];
+  await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it.each(["in_place", "copy"])("delivers values and stdin without argv exposure in %s mode", async (mode) => {

@@ -52,10 +52,12 @@ This includes secret bindings with custom variable names.
 Each launch uses a unique directory under `/tmp` with mode `0700`.
 The environment file has mode `0600`.
 The remote wrapper reads the file after the login profiles.
-It disables shell tracing before it reads the values.
+It disables verbose shell output and execution tracing before it reads the values.
 It removes the file and directory before it starts the provider.
 Cleanup also attempts removal when the launch fails or never starts.
 An unavailable SSH connection can prevent that final cleanup attempt.
+An upload input error rejects the command after the SSH process closes.
+This preserves cleanup and prevents an unhandled broken-pipe error.
 
 The same path serves provider launches and managed runtime commands.
 Provider standard input remains available in both `in_place` and copy modes.

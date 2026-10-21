@@ -135,6 +135,7 @@ async function spawnText(
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    let stdinError: Error | null = null;
 
     const finishReject = (error: Error & { stdout?: string; stderr?: string; code?: number | null; killed?: boolean }) => {
       if (settled) return;
@@ -205,6 +206,10 @@ async function spawnText(
       if (settled) return;
       settled = true;
       if (code === 0) {
+        if (stdinError) {
+          reject(Object.assign(stdinError, { stdout, stderr, signal, killed: timedOut }));
+          return;
+        }
         resolve({ stdout, stderr });
         return;
       }
@@ -218,6 +223,8 @@ async function spawnText(
     });
 
     if (options.stdin != null && child.stdin) {
+      // Wait for close before rejecting so remote cleanup cannot race the upload.
+      child.stdin.on("error", (error) => { stdinError = error; });
       child.stdin.end(options.stdin);
     }
   });

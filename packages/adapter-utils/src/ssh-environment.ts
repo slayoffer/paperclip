@@ -20,7 +20,7 @@ export async function stageSshEnvironment(env: Record<string, string>, execute: 
   const remove = `/bin/rm -f ${file} && /bin/rmdir ${shellQuote(directory)}`;
   const cleanup = async () => { await execute(`${remove} 2>/dev/null`).catch(() => undefined); };
   const upload = [
-    "set +x",
+    "set +xv",
     "umask 077",
     `paperclip_env_dir=${shellQuote(directory)}`,
     'mkdir -m 700 "$paperclip_env_dir" || exit 125',
@@ -39,8 +39,8 @@ export async function stageSshEnvironment(env: Record<string, string>, execute: 
   }
   return {
     // Shell builtins read values without placing them in a child process argv.
-    // Disable profile tracing before the shell reads any credential values.
-    wrap: (command) => `{ set +x; . ${file} && ${remove} && ${command}; }`,
+    // Disable verbose output and execution tracing before reading credential values.
+    wrap: (command) => `{ set +xv; . ${file} && ${remove} && ${command}; }`,
     cleanup,
   };
 }
