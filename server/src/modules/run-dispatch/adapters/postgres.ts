@@ -337,19 +337,7 @@ export function createPostgresRunDispatchAdapter(
     if (!issueId) return { agentFound: true, facts };
 
     const issueQuery = dbOrTx
-      .select({
-        id: issues.id,
-        companyId: issues.companyId,
-        projectId: issues.projectId,
-        status: issues.status,
-        assigneeAgentId: issues.assigneeAgentId,
-        assigneeUserId: issues.assigneeUserId,
-        executionRunId: issues.executionRunId,
-        checkoutRunId: issues.checkoutRunId,
-        executionPolicy: issues.executionPolicy,
-        executionState: issues.executionState,
-        monitorNextCheckAt: issues.monitorNextCheckAt,
-      })
+      .select()
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)));
     // Locking the row here, only when a caller opened a transaction for the

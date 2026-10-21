@@ -30,6 +30,7 @@ The action must use this exact form. Letter case can differ.
 The head must contain exactly 40 hexadecimal characters.
 The branch must be `review/<issue identifier>`.
 The manifest must contain exactly the four fields shown above.
+The fields can appear in any order. Hexadecimal letter case can differ in both heads.
 
 The server checks the latest handoff comment from the current issue owner.
 It restricts the query to the same company and issue. It excludes deleted comments.

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, companies, createDb, issueRelations, issues } from "@paperclipai/db";
 import { createDependencyResolvedWakeup } from "../routes/issue-dependency-wakeup.js";
 import { releaseReadyDependencyWait } from "../services/issue-dependency-release.js";
@@ -18,6 +18,7 @@ suite("dependency release wakes from routes", () => {
     db = createDb(temp.connectionString);
   }, 90000);
   afterAll(async () => { await temp?.cleanup(); });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   async function fixture() {
     const companyId = randomUUID(), agentId = randomUUID(), blockerId = randomUUID(), dependentId = randomUUID();
@@ -76,5 +77,16 @@ suite("dependency release wakes from routes", () => {
     const f = await fixture();
     await f.recordWake("failed", ":release");
     expect(await f.wake()).not.toBeNull();
+  });
+
+  it("does not duplicate a completed integrity wake through the released route helper", async () => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", "true");
+    const f = await fixture();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.dependentId));
+    await f.recordWake("completed", "");
+    expect(await f.wake()).toBeNull();
+    f.input.blockedTransitionAt = new Date("2026-10-20T12:00:00.000Z");
+    await db.update(issues).set({ blockedTransitionAt: f.input.blockedTransitionAt }).where(eq(issues.id, f.dependentId));
+    expect((await f.wake())?.idempotencyKey).toBe(buildIssueBlockersResolvedWakeStateKey(f.input));
   });
 });

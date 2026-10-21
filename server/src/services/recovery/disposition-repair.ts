@@ -1,3 +1,4 @@
+import { blockedStateIntegrityEnabled, hasOutsideWait, hasPendingHandoffWait } from "../blocked-state-integrity.js";
 import { createHash } from "node:crypto";
 import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -30,6 +31,8 @@ type DispositionRepairIssue = Pick<
   | "executionPolicy"
   | "executionState"
   | "monitorNextCheckAt"
+  | "identifier"
+  | "unblockDescriptor"
 >;
 
 export type DispositionRepairSourceState = {
@@ -202,7 +205,9 @@ export async function collectDispositionRepairSourceState(
   const pendingApproval = linkedApprovals.some((row) =>
     row.status === "pending" || row.status === "revision_requested",
   );
-  const durablePathReason = issue.assigneeUserId
+  const recordedWait = blockedStateIntegrityEnabled() && issue.status === "blocked" &&
+    (hasOutsideWait(issue.unblockDescriptor) || await hasPendingHandoffWait(db, issue));
+  const durablePathReason = recordedWait ? "recorded_wait" : issue.assigneeUserId
     ? "user_owner"
     : blockers.length > 0
       ? "blocker"
@@ -219,6 +224,7 @@ export async function collectDispositionRepairSourceState(
   const durableState = {
     source: {
       status: issue.status,
+      ...(blockedStateIntegrityEnabled() ? { unblockDescriptor: issue.unblockDescriptor } : {}),
       assigneeAgentId: issue.assigneeAgentId,
       assigneeUserId: issue.assigneeUserId,
       executionPolicy: issue.executionPolicy,
