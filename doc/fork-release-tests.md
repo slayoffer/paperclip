@@ -53,6 +53,12 @@ GitHub check annotations identify assertion failures without downloading the com
 The first complete run found two stale board-wake expectations in `agent-live-run-routes.test.ts`.
 Those expectations now require the existing `issueBudgetOverride: true` field.
 The route behavior and budget rules remain unchanged.
+A later run tested the combined source with a newer release target.
+The release target now supplies the missing startup pull-queue mock.
+Credential rotation also marks connection health unchecked before the approval snapshot check.
+The replay regression verifies rejection at that health gate and after simulated health confirmation.
+Both cases execute no provider request. Runtime behavior remains unchanged.
+The remote-tool fixture uses a separate helper to limit growth of the existing test file.
 
 ## Action references
 
