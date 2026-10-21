@@ -1,5 +1,23 @@
 # Workspace operations
 
+## Task environment selection
+
+`executionWorkspaceSettings.environmentId` selects an environment for one task.
+The task selection precedes the agent, instance, and local defaults.
+A null or absent selection uses the existing default order.
+The server validates the identifier, environment availability, driver, and provider restrictions before workspace changes.
+Instance sandbox requirements still apply.
+
+When a task selects a different environment, the runtime creates a separate execution workspace binding.
+It preserves the inherited binding and records it in `derivedFromExecutionWorkspaceId`.
+The task binding borrows the source checkout. Its cleanup does not remove the source files or branch.
+Parent and sibling tasks retain their bindings and environment defaults.
+A suspended native execution cannot change its admitted environment. Start a new execution after such a change.
+
+The release workflow runs the policy, heartbeat default, and task routing regression suites.
+
+## Workspace transport
+
 For sandbox file synchronization, lock ownership, and the required upgrade
 procedure from directory locks, see [Workspace restore locks](workspace-restore-locks.md).
 

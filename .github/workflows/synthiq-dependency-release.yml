@@ -13,6 +13,11 @@ on:
       - server/src/__tests__/dependency-release.test.ts
       - server/src/__tests__/issue-dependency-wakeup-release.test.ts
       - server/src/__tests__/heartbeat-dependency-scheduling.test.ts
+      - server/src/__tests__/execution-workspace-policy.test.ts
+      - server/src/__tests__/heartbeat-local-environment.test.ts
+      - server/src/__tests__/heartbeat-task-environment.test.ts
+      - server/src/__tests__/environment-selection-route-guards.test.ts
+      - server/src/__tests__/environment-routes.test.ts
       - packages/db/src/**
       - packages/shared/src/**
 
@@ -68,3 +73,11 @@ jobs:
           server/src/__tests__/heartbeat-dependency-scheduling.test.ts
           server/src/modules/run-dispatch/domain/policy.test.ts
           server/src/modules/run-dispatch/adapters/postgres.test.ts
+      - name: Test task environment routing and default behavior
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism
+          server/src/__tests__/execution-workspace-policy.test.ts
+          server/src/__tests__/heartbeat-local-environment.test.ts
+          server/src/__tests__/heartbeat-task-environment.test.ts
+          server/src/__tests__/environment-selection-route-guards.test.ts
+          server/src/__tests__/environment-routes.test.ts

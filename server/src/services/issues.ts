@@ -131,7 +131,11 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
-import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import {
+  mergeExecutionWorkspaceConfig,
+  readExecutionWorkspaceConfig,
+  requiresTaskEnvironmentBinding,
+} from "./execution-workspaces.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
 import { readChatControlChronology } from "./chat-control-chronology.js";
 import { authorizeChatConversationForBoundRun } from "./native-runtime/chat-attachment-reuse.js";
@@ -467,7 +471,6 @@ function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
   settings: ReturnType<typeof parseIssueExecutionWorkspaceSettings>,
 ) {
   return {
-    environmentId: settings?.environmentId ?? null,
     provisionCommand: settings?.workspaceStrategy?.provisionCommand ?? null,
     runtimeProvisionCommand:
       settings?.workspaceStrategy?.runtimeProvisionCommand ?? null,
@@ -10679,9 +10682,11 @@ export function issueService(db: Db) {
         issueData.executionWorkspaceSettings !== undefined
           ? parseIssueExecutionWorkspaceSettings(
               issueData.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             )
           : parseIssueExecutionWorkspaceSettings(
               existing.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             );
       if (issueData.executionWorkspaceSettings !== undefined) {
         patch.executionWorkspaceSettings = nextExecutionWorkspaceSettings
@@ -11021,7 +11026,13 @@ export function issueService(db: Db) {
               (rows: Array<{ id: string; metadata: unknown }>) =>
                 rows[0] ?? null,
             );
-          if (workspace) {
+          if (
+            workspace &&
+            !requiresTaskEnvironmentBinding(
+              { config: readExecutionWorkspaceConfig(workspace.metadata as Record<string, unknown> | null) },
+              nextExecutionWorkspaceSettings?.environmentId,
+            )
+          ) {
             await tx
               .update(executionWorkspaces)
               .set({
