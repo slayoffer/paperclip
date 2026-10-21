@@ -1,3 +1,5 @@
+import { vi } from "vitest";
+
 export const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 export const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
 export const ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON;
@@ -42,5 +44,23 @@ export function buildTestConfig(overrides: Record<string, unknown> = {}) {
     heartbeatSchedulerIntervalMs: 30000,
     companyDeletionEnabled: false,
     ...overrides,
+  };
+}
+
+export function createStartupDatabaseMock(createDb: unknown) {
+  return {
+    createDb,
+    ensurePostgresDatabase: vi.fn(),
+    getPostgresDataDirectory: vi.fn(),
+    inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
+    applyPendingMigrations: vi.fn(),
+    reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
+    formatDatabaseBackupResult: vi.fn(() => "ok"),
+    runDatabaseBackup: vi.fn(),
+    authUsers: {},
+    companies: {},
+    companyMemberships: {},
+    instanceUserRoles: {},
+    heartbeatRuns: {},
   };
 }
