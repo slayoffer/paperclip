@@ -1,3 +1,5 @@
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { listWakeableBlockedDependents } from "./issue-wakeable-dependents.js";
 import { listIssueDependencyReadinessMap, readIssueDependencyReadiness, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
@@ -8735,79 +8737,12 @@ export function issueService(db: Db) {
       return listIssueReviewAttentionMap(dbOrTx, companyId, issueRows);
     },
 
-    listWakeableBlockedDependents: async (blockerIssueId: string) => {
-      const blockerIssue = await db
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, blockerIssueId))
-        .then((rows) => rows[0] ?? null);
-      if (!blockerIssue) return [];
-      if (blockedStateIntegrityEnabled()) {
-        const publications: ActivityPublication[] = [];
-        const intents = await db.transaction(async tx => releaseResolvedBlockedDependents(tx as unknown as Db, blockerIssue,
-          async (issueId) => (await listIssueDependencyReadinessMap(tx, blockerIssue.companyId, [issueId])).get(issueId)?.isDependencyReady ?? false, publications));
-        for (const publication of publications) publishActivity(publication);
-        await executeIssuePostCommitActions(db, intents.map(intentId => ({
-          type: "dispatch_dependency_wake", companyId: blockerIssue.companyId, intentId,
-        })));
-      }
-
-      const candidates = await db
-        .select({
-          id: issues.id,
-          assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
-          blockedTransitionAt: issues.blockedTransitionAt,
-        })
-        .from(issueRelations)
-        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
-        .where(
-          and(
-            eq(issueRelations.companyId, blockerIssue.companyId),
-            eq(issueRelations.type, "blocks"),
-            eq(issueRelations.issueId, blockerIssueId),
-            isNull(issues.conversationAgentId),
-          ),
-        );
-      if (candidates.length === 0) return [];
-
-      const wakeableCandidates = candidates.filter(
-        (candidate) =>
-          candidate.assigneeAgentId &&
-          !(isPullQueueEnabled() ? ["done", "cancelled"] : ["backlog", "done", "cancelled"]).includes(candidate.status),
-      );
-      if (wakeableCandidates.length === 0) return [];
-
-      // Defer to the unified readiness check so that a dependent only fires when
-      // (a) every blocker is resolved AND (b) each workspace passes finalization.
-      // The finalize hook also calls
-      // this function on completion, so a wake initially gated by an in-flight
-      // sync-back will re-fire once the restore lands locally.
-      const readinessMap = await listIssueDependencyReadinessMap(
-        db,
-        blockerIssue.companyId,
-        wakeableCandidates.map((candidate) => candidate.id),
-      );
-
-      const waitStates = await Promise.all(wakeableCandidates.map(candidate => hasNonDependencyBlockedWait(db, candidate.id)));
-      return wakeableCandidates.filter((_, index) => !waitStates[index])
-        .map((candidate) => {
-          const readiness =
-            readinessMap.get(candidate.id) ??
-            createIssueDependencyReadiness(candidate.id);
-          return { candidate, readiness };
-        })
-        .filter(
-          ({ readiness }) =>
-            readiness.isDependencyReady && readiness.blockerIssueIds.length > 0,
-        )
-        .map(({ candidate, readiness }) => ({
-          id: candidate.id,
-          assigneeAgentId: candidate.assigneeAgentId!,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        }));
-    },
+    listWakeableBlockedDependents: (
+      blockerIssueId: string,
+      dbOrTx: any = db,
+      postCommitActivityPublications?: ActivityPublication[],
+      postCommitActions?: IssuePostCommitAction[],
+    ) => listWakeableBlockedDependents(db, blockerIssueId, dbOrTx, postCommitActivityPublications, postCommitActions),
 
     getWakeableParentAfterChildCompletion: async (
       parentIssueId: string,
@@ -10946,11 +10881,11 @@ export function issueService(db: Db) {
       const result = await (dbOrTx === db
         ? db.transaction(runUpdate)
         : runUpdate(dbOrTx));
-      if (dbOrTx === db && !postCommitActivityPublications) {
+      if (dbOrTx === db && !(db instanceof PgTransaction) && !postCommitActivityPublications) {
         for (const publication of ownedActivityPublications)
           publishActivity(publication);
       }
-      if (dbOrTx === db && !postCommitActions) {
+      if (dbOrTx === db && !(db instanceof PgTransaction) && !postCommitActions) {
         await executeIssuePostCommitActions(db, ownedPostCommitActions);
       }
       return result;

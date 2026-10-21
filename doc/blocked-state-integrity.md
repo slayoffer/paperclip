@@ -36,6 +36,10 @@ A later transition into blocked creates a new cycle timestamp.
 The transaction also records a dependency wake intent in `agent_wakeup_requests`.
 The intent uses `pending_dependency_dispatch`. It does not represent a queued heartbeat.
 After commit, dispatch applies the existing scheduler checks and the cycle wake key.
+Native completion passes activity and wake queues through its outer status transaction.
+It dispatches those queues through the root database after the outer commit.
+A transaction-bound issue service never dispatches from a savepoint.
+Without a caller queue, its durable intents remain available for recovery after commit.
 Failed or deferred dispatches remain pending. The periodic dependency check retries them for released `todo` issues.
 An expired dispatch claim also permits a retry. An existing wake prevents a duplicate dispatch.
 Route completion and recovery use the same cycle key when integrity is enabled.
