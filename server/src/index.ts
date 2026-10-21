@@ -24,6 +24,7 @@ import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./se
 import { isIdleTaskDrainActive, beginIdleTrackedWork, trackIdleWork } from "./services/task-admission.js";
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { clearIdleBackupWakeRequired, idleBackupWakeMarker, markIdleBackupWakeRequired, verifyIdleDatabaseBackup } from "./services/idle-database-backup.js";
+import { createSshInPlaceOwnershipReconciler } from "./services/ssh-in-place-reconciliation.js";
 import { runStartupHeartbeatRecoverySteps } from "./startup-heartbeat-recovery.js";
 import type { BetterAuthSessionResult, EmbeddedPostgresInstance, EmbeddedPostgresCtor, StartedServer, StartupDatabaseTeardown } from "./server-startup-types.js";
 export type { StartedServer } from "./server-startup-types.js";
@@ -1291,7 +1292,10 @@ async function startServerWithDatabaseTeardown(
   });
   const deliveryWork = app.locals.deliveryWork as ReturnType<typeof createDeliveryWorkCoordinator>;
   const executionSchedule = executionControlSchedule(db);
+  const reconcileSshOwnership = createSshInPlaceOwnershipReconciler(db);
   registerExecutionControlWork(deliveryWork, [
+    { queue: DELIVERY_QUEUES.executionSshOwnership, run: reconcileSshOwnership,
+      onSettled: reconcileSshOwnership.requestScan, next: reconcileSshOwnership.nextRunAt },
     { queue: DELIVERY_QUEUES.executionFinalization, run: () => reconcileAbandonedExecutionControl(db), next: executionSchedule.finalization },
     { queue: DELIVERY_QUEUES.executionStatus, run: () => deliverExecutionStatuses(db), next: executionSchedule.status },
     { queue: DELIVERY_QUEUES.executionDisposition, run: () => settleUnrecoverableExecutions(db), next: executionSchedule.disposition },

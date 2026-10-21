@@ -29,7 +29,7 @@ export function trackSshWriterCommand(command: string, remoteWorkspacePath: stri
       if (!fs.readFileSync(root + '/cgroup.procs', 'utf8').trim().split('\\n').includes(String(process.pid))) process.exit(1);
       const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
       const mount = fs.statSync('/sys/fs/cgroup');
-      fs.writeFileSync(marker, JSON.stringify({ version: 2, boot, cgroup, hierarchy: [mount.dev, mount.ino] }));
+      fs.writeFileSync(marker, JSON.stringify({ version: 2, boot, pid: process.ppid, cgroup, hierarchy: [mount.dev, mount.ino] }));
     } catch { process.exit(1); }
   `;
   const writer = `node -e ${shellQuote(record)} ${shellQuote(marker)} ${shellQuote(unit)}; ${command}`;
@@ -65,7 +65,12 @@ export function sshWriterTerminationScript(remoteWorkspacePath: string, runId: s
         if (record.version !== 2 || !/^[0-9a-f-]{36}$/.test(record.boot) || typeof record.cgroup !== 'string' ||
             !record.cgroup.startsWith('/') || record.cgroup.split('/').includes('..') ||
             path.basename(record.cgroup) !== 'paperclip-writer-' + name + '.scope') process.exit(1);
+        if (record.pid !== undefined && (!Number.isSafeInteger(record.pid) || record.pid <= 0)) process.exit(1);
         if (record.boot !== boot) continue;
+        if (record.pid !== undefined) {
+          try { process.kill(record.pid, 0); process.exit(1); }
+          catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
         const mount = fs.statSync('/sys/fs/cgroup');
         if (!Array.isArray(record.hierarchy) || record.hierarchy.length !== 2 ||
             record.hierarchy[0] !== mount.dev || record.hierarchy[1] !== mount.ino) process.exit(1);

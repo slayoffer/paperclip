@@ -12,6 +12,7 @@ export function registerExecutionControlWork(
     queue: DeliveryQueue;
     run: () => Promise<unknown>;
     next: () => Promise<number | null>;
+    onSettled?: () => void;
   }>,
   canRun: () => boolean = () => true,
 ) {
@@ -23,7 +24,7 @@ export function registerExecutionControlWork(
     return coordinator.register(duty.queue, {
       retryMs: EXECUTION_RECONCILIATION_INTERVAL_MS,
       pausePassiveMaintenance: true,
-      onSettled: () => { requested += 1; },
+      onSettled: () => { requested += 1; duty.onSettled?.(); },
       run: async () => {
         if (!canRun()) { requested += 1; next = null; return; }
         const now = Date.now();

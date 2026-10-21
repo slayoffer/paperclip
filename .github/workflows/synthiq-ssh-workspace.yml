@@ -10,6 +10,9 @@ on:
       - "packages/adapters/codex-local/**"
       - "packages/adapters/claude-local/**"
       - "server/src/services/ssh-in-place-*.ts"
+      - "server/src/index.ts"
+      - "server/src/services/execution-control-sweeper.ts"
+      - "server/src/__tests__/execution-control-sweeper.test.ts"
       - "server/src/services/environment-runtime.ts"
       - "server/src/services/environment-ssh-driver.ts"
       - "server/src/services/heartbeat-github-launchers*"
@@ -82,3 +85,5 @@ jobs:
           server/src/__tests__/ssh-in-place-lock.test.ts
           packages/adapter-utils/src/ssh-writer-termination.test.ts
           server/src/__tests__/ssh-in-place-lock-checks.test.ts
+          server/src/__tests__/ssh-in-place-reconciliation.test.ts
+          server/src/__tests__/execution-control-sweeper.test.ts
