@@ -7,6 +7,7 @@ import {
   normalizeAgentUrlKey, type AgentEligibilityAgent,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { createAgentReadById } from "../services/agent-read-by-id.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { builtInAgentMarkersEqual, readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
@@ -393,19 +394,9 @@ export function agentRecordQueries(db: Db) {
     }));
   }
 
-  async function getById(id: string) {
-    const row = await db
-      .select()
-      .from(agents)
-      .where(eq(agents.id, id))
-      .then((rows) => rows[0] ?? null);
-    if (!row) return null;
-    const [companyRows, hydrated] = await Promise.all([
-      listCompanyAgentRows(row.companyId),
-      hydrateAgentSpend([row]).then((rows) => rows[0]!),
-    ]);
-    return normalizeAgentRow(hydrated, companyRows);
-  }
+  const getById = createAgentReadById(db, {
+    listCompanyAgentRows, hydrateAgentSpend, normalizeAgentRows,
+  });
 
   async function ensureManager(companyId: string, managerId: string) {
     const manager = await getById(managerId);
