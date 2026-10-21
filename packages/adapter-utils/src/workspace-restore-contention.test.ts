@@ -153,9 +153,22 @@ it("revalidates changes after the warm scan and rejects conflicts before writing
   const source = path.join(root, "source");
   await cp(target, source, { recursive: true });
   await writeFile(path.join(source, "file"), "remote");
-  await expect(mergeDirectoryWithBaseline({ baseline, sourceDir: source, targetDir: target, conflictPolicy: "reject",
-    beforeApply: async () => { await writeFile(path.join(target, "file"), "local!"); } }))
-    .rejects.toMatchObject({ code: "DIRECTORY_MERGE_CONFLICT", paths: ["file"] });
+  const acquired = deferred(), release = deferred(), waiting = deferred();
+  const holder = withDirectoryMergeLock(target, async () => {
+    acquired.resolve();
+    await release.promise;
+  });
+  await acquired.promise;
+  const beforeApply = vi.fn(async () => {});
+  const restore = mergeDirectoryWithBaseline({ baseline, sourceDir: source, targetDir: target, conflictPolicy: "reject",
+    beforeApply, onProgress: async (line) => { if (line.includes("lock wait started")) waiting.resolve(); } });
+  const rejected = expect(restore).rejects.toMatchObject({ code: "DIRECTORY_MERGE_CONFLICT", paths: ["file"] });
+  try {
+    await waiting.promise;
+    await writeFile(path.join(target, "file"), "local!");
+  } finally { release.resolve(); }
+  await Promise.all([holder, rejected]);
+  expect(beforeApply).not.toHaveBeenCalled();
   expect(await readFile(path.join(target, "file"), "utf8")).toBe("local!");
 });
 

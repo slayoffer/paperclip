@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream, promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { Transform } from "node:stream";
 import {
@@ -225,59 +225,4 @@ export async function streamLocalFileToSsh(input: {
   }).finally(auth.cleanup);
 }
 
-export async function streamSshToLocalFile(input: {
-  spec: SshConnectionConfig;
-  remoteScript: string;
-  localFile: string;
-  progress?: TransferProgress;
-}): Promise<void> {
-  const auth = await createSshAuthArgs(input.spec);
-  const sshArgs = [
-    ...auth.args,
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(input.remoteScript)}`,
-  ];
-
-  await new Promise<void>((resolve, reject) => {
-    const ssh = spawn("ssh", sshArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const sink = createWriteStream(input.localFile, { mode: 0o600 });
-
-    let sshStderr = "";
-    let settled = false;
-
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      ssh.kill("SIGTERM");
-      sink.destroy();
-      reject(error);
-    };
-
-    if (input.progress) {
-      input.progress.counter.on("error", fail);
-      ssh.stdout?.pipe(input.progress.counter).pipe(sink);
-    } else {
-      ssh.stdout?.pipe(sink);
-    }
-    ssh.stderr?.on("data", (chunk) => {
-      sshStderr += String(chunk);
-    });
-    ssh.on("error", fail);
-    sink.on("error", fail);
-    ssh.on("close", (code) => {
-      sink.end(() => {
-        if (settled) return;
-        settled = true;
-        if ((code ?? 0) !== 0) {
-          reject(new Error(sshStderr.trim() || `ssh exited with code ${code ?? -1}`));
-          return;
-        }
-        resolve();
-      });
-    });
-  }).finally(auth.cleanup);
-}
+export { streamSshToLocalFile } from "./ssh-download.js";

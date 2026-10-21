@@ -1,3 +1,4 @@
+import { createSshEnvironmentDriver } from "./environment-ssh-driver.js";
 import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, settleStopOnlyCleanup, stopOnlyCleanupKey } from "./sandbox-stop-and-retain.js";
 import { readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -31,7 +32,6 @@ import type {
   PluginEnvironmentSyncResult,
   PluginSyncOperation,
 } from "@paperclipai/plugin-sdk";
-import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
 import {
   getActiveStepContext,
   runWithRuntimeParent,
@@ -1176,77 +1176,6 @@ function createLocalEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
   };
 }
 
-function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
-  const environmentsSvc = environmentService(db);
-
-  return {
-    driver: "ssh",
-
-    async acquireRunLease(input) {
-      const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.companyId, input.environment, {
-        issueId: input.issueId,
-        heartbeatRunId: input.heartbeatRunId,
-        applyCustomImageTemplate: input.applyCustomImageTemplate ?? false,
-      });
-      if (parsed.driver !== "ssh") {
-        throw new Error(`Expected SSH environment config for driver "${input.environment.driver}".`);
-      }
-
-      const { remoteCwd } = await ensureSshWorkspaceReady(parsed.config);
-      return await environmentsSvc.acquireLease({
-        companyId: input.companyId,
-        environmentId: input.environment.id,
-        executionWorkspaceId: input.executionWorkspaceId,
-        issueId: input.issueId,
-        heartbeatRunId: input.heartbeatRunId,
-        leasePolicy: "ephemeral",
-        provider: "ssh",
-        providerLeaseId: `ssh://${parsed.config.username}@${parsed.config.host}:${parsed.config.port}${remoteCwd}`,
-        metadata: {
-          ...(input.agentId ? { agentId: input.agentId } : {}),
-          driver: input.environment.driver,
-          executionWorkspaceMode: input.executionWorkspaceMode,
-          host: parsed.config.host,
-          port: parsed.config.port,
-          username: parsed.config.username,
-          remoteWorkspacePath: parsed.config.remoteWorkspacePath,
-          remoteCwd,
-        },
-      });
-    },
-
-    async releaseRunLease(input) {
-      return await environmentsSvc.releaseLease(input.lease.id, input.status);
-    },
-
-    async realizeWorkspace(input) {
-      const record = buildWorkspaceRealizationRecordFromDriverInput({
-        environment: input.environment,
-        lease: input.lease,
-        workspace: input.workspace,
-        cwd:
-          typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
-            ? input.lease.metadata.remoteCwd.trim()
-            : input.workspace.remotePath ?? input.workspace.localPath ?? null,
-      });
-      return {
-        cwd: record.remote.path ?? record.local.path,
-        metadata: {
-          workspaceRealization: record,
-        },
-      };
-    },
-
-    async resolveCapabilities() {
-      // The SSH driver runs commands on a remote host through the SSH
-      // transport with no provider capability model, so it supports none of
-      // the eight capabilities either.
-      return classifyEnvironmentCapabilities({
-        supportedCapabilities: ENVIRONMENT_DRIVER_CAPABILITY_SUPPORT.ssh.supportedCapabilities,
-      });
-    },
-  };
-}
 
 /**
  * Adapt the worker manager's duplex host session to the cross-layer channel. The

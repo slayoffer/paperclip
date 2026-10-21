@@ -1,4 +1,6 @@
-import { issueInteractionReadApiPaths } from "./issue-interaction-read-api.js";
+import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
+import { registerTaskDrainPaths } from "./openapi-task-drain.js";
+import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import {
   experimentalApiPaths,
@@ -210,7 +212,6 @@ import {
   patchInstanceGeneralSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
-  startTaskDrainRequestSchema,
   // Resource memberships
   updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
@@ -314,22 +315,6 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
-type OpenApiResponse = Record<string, unknown>;
-type OpenApiPathRegistration = {
-  method: string;
-  path: string;
-  request?: {
-    params?: z.ZodTypeAny;
-    query?: z.ZodTypeAny;
-    body?: {
-      content: Record<string, { schema: unknown }>;
-      required?: boolean;
-    };
-  };
-  responses?: Record<string, OpenApiResponse>;
-  [key: string]: unknown;
-};
-
 // Zod 4 stores each schema definition on `_def` with a lowercase `type`
 // discriminator and moves the wrapped members onto that def. This loose view
 // lets the converter read those members, because Zod 4 does not export a
@@ -6319,37 +6304,7 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
-registry.registerPath({
-  method: "get",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Get the task-drain status for this process only; quiescent counts in-process work, and a process restart clears it even when the database still holds running rows",
-  responses: { 200: r.ok(), 401: r.unauthorized },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Start a task drain, so new run admission holds until active runs finish",
-  request: { body: jsonBody(startTaskDrainRequestSchema) },
-  responses: {
-    200: r.ok(),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-  },
-});
-
-registry.registerPath({
-  method: "delete",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary: "End a task drain and restore run admission",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
+registerTaskDrainPaths(registry, r);
 
 registry.registerPath({
   method: "get",
@@ -7399,7 +7354,7 @@ registry.registerPath({
 
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
-for (const path of issueInteractionReadApiPaths) registry.registerPath(path);
+for (const path of forkReadApiPaths) registry.registerPath(path);
 
 registry.registerPath({
   method: "post",
