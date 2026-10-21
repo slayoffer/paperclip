@@ -21,7 +21,7 @@ export async function notifyExecutionRunWork(transaction: object, scope?: Execut
   }
   for (const queue of [DELIVERY_QUEUES.executionStatus, DELIVERY_QUEUES.executionFinalization,
     DELIVERY_QUEUES.executionReplacement, DELIVERY_QUEUES.executionDisposition, DELIVERY_QUEUES.issueMonitors,
-    DELIVERY_QUEUES.remoteWorkspaceSnapshots]) {
+    DELIVERY_QUEUES.remoteWorkspaceSnapshots, DELIVERY_QUEUES.executionSshOwnership]) {
     await notifyDeliveryWork(transaction, queue);
   }
 }

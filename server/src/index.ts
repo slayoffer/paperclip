@@ -70,6 +70,7 @@ import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWo
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
 import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
+import { createSshInPlaceOwnershipReconciler } from "./services/ssh-in-place-reconciliation.js";
 import type { BetterAuthSessionResult, EmbeddedPostgresInstance, EmbeddedPostgresCtor, StartedServer, StartupDatabaseTeardown } from "./server-startup-types.js";
 export type { StartedServer } from "./server-startup-types.js";
 import { createTerminalWorkspaceSweepReporter } from "./services/terminal-workspace-sweep-report.js";
@@ -1345,7 +1346,10 @@ async function startServerWithDatabaseTeardown(
     logger.warn({ err: error, companyId }, "native cleanup release could not wake deferred execution");
   });
   server.on("close", unsubscribeNativeCleanupSettled);
+  const reconcileSshOwnership = createSshInPlaceOwnershipReconciler(db);
   registerExecutionControlWork(deliveryWork, [
+    { queue: DELIVERY_QUEUES.executionSshOwnership, run: reconcileSshOwnership,
+      onSettled: reconcileSshOwnership.requestScan, next: reconcileSshOwnership.nextRunAt },
     { queue: DELIVERY_QUEUES.executionFinalization, run: () => reconcileAbandonedExecutionControl(db, new Date(), {
       startupCleanup: async scope => {
         await accountingHeartbeat.cancelRun(scope.runId, "Native startup timed out; cancelling and verifying cleanup");

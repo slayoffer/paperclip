@@ -56,6 +56,7 @@ export const DELIVERY_QUEUES = {
   directoryCleanup: "directory-cleanup",
   instructionCommit: "instruction-commit",
   scheduledRetryCancellation: "scheduled-retry-cancellation",
+  executionSshOwnership: "execution-ssh-ownership",
   executionFinalization: "execution-finalization",
   workspaceRecovery: "workspace-recovery",
   executionReplacement: "execution-replacement",
