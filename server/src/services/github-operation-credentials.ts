@@ -31,7 +31,7 @@ export type GitHubCredentialSummary = {
 /** A raw GitHub token cannot enforce the low-trust read-only tool boundary. */
 async function allowsGitHubCredentialExport(
   db: Db,
-  run: typeof heartbeatRuns.$inferSelect,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "agentId" | "companyId" | "nativeIssueId" | "contextSnapshot">,
 ) {
   const issueId =
     run.contextSnapshot?.issueId ??

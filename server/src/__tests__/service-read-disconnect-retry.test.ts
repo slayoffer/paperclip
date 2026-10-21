@@ -55,6 +55,7 @@ function fixture(options: {
             if (name === "issues") return [row];
             if (name === "issue_labels") return [{ issueId, label: { id: "label-1", name: "Ready" } }];
             if (name === "issue_watchdogs") return [];
+            if (name === "issue_relations") return [];
             if (name === "heartbeat_runs") return [{
               id: "run-1", companyId, agentId, status: "succeeded",
               contextIssueId: issueId, contextWakeReason: "issue_assigned", resultSummary: "Finished",
@@ -129,16 +130,27 @@ describe.each([
   it("rebuilds the base lookup and enriches only the successful result", async () => {
     const test = fixture({ failures: { issues: [disconnected(), disconnected("CONNECT_TIMEOUT")] } });
     await expect(read(test.db)).resolves.toEqual({ ...test.row,
-      labels: [{ id: "label-1", name: "Ready" }], labelIds: ["label-1"], watchdog: null });
-    expect(test.select).toHaveBeenCalledTimes(5);
+      labels: [{ id: "label-1", name: "Ready" }], labelIds: ["label-1"], watchdog: null,
+      dependencyReadiness: {
+        issueId,
+        blockerIssueIds: [],
+        unresolvedBlockerIssueIds: [],
+        unresolvedBlockerIds: [],
+        unresolvedBlockerCount: 0,
+        pendingFinalizeBlockerIssueIds: [],
+        allBlockersDone: true,
+        isDependencyReady: true,
+      } });
+    expect(test.select).toHaveBeenCalledTimes(6);
     expect(test.attempts.map((attempt) => attempt.table))
-      .toEqual(["issues", "issues", "issues", "issue_labels", "issue_watchdogs"]);
+      .toEqual(["issues", "issues", "issues", "issue_labels", "issue_watchdogs", "issue_relations"]);
     for (const attempt of test.attempts.slice(0, 3)) {
       expect(attempt.params).toEqual([parameter]);
       expect(attempt.fields).toHaveProperty("externalConversationState");
     }
     expect(test.attempts[3].params).toEqual([issueId]);
     expect(test.attempts[4].params).toEqual([companyId, issueId, "active"]);
+    expect(test.attempts[5].params).toEqual([companyId, companyId, "blocks", issueId]);
   });
 
   it("propagates the final lookup error without enrichment", async () => {
@@ -161,11 +173,13 @@ describe.each([
     expect(test.select).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["issue_labels", "issue_watchdogs"])("does not replay the lookup when %s enrichment fails", async (table) => {
+  it.each(["issue_labels", "issue_watchdogs", "issue_relations"])("does not replay the lookup when %s enrichment fails", async (table) => {
     const error = disconnected();
     const test = fixture({ failures: { [table]: [error] } });
     await expect(read(test.db)).rejects.toBe(error);
-    expect(test.attempts.map((attempt) => attempt.table)).toEqual(["issues", "issue_labels", "issue_watchdogs"]);
+    expect(test.attempts.map((attempt) => attempt.table)).toEqual([
+      "issues", "issue_labels", "issue_watchdogs", ...(table === "issue_relations" ? [table] : []),
+    ]);
   });
 });
 

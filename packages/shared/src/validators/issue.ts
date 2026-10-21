@@ -1,3 +1,15 @@
+import { isValidExistingBranchName } from "./issue-branch-name.js";
+export { isValidExistingBranchName } from "./issue-branch-name.js";
+import {
+  issueThreadInteractionStatusSchema,
+  issueThreadInteractionKindSchema,
+  issueThreadInteractionCanonicalResolverPolicySchema,
+  issueThreadInteractionResolverPolicySchema,
+  issueThreadInteractionResolverPolicyProvenanceSchema,
+  issueThreadInteractionEffectiveResolverPolicySourceSchema,
+  issueThreadInteractionContinuationPolicySchema,
+} from "./interaction-query.js";
+export * from "./interaction-query.js";
 import { z } from "zod";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
@@ -24,13 +36,6 @@ import {
   ISSUE_WORK_MODES,
   clampIssueRequestDepth,
   ISSUE_STATUSES,
-  ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
-  ISSUE_THREAD_INTERACTION_CANONICAL_RESOLVER_POLICIES,
-  ISSUE_THREAD_INTERACTION_EFFECTIVE_RESOLVER_POLICY_SOURCES,
-  ISSUE_THREAD_INTERACTION_KINDS,
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES,
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICY_PROVENANCES,
-  ISSUE_THREAD_INTERACTION_STATUSES,
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
@@ -133,23 +138,6 @@ export const ISSUE_EXECUTION_WORKSPACE_PREFERENCES = [
 // Mirrors git check-ref-format for a single branch name. The runtime verifies
 // the branch actually exists before attaching, so this only rejects values
 // that could never be a branch (path escapes, option injection, ref syntax).
-export function isValidExistingBranchName(value: string): boolean {
-  if (value.length === 0 || value.length > 255) return false;
-  if (value.startsWith("-") || value.startsWith("/") || value.startsWith("."))
-    return false;
-  if (value.endsWith("/") || value.endsWith(".") || value.endsWith(".lock"))
-    return false;
-  if (
-    value.includes("..") ||
-    value.includes("//") ||
-    value.includes("@{") ||
-    value.includes("/.")
-  )
-    return false;
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x20\x7f~^:?*[\\]/.test(value)) return false;
-  return true;
-}
 
 const executionWorkspaceStrategySchema = z
   .object({
@@ -1066,30 +1054,6 @@ export const addIssueCommentSchema = z.object({
 });
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
-
-export const issueThreadInteractionStatusSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_STATUSES,
-);
-export const issueThreadInteractionKindSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_KINDS,
-);
-export const issueThreadInteractionCanonicalResolverPolicySchema = z
-  .enum(ISSUE_THREAD_INTERACTION_CANONICAL_RESOLVER_POLICIES)
-  .describe("Canonical resolver audience: anyone, not_creator, or human_only.");
-export const issueThreadInteractionResolverPolicySchema = z
-  .enum(ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES)
-  .describe(
-    "Resolver audience. Use anyone, not_creator, or human_only; board_or_agents and board_only are deprecated compatibility aliases.",
-  );
-export const issueThreadInteractionResolverPolicyProvenanceSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_RESOLVER_POLICY_PROVENANCES,
-);
-export const issueThreadInteractionEffectiveResolverPolicySourceSchema = z.enum(
-  ISSUE_THREAD_INTERACTION_EFFECTIVE_RESOLVER_POLICY_SOURCES,
-);
-export const issueThreadInteractionContinuationPolicySchema = z.enum(
-  ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
-);
 
 export const connectionIntentPhaseSchema = z.enum([
   "requested",
@@ -2046,6 +2010,8 @@ export type CreateIssueThreadInteractionInput = z.input<
 
 export const acceptIssueThreadInteractionSchema = z
   .object({
+    expectedRevision: z.string().min(1).max(200).optional(),
+    idempotencyKey: z.string().min(1).max(200).optional(),
     rememberAction: z.boolean().optional(),
     selectedClientKeys: z
       .array(z.string().trim().min(1).max(120))
@@ -2108,6 +2074,8 @@ export const resolveConfirmationFromCommentSchema = z.object({
 export type ResolveConfirmationFromComment = z.infer<typeof resolveConfirmationFromCommentSchema>;
 
 export const rejectIssueThreadInteractionSchema = z.object({
+  expectedRevision: z.string().min(1).max(200).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
   reason: z.string().trim().max(4000).optional(),
 });
 export type RejectIssueThreadInteraction = z.infer<
@@ -2135,13 +2103,32 @@ export type WithdrawIssueThreadInteraction = z.infer<
   typeof withdrawIssueThreadInteractionSchema
 >;
 
+const respondQuestionAnswerSchema = askUserQuestionsAnswerSchema.extend({
+  optionIds: askUserQuestionsAnswerSchema.shape.optionIds.default([]),
+  text: askUserQuestionsAnswerSchema.shape.otherText.optional(),
+}).superRefine((answer, ctx) => {
+  if (answer.text != null && answer.otherText != null && answer.text !== answer.otherText) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "Use text or otherText for the answer. If both fields exist, their values must match.",
+    });
+  }
+}).transform(({ text, ...answer }) => ({
+  ...answer,
+  ...(text != null ? { otherText: text } : {}),
+}));
+
 export const respondIssueThreadInteractionSchema = z.object({
-  answers: z.array(askUserQuestionsAnswerSchema).max(20),
+  expectedRevision: z.string().min(1).max(200).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
+  answers: z.array(respondQuestionAnswerSchema).max(20),
   summaryMarkdown: multilineTextSchema
     .pipe(z.string().max(20000))
     .nullable()
     .optional(),
 });
+export type RespondIssueThreadInteractionInput = z.input<typeof respondIssueThreadInteractionSchema>;
 export type RespondIssueThreadInteraction = z.infer<
   typeof respondIssueThreadInteractionSchema
 >;

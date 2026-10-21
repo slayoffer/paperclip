@@ -2039,8 +2039,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
             completionContractSha256: contractSha,
           })
           .where(eq(heartbeatRuns.id, runId));
-        // Use the real accepted-result/finalization path. Only physical cleanup
-        // is held below; startup, candidate discovery, reaping and drain are real.
+        // Hold physical cleanup. Use real finalization, startup, reaping and drain.
         const port = new PaperclipControlPlanePort(db, {
           companyId,
           issueId,
@@ -2192,15 +2191,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           drain = heartbeat.drainActiveRunExecutions().then(() => {
             drainFinished = true;
           });
-          // A completed unrelated DB read is a deterministic scheduling barrier:
-          // drain has entered its await while the physical cleanup is still held.
+          // This read lets drain wait while physical cleanup remains held.
           await heartbeat.getRun(runId);
           expect(drainFinished).toBe(false);
-          expect(heartbeat.getTaskDrainStatus()).toMatchObject({
+          expect(await heartbeat.getTaskDrainStatus()).toMatchObject({
             pendingWakes: 0,
             quiescent: false,
           });
-          expect(heartbeat.getTaskDrainStatus().activeRuns).toBeGreaterThan(0);
+          expect(
+            (await heartbeat.getTaskDrainStatus()).activeRuns,
+          ).toBeGreaterThan(0);
           expect(mockAdapterExecute).not.toHaveBeenCalled();
           expect(mockExecutePaperclipNativeSession).not.toHaveBeenCalled();
           release();
@@ -2210,15 +2210,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
             );
             expect(physicalCleanupFinished).toBe(true);
             expect(drainFinished).toBe(false);
-            expect(heartbeat.getTaskDrainStatus().quiescent).toBe(false);
+            expect((await heartbeat.getTaskDrainStatus()).quiescent).toBe(false);
           }
           releaseLateCallback();
           await drain;
           expect(physicalCleanupFinished).toBe(true);
-          expect(heartbeat.getTaskDrainStatus()).toMatchObject({
+          // The fixture retains its claimed wake after cleanup.
+          expect(await heartbeat.getTaskDrainStatus()).toMatchObject({
             activeRuns: 0,
             pendingWakes: 0,
-            quiescent: true,
+            persistedPendingWakes: 1,
+            quiescent: false,
           });
           expect(mockRetainedNativeCleanup).toHaveBeenCalledTimes(1);
           expect(mockAdapterExecute).not.toHaveBeenCalled();
@@ -15667,13 +15669,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       sql`create trigger test_native_blocked_wait_fault before insert on issue_comments for each row execute function test_native_blocked_wait_fault()`,
     );
     try {
+      // The sweep logs the failed issue and continues (SYNA-2368). It does
+      // not reject, but the failed write must still roll back in full.
       await expect(
         heartbeatService(db).reconcileStrandedAssignedIssues(),
-      ).rejects.toMatchObject({
-        cause: expect.objectContaining({
-          message: "native_blocked_wait_fixture_fault",
-        }),
-      });
+      ).resolves.toMatchObject({ failed: 1, escalated: 0 });
     } finally {
       await db.execute(
         sql`drop trigger test_native_blocked_wait_fault on issue_comments`,

@@ -1,3 +1,7 @@
+import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
+import { createIssueDependencyReadiness, listIssueDependencyReadinessMap, readIssueDependencyReadiness, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -127,7 +131,12 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
-import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import {
+  mergeExecutionWorkspaceConfig,
+  readExecutionWorkspaceConfig,
+  requiresTaskEnvironmentBinding,
+} from "./execution-workspaces.js";
+import { removeIsolatedWorkspaceControls } from "./issue-workspace-settings.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
 import { readChatControlChronology } from "./chat-control-chronology.js";
 import { authorizeChatConversationForBoundRun } from "./native-runtime/chat-attachment-reuse.js";
@@ -463,7 +472,6 @@ function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
   settings: ReturnType<typeof parseIssueExecutionWorkspaceSettings>,
 ) {
   return {
-    environmentId: settings?.environmentId ?? null,
     provisionCommand: settings?.workspaceStrategy?.provisionCommand ?? null,
     runtimeProvisionCommand:
       settings?.workspaceStrategy?.runtimeProvisionCommand ?? null,
@@ -1872,6 +1880,7 @@ type IssueWithLabels = IssueRow & {
   labels: IssueLabelRow[];
   labelIds: string[];
   watchdog?: IssueWatchdogSummary | null;
+  dependencyReadiness?: IssueDependencyReadiness;
 };
 type IssueWithLabelsAndRun = IssueWithLabels & {
   activeRun: IssueActiveRunRow | null;
@@ -2032,16 +2041,6 @@ type IssueSubtreeDiagnosticsActivityResultRow =
   IssueSubtreeDiagnosticsActivityRow & {
     rowNumber: number | string;
   };
-export type IssueDependencyReadiness = {
-  issueId: string;
-  blockerIssueIds: string[];
-  unresolvedBlockerIssueIds: string[];
-  unresolvedBlockerCount: number;
-  /** Blockers whose status is `done` but whose execution workspace has not yet finalized. */
-  pendingFinalizeBlockerIssueIds: string[];
-  allBlockersDone: boolean;
-  isDependencyReady: boolean;
-};
 export type ChildIssueCompletionSummary = {
   id: string;
   identifier: string | null;
@@ -2329,20 +2328,6 @@ async function findAcceptedPlanDocumentInteraction(
   return null;
 }
 
-function createIssueDependencyReadiness(
-  issueId: string,
-): IssueDependencyReadiness {
-  return {
-    issueId,
-    blockerIssueIds: [],
-    unresolvedBlockerIssueIds: [],
-    unresolvedBlockerCount: 0,
-    pendingFinalizeBlockerIssueIds: [],
-    allBlockersDone: true,
-    isDependencyReady: true,
-  };
-}
-
 /**
  * Returns the set of execution-workspace ids whose most recent workspace operation
  * is NOT a successful `workspace_finalize`. These workspaces have either an in-flight
@@ -2408,113 +2393,6 @@ export async function listUnfinalizedExecutionWorkspaceIds(
   return unfinalized;
 }
 
-async function listPendingFinalizeBlockerIssueIds(
-  dbOrTx: Pick<Db, "select">,
-  companyId: string,
-  blockerWorkspacePairs: Array<{
-    blockerIssueId: string;
-    executionWorkspaceId: string;
-  }>,
-): Promise<Set<string>> {
-  const pending = new Set<string>();
-  const blockerIssueIds = [
-    ...new Set(blockerWorkspacePairs.map((pair) => pair.blockerIssueId)),
-  ];
-  const executionWorkspaceIds = [
-    ...new Set(blockerWorkspacePairs.map((pair) => pair.executionWorkspaceId)),
-  ];
-  if (blockerIssueIds.length === 0 || executionWorkspaceIds.length === 0)
-    return pending;
-  const blockerWorkspaceKeys = new Set(
-    blockerWorkspacePairs.map(
-      (pair) => `${pair.blockerIssueId}:${pair.executionWorkspaceId}`,
-    ),
-  );
-
-  const rows = await dbOrTx
-    .select({
-      issueId: workspaceOperations.issueId,
-      executionWorkspaceId: workspaceOperations.executionWorkspaceId,
-      phase: workspaceOperations.phase,
-      status: workspaceOperations.status,
-      startedAt: workspaceOperations.startedAt,
-    })
-    .from(workspaceOperations)
-    .where(
-      and(
-        eq(workspaceOperations.companyId, companyId),
-        inArray(
-          workspaceOperations.executionWorkspaceId,
-          executionWorkspaceIds,
-        ),
-      ),
-    );
-
-  const latestAttributedByBlockerWorkspace = new Map<
-    string,
-    { phase: string; status: string; startedAt: Date }
-  >();
-  const latestUnattributedByWorkspace = new Map<
-    string,
-    { phase: string; status: string; startedAt: Date }
-  >();
-  const latestSuccessfulFinalizeByWorkspace = new Map<string, Date>();
-  for (const row of rows) {
-    if (!row.executionWorkspaceId) continue;
-    if (row.phase === "workspace_finalize" && row.status === "succeeded") {
-      const current = latestSuccessfulFinalizeByWorkspace.get(
-        row.executionWorkspaceId,
-      );
-      if (!current || row.startedAt > current) {
-        latestSuccessfulFinalizeByWorkspace.set(
-          row.executionWorkspaceId,
-          row.startedAt,
-        );
-      }
-    }
-    if (row.issueId) {
-      const key = `${row.issueId}:${row.executionWorkspaceId}`;
-      if (!blockerWorkspaceKeys.has(key)) continue;
-      const current = latestAttributedByBlockerWorkspace.get(key);
-      if (!current || row.startedAt > current.startedAt) {
-        latestAttributedByBlockerWorkspace.set(key, {
-          phase: row.phase,
-          status: row.status,
-          startedAt: row.startedAt,
-        });
-      }
-      continue;
-    }
-
-    const current = latestUnattributedByWorkspace.get(row.executionWorkspaceId);
-    if (!current || row.startedAt > current.startedAt) {
-      latestUnattributedByWorkspace.set(row.executionWorkspaceId, {
-        phase: row.phase,
-        status: row.status,
-        startedAt: row.startedAt,
-      });
-    }
-  }
-
-  for (const pair of blockerWorkspacePairs) {
-    const latest =
-      latestAttributedByBlockerWorkspace.get(
-        `${pair.blockerIssueId}:${pair.executionWorkspaceId}`,
-      ) ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
-    if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
-    if (latest.phase === "workspace_finalize" && latest.status === "succeeded")
-      continue;
-    const laterSuccessfulFinalize = latestSuccessfulFinalizeByWorkspace.get(
-      pair.executionWorkspaceId,
-    );
-    if (laterSuccessfulFinalize && laterSuccessfulFinalize > latest.startedAt)
-      continue;
-    pending.add(pair.blockerIssueId);
-  }
-
-  return pending;
-}
-
 /**
  * Whether a heartbeat run has reached a terminal state or no longer exists.
  * A terminal/missing run can make no further progress on its execution
@@ -2541,8 +2419,8 @@ export async function heartbeatRunIsTerminalOrMissing(
  * Semantics:
  * - No operations recorded → settled. The run never touched the workspace state
  *   the gates protect.
- * - Earlier phases recorded but no `workspace_finalize` yet → NOT settled. The
- *   sync-back hasn't been attempted; the gate should wait for it.
+ * - Earlier phases recorded but no `workspace_finalize` yet → wait while the
+ *   source run is alive. A terminal or missing run cannot start finalization.
  * - Latest `workspace_finalize` reached a terminal status (`succeeded`, `failed`,
  *   or `skipped`) → settled. A finalize that ran and finished is done even if it
  *   failed: it will not retry within this run, so continuing to block would wedge
@@ -2583,8 +2461,9 @@ export async function runWorkspaceIsFinalized(
       latestFinalize = row;
   }
 
-  // The run touched the workspace but hasn't reached the sync-back phase yet.
-  if (!latestFinalize) return false;
+  // A run can stop before it records any finalize operation, including during
+  // a server restart. Do not wait for that terminal run to start finalization.
+  if (!latestFinalize) return heartbeatRunIsTerminalOrMissing(dbOrTx, runId);
 
   // A finalize that reached any terminal status is settled — including `failed`
   // and `skipped`. It will not retry within this run, so gates must stop waiting.
@@ -2593,91 +2472,6 @@ export async function runWorkspaceIsFinalized(
   // Finalize is still marked `running`. It is only genuinely in flight while the
   // owning run is alive; a `running` record left behind by an ended run is stale.
   return heartbeatRunIsTerminalOrMissing(dbOrTx, runId);
-}
-
-async function listIssueDependencyReadinessMap(
-  dbOrTx: Pick<Db, "select">,
-  companyId: string,
-  issueIds: string[],
-) {
-  const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
-  const readinessMap = new Map<string, IssueDependencyReadiness>();
-  for (const issueId of uniqueIssueIds) {
-    readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
-  }
-  if (uniqueIssueIds.length === 0) return readinessMap;
-
-  const blockerRows = await dbOrTx
-    .select({
-      issueId: issueRelations.relatedIssueId,
-      blockerIssueId: issueRelations.issueId,
-      blockerStatus: issues.status,
-      blockerExecutionWorkspaceId: issues.executionWorkspaceId,
-    })
-    .from(issueRelations)
-    .innerJoin(issues, eq(issueRelations.issueId, issues.id))
-    .where(
-      and(
-        eq(issueRelations.companyId, companyId),
-        eq(issueRelations.type, "blocks"),
-        inArray(issueRelations.relatedIssueId, uniqueIssueIds),
-      ),
-    );
-
-  // Collect issue/workspace pairs of "done" blockers — these are the only ones
-  // subject to the workspace-finalize barrier. Blockers that aren't done already
-  // mark the dependent as not-ready and don't need a finalize check.
-  const doneBlockerWorkspacePairs: Array<{
-    blockerIssueId: string;
-    executionWorkspaceId: string;
-  }> = [];
-  for (const row of blockerRows) {
-    if (row.blockerStatus === "done" && row.blockerExecutionWorkspaceId) {
-      doneBlockerWorkspacePairs.push({
-        blockerIssueId: row.blockerIssueId,
-        executionWorkspaceId: row.blockerExecutionWorkspaceId,
-      });
-    }
-  }
-  const pendingFinalizeBlockerIssueIds =
-    await listPendingFinalizeBlockerIssueIds(
-      dbOrTx,
-      companyId,
-      doneBlockerWorkspacePairs,
-    );
-
-  for (const row of blockerRows) {
-    const current =
-      readinessMap.get(row.issueId) ??
-      createIssueDependencyReadiness(row.issueId);
-    current.blockerIssueIds.push(row.blockerIssueId);
-    // Only done blockers resolve dependents; cancelled blockers stay unresolved
-    // until an operator removes or replaces the blocker relationship explicitly.
-    if (row.blockerStatus !== "done") {
-      current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
-      current.unresolvedBlockerCount += 1;
-      current.allBlockersDone = false;
-      current.isDependencyReady = false;
-    } else if (
-      row.blockerExecutionWorkspaceId &&
-      pendingFinalizeBlockerIssueIds.has(row.blockerIssueId)
-    ) {
-      // Workspace-finalize barrier: the blocker's most recent run on its
-      // execution workspace hasn't recorded a successful workspace_finalize.
-      // Treat the dependent as not-ready until sync-back lands (or the run
-      // finalizes); a subsequent finalize wake will re-evaluate readiness.
-      // `allBlockersDone` is cleared too so that callers using it as a
-      // proxy for "this dependent can proceed" still see the gate.
-      current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
-      current.unresolvedBlockerCount += 1;
-      current.pendingFinalizeBlockerIssueIds.push(row.blockerIssueId);
-      current.allBlockersDone = false;
-      current.isDependencyReady = false;
-    }
-    readinessMap.set(row.issueId, current);
-  }
-
-  return readinessMap;
 }
 
 async function listUnresolvedBlockerDetails(
@@ -6621,6 +6415,48 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+/**
+ * Returns every issue that `issueId` blocks, directly or transitively, through
+ * "blocks" relations in the company. If one of these issues becomes a blocker
+ * of `issueId`, the relations contain a cycle. The blocking-cycle check and
+ * recovery use this one graph walk, so they agree on what a cycle is.
+ */
+export async function listIssuesTransitivelyBlockedBy(
+  dbOrTx: DbReader,
+  companyId: string,
+  issueId: string,
+): Promise<Set<string>> {
+  const rows = await dbOrTx
+    .select({
+      blockerIssueId: issueRelations.issueId,
+      blockedIssueId: issueRelations.relatedIssueId,
+    })
+    .from(issueRelations)
+    .where(
+      and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.type, "blocks"),
+      ),
+    );
+
+  const adjacency = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = adjacency.get(row.blockerIssueId) ?? [];
+    list.push(row.blockedIssueId);
+    adjacency.set(row.blockerIssueId, list);
+  }
+
+  const reachable = new Set<string>();
+  const queue = [...(adjacency.get(issueId) ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    queue.push(...(adjacency.get(current) ?? []));
+  }
+  return reachable;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -6663,7 +6499,7 @@ export function issueService(db: Db) {
     return title.trim().replace(/\s+/g, " ").toLowerCase();
   }
 
-  async function getIssueByUuid(id: string) {
+  async function getIssueByUuid(id: string): Promise<IssueWithLabels | null> {
     const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
@@ -6671,10 +6507,10 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return { ...enriched, dependencyReadiness: (await listIssueDependencyReadinessMap(db, row.companyId, [row.id])).get(row.id)! };
   }
 
-  async function getIssueByIdentifier(identifier: string) {
+  async function getIssueByIdentifier(identifier: string): Promise<IssueWithLabels | null> {
     const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
@@ -6682,7 +6518,7 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return { ...enriched, dependencyReadiness: (await listIssueDependencyReadinessMap(db, row.companyId, [row.id])).get(row.id)! };
   }
 
   async function projectHistoricalRunComments<
@@ -7390,38 +7226,13 @@ export function issueService(db: Db) {
   ) {
     if (blockerIssueIds.length === 0) return;
 
-    const rows = await dbOrTx
-      .select({
-        blockerIssueId: issueRelations.issueId,
-        blockedIssueId: issueRelations.relatedIssueId,
-      })
-      .from(issueRelations)
-      .where(
-        and(
-          eq(issueRelations.companyId, companyId),
-          eq(issueRelations.type, "blocks"),
-        ),
-      );
-
-    const adjacency = new Map<string, string[]>();
-    for (const row of rows) {
-      const list = adjacency.get(row.blockerIssueId) ?? [];
-      list.push(row.blockedIssueId);
-      adjacency.set(row.blockerIssueId, list);
-    }
-
-    for (const blockerIssueId of blockerIssueIds) {
-      const queue = [...(adjacency.get(issueId) ?? [])];
-      const visited = new Set<string>([issueId]);
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        if (current === blockerIssueId) {
-          throw unprocessable("Blocking relations cannot contain cycles");
-        }
-        if (visited.has(current)) continue;
-        visited.add(current);
-        queue.push(...(adjacency.get(current) ?? []));
-      }
+    const blockedByIssue = await listIssuesTransitivelyBlockedBy(
+      dbOrTx,
+      companyId,
+      issueId,
+    );
+    if (blockerIssueIds.some((blockerIssueId) => blockedByIssue.has(blockerIssueId))) {
+      throw unprocessable("Blocking relations cannot contain cycles");
     }
   }
 
@@ -9071,22 +8882,10 @@ export function issueService(db: Db) {
       };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
-      const issue = await dbOrTx
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then(
-          (rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null,
-        );
-      if (!issue) throw notFound("Issue not found");
-      const readiness = await listIssueDependencyReadinessMap(
-        dbOrTx,
-        issue.companyId,
-        [issueId],
-      );
-      return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
-    },
+    getDependencyReadiness: (issueId: string, dbOrTx: any = db, blockerIssueIds?: string[]) =>
+      readIssueDependencyReadiness(dbOrTx, issueId, blockerIssueIds),
+
+    releaseDependencyWait: (companyId: string, issueId: string) => releaseReadyDependencyWait(db, companyId, issueId),
 
     listDependencyReadiness: async (
       companyId: string,
@@ -9142,7 +8941,7 @@ export function issueService(db: Db) {
       const wakeableCandidates = candidates.filter(
         (candidate) =>
           candidate.assigneeAgentId &&
-          !["backlog", "done", "cancelled"].includes(candidate.status),
+          !(isPullQueueEnabled() ? ["done", "cancelled"] : ["backlog", "done", "cancelled"]).includes(candidate.status),
       );
       if (wakeableCandidates.length === 0) return [];
 
@@ -9826,9 +9625,7 @@ export function issueService(db: Db) {
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
       if (data.assigneeAgentId && data.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
@@ -10752,9 +10549,7 @@ export function issueService(db: Db) {
       // opt-in UI for creating isolated worktrees. Public updates still obey
       // the feature gate; only the internal shared-workspace binding bypasses it.
       if (!isolatedWorkspacesEnabled && !options.bindRuntimeSharedWorkspace) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
 
       if (issueData.status) {
@@ -10870,9 +10665,11 @@ export function issueService(db: Db) {
         issueData.executionWorkspaceSettings !== undefined
           ? parseIssueExecutionWorkspaceSettings(
               issueData.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             )
           : parseIssueExecutionWorkspaceSettings(
               existing.executionWorkspaceSettings,
+              { includeEnvironmentId: true },
             );
       if (issueData.executionWorkspaceSettings !== undefined) {
         patch.executionWorkspaceSettings = nextExecutionWorkspaceSettings
@@ -11212,7 +11009,13 @@ export function issueService(db: Db) {
               (rows: Array<{ id: string; metadata: unknown }>) =>
                 rows[0] ?? null,
             );
-          if (workspace) {
+          if (
+            workspace &&
+            !requiresTaskEnvironmentBinding(
+              { config: readExecutionWorkspaceConfig(workspace.metadata as Record<string, unknown> | null) },
+              nextExecutionWorkspaceSettings?.environmentId,
+            )
+          ) {
             await tx
               .update(executionWorkspaces)
               .set({
