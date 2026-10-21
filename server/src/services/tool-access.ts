@@ -1,3 +1,4 @@
+import { resolveConnectionCredentialUpdate, upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
 import { createConnectionCredentialValidation } from "./tool-access/connections/credential-validation.js";
 import { createConnectionGrants } from "./tool-access/connections/grants.js";
 import { createConnectionInstalls } from "./tool-access/connections/installs.js";
@@ -3692,6 +3693,9 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connection.id))
         .returning();
+      if (!personalIdentity && nextConnection.credentialPolicy === "shared") {
+        await ensureDefaultOrganizationGrant(nextConnection, tx);
+      }
       await syncConnectionCredentialBindings(tx, nextConnection,
         personalIdentity ? credentialSecretRefs : []);
       return nextConnection;
@@ -4584,40 +4588,39 @@ export function toolAccessService(
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, {
         excludeConnectionId: existing.id,
       });
+      const { credentialPolicy, credentialRefs, credentialSecretRefs, changed, replaced } =
+        resolveConnectionCredentialUpdate(existing, input);
       await assertSecretRefs(existing.companyId, [
-        ...(input.credentialRefs ?? existing.credentialRefs),
-        ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
+        ...credentialRefs,
+        ...credentialSecretRefs,
       ]);
-      const write = (database: Db) => database
-        .update(toolConnections)
-        .set({
-          name: input.name ?? existing.name,
-          status: input.status ?? existing.status,
-          enabled: input.enabled ?? existing.enabled,
-          ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
-            ? config
-            : (input.transportConfig ?? config),
-          credentialRefs: input.credentialRefs ?? existing.credentialRefs,
-          credentialSecretRefs:
-            input.credentialSecretRefs ?? existing.credentialSecretRefs,
-          credentialPolicy: input.credentialPolicy ?? existing.credentialPolicy,
-          updatedAt: new Date(),
-        })
-        .where(eq(toolConnections.id, connectionId))
-        .returning();
-      const [row] = existing.transport === "chat_sdk"
-        ? await db.transaction(async tx => {
-            await notifyChatEndpointWork(tx, existing.id);
-            const rows = await write(tx as unknown as Db);
-            // Credential resolution must never observe the binding rebuild's
-            // delete/insert gap after a configuration wake.
-            await syncCredentialBindings(rows[0]!, [], tx);
-            return rows;
+      const row = await db.transaction(async (tx) => {
+        if (existing.transport === "chat_sdk") await notifyChatEndpointWork(tx, existing.id);
+        const [updated] = await tx
+          .update(toolConnections)
+          .set({
+            name: input.name ?? existing.name,
+            status: input.status ?? existing.status,
+            enabled: input.enabled ?? existing.enabled,
+            ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
+            config,
+            transportConfig: isGoogleSheetsConnectionConfig(config)
+              ? config
+              : (input.transportConfig ?? config),
+            credentialRefs,
+            credentialSecretRefs,
+            credentialPolicy,
+            updatedAt: new Date(),
           })
-        : await write(db);
-      if (existing.transport !== "chat_sdk") await syncCredentialBindings(row);
+          .where(eq(toolConnections.id, connectionId))
+          .returning();
+        if (updated.credentialPolicy === "shared" && changed) {
+          await upsertDefaultOrganizationGrant(tx, updated,
+            isRailwayConnection(updated) ? [RAILWAY_SSH_SECRET_PATH] : [], undefined, replaced);
+        }
+        await syncConnectionCredentialBindings(tx, updated);
+        return updated;
+      });
       await ensureRuntimeSlot(row);
       emitConnectionUpdated(row, existing, "api");
       return toConnection(row);

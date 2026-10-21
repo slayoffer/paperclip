@@ -3,6 +3,7 @@ import { promptInjectionPreventionService } from "./prompt-injection-prevention.
 import { adapterExecutionControls } from "./adapter-execution-control.js";
 import type { BudgetServiceHooks } from "./budgets.js";
 import type { PromptInjectionDetectorMetadata } from "@paperclipai/shared";
+import { markToolConnectionHealth } from "./tool-connection-health.js";
 import { ToolGatewayHttpError, MAX_REMOTE_MCP_RESPONSE_BYTES, responseTooLargeError, readBoundedRemoteResponse, malformedRemoteMcpResponse } from "./tool-gateway-errors.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
@@ -118,7 +119,7 @@ import type {
 } from "./plugin-tool-dispatcher.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
-import { connectionGrantCredentialRef, resolveConnectionGrantSecret } from "./connection-credentials.js";
+import { connectionGrantCredentialRef as grantRefForCredential, resolveConnectionGrantSecret } from "./connection-credentials.js";
 import { railwayCommandBudgetMs, createRailwayClient, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_API_URL, RAILWAY_TOOL_PREFIX, RailwayError } from "./railway.js";
 import { RAILWAY_SSH_SECRET_PATH, runRailwaySshCommand } from "./railway-ssh.js";
 import {
@@ -3751,31 +3752,11 @@ export function createToolGatewayService(
     return { headers, summary };
   }
 
-  async function markRemoteConnectionHealth(
+  const markRemoteConnectionHealth = (
     connection: typeof toolConnections.$inferSelect,
     status: "ok" | "error" | "missing_secret" | "degraded",
     message: string | null,
-  ) {
-    const now = new Date();
-    await db
-      .update(toolConnections)
-      .set({
-        healthStatus: status,
-        healthMessage: message,
-        healthCheckedAt: now,
-        lastHealthAt: now,
-        lastError: status === "ok" ? null : message,
-        updatedAt: now,
-      })
-      .where(eq(toolConnections.id, connection.id));
-  }
-
-  function grantRefForCredential(
-    grant: typeof connectionGrants.$inferSelect,
-    ref: McpConnectionCredentialRef,
-  ): ToolCredentialSecretRef | undefined {
-    return connectionGrantCredentialRef(grant, ref);
-  }
+  ) => markToolConnectionHealth(db, connection, status, message);
 
   async function resolveGrantSecretValue(
     session: ToolGatewaySession,
@@ -4267,7 +4248,16 @@ export function createToolGatewayService(
     for (const ref of connection.credentialRefs ?? []) {
       if (ref.placement !== "header") continue;
       const grantRef = grantRefForCredential(grant, ref);
-      if (!grantRef) continue;
+      if (!grantRef) {
+        const message = "A configured header credential has no reference in the selected grant. Reconnect this connection.";
+        await markRemoteConnectionHealth(connection, "missing_secret", message);
+        throw new ToolGatewayHttpError(
+          422,
+          message,
+          "mcp_remote_missing_secret",
+          { connectionId: connection.id, grantId: grant.id, credential: ref.name },
+        );
+      }
       try {
         const value = await resolveGrantSecretValue(
           session,
