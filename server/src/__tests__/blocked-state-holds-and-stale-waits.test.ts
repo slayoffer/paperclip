@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,6 +11,10 @@ import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { issueService } from "../services/issues.js";
 import { namesOnlyIssueReferences } from "../services/blocked-state-integrity.js";
 import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
+import { issueRoutes } from "../routes/issues.js";
+import { errorHandler } from "../middleware/index.js";
+import { dispatchPendingDependencyReleaseWakes } from "../services/dependency-release-wakes.js";
+import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.js";
 
 // Split from blocked-state-integrity.test.ts to keep each file under the size limit.
 const heartbeat = vi.hoisted(() => ({ wakeup: vi.fn() }));
@@ -121,6 +127,56 @@ describeDatabase("blocked-state holds and stale waits", () => {
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, hold.id));
     await expect(svc.update(source.id, { status: "in_progress", blockedByIssueIds: [] }))
       .resolves.toMatchObject({ status: "in_progress" });
+  });
+
+  it("keeps the named bridge hold when the route replaces its blocker links", async () => {
+    const hold = await issue("SYNA-2024", "backlog", { parentId: source.id,
+      title: `Review hold: ${source.identifier} (bridge-owned, do not edit)` });
+    const unblockDescriptor = { owner: { agentId }, action: "Wait for SYNA-2024" };
+    await svc.update(source.id, { status: "blocked", blockedByIssueIds: [hold.id], unblockDescriptor });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "board", companyIds: [companyId], isInstanceAdmin: true,
+        source: "local_implicit" };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as never));
+    app.use(errorHandler);
+    const res = await request(app).patch(`/api/issues/${source.id}`).send({ blockedByIssueIds: [] });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ status: "blocked", unblockDescriptor });
+    expect((await svc.getRelationSummaries(source.id)).blockedBy.map(row => row.id)).toEqual([hold.id]);
+    expect(await svc.getDependencyReadiness(source.id)).toMatchObject({ unresolvedBlockerIssueIds: [hold.id] });
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("retries the current blocker set with an existing wake=%s", async existingWake => {
+    const first = await issue("SYNA-1780");
+    const second = await issue("SYNA-1781");
+    await svc.update(source.id, { status: "blocked", blockedByIssueIds: [first.id] });
+    await svc.update(first.id, { status: "done" });
+    const released = (await svc.getById(source.id))!;
+    await svc.update(source.id, { blockedByIssueIds: [second.id] });
+    await svc.update(second.id, { status: "done" });
+    const currentKey = buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: source.id,
+      blockerIssueIds: [second.id], blockedTransitionAt: released.blockedTransitionAt });
+    const recordWake = () => db.insert(agentWakeupRequests).values({ companyId, agentId,
+      source: "automation", status: "completed", reason: "issue_blockers_resolved", idempotencyKey: currentKey });
+    if (existingWake) await recordWake();
+    heartbeat.wakeup.mockClear().mockImplementation(async (_owner, opts) => {
+      expect(opts).toMatchObject({ idempotencyKey: currentKey,
+        payload: { issueId: source.id, blockerIssueIds: [second.id], resolvedBlockerIssueId: second.id },
+        contextSnapshot: { blockerIssueIds: [second.id], resolvedBlockerIssueId: second.id } });
+      await recordWake();
+      return (await db.insert(heartbeatRuns).values({ companyId, agentId, status: "succeeded" }).returning())[0]!;
+    });
+    await dispatchPendingDependencyReleaseWakes(db, heartbeat.wakeup, { companyId });
+    expect(heartbeat.wakeup).toHaveBeenCalledTimes(existingWake ? 0 : 1);
+    await dispatchPendingDependencyReleaseWakes(db, heartbeat.wakeup, { companyId });
+    expect(heartbeat.wakeup).toHaveBeenCalledTimes(existingWake ? 0 : 1);
+    expect((await db.select().from(agentWakeupRequests))
+      .find(row => row.requestedByActorId === "blocked-dependency-release")?.status).toBe("completed_dependency_dispatch");
   });
 
   it("releases a wait that names only its linked blocker when that blocker completes", async () => {

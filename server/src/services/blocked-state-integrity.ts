@@ -98,15 +98,19 @@ export async function blockedWaitFacts(
   // Readiness also includes terminal blockers whose workspace finalization is unfinished.
   const { getRequestedBlockerDependencyReadiness, listIssueDependencyReadinessMap } =
     await import("./issue-dependency-readiness.js");
-  const readiness = requestedBlockerIds !== undefined
-    ? await getRequestedBlockerDependencyReadiness(db, issue.companyId, issue.id, requestedBlockerIds)
+  const holds = await openBridgeHoldIds(db, issue);
+  // Blocker synchronization retains these holds when it replaces the requested links.
+  const effectiveBlockerIds = requestedBlockerIds === undefined ? undefined :
+    [...new Set([...requestedBlockerIds, ...holds])];
+  const readiness = effectiveBlockerIds !== undefined
+    ? await getRequestedBlockerDependencyReadiness(db, issue.companyId, issue.id, effectiveBlockerIds)
     : (await listIssueDependencyReadinessMap(db, issue.companyId, [issue.id])).get(issue.id)!;
   // Reference membership includes resolved links. Only unresolved links affect readiness.
   const blockers = readiness.blockerIssueIds.length === 0 ? [] :
     await db.select({ identifier: issues.identifier }).from(issues).where(and(
       eq(issues.companyId, issue.companyId), inArray(issues.id, readiness.blockerIssueIds),
     ));
-  const [interaction, approval, review, holds] = await Promise.all([
+  const [interaction, approval, review] = await Promise.all([
     db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
       eq(issueThreadInteractions.status, "pending"),
@@ -116,7 +120,6 @@ export async function blockedWaitFacts(
       eq(issueApprovals.issueId, issue.id), inArray(approvals.status, ["pending", "revision_requested"]),
     )).limit(1),
     hasPendingHandoffWait(db, issue, descriptor, commentBody),
-    openBridgeHoldIds(db, issue),
   ]);
   const linkedIdentifiers = new Set(blockers.map(row => row.identifier));
   const mentions = issueReferences(descriptor?.action);

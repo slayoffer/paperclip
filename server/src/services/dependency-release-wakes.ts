@@ -79,9 +79,9 @@ export async function dispatchPendingDependencyReleaseWakes(
         result.deferredOrFailed++;
         continue;
       }
-      const blockerIssueIds = payload.blockerIssueIds as string[];
+      const blockerIssueIds = readiness.blockerIssueIds;
       const state = { companyId: intent.companyId, dependentIssueId: issueId, blockerIssueIds,
-        blockedTransitionAt: payload.blockedTransitionAt as string | null };
+        blockedTransitionAt: issue.blockedTransitionAt };
       if (await findExistingIssueBlockersResolvedWakeForReadyState(db, state)) {
         await settle("completed_dependency_dispatch");
         continue;
