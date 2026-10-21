@@ -59,6 +59,12 @@ Credential rotation also marks connection health unchecked before the approval s
 The replay regression verifies rejection at that health gate and after simulated health confirmation.
 Both cases execute no provider request. Runtime behavior remains unchanged.
 The remote-tool fixture uses a separate helper to limit growth of the existing test file.
+The next complete run found five stale assertions after release changes.
+The disconnect-retry fixture now includes the company-scoped dependency readiness read.
+Its tests still require one base lookup when enrichment fails, including readiness failures.
+The Docker test requires permissions in the pack stage before the production copy.
+It also rejects a second recursive permission change in the production stage.
+These corrections preserve the existing retry, access, and image permission behavior.
 
 ## Action references
 
