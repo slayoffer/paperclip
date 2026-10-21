@@ -1,3 +1,4 @@
+import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { taskDrainService, taskDrainBlocksAdmission } from "./task-drain.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
@@ -18175,71 +18176,6 @@ export function heartbeatService(
     return claimed;
   }
 
-  // startNextQueuedRunForAgent checks admission suppression once, then claims
-  // runs (sets status "running"), then dispatches each to executeRun, which
-  // checks suppression again before it does any work. Suppression (task
-  // drain, worktree mode, a database restore) can start in the gap between
-  // those two checks. When executeRun's check catches that, the run is
-  // already claimed — release it back to "queued" so it does not keep a
-  // running execution lock that nothing will ever process. This runs inside
-  // the same promise startNextQueuedRunForAgent already tracks in
-  // activeRunExecutionPromises, so getTaskDrainStatus() keeps reporting the
-  // run as active until the release finishes.
-  //
-  // The run row, the wakeup request, and the issue execution lock all guard
-  // the same claim, so one transaction commits all three writes together. A
-  // partial write (for example the run flips to "queued" but the wakeup or
-  // issue update then fails) would let the execution promise clear from
-  // activeRunExecutionPromises while the wakeup stayed "claimed" or the
-  // issue stayed locked to a queued run — task-drain status would then read
-  // quiescent while the database still held part of the old claim.
-  async function releaseRunClaimedJustBeforeSuppression(runId: string) {
-    const now = new Date();
-    await db.transaction(async (tx) => {
-      const released = await tx
-        .update(heartbeatRuns)
-        .set({
-          status: "queued",
-          startedAt: null,
-          responsibleUserId: null,
-          updatedAt: now,
-        })
-        .where(
-          and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")),
-        )
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (!released) return;
-
-      if (released.wakeupRequestId) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({ status: "queued", claimedAt: null, updatedAt: now })
-          .where(and(eq(agentWakeupRequests.id, released.wakeupRequestId), ne(agentWakeupRequests.status, "cancelled")));
-      }
-
-      const context = parseObject(released.contextSnapshot);
-      const issueId = readNonEmptyString(context.issueId);
-      if (issueId) {
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: null,
-            executionAgentNameKey: null,
-            executionLockedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(issues.id, issueId),
-              eq(issues.companyId, released.companyId),
-              eq(issues.executionRunId, released.id),
-            ),
-          );
-      }
-    });
-  }
-
   async function cancelQueuedRunForBlockedDependencies(
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
@@ -20491,17 +20427,7 @@ export function heartbeatService(
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
-    if ((await getSchedulingSuppression()).suppressed) {
-      try {
-        await releaseRunClaimedJustBeforeSuppression(runId);
-      } catch (err) {
-        logger.error(
-          { err, runId },
-          "failed to release run claimed just before task-drain suppression; the run row stays running, and the orphan reaper finalizes it and releases the issue lock on its next cycle",
-        );
-      }
-      return;
-    }
+    if (await suppressRunAdmission(db, runId, runOptions, await getSchedulingSuppression())) return;
 
     let legacyAdapterEntered = false;
     let run = await getRun(runId);
@@ -26599,6 +26525,7 @@ export function heartbeatService(
     } catch (outerErr) {
       if (
         nativeOwnershipHeld ||
+        (!nativeDispatchStarted && isRunnerReattachment(runOptions.nativeRestartRecovery)) ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
         nativeOwnershipHeld = true;

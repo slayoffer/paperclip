@@ -46,6 +46,11 @@ Every scheduling check reads persisted state before it permits admission.
 No process cache or startup window bypasses the lease.
 A failed read or malformed storage stops admission.
 Queued wakes remain pending during the drain.
+Verified local runner reattachment can continue during a drain.
+Remote reattachment retains its sandbox ownership checks.
+Neither reattachment releases an existing run claim or issue execution lock.
+Recovery that starts a replacement runner remains subject to the drain.
+Other scheduling holds still apply to reattachment.
 Queued-run claims hold a shared database lock until their claim transaction commits.
 Acquisition waits for claims that already hold that lock.
 Claims that follow acquisition observe the committed lease and remain queued.
