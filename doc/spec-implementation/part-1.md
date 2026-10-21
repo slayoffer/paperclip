@@ -6,6 +6,9 @@
 This document is the concrete, build-ready V1 contract.
 When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
+The fork also supports [saved review waits](../review-waits.md).
+An agent can record a board-owned wait for its latest saved review handoff.
+
 ## 2. V1 Outcomes
 
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
