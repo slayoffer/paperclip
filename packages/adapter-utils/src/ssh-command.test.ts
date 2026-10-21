@@ -3,12 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { buildSshSpawnTarget } from "./ssh-command.js";
+
+import { useLocalSsh } from "./ssh-command-test-helpers.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
+beforeEach(async () => { roots.push(await useLocalSsh()); });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
