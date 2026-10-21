@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
-import { createWorkspaceManifest, WorkspaceManifestMap, workspacePathMatcher, type PathManifest, type WorkspacePaths, type WorkspaceManifestWriter } from "./workspace-manifest.js";
-import { shouldExcludePath } from "./exclude-patterns.js";
+import { createWorkspaceManifest, WorkspaceManifestMap, type PathManifest, type WorkspacePaths } from "./workspace-manifest.js";
 import { resolvePaperclipInstanceRootForAdapter } from "./server-utils.js";
 import { entriesMatch, directoryMergeConflicts, DirectoryMergeConflict, excludedReplacementConflicts } from "./workspace-restore-safety.js";
 export { directoryMergeConflicts, DirectoryMergeConflict } from "./workspace-restore-safety.js";
 import type { WorkspaceRestoreDiagnostic } from "./workspace-restore-diagnostics.js";
+import { hashWorkspaceFile } from "./workspace-file-hasher.js";
+import { scanWorkspaceSnapshot } from "./workspace-snapshot-worker-client.js";
 
 export type SnapshotEntry =
   | { kind: "dir" }
@@ -136,36 +137,6 @@ export function directorySnapshotSha256(snapshot: DirectorySnapshot): string {
   return digest.digest("hex");
 }
 
-async function hashFile(filePath: string): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
-}
-
-async function* walkDirectory(
-  root: string, exclude: readonly string[], ignored: ReturnType<typeof workspacePathMatcher>, relative = "",
-): AsyncGenerator<[string, SnapshotEntry]> {
-  const current = relative ? path.join(root, relative) : root;
-  for await (const entry of await fs.opendir(current)) {
-    const nextRelative = relative ? path.posix.join(relative, entry.name) : entry.name;
-    if (shouldExcludePath(nextRelative, exclude) || ignored.matches(nextRelative)) continue;
-    const fullPath = path.join(root, nextRelative);
-    const stats = await fs.lstat(fullPath);
-    if (stats.isDirectory()) {
-      yield [nextRelative, { kind: "dir" }];
-      yield* walkDirectory(root, exclude, ignored, nextRelative);
-    } else if (stats.isSymbolicLink()) {
-      yield [nextRelative, { kind: "symlink", target: await fs.readlink(fullPath) }];
-    } else if (stats.isFile()) {
-      yield [nextRelative, { kind: "file", mode: stats.mode, hash: await hashFile(fullPath) }];
-    }
-  }
-}
-
 async function readSnapshotEntry(root: string, relative: string): Promise<SnapshotEntry | null> {
   const fullPath = path.join(root, relative);
   let stats;
@@ -187,7 +158,7 @@ async function readSnapshotEntry(root: string, relative: string): Promise<Snapsh
   return {
     kind: "file",
     mode: stats.mode,
-    hash: await hashFile(fullPath),
+    hash: await hashWorkspaceFile(fullPath),
   };
 }
 
@@ -548,28 +519,20 @@ export async function captureDirectorySnapshot(
   options: { exclude?: string[]; ignoredPaths?: WorkspacePaths; diskBacked?: boolean } = {},
 ): Promise<DirectorySnapshot> {
   const exclude = [...new Set(options.exclude ?? [])];
-  const ignored = workspacePathMatcher(options.ignoredPaths);
-  let writer: WorkspaceManifestWriter | null = null;
+  const manifestDirectory = options.diskBacked
+    ? await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-baseline-")) : undefined;
   try {
-    writer = options.diskBacked ? await createWorkspaceManifest("paperclip-workspace-baseline-") : null;
-    const memory = new Map<string, SnapshotEntry>();
-    for await (const [relative, entry] of walkDirectory(rootDir, exclude, ignored)) {
-      if (writer) writer.add("baseline", relative, JSON.stringify(entry));
-      else memory.set(relative, entry);
-    }
-    const manifest = writer?.paths("baseline");
-    writer?.close();
+    const entries = await scanWorkspaceSnapshot({ rootDir, exclude, ignoredPaths: options.ignoredPaths, manifestDirectory });
     const snapshot: DirectorySnapshot = {
       exclude, ignoredPaths: options.ignoredPaths,
-      entries: manifest ? new WorkspaceManifestMap(manifest, parseManifestEntry) : memory,
+      entries: entries instanceof Map ? entries : new WorkspaceManifestMap(entries, parseManifestEntry),
     };
-    if (writer) ownedDirectorySnapshots.set(snapshot, path.dirname(writer.filePath));
+    if (manifestDirectory) ownedDirectorySnapshots.set(snapshot, manifestDirectory);
     return snapshot;
   } catch (error) {
-    writer?.close(false);
-    if (writer) await fs.rm(path.dirname(writer.filePath), { recursive: true, force: true });
+    if (manifestDirectory) await fs.rm(manifestDirectory, { recursive: true, force: true });
     throw error;
-  } finally { ignored.close(); }
+  }
 }
 
 /** A disk-backed subset for independent nested-repository merges. */

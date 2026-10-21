@@ -1,3 +1,4 @@
+import { clearCompanyFixtures } from "../../__tests__/helpers/clear-company-fixtures.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { createRunDispatch, deriveCommentId } from "../../modules/run-dispatch/index.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
@@ -63,9 +64,8 @@ const support = externalDatabaseUrl
       db = createDb(database.connectionString);
     }, 30_000);
     afterEach(async () => {
-      // Each sweep scans all companies. Keep earlier tests' unresolved runs out
-      // of later tests so every case exercises only its own recovery fixtures.
-      await db.execute(sql`TRUNCATE companies CASCADE`);
+      // Remove earlier fixtures before the next company sweep.
+      await clearCompanyFixtures(db);
     });
     afterAll(async () => {
       if (externalDatabaseUrl) await db?.$client.end();

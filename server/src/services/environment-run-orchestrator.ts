@@ -548,6 +548,11 @@ export function environmentRunOrchestrator(
         outboundRestorePaths: Array.isArray(workspaceRealization.outboundRestorePaths)
           ? workspaceRealization.outboundRestorePaths.filter((entry): entry is string => typeof entry === "string")
           : [],
+        ...(realizationMode === "in_place" &&
+        typeof workspaceRealization.runtimeRoot === "string" &&
+        workspaceRealization.runtimeRoot.trim().length > 0
+          ? { runtimeRoot: workspaceRealization.runtimeRoot.trim() }
+          : {}),
       };
       if (executionTarget) {
         executionTarget = {

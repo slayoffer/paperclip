@@ -3,7 +3,9 @@ import { PassThrough, Transform, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const transport = vi.hoisted(() => ({ spawn: vi.fn(), sink: null as unknown }));
-vi.mock("node:child_process", () => ({ spawn: transport.spawn }));
+vi.mock("node:child_process", async (original) => ({
+  ...await original<typeof import("node:child_process")>(), spawn: transport.spawn,
+}));
 vi.mock("node:fs", async (original) => ({
   ...await original<typeof import("node:fs")>(),
   createWriteStream: () => transport.sink,

@@ -38,7 +38,9 @@ pnpm exec vitest run --no-file-parallelism \
 ```
 
 The fork workflow `synthiq-ssh-sync.yml` also checks the existing SSH fixture,
-the managed runtime, the baseline merge, and adapter types.
+the managed runtime, the baseline merge, remote tracking refs, workspace scheduling, and adapter types.
+The snapshot tests check that hashing stays outside the main thread.
+The public SSH API remains in `ssh.ts`. Implementation modules retain the released module layout.
 The regression transport executes real Git and tar commands through a local SSH substitute.
 Separate stream tests control the sink speed and the SSH exit order.
 These tests do not prove production behavior under concurrent load.
