@@ -1,3 +1,4 @@
+import { stageSshEnvironment } from "./ssh-environment.js";
 import { trackSshWriterCommand } from "./ssh-writer-termination.js";
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
@@ -30,23 +31,16 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd?.trim() || defaultCwd;
-      const envEntries = Object.entries(commandInput.env ?? {})
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-      const envPrefix = envEntries.length > 0
-        ? `env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} `
-        : "";
-      const exportPrefix = envEntries.length > 0
-        ? envEntries.map(([key, value]) => `export ${key}=${shellQuote(value)};`).join(" ") + " "
-        : "";
       const commandScript = command === "sh" || command === "bash"
         ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
-          ? `${exportPrefix}${args[1]}`
-          : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
-        : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
+          ? args[1]
+          : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
+        : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
       const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {
         const result = await runSshCommand(input.spec, remoteCommand, {
+          env: commandInput.env,
           stdin: commandInput.stdin,
           timeoutMs: commandInput.timeoutMs,
           maxBuffer: maxBufferBytes,
@@ -341,34 +335,16 @@ export async function runSshCommand(
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const sshArgs = [...auth.args];
-    const envEntries = Object.entries(options.env ?? {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-    for (const [key] of envEntries) {
-      if (!isValidShellEnvKey(key)) {
-        throw new Error(`Invalid SSH environment variable key: ${key}`);
-      }
-    }
-
-    // Mirror buildSshSpawnTarget: source the login profiles first, then run
-    // `env KEY=VAL cmd` so user-supplied identity overrides win over anything a
-    // profile re-exports. The SSH target is an operator-configured host, not a
-    // Paperclip sandbox image, so it can expose `node` or an agent CLI only
-    // through a login profile; a non-login SSH command would miss that PATH.
-    // Source `/etc/profile` first so a host that exposes the PATH through
-    // `/etc/profile.d` scripts still resolves node and the agent CLI.
-    // The script no longer sources `nvm.sh`; a profile that adds nvm still runs.
-    // .bash_profile typically sources .bashrc itself; only source .bashrc
-    // directly when no .bash_profile exists, so a host that adds nvm in
-    // .bashrc still resolves node without a double-run of the setup.
-    const envArgs = envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`);
+    const environment = await stageSshEnvironment(options.env ?? {}, (command, stdin) =>
+      runSshCommand(config, command, { stdin, timeoutMs: options.timeoutMs }));
+    cleanup = async () => { try { await environment.cleanup(); } finally { await auth.cleanup(); } };
+    // Read login profiles before applying explicit environment overrides.
     const remoteScript = [
       'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
       'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
       'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
       'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
-      envArgs.length > 0
-        ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
-        : `exec sh -c ${shellQuote(remoteCommand)}`,
+      environment.wrap(`exec sh -c ${shellQuote(remoteCommand)}`),
     ].join(" && ");
 
     sshArgs.push(
@@ -410,48 +386,47 @@ export async function buildSshSpawnTarget(input: {
   }
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.env)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    .map(([key, value]) => `${key}=${shellQuote(value)}`);
-  const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
-  // Source the login profiles first, then run `env KEY=VAL cmd` so
-  // user-supplied identity overrides win over anything a profile re-exports.
-  // The SSH target is an operator-configured host, not a Paperclip sandbox
-  // image, so it can expose `node` or an agent CLI only through a login
-  // profile; a non-login SSH command would miss that PATH. Source
-  // `/etc/profile` first so a host that exposes the PATH through
-  // `/etc/profile.d` scripts still resolves node and the agent CLI. The script
-  // no longer sources `nvm.sh`; a profile that adds nvm still runs.
-  // .bash_profile typically sources .bashrc itself; only source .bashrc
-  // directly when no .bash_profile exists, so a host that adds nvm in
-  // .bashrc still resolves node without a double-run of the setup.
-  const remoteScript = [
-    'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
-    `cd ${shellQuote(input.spec.remoteCwd)}`,
-    trackSshWriterCommand(
-      envArgs.length > 0
-        ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
-        : `exec ${remoteCommandParts}`,
-      input.spec.remoteWorkspacePath,
-      input.env.PAPERCLIP_RUN_ID,
-    ),
-  ].join(" && ");
+  let environment;
+  try {
+    environment = await stageSshEnvironment(input.env, (command, stdin) =>
+      runSshCommand(input.spec, command, { stdin }));
+  } catch (error) {
+    await auth.cleanup();
+    throw error;
+  }
+  try {
+    const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
+    // Read login profiles before applying explicit environment overrides.
+    const remoteScript = [
+      'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
+      `cd ${shellQuote(input.spec.remoteCwd)}`,
+      trackSshWriterCommand(
+        environment.wrap(`exec ${remoteCommandParts}`),
+        input.spec.remoteWorkspacePath,
+        input.env.PAPERCLIP_RUN_ID,
+      ),
+    ].join(" && ");
 
-  sshArgs.push(
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteScript)}`,
-  );
+    sshArgs.push(
+      "-p",
+      String(input.spec.port),
+      `${input.spec.username}@${input.spec.host}`,
+      `sh -c ${shellQuote(remoteScript)}`,
+    );
 
-  return {
-    command: "ssh",
-    args: sshArgs,
-    cleanup: auth.cleanup,
-  };
+    return {
+      command: "ssh",
+      args: sshArgs,
+      cleanup: async () => { try { await environment.cleanup(); } finally { await auth.cleanup(); } },
+    };
+  } catch (error) {
+    await environment.cleanup();
+    await auth.cleanup();
+    throw error;
+  }
 }
 
 export async function ensureSshWorkspaceReady(
