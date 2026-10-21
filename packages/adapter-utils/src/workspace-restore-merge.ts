@@ -85,7 +85,7 @@ async function mergeDirectoryWithBaselineInner(input: Parameters<typeof mergeDir
       { ...currentOptions, cacheMetadata: true }).catch((error: NodeJS.ErrnoException) => {
         // Another writer can remove a path or change its type after lstat.
         // Discard this optional cache and repeat the scan under the lock.
-        if (["ENOENT", "ENOTDIR", "EISDIR", "EINVAL", "WORKSPACE_SNAPSHOT_CHANGED"].includes(error.code ?? "")) return undefined;
+        if (["ENOENT", "ENOTDIR", "EISDIR", "EINVAL", "ELOOP", "WORKSPACE_SNAPSHOT_CHANGED"].includes(error.code ?? "")) return undefined;
         throw error;
       });
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {

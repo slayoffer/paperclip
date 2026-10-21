@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { WorkerOptions } from "node:worker_threads";
@@ -20,7 +20,8 @@ vi.mock("node:worker_threads", async (importOriginal) => {
         if (require("node:path").basename(file) === "victim" && !replaced) {
           replaced = true;
           fs.unlinkSync(file);
-          if (stats.isSymbolicLink()) fs.writeFileSync(file, "concurrent result");
+          if (process.env.PAPERCLIP_TEST_SCAN_REPLACEMENT === "file-to-symlink-loop") fs.symlinkSync("victim", file);
+          else if (stats.isSymbolicLink()) fs.writeFileSync(file, "concurrent result");
           else {
             fs.mkdirSync(file);
             fs.writeFileSync(require("node:path").join(file, "kept"), "concurrent result");
@@ -49,22 +50,25 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-it.each(["file-to-directory", "symlink-to-file"])(
+it.each(["file-to-directory", "symlink-to-file", "file-to-symlink-loop"])(
   "repeats the scan under the lock after a %s replacement", async (replacement) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-restore-scan-race-"));
     roots.push(root);
+    vi.stubEnv("PAPERCLIP_TEST_SCAN_REPLACEMENT", replacement);
     vi.stubEnv("PAPERCLIP_HOME", path.join(root, "home"));
     vi.stubEnv("PAPERCLIP_INSTANCE_ID", "test");
     const target = path.join(root, "target"), source = path.join(root, "source");
     const victim = path.join(target, "victim");
     await mkdir(target);
-    if (replacement === "file-to-directory") await writeFile(victim, "baseline");
-    else await symlink("elsewhere", victim);
+    if (replacement === "symlink-to-file") await symlink("elsewhere", victim);
+    else await writeFile(victim, "baseline");
     const baseline = await captureDirectorySnapshot(target);
     await cp(target, source, { recursive: true, verbatimSymlinks: true });
     await writeFile(path.join(source, "independent"), "incoming result");
     const beforeApply = vi.fn(async () => {
-      expect((await lstat(victim)).isDirectory()).toBe(replacement === "file-to-directory");
+      const current = await lstat(victim);
+      expect(current.isDirectory()).toBe(replacement === "file-to-directory");
+      expect(current.isSymbolicLink()).toBe(replacement === "file-to-symlink-loop");
     });
 
     await expect(mergeDirectoryWithBaseline({ baseline, sourceDir: source, targetDir: target,
@@ -72,7 +76,8 @@ it.each(["file-to-directory", "symlink-to-file"])(
 
     expect(beforeApply).toHaveBeenCalledOnce();
     expect(await readFile(path.join(target, "independent"), "utf8")).toBe("incoming result");
-    expect(await readFile(replacement === "file-to-directory" ? path.join(victim, "kept") : victim, "utf8"))
+    if (replacement === "file-to-symlink-loop") expect(await readlink(victim)).toBe("victim");
+    else expect(await readFile(replacement === "file-to-directory" ? path.join(victim, "kept") : victim, "utf8"))
       .toBe("concurrent result");
   }, 30_000,
 );
