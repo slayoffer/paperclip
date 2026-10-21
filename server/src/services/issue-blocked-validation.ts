@@ -5,12 +5,13 @@ import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { conflict, forbidden, unprocessable } from "../errors.js";
 import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled } from "./self-block-guard.js";
 import { blockedStateIntegrityEnabled, blockedWaitFacts } from "./blocked-state-integrity.js";
+import { hasSavedReviewWait } from "./review-wait.js";
 
 export async function assertBlockedIssueUpdate(input: {
   db: Db;
   actor: Express.Request["actor"];
   existing: Pick<typeof issueRows.$inferSelect, "id" | "companyId" | "identifier" | "status" | "assigneeAgentId" | "unblockDescriptor">;
-  updateFields: { status?: string; unblockDescriptor?: IssueUnblockDescriptor | null };
+  updateFields: { status?: string; assigneeAgentId?: string | null; unblockDescriptor?: IssueUnblockDescriptor | null };
   requestedBlockerIds?: string[];
   getDependencyReadiness: (issueId: string) => Promise<{ unresolvedBlockerCount: number }>;
   commentBody?: string | null;
@@ -34,7 +35,12 @@ export async function assertBlockedIssueUpdate(input: {
     const owner = descriptor.owner;
     if (
       actor.type === "agent" &&
-      (owner === "board" || "userId" in owner)
+      (owner === "board" || "userId" in owner) &&
+      !(await hasSavedReviewWait(db, {
+        ...existing,
+        assigneeAgentId: updateFields.assigneeAgentId === undefined
+          ? existing.assigneeAgentId : updateFields.assigneeAgentId,
+      }, actor.agentId === existing.assigneeAgentId ? actor.agentId : undefined, descriptor))
     ) {
       throw forbidden(
         "Agents may only name themselves as an unblock owner",

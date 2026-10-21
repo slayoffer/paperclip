@@ -5,6 +5,7 @@ import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnreso
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
 import { assertIssueReadyToStart } from "./issue-start-readiness.js";
+import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -1840,6 +1841,7 @@ type IssueWithLabels = IssueRow & {
   labels: IssueLabelRow[];
   labelIds: string[];
   watchdog?: IssueWatchdogSummary | null;
+  dependencyReadiness?: IssueDependencyReadiness;
 };
 type IssueWithLabelsAndRun = IssueWithLabels & {
   activeRun: IssueActiveRunRow | null;
@@ -2289,70 +2291,7 @@ async function findAcceptedPlanDocumentInteraction(
 
 
 
-/**
- * Returns the set of execution-workspace ids whose most recent workspace operation
- * is NOT a successful `workspace_finalize`. These workspaces have either an in-flight
- * run, a failed finalize, or never reached the finalize barrier — dependents that
- * read this workspace must wait until finalize succeeds.
- *
- * Workspaces with no recorded operations are considered finalized (nothing has
- * touched them since they were realized).
- */
-export async function listUnfinalizedExecutionWorkspaceIds(
-  dbOrTx: Pick<Db, "select">,
-  companyId: string,
-  executionWorkspaceIds: string[],
-): Promise<Set<string>> {
-  const unfinalized = new Set<string>();
-  if (executionWorkspaceIds.length === 0) return unfinalized;
-
-  // Pull every workspace op for the candidate workspaces and pick the latest per
-  // workspace in memory. Per-workspace LATERAL queries would be tighter, but the
-  // candidate set is tiny in practice (one workspace per blocker per readiness call).
-  const rows = await dbOrTx
-    .select({
-      executionWorkspaceId: workspaceOperations.executionWorkspaceId,
-      phase: workspaceOperations.phase,
-      status: workspaceOperations.status,
-      startedAt: workspaceOperations.startedAt,
-    })
-    .from(workspaceOperations)
-    .where(
-      and(
-        eq(workspaceOperations.companyId, companyId),
-        inArray(
-          workspaceOperations.executionWorkspaceId,
-          executionWorkspaceIds,
-        ),
-      ),
-    );
-
-  const latestByWorkspace = new Map<
-    string,
-    { phase: string; status: string; startedAt: Date }
-  >();
-  for (const row of rows) {
-    if (!row.executionWorkspaceId) continue;
-    const current = latestByWorkspace.get(row.executionWorkspaceId);
-    if (!current || row.startedAt > current.startedAt) {
-      latestByWorkspace.set(row.executionWorkspaceId, {
-        phase: row.phase,
-        status: row.status,
-        startedAt: row.startedAt,
-      });
-    }
-  }
-
-  for (const workspaceId of executionWorkspaceIds) {
-    const latest = latestByWorkspace.get(workspaceId);
-    if (!latest) continue; // no ops recorded → treat as finalized
-    if (latest.phase === "workspace_finalize" && latest.status === "succeeded")
-      continue;
-    unfinalized.add(workspaceId);
-  }
-
-  return unfinalized;
-}
+export { listUnfinalizedExecutionWorkspaceIds } from "./issue-workspace-readiness.js";
 
 /**
  * Whether a heartbeat run has reached a terminal state or no longer exists.
@@ -6300,6 +6239,48 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+/**
+ * Returns every issue that `issueId` blocks, directly or transitively, through
+ * "blocks" relations in the company. If one of these issues becomes a blocker
+ * of `issueId`, the relations contain a cycle. The blocking-cycle check and
+ * recovery use this one graph walk, so they agree on what a cycle is.
+ */
+export async function listIssuesTransitivelyBlockedBy(
+  dbOrTx: DbReader,
+  companyId: string,
+  issueId: string,
+): Promise<Set<string>> {
+  const rows = await dbOrTx
+    .select({
+      blockerIssueId: issueRelations.issueId,
+      blockedIssueId: issueRelations.relatedIssueId,
+    })
+    .from(issueRelations)
+    .where(
+      and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.type, "blocks"),
+      ),
+    );
+
+  const adjacency = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = adjacency.get(row.blockerIssueId) ?? [];
+    list.push(row.blockedIssueId);
+    adjacency.set(row.blockerIssueId, list);
+  }
+
+  const reachable = new Set<string>();
+  const queue = [...(adjacency.get(issueId) ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    queue.push(...(adjacency.get(current) ?? []));
+  }
+  return reachable;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -6342,7 +6323,7 @@ export function issueService(db: Db) {
     return title.trim().replace(/\s+/g, " ").toLowerCase();
   }
 
-  async function getIssueByUuid(id: string) {
+  async function getIssueByUuid(id: string): Promise<IssueWithLabels | null> {
     const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
@@ -6350,10 +6331,10 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return { ...enriched, dependencyReadiness: (await listIssueDependencyReadinessMap(db, row.companyId, [row.id])).get(row.id)! };
   }
 
-  async function getIssueByIdentifier(identifier: string) {
+  async function getIssueByIdentifier(identifier: string): Promise<IssueWithLabels | null> {
     const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
@@ -6361,7 +6342,7 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return { ...enriched, dependencyReadiness: (await listIssueDependencyReadinessMap(db, row.companyId, [row.id])).get(row.id)! };
   }
 
   async function projectHistoricalRunComments<
@@ -7069,38 +7050,13 @@ export function issueService(db: Db) {
   ) {
     if (blockerIssueIds.length === 0) return;
 
-    const rows = await dbOrTx
-      .select({
-        blockerIssueId: issueRelations.issueId,
-        blockedIssueId: issueRelations.relatedIssueId,
-      })
-      .from(issueRelations)
-      .where(
-        and(
-          eq(issueRelations.companyId, companyId),
-          eq(issueRelations.type, "blocks"),
-        ),
-      );
-
-    const adjacency = new Map<string, string[]>();
-    for (const row of rows) {
-      const list = adjacency.get(row.blockerIssueId) ?? [];
-      list.push(row.blockedIssueId);
-      adjacency.set(row.blockerIssueId, list);
-    }
-
-    for (const blockerIssueId of blockerIssueIds) {
-      const queue = [...(adjacency.get(issueId) ?? [])];
-      const visited = new Set<string>([issueId]);
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        if (current === blockerIssueId) {
-          throw unprocessable("Blocking relations cannot contain cycles");
-        }
-        if (visited.has(current)) continue;
-        visited.add(current);
-        queue.push(...(adjacency.get(current) ?? []));
-      }
+    const blockedByIssue = await listIssuesTransitivelyBlockedBy(
+      dbOrTx,
+      companyId,
+      issueId,
+    );
+    if (blockerIssueIds.some((blockerIssueId) => blockedByIssue.has(blockerIssueId))) {
+      throw unprocessable("Blocking relations cannot contain cycles");
     }
   }
 
@@ -8766,6 +8722,8 @@ export function issueService(db: Db) {
       );
       return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
     },
+
+    releaseDependencyWait: (companyId: string, issueId: string) => releaseReadyDependencyWait(db, companyId, issueId),
 
     listDependencyReadiness: async (
       companyId: string,

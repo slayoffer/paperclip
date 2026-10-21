@@ -75,6 +75,23 @@ describeDatabase("blocked-state holds and stale waits", () => {
   }
   const external = (action: string): IssueUnblockDescriptor => ({ owner: { agentId }, action, kind: "external" });
 
+  it.each([false, true])("preserves a saved board review wait with integrity=%s", async integrity => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", String(integrity));
+    const head = "a".repeat(40);
+    await db.insert(issueComments).values({ companyId, issueId: source.id, authorAgentId: agentId,
+      body: `\`\`\`handoff\nrepo: slayoffer/paperclip\nbase: ${"b".repeat(40)}\nhead: ${head}\nbranch: review/${source.identifier}\n\`\`\`` });
+    const input = {
+      db, actor: { type: "agent" as const, companyId, agentId, source: "agent_jwt" as const }, existing: source,
+      updateFields: { status: "blocked", unblockDescriptor: { owner: "board" as const,
+        action: `waiting for the cross-vendor review of ${head}` } },
+      getDependencyReadiness: svc.getDependencyReadiness,
+    };
+    await expect(assertBlockedIssueUpdate(input)).resolves.toBeUndefined();
+    await expect(assertBlockedIssueUpdate({ ...input,
+      updateFields: { ...input.updateFields, assigneeAgentId: randomUUID() },
+    })).rejects.toMatchObject({ status: 403 });
+  });
+
   async function assertTitleEdit(blockerIds: string[]) {
     const existing = (await svc.getById(source.id))!;
     for (const requestedBlockerIds of [undefined, blockerIds]) {

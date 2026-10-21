@@ -7,7 +7,7 @@ Keep `PAPERCLIP_SELF_BLOCK_GUARD=true` to reject waits that name only the owner.
 A blocked issue requires an open blocker link, a pending card, a recorded review handoff, or a typed outside wait.
 The update API returns `422` when no target exists.
 The self-block guard still returns `409 self_block_refused` for a self-owned wait without a target.
-An action that names another issue requires an open blocker link to that issue.
+An action that names another issue requires a blocker link to that issue.
 
 The API accepts these optional `unblockDescriptor` fields:
 
@@ -19,6 +19,8 @@ A self-owned review wait requires the owner's latest handoff and its full head c
 The handoff branch must be `review/<issue identifier>`.
 A later rejection or merge authorization ends that review wait.
 The server can save the handoff comment and blocked status in one transaction.
+The released board-owned review wait also remains valid for a saved owner handoff.
+An agent cannot create that board-owned wait from an unsaved comment or change its assignee.
 This wait evidence grants no permission to publish, merge, or deploy.
 
 An open bridge hold remains a blocker when an update replaces reviewer links.
@@ -36,6 +38,8 @@ The intent uses `pending_dependency_dispatch`. It does not represent a queued he
 After commit, dispatch applies the existing scheduler checks and the cycle wake key.
 Failed or deferred dispatches remain pending. The periodic dependency check retries them for released `todo` issues.
 An expired dispatch claim also permits a retry. An existing wake prevents a duplicate dispatch.
+Route completion and recovery use the same cycle key when integrity is enabled.
+They suppress an existing completed wake for that cycle.
 A new status transition or assignee change cancels an obsolete intent.
 A card, approval, or review wait that appears after release keeps the intent pending.
 Pending cards, open approvals, outside waits, review handoffs, and open bridge holds preserve the blocked state.
@@ -55,6 +59,8 @@ No database migration is required. The descriptor uses the existing JSON column.
 Action references use all saved or proposed blocker links, including completed links.
 Readiness uses only unresolved blockers. Completed links do not create a waiting target.
 Disable the environment switch to restore the previous rules.
+The release branch still resolves cancelled dependencies when both integrity and pull queue are disabled.
+Its active finalization checks and saved board review waits also remain available.
 This source change does not enable the switch or deploy the server.
 
 Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`, `server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts`, and `server/src/__tests__/dependency-release-wakes.test.ts`.

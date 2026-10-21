@@ -1,5 +1,9 @@
-import type { IssueUnblockDescriptor } from "./issue-unblock.js";
-export type { IssueUnblockDescriptor, IssueUnblockOwner } from "./issue-unblock.js";
+import { IssueThreadInteractionBase, IssueThreadInteractionActorFields } from "./issue-interaction-base.js";
+export type { IssueThreadInteractionActorFields, IssueThreadInteractionBase } from "./issue-interaction-base.js";
+import type { IssueRecoveryAction } from "./issue-recovery-action.js";
+export type { IssueRecoveryAction } from "./issue-recovery-action.js";
+import type { IssueUnblockDescriptor, IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+export type { IssueUnblockOwner, IssueUnblockDescriptor, IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import type { ExecutionProjection, ExecutionBlocker } from "./execution-projection.js";
 import type {
   IssueCommentAuthorType,
@@ -532,41 +536,6 @@ export interface IssueBlockedInboxAttention {
   };
 }
 
-export interface IssueRecoveryAction {
-  /** Read-only activity of the exact native run named by the wake policy. */
-  nativeRunActivity?: {
-    runId: string;
-    status: "queued" | "running";
-    workspaceOperationId: string | null;
-  } | null;
-  id: string;
-  companyId: string;
-  sourceIssueId: string;
-  recoveryIssueId: string | null;
-  kind: IssueRecoveryActionKind;
-  status: IssueRecoveryActionStatus;
-  ownerType: IssueRecoveryActionOwnerType;
-  ownerAgentId: string | null;
-  ownerUserId: string | null;
-  previousOwnerAgentId: string | null;
-  returnOwnerAgentId: string | null;
-  cause: string;
-  fingerprint: string;
-  evidence: Record<string, unknown>;
-  nextAction: string;
-  wakePolicy: Record<string, unknown> | null;
-  monitorPolicy: Record<string, unknown> | null;
-  attemptCount: number;
-  maxAttempts: number | null;
-  timeoutAt: Date | string | null;
-  lastAttemptAt: Date | string | null;
-  outcome: IssueRecoveryActionOutcome | null;
-  resolutionNote: string | null;
-  resolvedAt: Date | string | null;
-  createdAt: Date | string;
-  updatedAt: Date | string;
-}
-
 export type SuccessfulRunHandoffStateKind = "required" | "resolved" | "escalated";
 
 export interface SuccessfulRunHandoffState {
@@ -834,6 +803,7 @@ export interface Issue {
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
+  dependencyReadiness?: IssueDependencyReadiness;
   blockerAttention?: IssueBlockerAttention;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
@@ -910,6 +880,7 @@ export type CompactIssue = Pick<
   labelIds?: string[];
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
+  dependencyReadiness?: IssueDependencyReadiness;
   blockerAttention?: IssueBlockerAttention;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
@@ -1093,14 +1064,6 @@ export interface IssueCommentPresentation {
   title?: string | null;
   detailsDefaultOpen: boolean;
   density?: IssueCommentPresentationDensity;
-}
-
-export interface IssueThreadInteractionActorFields {
-  createdByAgentId?: string | null;
-  createdByUserId?: string | null;
-  resolvedByAgentId?: string | null;
-  resolvedByRunId?: string | null;
-  resolvedByUserId?: string | null;
 }
 
 export interface SuggestedTaskDraft {
@@ -1506,39 +1469,6 @@ export interface RequestItemVerdictsResult {
   staleTarget?: RequestConfirmationTarget | null;
 }
 
-export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {
-  id: string;
-  companyId: string;
-  issueId: string;
-  kind: IssueThreadInteractionKind;
-  idempotencyKey?: string | null;
-  originCommentIds?: string[];
-  sourceCommentId?: string | null;
-  sourceRunId?: string | null;
-  sourceIdentityContextId?: string | null;
-  addresseeAgentId?: string | null;
-  addresseeUserId?: string | null;
-  title?: string | null;
-  summary?: string | null;
-  status: IssueThreadInteractionStatus;
-  continuationPolicy: IssueThreadInteractionContinuationPolicy;
-  /** Read-time acceptance gate; omitted when no workspace preparation is pending. */
-  acceptanceBlocker?: "workspace_sync_pending";
-  /** @deprecated Read requestedResolverPolicy. Kept for API compatibility. */
-  resolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  requestedResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  effectiveResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  resolverPolicyProvenance: IssueThreadInteractionResolverPolicyProvenance;
-  effectiveResolverPolicySource: IssueThreadInteractionEffectiveResolverPolicySource;
-  legacyResolverPolicyAliases: {
-    requested: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-    effective: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-  };
-  createdAt: Date | string;
-  updatedAt: Date | string;
-  resolvedAt?: Date | string | null;
-}
-
 export interface SuggestTasksInteraction extends IssueThreadInteractionBase {
   kind: "suggest_tasks";
   payload: SuggestTasksPayload;
@@ -1583,21 +1513,7 @@ export type IssueThreadInteraction =
   | RequestItemVerdictsInteraction
   | ConnectionIntentInteraction;
 
-export type IssueThreadInteractionPayload =
-  | SuggestTasksPayload
-  | AskUserQuestionsPayload
-  | RequestConfirmationPayload
-  | RequestCheckboxConfirmationPayload
-  | RequestItemVerdictsPayload
-  | ConnectionIntentPayload;
-
-export type IssueThreadInteractionResult =
-  | SuggestTasksResult
-  | AskUserQuestionsResult
-  | RequestConfirmationResult
-  | RequestCheckboxConfirmationResult
-  | RequestItemVerdictsResult
-  | ConnectionIntentResult;
+export type { CompanyIssueThreadInteraction, CompanyIssueThreadInteractionPage, IssueThreadInteractionPayload, IssueThreadInteractionResult } from "./company-issue-interactions.js";
 
 export interface IssueAttachment {
   id: string;

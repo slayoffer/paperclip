@@ -70,7 +70,7 @@ describeDatabase("durable dependency release wakes", () => {
     vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", String(pullQueue));
     for (const status of ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]) {
       await db.update(issues).set({ status }).where(eq(issues.id, blocker.id));
-      const resolved = status === "done" || (status === "cancelled" && (integrity || pullQueue));
+      const resolved = status === "done" || status === "cancelled";
       expect(await svc.getDependencyReadiness(dependent.id), status).toMatchObject({
         blockerIssueIds: [blocker.id],
         unresolvedBlockerIssueIds: resolved ? [] : [blocker.id],

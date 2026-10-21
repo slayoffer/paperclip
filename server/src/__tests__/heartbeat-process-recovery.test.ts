@@ -15667,13 +15667,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       sql`create trigger test_native_blocked_wait_fault before insert on issue_comments for each row execute function test_native_blocked_wait_fault()`,
     );
     try {
+      // The sweep logs the failed issue and continues (SYNA-2368). It does
+      // not reject, but the failed write must still roll back in full.
       await expect(
         heartbeatService(db).reconcileStrandedAssignedIssues(),
-      ).rejects.toMatchObject({
-        cause: expect.objectContaining({
-          message: "native_blocked_wait_fixture_fault",
-        }),
-      });
+      ).resolves.toMatchObject({ failed: 1, escalated: 0 });
     } finally {
       await db.execute(
         sql`drop trigger test_native_blocked_wait_fault on issue_comments`,

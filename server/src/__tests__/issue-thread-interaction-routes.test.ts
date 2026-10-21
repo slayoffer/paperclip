@@ -1,6 +1,7 @@
 import express from "express";
+import { resolveMockInteraction, createMockIssue, createLoopbackServer, closeRouteServers } from "./helpers/interaction-route-resolution.js";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const UNRELATED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -78,7 +79,7 @@ const mockAccessDecide = vi.hoisted(() => vi.fn(async (input: { action?: string 
   explanation: "Allowed by test grant.",
 })));
 
-const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockLogActivity = vi.hoisted(() => vi.fn(async (_db: unknown, _input: unknown) => undefined));
 const mockReviewTransition = vi.hoisted(() => ({
   value: null as null | { actorType: string; actorId: string; details: Record<string, unknown> },
 }));
@@ -160,6 +161,13 @@ vi.mock("../services/trust-preset-resolver.js", () => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("../services/activity-log.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../services/activity-log.js")>(),
+    logActivity: (db: unknown, input: unknown) => mockLogActivity(db, input),
+  }));
+  vi.doMock("../services/interaction-resolution-outbox.js", () => ({
+    interactionResolutionOutboxService: () => ({ deliver: vi.fn(async () => undefined) }),
+  }));
   vi.doMock("../services/question-response-delivery.js", () => ({
     questionResponseDeliveryService: () => mockQuestionResponseDeliveries,
   }));
@@ -239,27 +247,12 @@ function registerModuleMocks() {
   }));
 }
 
-function createIssue(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    companyId: "company-1",
-    status: "in_progress",
-    workMode: "standard",
-    priority: "medium",
-    projectId: null,
-    goalId: null,
-    parentId: null,
-    assigneeAgentId: ASSIGNEE_AGENT_ID,
-    assigneeUserId: null,
-    createdByUserId: "local-board",
-    identifier: "PAP-1714",
-    title: "Persist interactions",
-    executionPolicy: null,
-    executionState: null,
-    hiddenAt: null,
-    ...overrides,
-  };
-}
+// The service mocks are stable singletons. Reset their state for each test,
+// but load the large route dependency graph only once per test process.
+registerModuleMocks();
+afterEach(closeRouteServers);
+
+const createIssue = (overrides: Record<string, unknown> = {}) => createMockIssue(ASSIGNEE_AGENT_ID, overrides);
 
 function loadAppModules() {
   return Promise.all([
@@ -292,31 +285,12 @@ async function createApp(actor: Record<string, unknown> = {
   });
   app.use("/api", issueRoutes(mockDb as any, {} as any, routeOptions));
   app.use(errorHandler);
-  return app;
+  return createLoopbackServer(app);
 }
 
-async function resolveMockInteraction(
-  args: unknown[],
-  interaction: Record<string, unknown>,
-) {
-  const mutationOptions = args[4] as {
-    afterResolveInTransaction?: (
-      tx: Record<string, unknown>,
-      resolved: Record<string, unknown>,
-    ) => Promise<void>;
-  } | undefined;
-  await mutationOptions?.afterResolveInTransaction?.({}, interaction);
-  return interaction;
-}
 
 describe("issue thread interaction routes", () => {
   beforeEach(async () => {
-    vi.resetModules();
-    vi.doUnmock("../routes/issues.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    vi.doUnmock("../services/index.js");
-    registerModuleMocks();
     // Every mock here is a vi.hoisted() singleton. All 70+ tests share it.
     // A queued mockResolvedValueOnce() value can outlive its own test and
     // leak into a later, unrelated test. vi.resetAllMocks() drains that
@@ -787,7 +761,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
       "interaction-1",
       { selectedClientKeys: ["task-1"] },
-      expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ userId: "local-board" }), {},
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2);
     expect(mockHeartbeatService.wakeup).toHaveBeenNthCalledWith(
@@ -854,7 +828,7 @@ describe("issue thread interaction routes", () => {
     expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(
       expect.anything(), "interaction-2", {
         answers: [{ questionId: "scope", optionIds: answer.optionIds ?? [], otherText: "Selected files" }],
-      }, expect.anything(),
+      }, expect.anything(), {},
     );
     expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
   });
@@ -873,7 +847,7 @@ describe("issue thread interaction routes", () => {
       .send({ answers: [{ questionId: "scope", optionIds: ["phase-1"] }] });
     if (userId === "paperclip-id:chat-owner") {
       expect(response.status).toBe(200);
-      expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(expect.anything(), "interaction-2", expect.anything(), expect.objectContaining({ userId }));
+      expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(expect.anything(), "interaction-2", expect.anything(), expect.objectContaining({ userId }), {});
       expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
     } else {
       expect(response.status).toBe(403);
@@ -1645,7 +1619,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
       "interaction-checkbox",
       { selectedOptionIds: ["file-b"] },
-      expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ userId: "local-board" }), {},
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -2396,7 +2370,7 @@ describe("issue thread interaction routes", () => {
       expect.anything(),
       "interaction-2",
       expect.anything(),
-      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null }),
+      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null }), {},
     );
     expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
@@ -2467,7 +2441,7 @@ describe("issue thread interaction routes", () => {
         userId: null,
         resolverPolicyRestriction: "anyone",
         suggestedTaskEffectsAuthorized: true,
-      },
+      }, {},
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorType: "agent",
@@ -2517,7 +2491,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({
         agentId: ASSIGNEE_AGENT_ID,
         resolverPolicyRestriction: "anyone",
-      }),
+      }), {},
     );
   });
 
@@ -2929,7 +2903,7 @@ describe("issue thread interaction routes", () => {
       expect.anything(),
       "interaction-open",
       expect.anything(),
-      expect.objectContaining({ agentId: CREATED_AGENT_ID, runId: RUN_9 }),
+      expect.objectContaining({ agentId: CREATED_AGENT_ID, runId: RUN_9 }), {},
     );
   });
 

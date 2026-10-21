@@ -68,6 +68,7 @@ export function createIssueDependencyReadiness(
     issueId,
     blockerIssueIds: [],
     unresolvedBlockerIssueIds: [],
+    unresolvedBlockerIds: [],
     unresolvedBlockerCount: 0,
     pendingFinalizeBlockerIssueIds: [],
     allBlockersDone: true,

@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issueComments, issues, issueThreadInteractions } from "@paperclipai/db";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
+import { hasSavedReviewWait } from "./review-wait.js";
 
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PAPERCLIP_BLOCKED_STATE_INTEGRITY === "true";
@@ -60,8 +61,10 @@ export async function hasPendingHandoffWait(
   commentBody?: string | null,
 ): Promise<boolean> {
   if (!blockedStateIntegrityEnabled() || !issue.assigneeAgentId || !descriptor) return false;
-  if (descriptor.owner === "board" || !("agentId" in descriptor.owner) ||
-      descriptor.owner.agentId !== issue.assigneeAgentId) return false;
+  if (descriptor.owner === "board") {
+    if (!await hasSavedReviewWait(db, issue, issue.assigneeAgentId, descriptor)) return false;
+    commentBody = null;
+  } else if (!("agentId" in descriptor.owner) || descriptor.owner.agentId !== issue.assigneeAgentId) return false;
   const handoff = commentBody?.includes("```handoff") ? { body: commentBody, createdAt: new Date() } :
     await db.select({ body: issueComments.body, createdAt: issueComments.createdAt })
       .from(issueComments).where(and(
