@@ -2626,6 +2626,13 @@
       "when": 1792488075066,
       "tag": "0376_simple_sleeper",
       "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792563986433,
+      "tag": "0377_strange_romulus",
+      "breakpoints": true
     }
   ]
 }

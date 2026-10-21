@@ -84,6 +84,7 @@ import {
 } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
+import { publishHeartbeatRunRuntimeProgress, recordCurrentRunRuntimeProgress } from "../heartbeat-runtime-progress.js";
 import { redactRunPersistencePatch } from "../run-result-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
 import {
@@ -358,61 +359,7 @@ export function decorateHeartbeatRunRuntimeStatus<
   };
 }
 
-export function publishHeartbeatRunRuntimeProgress(status: {
-  companyId: string;
-  runId: string;
-  agentId: string;
-  issueId: string | null;
-  phase: HeartbeatRunStatusPhase;
-  message: string;
-  updatedAt: Date;
-  currentToolName?: string | null;
-  lastAssistantSnippet?: string | null;
-  lastEventAt?: Date | null;
-}) {
-  publishLiveEvent({
-    companyId: status.companyId,
-    type: "heartbeat.run.progress",
-    payload: {
-      runId: status.runId,
-      agentId: status.agentId,
-      issueId: status.issueId,
-      phase: status.phase,
-      message: status.message,
-      currentToolName: status.currentToolName ?? null,
-      lastAssistantSnippet: status.lastAssistantSnippet ?? null,
-      lastEventAt: (status.lastEventAt ?? status.updatedAt).toISOString(),
-      updatedAt: status.updatedAt.toISOString(),
-    },
-  });
-}
-
-function recordHeartbeatRunRuntimeProgress(
-  run: Pick<
-    typeof heartbeatRuns.$inferSelect,
-    "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-  >,
-  update: RuntimeStatusUpdate,
-  issueId: string | null,
-) {
-  if (!isHeartbeatRunRuntimeStatusActive(run.status)) return null;
-  const status = setHeartbeatRunRuntimeStatus({
-    companyId: run.companyId,
-    issueId,
-    agentId: run.agentId,
-    runId: run.id,
-    phase: update.phase as HeartbeatRunStatusPhase,
-    message: update.message,
-    currentToolName: readNonEmptyString(update.currentToolName) ?? null,
-    lastAssistantSnippet:
-      readNonEmptyString(update.lastAssistantSnippet) ?? null,
-    lastEventAt: update.lastEventAt ? new Date(update.lastEventAt) : new Date(),
-  });
-  if (!status) return null;
-
-  publishHeartbeatRunRuntimeProgress(status);
-  return status;
-}
+export { publishHeartbeatRunRuntimeProgress } from "../heartbeat-runtime-progress.js";
 
 function sanitizeLiveRunProgressText(
   value: string,
@@ -992,25 +939,11 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
   }
 
   async function recordCurrentHeartbeatRunRuntimeProgress(
-    run: Pick<
-      typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-    >,
+    run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "status">,
     update: RuntimeStatusUpdate,
     issueId: string | null,
   ) {
-    if (!isHeartbeatRunRuntimeStatusActive(run.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    const currentRun = await getRun(run.id);
-    if (!currentRun || !isHeartbeatRunRuntimeStatusActive(currentRun.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    return recordHeartbeatRunRuntimeProgress(currentRun, update, issueId);
+    return recordCurrentRunRuntimeProgress(db, run, update, issueId);
   }
 
   async function writeRunStatus<T>(status: string, companyId: string | undefined, write: (tx: Db) => Promise<T>) {
