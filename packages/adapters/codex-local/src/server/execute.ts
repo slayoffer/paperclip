@@ -21,6 +21,7 @@ import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
+  resolveAdapterExecutionTargetInPlaceRuntimeRootDir,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesPaperclipBridge,
@@ -860,6 +861,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             runId,
             target: executionTarget,
             adapterKey: "codex",
+            companyId: agent.companyId,
             timeoutSec,
             workspaceLocalDir: cwd,
             workspaceRemoteDir:
@@ -867,6 +869,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 ? targetWorkspaceRealization.authoritativeRoot
                 : undefined,
             syncWorkspace: targetWorkspaceRealization?.mode !== "in_place",
+            // Temporary assets stay outside the worktree. Transcripts persist separately.
+            runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "codex"),
             installCommand: SANDBOX_INSTALL_COMMAND,
             detectCommand: command,
             onProgress: (line) => onLog("stdout", line),
