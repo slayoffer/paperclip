@@ -1,0 +1,3 @@
+# Historical redaction test fixture. Its synthetic HS256 signature has 24 characters.
+# Keep this exception specific to the original commit, file, rule, and line.
+142a17d38b1b4ac5508777d871a7123353a550c7:server/src/__tests__/run-result-redaction.test.ts:jwt:149

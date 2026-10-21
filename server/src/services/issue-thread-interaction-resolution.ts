@@ -7,6 +7,8 @@ import { HttpError } from "../errors.js";
 
 export const ISSUE_THREAD_INTERACTION_RESOLUTION_DENIAL_CODES = [
   "interaction_not_found",
+  "interaction_revision_conflict",
+  "interaction_idempotency_conflict",
   "interaction_run_attribution_required",
   "interaction_scope_denied",
   "interaction_human_only",
