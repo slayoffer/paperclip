@@ -1,3 +1,4 @@
+import { notFound } from "../errors.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { heartbeatRuns, issueRelations, issues, workspaceOperations, type Db } from "@paperclipai/db";
 import { isWorkspaceFinalizationOperationActive } from "./workspace-finalization-activity.js";
@@ -160,6 +161,7 @@ export async function listIssueDependencyReadinessMap(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
   issueIds: string[],
+  requestedBlockers?: { issueId: string; blockerIssueIds: string[] },
 ) {
   const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
   const readinessMap = new Map<string, IssueDependencyReadiness>();
@@ -168,7 +170,21 @@ export async function listIssueDependencyReadinessMap(
   }
   if (uniqueIssueIds.length === 0) return readinessMap;
 
-  const blockerRows = await dbOrTx
+  // Preview the proposed relation without changing the stored graph.
+  const blockerRows = requestedBlockers
+    ? (await dbOrTx
+        .select({
+          blockerIssueId: issues.id,
+          blockerStatus: issues.status,
+          blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+        })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, companyId),
+          inArray(issues.id, [...new Set(requestedBlockers.blockerIssueIds)]),
+        )))
+        .map((row) => ({ ...row, issueId: requestedBlockers.issueId }))
+    : await dbOrTx
     .select({
       issueId: issueRelations.relatedIssueId,
       blockerIssueId: issueRelations.issueId,
@@ -240,4 +256,24 @@ export async function listIssueDependencyReadinessMap(
   }
 
   return readinessMap;
+}
+
+export async function readIssueDependencyReadiness(
+  dbOrTx: any,
+  issueId: string,
+  blockerIssueIds?: string[],
+): Promise<IssueDependencyReadiness> {
+  const issue = await dbOrTx
+    .select({ id: issues.id, companyId: issues.companyId })
+    .from(issues)
+    .where(eq(issues.id, issueId))
+    .then((rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null);
+  if (!issue) throw notFound("Issue not found");
+  const readiness = await listIssueDependencyReadinessMap(
+    dbOrTx,
+    issue.companyId,
+    [issueId],
+    blockerIssueIds === undefined ? undefined : { issueId, blockerIssueIds },
+  );
+  return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
 }
