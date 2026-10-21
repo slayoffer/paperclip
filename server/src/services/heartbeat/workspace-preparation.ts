@@ -116,6 +116,10 @@ export interface HeartbeatWorkspacePreparationInput {
     projectExecutionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
     issueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
     environmentExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
+    /** Parsed issue settings, including the task environment, before isolation gating. */
+    parsedIssueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
+    /** The task environment differs from the reusable workspace binding. */
+    separateTaskEnvironmentBinding: boolean;
     executionPolicy: Parameters<typeof evaluateExecutionAllowlist>[0];
   };
   environment: {
@@ -186,6 +190,8 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     projectExecutionWorkspacePolicy,
     issueExecutionWorkspaceSettings,
     environmentExecutionWorkspaceSettings,
+    parsedIssueExecutionWorkspaceSettings,
+    separateTaskEnvironmentBinding,
     executionPolicy,
   } = input.policy;
   const {
@@ -754,11 +760,11 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     selectedEnvironmentForConfig?.driver === "sandbox" &&
     selectedEnvironmentConfigForFingerprint.reuseLease === true &&
     selectedEnvironmentConfigForFingerprint.runnerLifecycleMode === "warm";
-  // Native provider checkpoints bind to the workspace row, including ordinary
-  // local shared workspaces. Persist that binding independently of the opt-in
-  // isolated-workspace UI, just as warm sandbox continuity already does.
-  const nativeSharedWorkspace = agent.adapterType === "paperclip_runner" &&
-    requestedExecutionWorkspaceMode === "shared_workspace";
+  // Native checkpoints and task environment selection require a saved binding.
+  // Persist it independently of the opt-in isolated-workspace controls.
+  const runtimeSharedWorkspace = separateTaskEnvironmentBinding || (
+    agent.adapterType === "paperclip_runner" && requestedExecutionWorkspaceMode === "shared_workspace"
+  );
   const bindIssueToPersistedExecutionWorkspace = async (
     workspace: ExecutionWorkspace | null,
   ) => {
@@ -772,7 +778,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       issueRef?.executionWorkspacePreference === "reuse_existing" ||
       requestedExecutionWorkspaceMode === "isolated_workspace" ||
       requestedExecutionWorkspaceMode === "operator_branch" ||
-      warmReusableExecutionWorkspace || nativeSharedWorkspace || Boolean(issueId);
+      warmReusableExecutionWorkspace || runtimeSharedWorkspace || Boolean(issueId);
     const nextIssuePatch: TaskWorkspaceBindingPatch = {};
     if (issueExecutionWorkspaceIdForRun !== workspace.id) {
       nextIssuePatch.executionWorkspaceId = workspace.id;
@@ -790,7 +796,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     ) {
       nextIssuePatch.executionWorkspacePreference = "reuse_existing";
       nextIssuePatch.executionWorkspaceSettings = {
-        ...(issueExecutionWorkspaceSettings ?? {}),
+        ...(parsedIssueExecutionWorkspaceSettings ?? {}),
         mode: nextIssueWorkspaceMode,
       };
     }
@@ -808,7 +814,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const baseExecutionWorkspaceMetadata =
     mergeExecutionWorkspaceMetadataForPersistence({
       existingMetadata:
-        resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace
+        resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace && !separateTaskEnvironmentBinding
           ? (reusableExistingExecutionWorkspace?.metadata ?? null)
           : null,
       source: executionWorkspace.source,
@@ -819,11 +825,11 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       strategyType: executionWorkspace.strategy,
       configSnapshot,
       shouldReuseExisting:
-        resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace,
+        resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace && !separateTaskEnvironmentBinding,
       shouldRefreshConfigSnapshot:
         resolvedWorkspaceReusePolicy.shouldRefreshWorkspaceConfigSnapshot,
       workspaceConfigMetadata:
-        resolvedWorkspaceReusePolicy.shouldPersistLatestWorkspaceConfigMetadata
+        separateTaskEnvironmentBinding || resolvedWorkspaceReusePolicy.shouldPersistLatestWorkspaceConfigMetadata
           ? latestWorkspaceConfigMetadata
           : null,
       baseRef: executionWorkspace.repoRef,
@@ -868,6 +874,10 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     ...(taskWorkspaceOwner && !pluginPrepared ? { runnerTaskWorkspaceOwner: taskWorkspaceOwner } : {}),
     ...(providerFresh && pluginTaskWorkspace && !pluginPrepared ? { runnerTaskFreshWorkspace: providerFresh } : {}),
     ...(copyOnlyProvisioning ? { [CONTROLLER_PROVISION_COPY_ONLY]: true } : {}),
+    ...(separateTaskEnvironmentBinding ? {
+      taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
+      createdByRuntime: false,
+    } : {}),
     ...(persistedWorktreeInstanceRoot
       ? {
           [WORKTREE_INSTANCE_ROOT_METADATA_KEY]:
@@ -885,7 +895,8 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       pluginPrepared ? await executionWorkspacesSvc.update(pluginPrepared.id, { metadata: nextExecutionWorkspaceMetadata }) :
       freshTaskReservation ? await executionWorkspacesSvc.update(freshTaskReservation.id, { metadata: nextExecutionWorkspaceMetadata }) :
       resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
-      reusableExistingExecutionWorkspace
+      reusableExistingExecutionWorkspace &&
+      !separateTaskEnvironmentBinding
         ? await timeWorkspace("workspace_record_update", () => executionWorkspacesSvc.update(
             reusableExistingExecutionWorkspace.id,
             {
@@ -914,6 +925,9 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
               projectId: resolvedProjectId,
               projectWorkspaceId: resolvedProjectWorkspaceId,
               sourceIssueId: issueRef?.id ?? null,
+              ...(separateTaskEnvironmentBinding ? {
+                derivedFromExecutionWorkspaceId: reusableExistingExecutionWorkspace!.id,
+              } : {}),
               mode:
                 requestedExecutionWorkspaceMode === "isolated_workspace"
                   ? "isolated_workspace"
@@ -1015,6 +1029,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     activeWorkspaceId: persistedExecutionWorkspace?.id ?? null,
   }));
   if (
+    !separateTaskEnvironmentBinding &&
     reusableExistingExecutionWorkspace &&
     persistedExecutionWorkspace &&
     reusableExistingExecutionWorkspace.id !==

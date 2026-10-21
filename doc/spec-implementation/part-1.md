@@ -7,6 +7,7 @@ This document is the concrete, build-ready V1 contract.
 When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
 The Synthiq fork provides an optional [guarded pull queue](../pull-queue.md).
+Task-only [environment selection](../workspace-operations.md#task-environment-selection) precedes defaults and preserves inherited workspace bindings.
 `PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
 The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
 

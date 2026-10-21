@@ -4278,6 +4278,10 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   if (input.workspace.providerType === "plugin") throw new Error("Managed workspace cleanup requires its storage plugin");
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
+  // Environment bindings borrow the source checkout. Only its owner removes it.
+  if (typeof input.workspace.metadata?.taskEnvironmentSourceWorkspaceId === "string") {
+    return { cleanedPath: workspacePath, cleaned: false, warnings };
+  }
   const isolatedSource = await verifiedRecordedIsolatedRemoteSource(input.workspace);
   const repoRoot = input.workspace.providerType === "git_worktree" && workspacePath
     ? await resolveGitRepoRootForWorkspaceCleanup(

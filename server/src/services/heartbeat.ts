@@ -2392,6 +2392,7 @@ export function heartbeatService(
       const parsedIssueExecutionWorkspaceSettings =
         parseIssueExecutionWorkspaceSettings(
           issueContext?.executionWorkspaceSettings,
+          { includeEnvironmentId: true },
         );
       const issueExecutionWorkspaceSettings = runtimeWorkspaceSelectionEnabled
         ? parsedIssueExecutionWorkspaceSettings
@@ -2601,16 +2602,17 @@ export function heartbeatService(
         materializeNativeChatWorktree,
         explicitTaskDirectory,
         useIsolatedTaskDirectory,
+        separateTaskEnvironmentBinding,
       } = await timePreparation("environment_selection", () => selectHeartbeatEnvironment(db, {
         run, agent,
         task: { issueRef, issueContext, issueId, context, executionProjectId, workspaceProjectContext, boundSourceWorkspace,
           freshWorkspace, hasSelectedWorkspaceSource: Boolean(selectedWorkspaceSource), taskWorkspaceIntent: taskWorkspaceIntentRow?.intent ?? null, responsibleUserId },
         policy: {
           trustPreset, requestedExecutionWorkspaceMode, isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
-          projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings,
+          projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, environmentExecutionWorkspaceSettings,
         },
         config: { config, sourceWorkspaceConfig, issueAssigneeOverrides },
-        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder },
+        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder, envOrchestrator },
       }));
       let nativeChatExpectedCwd = selectedNativeChatExpectedCwd;
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {
@@ -2698,6 +2700,8 @@ export function heartbeatService(
           projectExecutionWorkspacePolicy,
           issueExecutionWorkspaceSettings,
           environmentExecutionWorkspaceSettings,
+          parsedIssueExecutionWorkspaceSettings,
+          separateTaskEnvironmentBinding,
           executionPolicy,
         },
         environment: {
