@@ -92,6 +92,55 @@ describeDatabase("blocked-state holds and stale waits", () => {
     })).rejects.toMatchObject({ status: 403 });
   });
 
+  it.each([
+    [false, "field order"], [true, "field order"],
+    [false, "action head case"], [true, "action head case"],
+    [false, "manifest head case"], [true, "manifest head case"],
+  ] as const)("preserves saved handoff %s/%s through the route", async (integrity, variation) => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", String(integrity));
+    const head = "abcdef0123".repeat(4);
+    const fields = [`repo: slayoffer/paperclip`, `base: ${"b".repeat(40)}`,
+      `head: ${variation === "manifest head case" ? head.toUpperCase() : head}`, `branch: review/${source.identifier}`];
+    if (variation === "field order") fields.unshift(fields.splice(2, 1)[0]!);
+    await db.insert(issueComments).values({ companyId, issueId: source.id, authorAgentId: agentId,
+      body: `\`\`\`handoff\n${fields.join("\n")}\n\`\`\`` });
+    const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running",
+      contextSnapshot: { issueId: source.id } }).returning();
+    await db.update(issues).set({ checkoutRunId: run!.id, executionRunId: run!.id }).where(eq(issues.id, source.id));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "agent", companyId, agentId, runId: run!.id, source: "agent_jwt" };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as never));
+    app.use(errorHandler);
+    const unblockDescriptor = { owner: "board" as const,
+      action: `waiting for the cross-vendor review of ${variation === "action head case" ? head.toUpperCase() : head}` };
+    const res = await request(app).patch(`/api/issues/${source.id}`).send({ status: "blocked", unblockDescriptor });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ status: "blocked", assigneeAgentId: agentId, unblockDescriptor });
+    expect(await svc.getById(source.id)).toMatchObject({ status: "blocked", unblockDescriptor });
+    expect(heartbeat.wakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["Cross-vendor review r15 REJECTED", "Merge go:", "Self-merge accepted:"])(
+    "refuses a saved board wait after %s", async verdict => {
+      const head = "abcdef0123".repeat(4);
+      await db.insert(issueComments).values([
+        { companyId, issueId: source.id, authorAgentId: agentId, createdAt: new Date(Date.now() - 60_000),
+          body: `\`\`\`handoff\nhead: ${head.toUpperCase()}\nbranch: review/${source.identifier}\nrepo: slayoffer/paperclip\nbase: ${"B".repeat(40)}\n\`\`\`` },
+        { companyId, issueId: source.id, authorUserId: "board", body: `${verdict} head ${head}` },
+      ]);
+      await expect(assertBlockedIssueUpdate({
+        db, actor: { type: "agent", companyId, agentId, source: "agent_jwt" }, existing: source,
+        updateFields: { status: "blocked", unblockDescriptor: { owner: "board",
+          action: `waiting for the cross-vendor review of ${head}` } },
+        getDependencyReadiness: svc.getDependencyReadiness,
+      })).rejects.toMatchObject({ status: 422 });
+    },
+  );
+
   async function assertTitleEdit(blockerIds: string[]) {
     const existing = (await svc.getById(source.id))!;
     for (const requestedBlockerIds of [undefined, blockerIds]) {

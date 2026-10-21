@@ -3,7 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issueComments, issues, issueThreadInteractions } from "@paperclipai/db";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
-import { hasSavedReviewWait } from "./review-wait.js";
+import { hasSavedReviewWait, parseReviewHandoffManifest } from "./review-wait.js";
 
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PAPERCLIP_BLOCKED_STATE_INTEGRITY === "true";
@@ -73,8 +73,8 @@ export async function hasPendingHandoffWait(
         like(issueComments.body, "%```handoff%"),
       )).orderBy(desc(issueComments.createdAt), desc(issueComments.id)).limit(1).then(rows => rows[0]);
   if (!handoff) return false;
-  const manifest = handoff.body.match(/^```handoff\r?\nrepo: [\w.-]+\/[\w.-]+\r?\nbase: [a-f0-9]{40}\r?\nhead: ([a-f0-9]{40})\r?\nbranch: ([^\r\n]+)\r?\n```/m);
-  if (!manifest || manifest[2] !== `review/${issue.identifier}` || !descriptor.action.includes(manifest[1]!)) return false;
+  const manifest = parseReviewHandoffManifest(handoff.body);
+  if (!manifest || manifest.branch !== `review/${issue.identifier}` || !descriptor.action.toLowerCase().includes(manifest.head)) return false;
   const later = await db.select({ body: issueComments.body }).from(issueComments).where(and(
     eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
     gt(issueComments.createdAt, handoff.createdAt), isNull(issueComments.deletedAt),
