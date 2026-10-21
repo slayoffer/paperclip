@@ -22464,11 +22464,11 @@ export function heartbeatService(
         selectedEnvironmentForConfig?.driver === "sandbox" &&
         selectedEnvironmentConfigForFingerprint.reuseLease === true &&
         selectedEnvironmentConfigForFingerprint.runnerLifecycleMode === "warm";
-      // Native provider checkpoints bind to the workspace row, including ordinary
-      // local shared workspaces. Persist that binding independently of the opt-in
-      // isolated-workspace UI, just as warm sandbox continuity already does.
-      const nativeSharedWorkspace = agent.adapterType === "paperclip_runner" &&
-        requestedExecutionWorkspaceMode === "shared_workspace";
+      // Native checkpoints and task environment selection require a saved binding.
+      // Persist it independently of the opt-in isolated-workspace controls.
+      const runtimeSharedWorkspace = separateTaskEnvironmentBinding || (
+        agent.adapterType === "paperclip_runner" && requestedExecutionWorkspaceMode === "shared_workspace"
+      );
       const bindIssueToPersistedExecutionWorkspace = async (
         workspace: ExecutionWorkspace | null,
       ) => {
@@ -22482,7 +22482,7 @@ export function heartbeatService(
           issueRef?.executionWorkspacePreference === "reuse_existing" ||
           requestedExecutionWorkspaceMode === "isolated_workspace" ||
           requestedExecutionWorkspaceMode === "operator_branch" ||
-          warmReusableExecutionWorkspace || nativeSharedWorkspace;
+          warmReusableExecutionWorkspace || runtimeSharedWorkspace;
         const nextIssuePatch: Record<string, unknown> = {};
         if (issueExecutionWorkspaceIdForRun !== workspace.id) {
           nextIssuePatch.executionWorkspaceId = workspace.id;
@@ -22511,7 +22511,7 @@ export function heartbeatService(
             db,
             undefined,
             undefined,
-            { bindRuntimeSharedWorkspace: (warmReusableExecutionWorkspace || nativeSharedWorkspace) && workspace.mode === "shared_workspace" },
+            { bindRuntimeSharedWorkspace: (warmReusableExecutionWorkspace || runtimeSharedWorkspace) && workspace.mode === "shared_workspace" },
           );
           issueExecutionWorkspaceIdForRun = workspace.id;
           issueProjectWorkspaceIdForRun =
