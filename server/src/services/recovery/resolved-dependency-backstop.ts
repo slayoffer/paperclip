@@ -1,3 +1,5 @@
+import { dispatchPendingDependencyReleaseWakes } from "../dependency-release-wakes.js";
+import { hasNonDependencyBlockedWait, blockedStateIntegrityEnabled } from "../blocked-state-integrity.js";
 import type { Db } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import { logActivity } from "../activity-log.js";
@@ -52,6 +54,12 @@ export function createResolvedDependencyWakeBackstop(db: Db, deps: {
       issueIds: [] as string[],
     };
 
+    const dispatch = await dispatchPendingDependencyReleaseWakes(db, deps.enqueueWakeup, opts);
+    result.checked += dispatch.checked;
+    result.healed += dispatch.healed;
+    result.deferredOrFailed += dispatch.deferredOrFailed;
+    result.enqueueFailed += dispatch.enqueueFailed;
+    result.issueIds.push(...dispatch.issueIds);
     const source = opts?.source ?? "issue_graph_liveness.backstop";
     const requestedByActorId =
       source === "workspace.finalize"
@@ -81,7 +89,7 @@ export function createResolvedDependencyWakeBackstop(db: Db, deps: {
     const candidates = candidateRows.map(
       ({ totalCount: _totalCount, ...candidate }) => candidate,
     );
-    result.checked = candidates.length;
+    result.checked += candidates.length;
     result.candidateLimitSkipped = Math.max(
       0,
       totalCandidateCount - candidates.length,
@@ -144,12 +152,22 @@ export function createResolvedDependencyWakeBackstop(db: Db, deps: {
           continue;
         }
 
-        // Reuse the dependency state key across release paths.
+        if (await hasNonDependencyBlockedWait(db, candidate.id)) {
+          result.notReadySkipped += 1;
+          continue;
+        }
+        if (blockedStateIntegrityEnabled()) await issuesSvc.listWakeableBlockedDependents(resolvedBlockerIssueId);
+
+        // Level-triggered dedup: key on the full blocker set (the current ready
+        // state), not on any single resolved edge. An older completed per-edge
+        // wake for an earlier partial resolution has a different key, so it does
+        // not suppress this wake. The shared helper still suppresses a duplicate
+        // wake for the SAME ready state, which bounds reconciliation.
         const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
           blockedTransitionAt: candidate.blockedTransitionAt,
-        }) + ":release";
+        }) + (blockedStateIntegrityEnabled() ? "" : ":release");
         if (!(await releaseReadyDependencyWait(db, companyId, candidate.id))) {
           result.notReadySkipped += 1;
           continue;
@@ -161,7 +179,7 @@ export function createResolvedDependencyWakeBackstop(db: Db, deps: {
             blockerIssueIds: readiness.blockerIssueIds,
             blockedTransitionAt: candidate.blockedTransitionAt,
           });
-        if (existingWake && (existingWake.status !== "completed" || existingWake.idempotencyKey?.endsWith(":release"))) {
+        if (existingWake && (blockedStateIntegrityEnabled() || existingWake.status !== "completed" || existingWake.idempotencyKey?.endsWith(":release"))) {
           result.existingWakeSkipped += 1;
           continue;
         }

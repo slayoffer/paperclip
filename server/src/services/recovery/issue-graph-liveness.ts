@@ -1,3 +1,5 @@
+import { issueLabel, pathEntry, readRecord, readPositiveInteger, readDateMs } from "./issue-graph-values.js";
+import { blockerIsResolved } from "../blocked-state-integrity.js";
 import { getAgentWorkEligibility, isAgentInvokable } from "@paperclipai/shared";
 import { buildIssueGraphLivenessIncidentKey } from "./origins.js";
 
@@ -132,19 +134,6 @@ export interface IssueGraphLivenessInput {
   now?: Date | string;
 }
 
-function issueLabel(issue: IssueLivenessIssueInput) {
-  return issue.identifier ?? issue.id;
-}
-
-function pathEntry(issue: IssueLivenessIssueInput): IssueLivenessDependencyPathEntry {
-  return {
-    issueId: issue.id,
-    identifier: issue.identifier,
-    title: issue.title,
-    status: issue.status,
-  };
-}
-
 function isInvokableAgent(
   agent: IssueLivenessAgentInput | null | undefined,
   agentsById: Map<string, IssueLivenessAgentInput>,
@@ -169,23 +158,6 @@ function hasWaitingPath(
   waitingPaths: IssueLivenessWaitingPathInput[],
 ) {
   return waitingPaths.some((entry) => entry.companyId === companyId && entry.issueId === issueId);
-}
-
-function readRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function readPositiveInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function readDateMs(value: unknown): number | null {
-  if (!(typeof value === "string" || value instanceof Date)) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  const time = date.getTime();
-  return Number.isNaN(time) ? null : time;
 }
 
 function monitorFromIssue(issue: IssueLivenessIssueInput) {
@@ -506,8 +478,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       blocked &&
       blocker.companyId === relation.companyId &&
       blocked.companyId === relation.companyId &&
-      blocker.status !== "done" &&
-      blocker.status !== "cancelled" &&
+      !blockerIsResolved(blocker.status) && blocker.status !== "cancelled" &&
       blocked.status === "blocked"
     ) {
       unresolvedBlockers.add(blocker.id);
@@ -701,7 +672,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     for (const relation of relations) {
       if (relation.companyId !== current.companyId || relation.companyId !== source.companyId) continue;
       const blocker = issuesById.get(relation.blockerIssueId);
-      if (!blocker || blocker.companyId !== source.companyId || blocker.status === "done") continue;
+      if (!blocker || blocker.companyId !== source.companyId || blockerIsResolved(blocker.status)) continue;
       const path = [...dependencyPath, blocker];
 
       if (blocker.status === "blocked") {
@@ -721,7 +692,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     const hasUnresolvedBlockerEdge = (blockersByBlockedIssueId.get(issue.id) ?? []).some((relation) => {
       if (relation.companyId !== issue.companyId) return false;
       const blocker = issuesById.get(relation.blockerIssueId);
-      return Boolean(blocker && blocker.companyId === issue.companyId && blocker.status !== "done");
+      return Boolean(blocker && blocker.companyId === issue.companyId && !blockerIsResolved(blocker.status));
     });
     const shouldInspectBlockedChain = issue.status === "blocked" || (
       issue.status !== "done" &&

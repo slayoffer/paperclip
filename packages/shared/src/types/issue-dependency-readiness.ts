@@ -1,9 +1,4 @@
-export type IssueUnblockOwner = { agentId: string } | { userId: string } | "board";
-
-export interface IssueUnblockDescriptor {
-  owner: IssueUnblockOwner;
-  action: string;
-}
+export type { IssueUnblockOwner, IssueUnblockDescriptor } from "./issue-unblock.js";
 
 export interface IssueDependencyReadiness {
   isDependencyReady: boolean;
