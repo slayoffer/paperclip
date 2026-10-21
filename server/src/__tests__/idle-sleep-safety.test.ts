@@ -171,7 +171,11 @@ if (!support.supported) console.warn(`Skipping idle sleep Postgres tests: ${supp
     database = await startEmbeddedPostgresTestDatabase("idle-sleep-safety-");
     db = createDb(database.connectionString);
   }, 60_000);
-  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    }); });
   afterAll(async () => { await database?.cleanup(); });
 
   const read = () => readIdleSleepSafety(db, owned, () => now, ownerId, emptyLocal);

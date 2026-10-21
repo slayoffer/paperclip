@@ -1,3 +1,4 @@
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -63,7 +64,7 @@ describeEmbeddedPostgres("heartbeat queued-run claim isolation", () => {
     mockAdapterExecute.mockClear();
     runningProcesses.clear();
     // Executed runs write to many company-scoped tables; clear them all.
-    await db.execute(sql`truncate table ${companies} cascade`);
+    await clearCompanyFixtures(db);
   });
 
   afterAll(async () => {
