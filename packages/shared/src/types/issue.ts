@@ -1,6 +1,10 @@
 import type { ChatProvider } from "./chat-channels.js";
 import type { TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "./task-workspace.js";
 import type { ExecutionProjection, ExecutionBlocker, TaskInterruptionPresentation } from "./execution-projection.js";
+import type { IssueRecoveryAction } from "./issue-recovery-action.js";
+export type { IssueRecoveryAction } from "./issue-recovery-action.js";
+import type { IssueUnblockDescriptor, IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+export type { IssueUnblockOwner, IssueUnblockDescriptor, IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import type {
   IssueCommentAuthorType,
   IssueCommentMetadataRowType,
@@ -590,48 +594,6 @@ export interface IssueBlockedInboxAttention {
   };
 }
 
-export type IssueUnblockOwner = { agentId: string } | { userId: string } | "board";
-
-export interface IssueUnblockDescriptor {
-  owner: IssueUnblockOwner;
-  action: string;
-}
-
-export interface IssueRecoveryAction {
-  /** Read-only activity of the exact native run named by the wake policy. */
-  nativeRunActivity?: {
-    runId: string;
-    status: "queued" | "running";
-    workspaceOperationId: string | null;
-  } | null;
-  id: string;
-  companyId: string;
-  sourceIssueId: string;
-  recoveryIssueId: string | null;
-  kind: IssueRecoveryActionKind;
-  status: IssueRecoveryActionStatus;
-  ownerType: IssueRecoveryActionOwnerType;
-  ownerAgentId: string | null;
-  ownerUserId: string | null;
-  previousOwnerAgentId: string | null;
-  returnOwnerAgentId: string | null;
-  cause: string;
-  fingerprint: string;
-  evidence: Record<string, unknown>;
-  nextAction: string;
-  wakePolicy: Record<string, unknown> | null;
-  monitorPolicy: Record<string, unknown> | null;
-  attemptCount: number;
-  maxAttempts: number | null;
-  timeoutAt: Date | string | null;
-  lastAttemptAt: Date | string | null;
-  outcome: IssueRecoveryActionOutcome | null;
-  resolutionNote: string | null;
-  resolvedAt: Date | string | null;
-  createdAt: Date | string;
-  updatedAt: Date | string;
-}
-
 export type SuccessfulRunHandoffStateKind = "required" | "resolved" | "escalated";
 
 export interface SuccessfulRunHandoffState {
@@ -918,6 +880,7 @@ export interface Issue {
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
+  dependencyReadiness?: IssueDependencyReadiness;
   blockerAttention?: IssueBlockerAttention;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
@@ -998,6 +961,7 @@ export type CompactIssue = Pick<
   labelIds?: string[];
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
+  dependencyReadiness?: IssueDependencyReadiness;
   blockerAttention?: IssueBlockerAttention;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;

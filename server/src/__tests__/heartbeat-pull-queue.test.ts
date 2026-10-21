@@ -90,7 +90,7 @@ databaseTests("event-driven pull queue", () => {
     expect(wakeup.mock.calls[0][1].payload?.issueId).toBe(next.id);
   });
 
-  it("skips open blockers and pending cards, and resolves cancelled blockers only with the switch", async () => {
+  it("skips open blockers and pending cards, and resolves cancelled blockers without the switch", async () => {
     const blocker = await task({ status: "in_progress", assigneeAgentId: null });
     const dependent = await task({ priority: "critical" });
     await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: dependent.id, type: "blocks" });
@@ -109,7 +109,7 @@ databaseTests("event-driven pull queue", () => {
     await queue.notify(companyId);
     expect(wakeup.mock.calls[1][1].payload?.issueId).toBe(dependent.id);
     vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", "false");
-    expect((await svc.getDependencyReadiness(dependent.id)).isDependencyReady).toBe(false);
+    expect((await svc.getDependencyReadiness(dependent.id)).isDependencyReady).toBe(true);
     expect(await svc.listWakeableBlockedDependents(blocker.id)).toEqual([]);
   });
 
