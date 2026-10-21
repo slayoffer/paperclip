@@ -66,6 +66,23 @@ The Docker test requires permissions in the pack stage before the production cop
 It also rejects a second recursive permission change in the production stage.
 These corrections preserve the existing retry, access, and image permission behavior.
 
+## Issue read checks across release updates
+
+The issue read workflow also tests the pull request merge commit.
+Its previous checkout used the request head alone.
+A newer release workflow then requested three suites absent from an older head.
+Vitest passed the seven available suites, but the required benchmark file was absent.
+The job failed despite 84 passing tests.
+The merge checkout includes the release target and the proposed changes.
+Its contract checks every requested suite before dependency installation.
+It rejects checkout overrides and requires the benchmark output check.
+
+```sh
+node --test .github/scripts/tests/issue-read-workflow.test.mjs
+```
+
+This correction keeps the issue read job's action pins, permissions, tests, and limits.
+
 ## Action references
 
 These are the workflow's only action references. Both belong to GitHub.
