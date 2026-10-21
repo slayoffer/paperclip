@@ -1,0 +1,36 @@
+name: Synthiq image checks
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - Dockerfile
+      - .github/scripts/synthiq-image.mjs
+      - .github/scripts/tests/synthiq-image.test.mjs
+      - .github/workflows/synthiq-image.yml
+      - .github/workflows/synthiq-image-checks.yml
+      - .github/actionlint.yaml
+permissions:
+  contents: read
+jobs:
+  publication-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Test publication and recovery
+        run: node --test .github/scripts/tests/synthiq-image.test.mjs
+      - name: Check workflow syntax
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL --retry 3 --max-time 60 -o "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" .github/workflows/synthiq-image.yml .github/workflows/synthiq-image-checks.yml

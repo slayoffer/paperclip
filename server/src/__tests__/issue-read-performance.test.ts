@@ -71,7 +71,7 @@ suite("issue read projections with large run payloads", () => {
   afterAll(async () => { await database?.cleanup(); });
 
   it("backfills stored values when the migration sees historical rows", async () => {
-    const migration = readFileSync(new URL("../../../packages/db/src/migrations/0306_futuristic_lethal_legion.sql", import.meta.url), "utf8");
+    const migration = readFileSync(new URL("../../../packages/db/src/migrations/0308_strange_romulus.sql", import.meta.url), "utf8");
     await db.transaction(async (tx) => {
       await tx.execute(sql`create temporary table heartbeat_runs (company_id uuid, agent_id uuid,
         created_at timestamptz, context_snapshot jsonb, result_json jsonb, status text) on commit drop`);

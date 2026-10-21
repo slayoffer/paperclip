@@ -25,11 +25,24 @@ export function isPreDispatchReviewWait(
     run.controllerBootId === null && run.controllerLeaseExpiresAt === null && run.executionStage === null;
 }
 
+/** The dispatch gate cancelled this attempt before any executor claimed it. */
+export function isPreDispatchDependencyWait(run: Run): boolean {
+  return run.runtimeMode === "legacy" && run.status === "cancelled" &&
+    run.errorCode === "issue_dependencies_blocked" &&
+    (run.scheduledRetryAt !== null ||
+      (run.resultJson?.stopReason === run.errorCode && run.resultJson?.timeoutSource === "stale_queued_run_gate")) &&
+    run.resultJson?.workspaceRestoreFailure !== "restore_unsafe_archive" &&
+    run.startedAt === null && run.runtimeModeResolvedAt === null &&
+    run.processPid === null && run.processGroupId === null && run.processStartedAt === null &&
+    run.nativeIssueId === null && run.nativeSessionId === null && run.sessionIdAfter === null &&
+    run.controllerBootId === null && run.controllerLeaseExpiresAt === null && run.executionStage === null;
+}
+
 /** The row receipt is a candidate, not permission to discard conflicting
  * retained execution or cleanup evidence. Historical false holds must be
  * checked against the same evidence that gates explicit user admission. */
-export async function isPreDispatchReviewWaitVerified(db: Db, run: Run): Promise<boolean> {
-  if (!isPreDispatchReviewWait(run)) return false;
+export async function isPreDispatchWaitVerified(db: Db, run: Run): Promise<boolean> {
+  if (!isPreDispatchReviewWait(run) && !isPreDispatchDependencyWait(run)) return false;
   const [coordinator] = await db.select({ id: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
     eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
   )).limit(1);

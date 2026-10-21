@@ -22,7 +22,7 @@ The activity query reads stored issue and task identifiers through the
 
 ## Migration
 
-Migration `0306_futuristic_lethal_legion` adds stored generated columns.
+Migration `0308_strange_romulus` adds stored generated columns.
 PostgreSQL computes these values for existing rows and future writes.
 The migration combines the columns in one table rewrite.
 It also creates a covering index for company, agent, creation time, and task ids.

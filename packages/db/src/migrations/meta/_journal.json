@@ -2133,8 +2133,22 @@
     {
       "idx": 306,
       "version": "7",
-      "when": 1792460872195,
-      "tag": "0306_futuristic_lethal_legion",
+      "when": 1792433293974,
+      "tag": "0306_exotic_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0307_simple_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 308,
+      "version": "7",
+      "when": 1792563986433,
+      "tag": "0308_strange_romulus",
       "breakpoints": true
     }
   ]

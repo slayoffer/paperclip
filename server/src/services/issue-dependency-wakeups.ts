@@ -209,7 +209,8 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
         ),
     ),
   ];
-  const lookupKeys = [...new Set([cycleKey, oldStateKey, ...legacyKeyList])];
+  const releaseKey = `${cycleKey}:release`;
+  const lookupKeys = [...new Set([releaseKey, cycleKey, oldStateKey, ...legacyKeyList])];
   const blockedTransitionAt = parseWakeCycleDate(input.blockedTransitionAt);
 
   const rows = await db
@@ -227,7 +228,8 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       ),
     );
 
-  const covering = rows.find((row) =>
+  const covering = rows.find(row => row.idempotencyKey === releaseKey
+    && IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(row.status)) ?? rows.find((row) =>
     wakeCoversIssueBlockersResolvedReadyState(row, {
       cycleKey,
       oldStateKey,
