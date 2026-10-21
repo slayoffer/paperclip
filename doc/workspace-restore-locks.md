@@ -9,7 +9,9 @@ locking. Network filesystems that do not provide that locking are not supported.
 Each target has a permanent `<hash>.lock.sqlite` file. An open SQLite
 `BEGIN IMMEDIATE` transaction holds its reserved file lock for the entire write
 operation. Contenders retry without blocking the Node event loop, up to the
-existing 30-second limit. Closing the connection releases the lock; the operating
+15-minute default. `PAPERCLIP_RESTORE_LOCK_WAIT_MS` overrides this limit in
+milliseconds. Set a positive safe integer. Invalid values retain the default.
+The setting uses the caller environment. Closing the connection releases the lock. The operating
 system also releases it when the process exits or crashes. Independent targets
 use different files and can proceed concurrently.
 
@@ -27,6 +29,28 @@ write to it.** Its stable inode is part of the locking contract. Replacing it
 could let two writers lock different files for the same target. Files remain
 after release, including for targets that no longer exist. Their diagnostic
 owner sidecars are normally removed after release.
+
+## Restore contention and timings
+
+Directory merges reserve a shared operation slot before they request the lock.
+A nested SSH restore retains its existing slot. The locked merge never waits
+for another operation slot.
+
+A private target scan hashes content before lock acquisition. The locked scan
+checks each file's device, inode, size, mode, and nanosecond modification and
+change timestamps. It reuses a hash only when all fields match the same local
+target. A changed file requires a new hash. A file that changes during hashing
+fails the optional cache scan. Concurrent renames during that scan discard
+that cache. The locked scan then reads content again.
+
+Metadata stays in a private temporary manifest. Serialized baselines cannot
+supply metadata authority. Merge rules and baseline hashes remain unchanged.
+The private manifest is removed after success or failure.
+
+Run logs report `Workspace merge lock wait` and `Workspace merge lock hold`.
+Each line uses the existing step format and reports elapsed milliseconds.
+Failure lines retain timing evidence. These lines contain no target paths,
+process identifiers, or owner metadata. A log failure cannot retain the lock.
 
 ## Upgrade from directory locks
 
