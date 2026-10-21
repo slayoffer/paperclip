@@ -65,6 +65,14 @@ Its tests still require one base lookup when enrichment fails, including readine
 The Docker test requires permissions in the pack stage before the production copy.
 It also rejects a second recursive permission change in the production stage.
 These corrections preserve the existing retry, access, and image permission behavior.
+A later run found two stale conversation cancellation fixtures in `agent-auth-middleware.test.ts`.
+The fixture now returns the stored `conversationMode` and `writesRevoked` scalar values.
+Its query mock returns only selected fields, so cancellation tests cannot use omitted JSON payloads.
+The tests preserve exact denial codes and read access for stopped runs.
+They also confirm write access for active ordinary and conversation runs.
+The test entry point imports cases and fixtures from smaller modules.
+This split satisfies the commit hook's file size limit.
+The database projection and runtime behavior remain unchanged.
 
 ## Issue read checks across release updates
 
