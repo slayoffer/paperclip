@@ -1,3 +1,4 @@
+import { issueUnblockDescriptorSchema } from "./issue-unblock.js";
 import { isValidExistingBranchName } from "./issue-branch-name.js";
 export { isValidExistingBranchName } from "./issue-branch-name.js";
 import {
@@ -679,18 +680,7 @@ const createIssueBaseSchema = z.object({
   goalId: z.string().guid().optional().nullable(),
   parentId: z.string().guid().optional().nullable(),
   blockedByIssueIds: z.array(z.string().guid()).optional(),
-  unblockDescriptor: z
-    .object({
-      owner: z.union([
-        z.object({ agentId: z.string().guid() }).strict(),
-        z.object({ userId: z.string().trim().min(1) }).strict(),
-        z.literal("board"),
-      ]),
-      action: multilineTextSchema.pipe(z.string().trim().min(1).max(2_000)),
-    })
-    .strict()
-    .optional()
-    .nullable(),
+  unblockDescriptor: issueUnblockDescriptorSchema,
   inheritExecutionWorkspaceFromIssueId: z.string().guid().optional().nullable(),
   title: z.string().min(1),
   description: multilineTextSchema.optional().nullable(),
