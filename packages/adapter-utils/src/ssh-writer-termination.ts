@@ -33,14 +33,15 @@ export function trackSshWriterCommand(command: string, remoteWorkspacePath: stri
     } catch { process.exit(1); }
   `;
   const writer = `node -e ${shellQuote(record)} ${shellQuote(marker)} ${shellQuote(unit)}; ${command}`;
-  return [
+  // Keep every wrapper command behind the caller's directory-change guard.
+  return `{ ${[
     "umask 077",
     `mkdir -p ${shellQuote(directory)} || exit 125`,
     // Every invocation needs a record, including uncontained fallback commands.
     `printf 'uncontained\\n' > ${shellQuote(marker)} || exit 125`,
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
     `if [ -r /sys/fs/cgroup/cgroup.controllers ] && command -v systemd-run >/dev/null 2>&1 && systemd-run --help | grep -q -- --expand-environment && systemctl --user show-environment >/dev/null 2>&1; then exec systemd-run --user --scope --quiet --expand-environment=no --unit=${shellQuote(unit)} sh -c ${shellQuote(writer)}; else ${command}; fi`,
-  ].join("; ");
+  ].join("; ")}; }`;
 }
 
 /** A cgroup includes descendants in new sessions and process groups. Its

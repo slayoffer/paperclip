@@ -72,6 +72,7 @@ jobs:
           packages/adapter-utils/src/github-launcher-environment.test.ts
           packages/adapter-utils/src/workspace-restore-merge.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
+          packages/adapter-utils/src/ssh-command.test.ts
           packages/adapter-utils/src/ssh-git-remotes.test.ts
           server/src/services/heartbeat-github-launchers.test.ts
           server/src/__tests__/heartbeat-ssh-in-place.test.ts
