@@ -1,3 +1,4 @@
+import { resolveConnectionCredentialUpdate, upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
 import { selectVaultConnectionGrant } from "./connection-vault-grant.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
@@ -5951,80 +5952,8 @@ export function toolAccessService(
       requestedScopes: string[];
     },
   ) {
-    const providerTenantWithOauth = (
-      current: (typeof connectionGrants.$inferSelect)["providerTenant"],
-    ) =>
-      oauthProvenance
-        ? {
-            ...(current ?? {}),
-            oauth: {
-              ...(current?.oauth ?? {}),
-              scopes: oauthProvenance.scopes,
-              scopeSource: oauthProvenance.scopeSource,
-              unrequestedScopes: oauthProvenance.unrequestedScopes,
-              requestedScopes: oauthProvenance.requestedScopes,
-            },
-          }
-        : current;
-    const [existing] = await dbClient
-      .select()
-      .from(connectionGrants)
-      .where(
-        and(
-          eq(connectionGrants.companyId, connection.companyId),
-          eq(connectionGrants.connectionId, connection.id),
-          eq(connectionGrants.kind, "organization"),
-          eq(connectionGrants.isDefault, true),
-        ),
-      )
-      .limit(1);
-    if (existing) {
-      // OAuth connections create their organization grant before the browser
-      // callback has issued any credentials. Reconnects can rotate those
-      // credentials later as well. Keep the execution grant synchronized with
-      // the connection so the gateway projects the current secrets instead of
-      // sending an unauthenticated request after an apparently successful
-      // setup. Reconnecting is also the explicit recovery path for a revoked
-      // shared identity, so it is correct to reactivate that default grant here.
-      const [updated] = await dbClient
-        .update(connectionGrants)
-        .set({
-          credentialSecretRefs: isRailwayConnection(connection)
-            ? [...connection.credentialSecretRefs, ...existing.credentialSecretRefs.filter((ref) => ref.configPath === RAILWAY_SSH_SECRET_PATH && !connection.credentialSecretRefs.some((candidate) => candidate.configPath === ref.configPath))]
-            : connection.credentialSecretRefs,
-          ...(oauthProvenance
-            ? { providerTenant: providerTenantWithOauth(existing.providerTenant) }
-            : {}),
-          status: "active",
-          revokedAt: null,
-          revokedByAgentId: null,
-          revokedByUserId: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(connectionGrants.id, existing.id))
-        .returning();
-      if (!updated)
-        throw new Error("Failed to update default connection grant");
-      onMutation?.({ previous: existing, current: updated });
-      return updated;
-    }
-    const [created] = await dbClient
-      .insert(connectionGrants)
-      .values({
-        companyId: connection.companyId,
-        connectionId: connection.id,
-        kind: "organization",
-        credentialSecretRefs: connection.credentialSecretRefs,
-        ...(oauthProvenance
-          ? { providerTenant: providerTenantWithOauth(null) }
-          : {}),
-        status: "active",
-        isDefault: true,
-      })
-      .returning();
-    if (!created) throw new Error("Failed to create default connection grant");
-    onMutation?.({ previous: null, current: created });
-    return created;
+    return upsertDefaultOrganizationGrant(dbClient, connection,
+      isRailwayConnection(connection) ? [RAILWAY_SSH_SECRET_PATH] : [], onMutation, true, oauthProvenance);
   }
 
   async function getProfileRow(profileId: string, companyId?: string) {
@@ -14525,6 +14454,9 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connection.id))
         .returning();
+      if (!personalIdentity && nextConnection.credentialPolicy === "shared") {
+        await ensureDefaultOrganizationGrant(nextConnection, tx);
+      }
       await syncConnectionCredentialBindings(tx, nextConnection,
         personalIdentity ? credentialSecretRefs : []);
       return nextConnection;
@@ -18989,30 +18921,38 @@ export function toolAccessService(
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, {
         excludeConnectionId: existing.id,
       });
+      const { credentialPolicy, credentialRefs, credentialSecretRefs, changed, replaced } =
+        resolveConnectionCredentialUpdate(existing, input);
       await assertSecretRefs(existing.companyId, [
-        ...(input.credentialRefs ?? existing.credentialRefs),
-        ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
+        ...credentialRefs,
+        ...credentialSecretRefs,
       ]);
-      const [row] = await db
-        .update(toolConnections)
-        .set({
-          name: input.name ?? existing.name,
-          status: input.status ?? existing.status,
-          enabled: input.enabled ?? existing.enabled,
-          ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
-            ? config
-            : (input.transportConfig ?? config),
-          credentialRefs: input.credentialRefs ?? existing.credentialRefs,
-          credentialSecretRefs:
-            input.credentialSecretRefs ?? existing.credentialSecretRefs,
-          credentialPolicy: input.credentialPolicy ?? existing.credentialPolicy,
-          updatedAt: new Date(),
-        })
-        .where(eq(toolConnections.id, connectionId))
-        .returning();
-      await syncCredentialBindings(row);
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(toolConnections)
+          .set({
+            name: input.name ?? existing.name,
+            status: input.status ?? existing.status,
+            enabled: input.enabled ?? existing.enabled,
+            ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
+            config,
+            transportConfig: isGoogleSheetsConnectionConfig(config)
+              ? config
+              : (input.transportConfig ?? config),
+            credentialRefs,
+            credentialSecretRefs,
+            credentialPolicy,
+            updatedAt: new Date(),
+          })
+          .where(eq(toolConnections.id, connectionId))
+          .returning();
+        if (updated.credentialPolicy === "shared" && changed) {
+          await upsertDefaultOrganizationGrant(tx, updated,
+            isRailwayConnection(updated) ? [RAILWAY_SSH_SECRET_PATH] : [], undefined, replaced);
+        }
+        await syncConnectionCredentialBindings(tx, updated);
+        return updated;
+      });
       await ensureRuntimeSlot(row);
       emitConnectionUpdated(row, existing, "api");
       return toConnection(row);
