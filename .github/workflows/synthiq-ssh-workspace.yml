@@ -79,6 +79,8 @@ jobs:
           packages/adapter-utils/src/workspace-restore-merge.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
           packages/adapter-utils/src/ssh-command.test.ts
+          packages/adapter-utils/src/ssh-environment.test.ts
+          packages/adapter-utils/src/ssh-environment.integration.test.ts
           packages/adapter-utils/src/ssh-git-remotes.test.ts
           packages/adapter-utils/src/ssh-git-boundary.test.ts
           server/src/__tests__/managed-worktree-git.test.ts
