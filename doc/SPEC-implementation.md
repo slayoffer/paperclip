@@ -195,6 +195,7 @@ See [details](spec-implementation/part-5.md#98-scoped-task-assignment-grants).
 ### 9.8.1 Issue-thread interaction resolver contract
 
 See [Issue-thread interactions](issue-thread-interactions.md) for read routes and resolver rules.
+See [Answer preconditions](interaction-resolution.md) for revision and retry rules.
 
 ## 9.9 Task Watchdog Authority Contract
 
