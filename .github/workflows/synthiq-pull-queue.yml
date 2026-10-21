@@ -60,4 +60,5 @@ jobs:
           server/src/services/agent-wip-limit.test.ts
           server/src/__tests__/issue-execution-policy.test.ts
           server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+          server/src/__tests__/issue-blocker-update-routes.test.ts
           --maxWorkers=1

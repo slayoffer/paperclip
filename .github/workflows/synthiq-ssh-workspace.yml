@@ -7,6 +7,15 @@ on:
     paths:
       - ".github/workflows/synthiq-ssh-workspace.yml"
       - "packages/adapter-utils/**"
+      - "packages/adapters/codex-local/**"
+      - "packages/adapters/claude-local/**"
+      - "server/src/services/ssh-in-place-*.ts"
+      - "server/src/services/environment-runtime.ts"
+      - "server/src/services/environment-ssh-driver.ts"
+      - "server/src/services/heartbeat-github-launchers*"
+      - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
+      - "server/src/__tests__/ssh-in-place-*.test.ts"
+      - "server/src/__tests__/helpers/ssh-in-place-heartbeat.ts"
 
 permissions:
   contents: read
@@ -32,12 +41,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes openssh-server
+      - name: Require writer containment tests
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "PAPERCLIP_REQUIRE_WRITER_CONTAINMENT_TESTS=1" >> "$GITHUB_ENV"
+          systemd-run --user --scope --quiet --expand-environment=no true
       - name: Install dependencies
         run: |
           corepack enable
           corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
       - name: Check adapter types
         run: corepack pnpm --filter @paperclipai/adapter-utils typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
       - name: Test workspace preparation and restore
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000
@@ -45,5 +68,17 @@ jobs:
           packages/adapter-utils/src/workspace-operation-schedule.test.ts
           packages/adapter-utils/src/remote-workspace-schedule.test.ts
           packages/adapter-utils/src/remote-managed-runtime.test.ts
+          packages/adapter-utils/src/github-launcher-directory.test.ts
+          packages/adapter-utils/src/github-launcher-environment.test.ts
           packages/adapter-utils/src/workspace-restore-merge.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
+          packages/adapter-utils/src/ssh-command.test.ts
+          packages/adapter-utils/src/ssh-git-remotes.test.ts
+          server/src/services/heartbeat-github-launchers.test.ts
+          server/src/__tests__/heartbeat-ssh-in-place.test.ts
+          server/src/__tests__/ssh-in-place-release.test.ts
+          server/src/__tests__/ssh-in-place-termination.test.ts
+          server/src/__tests__/ssh-in-place-workspace.test.ts
+          server/src/__tests__/ssh-in-place-lock.test.ts
+          packages/adapter-utils/src/ssh-writer-termination.test.ts
+          server/src/__tests__/ssh-in-place-lock-checks.test.ts

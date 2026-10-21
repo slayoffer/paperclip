@@ -340,6 +340,93 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     }));
   });
 
+  it("SSH same-host in_place: runs in the server worktree and forwards the per-run runtime root", async () => {
+    const spec = {
+      host: "home-pc",
+      port: 22,
+      username: "slayo",
+      remoteWorkspacePath: "/home/slayo/paperclip-work",
+      remoteCwd: "/home/slayo/paperclip-work",
+      privateKey: null,
+      knownHosts: null,
+      strictHostKeyChecking: true,
+    };
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "ssh",
+      remoteCwd: spec.remoteCwd,
+      spec,
+    });
+    const runtime = makeMockRuntime({
+      realizeWorkspace: vi.fn().mockResolvedValue({
+        cwd: "/paperclip/worktrees/SYNA-1",
+        metadata: {
+          workspaceRealization: {
+            version: 1,
+            mode: "in_place",
+            authoritativeRoot: "/paperclip/worktrees/SYNA-1",
+            runtimeRoot: "/home/slayo/paperclip-work/.paperclip-runtime/runs/run-1",
+            pathAliases: [],
+            outboundRestorePaths: [],
+          },
+        },
+      }),
+    });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    const result = await orchestrator.realizeForRun(
+      makeRealizeInput({ environment: makeEnvironment("ssh") }),
+    );
+
+    expect(result.executionTarget).toEqual(expect.objectContaining({
+      kind: "remote",
+      transport: "ssh",
+      remoteCwd: "/paperclip/worktrees/SYNA-1",
+      workspaceRealization: {
+        mode: "in_place",
+        authoritativeRoot: "/paperclip/worktrees/SYNA-1",
+        runtimeRoot: "/home/slayo/paperclip-work/.paperclip-runtime/runs/run-1",
+        pathAliases: [],
+        outboundRestorePaths: [],
+      },
+    }));
+  });
+
+  it("drops a runtime root from a copy realization", async () => {
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/copied/workspace",
+    });
+    const runtime = makeMockRuntime({
+      realizeWorkspace: vi.fn().mockResolvedValue({
+        cwd: "/copied/workspace",
+        metadata: {
+          workspaceRealization: {
+            version: 1,
+            mode: "copy",
+            authoritativeRoot: "/workspace/project",
+            runtimeRoot: "/should/not/forward",
+            pathAliases: [],
+            outboundRestorePaths: [],
+          },
+        },
+      }),
+    });
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    const result = await orchestrator.realizeForRun(
+      makeRealizeInput({ environment: makeEnvironment("sandbox") }),
+    );
+
+    expect(result.executionTarget?.workspaceRealization).toEqual({
+      mode: "copy",
+      authoritativeRoot: "/workspace/project",
+      pathAliases: [],
+      outboundRestorePaths: [],
+    });
+  });
+
   it("realization failure: runtime.realizeWorkspace throws → EnvironmentRunError with code workspace_realization_failed", async () => {
     const runtime = makeMockRuntime({
       realizeWorkspace: vi.fn().mockRejectedValue(new Error("sandbox unreachable")),

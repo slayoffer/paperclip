@@ -33,11 +33,18 @@ export async function truncateTablesWithDeadlockRetry(
   truncateStatement: string,
   opts: { attempts?: number; delayMs?: (attempt: number) => number } = {},
 ): Promise<void> {
+  return retryFixtureCleanup(() => db.execute(sql.raw(truncateStatement)), opts);
+}
+
+export async function retryFixtureCleanup(
+  cleanup: () => Promise<unknown>,
+  opts: { attempts?: number; delayMs?: (attempt: number) => number } = {},
+): Promise<void> {
   const attempts = opts.attempts ?? 10;
   const delayMs = opts.delayMs ?? ((attempt: number) => 50 * (attempt + 1));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      await db.execute(sql.raw(truncateStatement));
+      await cleanup();
       return;
     } catch (error) {
       if (!isLateWriterRace(error) || attempt === attempts - 1) {

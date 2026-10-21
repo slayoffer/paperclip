@@ -1,5 +1,5 @@
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
-import { createIssueDependencyReadiness, listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { createIssueDependencyReadiness, listIssueDependencyReadinessMap, readIssueDependencyReadiness, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
@@ -6411,6 +6411,48 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+/**
+ * Returns every issue that `issueId` blocks, directly or transitively, through
+ * "blocks" relations in the company. If one of these issues becomes a blocker
+ * of `issueId`, the relations contain a cycle. The blocking-cycle check and
+ * recovery use this one graph walk, so they agree on what a cycle is.
+ */
+export async function listIssuesTransitivelyBlockedBy(
+  dbOrTx: DbReader,
+  companyId: string,
+  issueId: string,
+): Promise<Set<string>> {
+  const rows = await dbOrTx
+    .select({
+      blockerIssueId: issueRelations.issueId,
+      blockedIssueId: issueRelations.relatedIssueId,
+    })
+    .from(issueRelations)
+    .where(
+      and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.type, "blocks"),
+      ),
+    );
+
+  const adjacency = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = adjacency.get(row.blockerIssueId) ?? [];
+    list.push(row.blockedIssueId);
+    adjacency.set(row.blockerIssueId, list);
+  }
+
+  const reachable = new Set<string>();
+  const queue = [...(adjacency.get(issueId) ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    queue.push(...(adjacency.get(current) ?? []));
+  }
+  return reachable;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -7180,38 +7222,13 @@ export function issueService(db: Db) {
   ) {
     if (blockerIssueIds.length === 0) return;
 
-    const rows = await dbOrTx
-      .select({
-        blockerIssueId: issueRelations.issueId,
-        blockedIssueId: issueRelations.relatedIssueId,
-      })
-      .from(issueRelations)
-      .where(
-        and(
-          eq(issueRelations.companyId, companyId),
-          eq(issueRelations.type, "blocks"),
-        ),
-      );
-
-    const adjacency = new Map<string, string[]>();
-    for (const row of rows) {
-      const list = adjacency.get(row.blockerIssueId) ?? [];
-      list.push(row.blockedIssueId);
-      adjacency.set(row.blockerIssueId, list);
-    }
-
-    for (const blockerIssueId of blockerIssueIds) {
-      const queue = [...(adjacency.get(issueId) ?? [])];
-      const visited = new Set<string>([issueId]);
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        if (current === blockerIssueId) {
-          throw unprocessable("Blocking relations cannot contain cycles");
-        }
-        if (visited.has(current)) continue;
-        visited.add(current);
-        queue.push(...(adjacency.get(current) ?? []));
-      }
+    const blockedByIssue = await listIssuesTransitivelyBlockedBy(
+      dbOrTx,
+      companyId,
+      issueId,
+    );
+    if (blockerIssueIds.some((blockerIssueId) => blockedByIssue.has(blockerIssueId))) {
+      throw unprocessable("Blocking relations cannot contain cycles");
     }
   }
 
@@ -8861,22 +8878,8 @@ export function issueService(db: Db) {
       };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
-      const issue = await dbOrTx
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then(
-          (rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null,
-        );
-      if (!issue) throw notFound("Issue not found");
-      const readiness = await listIssueDependencyReadinessMap(
-        dbOrTx,
-        issue.companyId,
-        [issueId],
-      );
-      return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
-    },
+    getDependencyReadiness: (issueId: string, dbOrTx: any = db, blockerIssueIds?: string[]) =>
+      readIssueDependencyReadiness(dbOrTx, issueId, blockerIssueIds),
 
     releaseDependencyWait: (companyId: string, issueId: string) => releaseReadyDependencyWait(db, companyId, issueId),
 

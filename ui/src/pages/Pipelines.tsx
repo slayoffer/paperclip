@@ -1,3 +1,5 @@
+import { normalizePipelineConversationComments, resolveRunningPipelineConversationRun } from "./pipeline-conversation";
+export { normalizePipelineConversationComments } from "./pipeline-conversation";
 import { interactionReadinessRefetchInterval } from "@/lib/issue-thread-interactions";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
@@ -136,10 +138,6 @@ type PipelineConversationActionableInteraction =
 
 type PipelineBoardAutomationAgent = Pick<Agent, "id" | "name" | "icon" | "urlKey">;
 
-export function normalizePipelineConversationComments(value: unknown): IssueChatComment[] {
-  return Array.isArray(value) ? value : [];
-}
-
 interface DraftRow {
   id: string;
   expanded: boolean;
@@ -149,15 +147,6 @@ interface DraftRow {
 
 function issueDetailPath(issue: Pick<Issue, "id" | "identifier">) {
   return createIssueDetailPath(issue.identifier ?? issue.id);
-}
-
-function resolveRunningPipelineConversationRun(
-  activeRun: ActiveRunForIssue | null | undefined,
-  liveRuns: readonly LiveRunForIssue[] | undefined,
-) {
-  return activeRun?.status === "running"
-    ? activeRun
-    : (liveRuns ?? []).find((run) => run.status === "running") ?? null;
 }
 
 type FieldErrors = Record<string, string>;
@@ -2442,7 +2431,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
     rememberAction?: boolean,
   ) => {
     if (!conversationIssueId) return;
-    await issuesApi.acceptInteraction(conversationIssueId, interaction.id, { selectedClientKeys, selectedOptionIds, rememberAction });
+    await issuesApi.acceptInteraction(conversationIssueId, interaction.id, { selectedClientKeys, selectedOptionIds, rememberAction, expectedRevision: interaction.revision });
     await invalidateConversation();
   }, [conversationIssueId, invalidateConversation]);
 
@@ -2451,7 +2440,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
     reason?: string,
   ) => {
     if (!conversationIssueId) return;
-    await issuesApi.rejectInteraction(conversationIssueId, interaction.id, reason);
+    await issuesApi.rejectInteraction(conversationIssueId, interaction.id, reason, { expectedRevision: interaction.revision });
     await invalidateConversation();
   }, [conversationIssueId, invalidateConversation]);
 
@@ -2460,7 +2449,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
     answers: AskUserQuestionsAnswer[],
   ) => {
     if (!conversationIssueId) return;
-    await issuesApi.respondToInteraction(conversationIssueId, interaction.id, { answers });
+    await issuesApi.respondToInteraction(conversationIssueId, interaction.id, { answers, expectedRevision: interaction.revision });
     await invalidateConversation();
   }, [conversationIssueId, invalidateConversation]);
 

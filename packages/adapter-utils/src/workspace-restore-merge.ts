@@ -5,6 +5,8 @@ import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { createWorkspaceManifest, WorkspaceManifestMap, type PathManifest, type WorkspacePaths } from "./workspace-manifest.js";
 import { resolvePaperclipInstanceRootForAdapter } from "./server-utils.js";
+import { entriesMatch, directoryMergeConflicts, DirectoryMergeConflict, excludedReplacementConflicts } from "./workspace-restore-safety.js";
+export { directoryMergeConflicts, DirectoryMergeConflict } from "./workspace-restore-safety.js";
 import type { WorkspaceRestoreDiagnostic } from "./workspace-restore-diagnostics.js";
 import { hashWorkspaceFile } from "./workspace-file-hasher.js";
 import { scanWorkspaceSnapshot } from "./workspace-snapshot-worker-client.js";
@@ -160,18 +162,6 @@ async function readSnapshotEntry(root: string, relative: string): Promise<Snapsh
   };
 }
 
-function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEntry | null | undefined): boolean {
-  if (!left || !right) return false;
-  if (left.kind !== right.kind) return false;
-  if (left.kind === "dir") return true;
-  if (left.kind === "symlink" && right.kind === "symlink") {
-    return left.target === right.target;
-  }
-  if (left.kind === "file" && right.kind === "file") {
-    return left.mode === right.mode && left.hash === right.hash;
-  }
-  return false;
-}
 
 const LOCK_WAIT_MS = 30_000;
 const LOCK_DIAGNOSTIC_READ_TIMEOUT_MS = 100;
@@ -573,49 +563,6 @@ function orderedEntries(snapshot: DirectorySnapshot, reverse = false): Iterable<
   return [...snapshot.entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0) * (reverse ? -1 : 1));
 }
 
-export class DirectoryMergeConflict extends Error {
-  readonly code = "DIRECTORY_MERGE_CONFLICT";
-  constructor(readonly paths: string[]) {
-    super("Directory contents changed concurrently");
-  }
-}
-
-/** Preflight the entire delta before writing. Identical replays are safe after
- * an interrupted apply; unrelated edits are left alone. No history is retained. */
-export function directoryMergeConflicts(baseline: DirectorySnapshot, source: DirectorySnapshot, current: DirectorySnapshot): string[] {
-  const same = (a: SnapshotEntry | undefined, b: SnapshotEntry | undefined) =>
-    (!a && !b) || entriesMatch(a, b);
-  const conflicts = new Set<string>();
-  function* changedPaths() {
-    for (const [name] of baseline.entries) yield name;
-    for (const [name] of source.entries) if (!baseline.entries.has(name)) yield name;
-  }
-  for (const relative of changedPaths()) {
-    const before = baseline.entries.get(relative);
-    const incoming = source.entries.get(relative);
-    const present = current.entries.get(relative);
-    if (same(before, incoming) || same(incoming, present)) continue;
-    if (!same(before, present)) conflicts.add(relative);
-    // A parent removed/replaced by another writer must never be traversed.
-    for (let parent = path.posix.dirname(relative); parent !== "."; parent = path.posix.dirname(parent)) {
-      if (current.entries.get(parent)?.kind !== "dir" &&
-          !same(current.entries.get(parent), baseline.entries.get(parent))) conflicts.add(parent);
-    }
-  }
-  // Stream each current entry once. A replacement must not remove children
-  // omitted from the baseline, including excluded or newly created files.
-  for (const [child, entry] of current.entries) {
-    if (same(entry, baseline.entries.get(child)) || same(entry, source.entries.get(child))) continue;
-    for (let parent = path.posix.dirname(child); parent !== "."; parent = path.posix.dirname(parent)) {
-      if (baseline.entries.get(parent)?.kind === "dir" && source.entries.get(parent)?.kind !== "dir") {
-        conflicts.add(child);
-        break;
-      }
-    }
-  }
-  return [...conflicts].sort();
-}
-
 export async function mergeDirectoryWithBaseline(input: {
   baseline: DirectorySnapshot;
   sourceDir: string;
@@ -631,7 +578,6 @@ export async function mergeDirectoryWithBaseline(input: {
   const source = input.snapshots?.source ?? await captureDirectorySnapshot(input.sourceDir, options);
   try {
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {
-      await input.beforeApply?.();
       // Strict preflight must see excluded children before a directory is
       // replaced. The merge still applies only the filtered source/baseline.
       const current = input.snapshots?.current ?? await captureDirectorySnapshot(canonicalTargetDir,
@@ -640,7 +586,11 @@ export async function mergeDirectoryWithBaseline(input: {
         if (input.conflictPolicy === "reject") {
           const conflicts = directoryMergeConflicts(input.baseline, source, current);
           if (conflicts.length) throw new DirectoryMergeConflict(conflicts);
+        } else {
+          const conflicts = await excludedReplacementConflicts(canonicalTargetDir, source, input.baseline);
+          if (conflicts.length) throw new DirectoryMergeConflict(conflicts);
         }
+        await input.beforeApply?.();
         for (const [relative, baselineEntry] of orderedEntries(input.baseline)) {
           if (baselineEntry.kind === "dir" || source.entries.has(relative)) continue;
           if (!entriesMatch(current.entries.get(relative), baselineEntry)) continue;
