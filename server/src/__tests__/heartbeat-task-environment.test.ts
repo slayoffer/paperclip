@@ -110,8 +110,9 @@ suite("task environment routing", () => {
     return result;
   }
 
-  it.each([false, true])("selects mac-spike and preserves the parent, sibling, workspace, and agent default (isolated=%s)", async (isolated) => {
+  it.each([[false, false], [false, true], [true, false], [true, true]])("selects mac-spike and preserves the parent, sibling, workspace, and agent default (flag=%s, isolated=%s)", async (enabled, isolated) => {
     const fixtureData = await fixture({}, isolated);
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: enabled });
     const mode = isolated ? "isolated_workspace" : "shared_workspace";
     const { agentId, parentId, targetId, siblingId, localId } = fixtureData;
     const [workspaceBefore] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, sharedWorkspaceId));

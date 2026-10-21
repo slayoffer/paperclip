@@ -16,6 +16,7 @@ on:
       - server/src/__tests__/execution-workspace-policy.test.ts
       - server/src/__tests__/heartbeat-local-environment.test.ts
       - server/src/__tests__/heartbeat-task-environment.test.ts
+      - server/src/__tests__/issues-task-environment.test.ts
       - server/src/__tests__/environment-selection-route-guards.test.ts
       - server/src/__tests__/environment-routes.test.ts
       - packages/db/src/**
@@ -79,5 +80,6 @@ jobs:
           server/src/__tests__/execution-workspace-policy.test.ts
           server/src/__tests__/heartbeat-local-environment.test.ts
           server/src/__tests__/heartbeat-task-environment.test.ts
+          server/src/__tests__/issues-task-environment.test.ts
           server/src/__tests__/environment-selection-route-guards.test.ts
           server/src/__tests__/environment-routes.test.ts

@@ -5,6 +5,8 @@
 `executionWorkspaceSettings.environmentId` selects an environment for one task.
 The task selection precedes the agent, instance, and local defaults.
 A null or absent selection uses the existing default order.
+Create and update preserve the selection when isolated workspaces are disabled.
+This setting does not enable isolated workspace controls.
 The server validates the identifier, environment availability, driver, and provider restrictions before workspace changes.
 Instance sandbox requirements still apply.
 

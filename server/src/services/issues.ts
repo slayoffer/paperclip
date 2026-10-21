@@ -136,6 +136,7 @@ import {
   readExecutionWorkspaceConfig,
   requiresTaskEnvironmentBinding,
 } from "./execution-workspaces.js";
+import { removeIsolatedWorkspaceControls } from "./issue-workspace-settings.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
 import { readChatControlChronology } from "./chat-control-chronology.js";
 import { authorizeChatConversationForBoundRun } from "./native-runtime/chat-attachment-reuse.js";
@@ -9638,9 +9639,7 @@ export function issueService(db: Db) {
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
       if (data.assigneeAgentId && data.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
@@ -10564,9 +10563,7 @@ export function issueService(db: Db) {
       // opt-in UI for creating isolated worktrees. Public updates still obey
       // the feature gate; only the internal shared-workspace binding bypasses it.
       if (!isolatedWorkspacesEnabled && !options.bindRuntimeSharedWorkspace) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        removeIsolatedWorkspaceControls(issueData);
       }
 
       if (issueData.status) {
