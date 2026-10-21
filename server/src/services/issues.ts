@@ -1,4 +1,4 @@
-import { listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { listIssueDependencyReadinessMap, readIssueDependencyReadiness, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./issue-post-commit-actions.js";
 import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails } from "./issue-blocker-details.js";
@@ -8706,22 +8706,8 @@ export function issueService(db: Db) {
       };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
-      const issue = await dbOrTx
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then(
-          (rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null,
-        );
-      if (!issue) throw notFound("Issue not found");
-      const readiness = await listIssueDependencyReadinessMap(
-        dbOrTx,
-        issue.companyId,
-        [issueId],
-      );
-      return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
-    },
+    getDependencyReadiness: (issueId: string, dbOrTx: any = db, blockerIssueIds?: string[]) =>
+      readIssueDependencyReadiness(dbOrTx, issueId, blockerIssueIds),
 
     releaseDependencyWait: (companyId: string, issueId: string) => releaseReadyDependencyWait(db, companyId, issueId),
 

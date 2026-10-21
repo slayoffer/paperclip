@@ -1,3 +1,4 @@
+import { trackSshWriterCommand } from "./ssh-writer-termination.js";
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
@@ -430,9 +431,13 @@ export async function buildSshSpawnTarget(input: {
     'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
     'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
     `cd ${shellQuote(input.spec.remoteCwd)}`,
-    envArgs.length > 0
-      ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
-      : `exec ${remoteCommandParts}`,
+    trackSshWriterCommand(
+      envArgs.length > 0
+        ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
+        : `exec ${remoteCommandParts}`,
+      input.spec.remoteWorkspacePath,
+      input.env.PAPERCLIP_RUN_ID,
+    ),
   ].join(" && ");
 
   sshArgs.push(

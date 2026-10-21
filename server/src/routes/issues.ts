@@ -12,6 +12,7 @@ import { secretProposalExecutionErrorCode, readToolActionContinuationContext, re
 import { compactIssueProject, compactIssueProjectWorkspace, compactIssueExecutionWorkspace } from "./issue-read-projections.js";
 import { withCompanyAgentReadBatch } from "../services/agent-read-batch.js";
 import { createDependencyResolvedWakeup } from "./issue-dependency-wakeup.js";
+import { createExplicitResumeIntentGuard } from "./issue-resume-intent.js";
 import { registerCompanyInteractionReads } from "./company-interaction-reads.js";
 import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { setIssueTitle } from "../services/issue-title.js";
@@ -6267,112 +6268,18 @@ export function issueRoutes(
     return false;
   }
 
-  async function assertExplicitResumeIntentAllowed(
-    req: Request,
-    res: Response,
-    issue: Parameters<typeof decideIssueAccess>[1],
-    options: { resumeIntent?: boolean } = {},
-  ) {
-    if (
-      await assertLowTrustControlPlaneDenied(req, res, issue.companyId, issue)
-    )
-      return false;
-
-    // Structured resume intent is the sole comment surface that may revive a
-    // cancelled issue. Bare status transitions and `reopen` keep using the
-    // dedicated restore-flow guard.
-    if (issue.status === "cancelled" && options.resumeIntent !== true) {
-      res.status(409).json({
-        error:
-          "Cancelled issues must be restored through the dedicated restore flow",
-        details: {
-          issueId: issue.id,
-          status: issue.status,
-        },
-      });
-      return false;
-    }
-
-    if (!isExplicitResumeCapableStatus(issue.status)) {
-      res.status(409).json({
-        error: "Issue is not resumable through comment follow-up intent",
-        details: { issueId: issue.id, status: issue.status },
-      });
-      return false;
-    }
-
-    const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
-      issue.companyId,
-      issue.id,
-    );
-    if (activePauseHold) {
-      res.status(409).json({
-        error: "Issue follow-up blocked by active subtree pause hold",
-        details: {
-          issueId: issue.id,
-          holdId: activePauseHold.holdId,
-          rootIssueId: activePauseHold.rootIssueId,
-          mode: activePauseHold.mode,
-        },
-      });
-      return false;
-    }
-
-    if (issue.status === "blocked") {
-      const readiness = await svc.getDependencyReadiness(issue.id);
-      if (readiness.unresolvedBlockerCount > 0) {
-        res.status(409).json({
-          error: "Issue follow-up blocked by unresolved blockers",
-          details: {
-            issueId: issue.id,
-            unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
-          },
-        });
-        return false;
-      }
-    }
-
-    if (req.actor.type !== "agent") return true;
-
-    const actorAgentId = req.actor.agentId;
-    if (!actorAgentId) {
-      res.status(403).json({ error: "Agent authentication required" });
-      return false;
-    }
-    if (!issue.assigneeAgentId) {
-      res.status(409).json({
-        error: "Issue follow-up requires an assigned agent",
-        details: { issueId: issue.id, actorAgentId },
-      });
-      return false;
-    }
-    if (issue.assigneeAgentId === actorAgentId) return true;
-    if (
-      await hasActiveCheckoutManagementOverride(
-        actorAgentId,
-        issue.companyId,
-        issue.assigneeAgentId,
-      )
-    ) {
-      return true;
-    }
-    const boundaryDecision = await decideIssueAccess(
-      req,
-      issue,
-      "issue:mutate",
-    );
-    if (isDefaultOpenIssueWriteDecision(boundaryDecision)) return true;
-
-    res.status(403).json({
-      error: "Agent cannot request follow-up for another agent's issue",
-      details: {
-        issueId: issue.id,
-        assigneeAgentId: issue.assigneeAgentId,
-        actorAgentId,
-      },
-    });
-    return false;
-  }
+  const assertExplicitResumeIntentAllowed = createExplicitResumeIntentGuard({
+    assertLowTrustControlPlaneDenied,
+    isExplicitResumeCapableStatus,
+    getActivePauseHoldGate: treeControlSvc.getActivePauseHoldGate,
+    getDependencyReadiness: (issueId, blockerIssueIds) =>
+      blockerIssueIds === undefined
+        ? svc.getDependencyReadiness(issueId)
+        : svc.getDependencyReadiness(issueId, db, blockerIssueIds),
+    hasActiveCheckoutManagementOverride,
+    decideIssueAccess,
+    isDefaultOpenIssueWriteDecision,
+  });
 
   async function requireRecoveryActionAuthority(
     req: Request,
@@ -12648,6 +12555,7 @@ export function issueRoutes(
         resumeRequested === true &&
         !(await assertExplicitResumeIntentAllowed(req, res, existing, {
           resumeIntent: true,
+          blockedByIssueIds: req.body.blockedByIssueIds,
         }))
       )
         return;
@@ -12661,7 +12569,9 @@ export function issueRoutes(
         req.actor.type === "agent" &&
         reopenRequested === true
       ) {
-        if (!(await assertExplicitResumeIntentAllowed(req, res, existing)))
+        if (!(await assertExplicitResumeIntentAllowed(req, res, existing, {
+          blockedByIssueIds: req.body.blockedByIssueIds,
+        })))
           return;
       }
       await assertIssueEnvironmentSelection(
@@ -12711,7 +12621,9 @@ export function issueRoutes(
       if (
         resumeRequested !== true &&
         agentStatusTransitionRequiresResumeAuthority &&
-        !(await assertExplicitResumeIntentAllowed(req, res, existing))
+        !(await assertExplicitResumeIntentAllowed(req, res, existing, {
+          blockedByIssueIds: req.body.blockedByIssueIds,
+        }))
       ) {
         return;
       }
@@ -12759,7 +12671,7 @@ export function issueRoutes(
         : null;
       const hasUnresolvedFirstClassBlockers =
         isBlocked && effectiveMoveToTodoRequested
-          ? (await svc.getDependencyReadiness(existing.id))
+          ? (await svc.getDependencyReadiness(existing.id, db, req.body.blockedByIssueIds))
               .unresolvedBlockerCount > 0
           : false;
       if (

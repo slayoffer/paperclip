@@ -87,9 +87,22 @@ copy mode").
   Stale ownership transfers require an inactive lease and a bound provider termination receipt.
   Missing termination evidence keeps the lock, including after normal lease release.
   SSH client exit, run success, failure, cancellation, and timeout do not prove writer termination.
-  The SSH driver only releases lease bookkeeping. It preserves durable worktree ownership.
-  A later acquisition can replace that ownership only with the bound provider termination receipt.
-  SSH currently supplies no such receipt. Later runs use copy mode until verified termination evidence exists.
+  On supported Linux hosts, each provider invocation starts in a unique systemd scope.
+  The scope uses the static description `Paperclip SSH writer`.
+  Its unit name contains only a random invocation identifier.
+  These properties keep provider arguments and environment values out of systemd journal descriptions.
+  The scope uses a control group in version 2 of the Linux control group filesystem.
+  Descendants remain in that group when they create new sessions or process groups.
+  The launcher records the control group and kernel boot identity before provider execution.
+  These records remain under `<remoteWorkspacePath>/.paperclip-runtime/ssh-writers/<runId>`.
+  They remain outside adapter runtime cleanup.
+  At release, the driver checks all recorded groups through SSH on the original endpoint.
+  A populated group prevents release, including when only detached descendants remain.
+  An empty group, a removed verified scope, or a different kernel boot proves termination.
+  The driver saves the receipt before it removes ownership.
+  At the next run startup, acquisition repeats this check for a terminal owner run.
+  This also recovers an active bookkeeping lease after a controller interruption.
+  Missing records, unsupported hosts, failed checks, and changed endpoints preserve ownership.
   Do not remove ownership files based only on a run status or elapsed time.
   An interrupted directory guard also stays closed. The server never removes it through a timeout.
 
@@ -104,9 +117,17 @@ server worktree was the run's workspace the whole time.
 - A run in `in_place` mode and a copy-mode run of a different environment can
   still work on one worktree at the same time. The copy run's restore merge then
   sees the in_place run's edits as local changes.
-- SSH does not currently produce provider termination receipts. After an unclean server exit,
-  the worktree therefore uses copy mode until an operator checks termination and removes its stale lock.
-  This recovery operation requires separate authorization.
+- Older runs have no writer records. Their ownership remains until an operator proves termination.
+  Manual recovery requires separate authorization. This change does not remove old locks by age.
+- Receipts require Linux control groups version 2 and a reachable systemd user manager.
+  The `systemd-run` command must support `--expand-environment=no` (systemd 254 or newer).
+  Without these capabilities, commands run without containment and ownership remains.
+  A scope creation failure fails the command and preserves ownership.
+- Earlier session-only records cannot prove termination. Their ownership remains.
+- The scope contains ordinary descendants, including detached children.
+  This mechanism does not isolate hostile processes with permission to move into another control group.
+- Writer identity records persist for recovery. They contain no credentials or command arguments.
+- Production acceptance requires homelab to compare consecutive realizations and restore-lock timeout counts after deployment.
 - Provider transcripts remain on the SSH host until an operator removes them.
   Per-run cleanup does not delete transcripts.
 - Per-run folders of copy-mode runs (`.paperclip-runtime/runs/<runId>/workspace`)
