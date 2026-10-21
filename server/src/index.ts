@@ -1,3 +1,5 @@
+import { createExecutionControlSweeper } from "./services/execution-control-sweeper.js";
+import { createSshInPlaceOwnershipReconciler } from "./services/ssh-in-place-reconciliation.js";
 import { runStartupHeartbeatRecoverySteps } from "./startup-heartbeat-recovery.js";
 import type { BetterAuthSessionResult, EmbeddedPostgresInstance, EmbeddedPostgresCtor, StartedServer, StartupDatabaseTeardown } from "./server-startup-types.js";
 export type { StartedServer } from "./server-startup-types.js";
@@ -1124,27 +1126,22 @@ async function startServerWithDatabaseTeardown(
       await Promise.allSettled([...heartbeatSchedulerInFlight]);
     }
   };
-  const executionControlSweepsInFlight = new Set<string>();
+  const reconcileSshOwnership = createSshInPlaceOwnershipReconciler(db);
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
+    ["ssh_ownership", reconcileSshOwnership],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
     ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
   ] as const;
-  const sweepExecutionControl = () => {
-    if (heartbeatSchedulerStopped || isWarmStandby()) return;
-    // Independent durable queues must not block one another. Each queue remains
-    // single-flight; a later sweep observes committed transitions from its peers.
-    for (const [queue, work] of executionControlSweeps) {
-      if (executionControlSweepsInFlight.has(queue)) continue;
-      executionControlSweepsInFlight.add(queue);
-      trackHeartbeatSchedulerWork(Promise.resolve().then(async () => { await work(); })
-        .catch(err => logger.error({ err, queue }, "execution control reconciliation failed"))
-        .finally(() => { executionControlSweepsInFlight.delete(queue); }));
-    }
-  };
+  const sweepExecutionControl = createExecutionControlSweeper({
+    stopped: () => heartbeatSchedulerStopped || isWarmStandby(),
+    queues: executionControlSweeps,
+    track: trackHeartbeatSchedulerWork,
+    onError: (err, queue) => logger.error({ err, queue }, "execution control reconciliation failed"),
+  });
   const executionControlInterval = setInterval(sweepExecutionControl, EXECUTION_RECONCILIATION_INTERVAL_MS);
   executionControlInterval.unref?.();
   sweepExecutionControl();
