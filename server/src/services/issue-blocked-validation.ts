@@ -28,7 +28,7 @@ export async function assertBlockedIssueUpdate(input: {
     ? await blockedWaitFacts(db, existing, descriptor, requestedBlockerIds, actor.type === "agent" && actor.agentId === existing.assigneeAgentId ? commentBody : null)
     : null;
   if (facts?.unlinkedReferences.length) {
-    throw unprocessable("The blocked action names an issue without an open blocker link", { issueIdentifiers: facts.unlinkedReferences });
+    throw unprocessable("The blocked action names an issue without a blocker link", { issueIdentifiers: facts.unlinkedReferences });
   }
   if (updateFields.unblockDescriptor && descriptor && typeof descriptor === "object") {
     const owner = descriptor.owner;

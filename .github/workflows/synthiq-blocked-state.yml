@@ -11,6 +11,7 @@ on:
       - "server/src/routes/issues.ts"
       - "server/src/services/**"
       - "server/src/__tests__/blocked-state-integrity.test.ts"
+      - "server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts"
       - "server/src/__tests__/dependency-release-wakes.test.ts"
       - "server/src/__tests__/issue-blocker*.test.ts"
       - "server/src/__tests__/issue-dependency-wakeups-routes.test.ts"
@@ -65,6 +66,7 @@ jobs:
           corepack pnpm exec vitest run --no-file-parallelism
           packages/shared/src/validators/issue.test.ts
           server/src/__tests__/blocked-state-integrity.test.ts
+          server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts
           server/src/__tests__/dependency-release-wakes.test.ts
           server/src/__tests__/issue-blocker-attention.test.ts
           server/src/__tests__/issue-blocker-diagnostics-routes.test.ts

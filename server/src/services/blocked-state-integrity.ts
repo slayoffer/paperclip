@@ -101,9 +101,10 @@ export async function blockedWaitFacts(
   const readiness = requestedBlockerIds !== undefined
     ? await getRequestedBlockerDependencyReadiness(db, issue.companyId, issue.id, requestedBlockerIds)
     : (await listIssueDependencyReadinessMap(db, issue.companyId, [issue.id])).get(issue.id)!;
-  const blockers = readiness.unresolvedBlockerIssueIds.length === 0 ? [] :
+  // Reference membership includes resolved links. Only unresolved links affect readiness.
+  const blockers = readiness.blockerIssueIds.length === 0 ? [] :
     await db.select({ identifier: issues.identifier }).from(issues).where(and(
-      eq(issues.companyId, issue.companyId), inArray(issues.id, readiness.unresolvedBlockerIssueIds),
+      eq(issues.companyId, issue.companyId), inArray(issues.id, readiness.blockerIssueIds),
     ));
   const [interaction, approval, review, holds] = await Promise.all([
     db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
@@ -120,7 +121,7 @@ export async function blockedWaitFacts(
   const linkedIdentifiers = new Set(blockers.map(row => row.identifier));
   const mentions = issueReferences(descriptor?.action);
   return {
-    hasTarget: blockers.length > 0 || interaction.length > 0 || approval.length > 0 || review || holds.length > 0,
+    hasTarget: readiness.unresolvedBlockerCount > 0 || interaction.length > 0 || approval.length > 0 || review || holds.length > 0,
     outside: hasOutsideWait(descriptor) && !await isStaleIssueOnlyWait(db, issue, descriptor!),
     unlinkedReferences: mentions.filter(identifier => !linkedIdentifiers.has(identifier) && identifier !== issue.identifier),
   };
@@ -139,7 +140,7 @@ export async function assertRealBlockedWait(db: Pick<Db, "select">, issue: WaitI
   const facts = await blockedWaitFacts(db, issue, issue.unblockDescriptor, undefined, commentBody);
   const { unprocessable } = await import("../errors.js");
   if (facts.unlinkedReferences.length) {
-    throw unprocessable("The blocked action names an issue without an open blocker link", { issueIdentifiers: facts.unlinkedReferences });
+    throw unprocessable("The blocked action names an issue without a blocker link", { issueIdentifiers: facts.unlinkedReferences });
   }
   if (!facts.hasTarget && !facts.outside) {
     throw unprocessable("Blocked status requires an open blocker, a pending review or card, or a typed outside wait");

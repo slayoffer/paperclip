@@ -8,6 +8,7 @@ import {
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { issueService } from "../services/issues.js";
 import { namesOnlyIssueReferences } from "../services/blocked-state-integrity.js";
+import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 
 // Split from blocked-state-integrity.test.ts to keep each file under the size limit.
 const heartbeat = vi.hoisted(() => ({ wakeup: vi.fn() }));
@@ -67,6 +68,46 @@ describeDatabase("blocked-state holds and stale waits", () => {
     return (await db.insert(issues).values({ companyId, identifier, title: identifier, status, ...extra }).returning())[0]!;
   }
   const external = (action: string): IssueUnblockDescriptor => ({ owner: { agentId }, action, kind: "external" });
+
+  async function assertTitleEdit(blockerIds: string[]) {
+    const existing = (await svc.getById(source.id))!;
+    for (const requestedBlockerIds of [undefined, blockerIds]) {
+      await expect(assertBlockedIssueUpdate({
+        db, actor: { type: "board", source: "local_implicit" }, existing,
+        updateFields: {}, requestedBlockerIds,
+        getDependencyReadiness: svc.getDependencyReadiness,
+      })).resolves.toBeUndefined();
+    }
+    await expect(svc.update(source.id, { title: "Updated title" }))
+      .resolves.toMatchObject({ title: "Updated title", status: "blocked" });
+  }
+
+  it.each(["done", "cancelled"])("permits edits to a vendor wait after its linked blocker becomes %s", async status => {
+    const blocker = await issue("SYNA-1780");
+    const unblockDescriptor = external("Wait for the vendor reply on SYNA-1780");
+    await svc.update(source.id, { status: "blocked", blockedByIssueIds: [blocker.id], unblockDescriptor });
+    await svc.update(blocker.id, { status });
+    expect(await svc.getById(source.id)).toMatchObject({ status: "blocked", unblockDescriptor });
+    await assertTitleEdit([blocker.id]);
+    expect((await svc.getRelationSummaries(source.id)).blockedBy.map(row => row.id)).toEqual([blocker.id]);
+    const existing = (await svc.getById(source.id))!;
+    await expect(assertBlockedIssueUpdate({
+      db, actor: { type: "board", source: "local_implicit" }, existing,
+      updateFields: {}, requestedBlockerIds: [], getDependencyReadiness: svc.getDependencyReadiness,
+    })).rejects.toMatchObject({ status: 422, details: { issueIdentifiers: [blocker.identifier] } });
+  });
+
+  it.each(["done", "cancelled"])("permits edits to a multiple-blocker wait after its first blocker becomes %s", async status => {
+    const first = await issue("SYNA-1780");
+    const second = await issue("SYNA-1781");
+    const unblockDescriptor = external("Wait for SYNA-1780 and SYNA-1781 to finish.");
+    await svc.update(source.id, { status: "blocked", blockedByIssueIds: [first.id, second.id], unblockDescriptor });
+    await svc.update(first.id, { status });
+    await assertTitleEdit([first.id, second.id]);
+    expect(await svc.getDependencyReadiness(source.id)).toMatchObject({ unresolvedBlockerIssueIds: [second.id] });
+    await svc.update(second.id, { status: "done" });
+    expect(await svc.getById(source.id)).toMatchObject({ status: "todo", unblockDescriptor: null });
+  });
 
   it("refuses a start that drops an open bridge hold until the hold ends", async () => {
     const hold = await issue("SYNA-2024", "backlog", { parentId: source.id,

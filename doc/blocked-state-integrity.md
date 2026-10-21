@@ -52,6 +52,8 @@ Restoring completed blocker links does not send a dependency wake while a separa
 The periodic dependency check also respects these waits.
 
 No database migration is required. The descriptor uses the existing JSON column.
+Action references use all saved or proposed blocker links, including completed links.
+Readiness uses only unresolved blockers. Completed links do not create a waiting target.
 Disable the environment switch to restore the previous rules.
 This source change does not enable the switch or deploy the server.
 
