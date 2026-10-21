@@ -77,6 +77,10 @@ jobs:
           packages/adapter-utils/src/github-launcher-directory.test.ts
           packages/adapter-utils/src/github-launcher-environment.test.ts
           packages/adapter-utils/src/workspace-restore-merge.test.ts
+          packages/adapter-utils/src/workspace-restore-contention.test.ts
+          packages/adapter-utils/src/workspace-restore-scan-races.test.ts
+          packages/adapter-utils/src/ssh-sync-regressions.test.ts
+          packages/adapter-utils/src/directory-merge-lock.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
           packages/adapter-utils/src/ssh-command.test.ts
           packages/adapter-utils/src/ssh-environment.test.ts

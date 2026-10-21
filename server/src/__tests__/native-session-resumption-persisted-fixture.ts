@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +13,6 @@ import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.j
 import { heartbeatService } from "../services/heartbeat.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { environmentService } from "../services/environments.js";
-import { git } from "./helpers/terminal-workspace-fixture.js";
 
 export type RecoveryVariant = "unchanged" | "newer_active" | "stale_idle";
 export function createPersistedRecoveryFixture(variant: RecoveryVariant) {
@@ -192,11 +191,12 @@ export function createPersistedRecoveryFixture(variant: RecoveryVariant) {
 
   beforeAll(async () => {
     await mkdir(repoRoot);
-    git(repoRoot, "init", "--template=", "-b", "main");
-    git(repoRoot, "config", "core.hooksPath", "/dev/null");
-    git(repoRoot, "config", "user.name", "Test");
-    git(repoRoot, "config", "user.email", "test@example.test");
-    git(repoRoot, "commit", "--allow-empty", "-m", "Native recovery fixture");
+    const git = (...args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { stdio: "pipe" });
+    git("init", "--template=", "-b", "main");
+    git("config", "core.hooksPath", "/dev/null");
+    git("config", "user.name", "Test");
+    git("config", "user.email", "test@example.test");
+    git("commit", "--allow-empty", "-m", "Native recovery fixture");
     temporary = await startEmbeddedPostgresTestDatabase(
       "paperclip-native-reaper-e2e-",
     );

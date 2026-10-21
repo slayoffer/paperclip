@@ -7,6 +7,15 @@ export interface WorkspaceSnapshotScanInput {
   exclude: string[];
   ignoredPaths?: WorkspacePaths;
   manifestDirectory?: string;
+  cacheMetadata?: boolean;
+  reuseMetadata?: PathManifest;
+}
+
+export interface WorkspaceSnapshotScanResult {
+  entries: PathManifest | Map<string, SnapshotEntry>;
+  metadata?: PathManifest;
+  hashedFiles: number;
+  reusedFiles: number;
 }
 
 // Source checkouts use Node's TypeScript support. Published packages load JavaScript.
@@ -29,21 +38,22 @@ if (workerData.source) {
 import(workerData.moduleUrl).catch((error) => { throw error; });
 `;
 
-export async function scanWorkspaceSnapshot(input: WorkspaceSnapshotScanInput): Promise<PathManifest | Map<string, SnapshotEntry>> {
+export async function scanWorkspaceSnapshot(input: WorkspaceSnapshotScanInput): Promise<WorkspaceSnapshotScanResult> {
   const source = import.meta.url.endsWith(".ts");
   const moduleUrl = new URL(source ? "./workspace-snapshot-worker.ts" : "./workspace-snapshot-worker.js", import.meta.url).href;
   return new Promise((resolve, reject) => {
     const memory = new Map<string, SnapshotEntry>();
-    let result: PathManifest | Map<string, SnapshotEntry> | undefined;
+    let result: WorkspaceSnapshotScanResult | undefined;
     let failure: Error | undefined;
     const worker = new Worker(BOOTSTRAP, { eval: true, execArgv: ["--disable-warning=ExperimentalWarning"], workerData: { input, source, moduleUrl } });
-    worker.on("message", (message: { batch?: Array<[string, SnapshotEntry]>; manifest?: PathManifest; error?: { message: string; code?: string } }) => {
+    worker.on("message", (message: { batch?: Array<[string, SnapshotEntry]>; manifest?: PathManifest; metadata?: PathManifest; hashedFiles: number; reusedFiles: number; error?: { message: string; code?: string } }) => {
       if (message.batch) {
         for (const [relative, entry] of message.batch) memory.set(relative, entry);
         // Give timers and API callbacks a turn before admitting the next batch.
         setImmediate(() => worker.postMessage("continue"));
       } else if (message.error) failure = Object.assign(new Error(message.error.message), { code: message.error.code });
-      else result = message.manifest ?? memory;
+      else result = { entries: message.manifest ?? memory, metadata: message.metadata,
+        hashedFiles: message.hashedFiles, reusedFiles: message.reusedFiles };
     });
     worker.on("error", (error) => { failure = error; });
     // Wait for exit before publishing or removing a manifest directory.
