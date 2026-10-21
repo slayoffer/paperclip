@@ -5,3 +5,4 @@ export { syncDirectoryToSsh, syncDirectoryFromSsh } from "./ssh-sync.js";
 export { listLocalProjectRepositories } from "./ssh-git.js";
 export { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh-workspace.js";
 export { getSshEnvLabSupport, buildKnownHostsEntry, readSshEnvLabFixtureState, stopSshEnvLabFixture, startSshEnvLabFixture, buildSshEnvLabFixtureConfig, readSshEnvLabFixtureStatus } from "./ssh-fixture.js";
+export { type HostWorktreeLayout, resolveHostWorktreeLayout, acquireHostWorktreeLock, readHostWorktreeState, writeHostWorktreeState, inventoryHostRepo, materializeHostWorktree, exportHostWorktree, adoptHostWorktree, removeHostWorktree, HostWorktreeError } from "./ssh-host-worktree.js";
