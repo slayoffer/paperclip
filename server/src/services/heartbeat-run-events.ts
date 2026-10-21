@@ -70,7 +70,7 @@ export async function appendHeartbeatRunEvent(
 ): Promise<AppendHeartbeatRunEventResult> {
   return db.transaction(async (tx) => {
     const run = await tx
-      .select()
+      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, input.runId))
       .for("update")
