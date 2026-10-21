@@ -1,3 +1,5 @@
+import { IssueThreadInteractionBase, IssueThreadInteractionActorFields } from "./issue-interaction-base.js";
+export type { IssueThreadInteractionActorFields, IssueThreadInteractionBase } from "./issue-interaction-base.js";
 import type { IssueRecoveryAction } from "./issue-recovery-action.js";
 export type { IssueRecoveryAction } from "./issue-recovery-action.js";
 import type { IssueUnblockDescriptor, IssueDependencyReadiness } from "./issue-dependency-readiness.js";
@@ -1064,14 +1066,6 @@ export interface IssueCommentPresentation {
   density?: IssueCommentPresentationDensity;
 }
 
-export interface IssueThreadInteractionActorFields {
-  createdByAgentId?: string | null;
-  createdByUserId?: string | null;
-  resolvedByAgentId?: string | null;
-  resolvedByRunId?: string | null;
-  resolvedByUserId?: string | null;
-}
-
 export interface SuggestedTaskDraft {
   clientKey: string;
   parentClientKey?: string | null;
@@ -1475,39 +1469,6 @@ export interface RequestItemVerdictsResult {
   staleTarget?: RequestConfirmationTarget | null;
 }
 
-export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {
-  id: string;
-  companyId: string;
-  issueId: string;
-  kind: IssueThreadInteractionKind;
-  idempotencyKey?: string | null;
-  originCommentIds?: string[];
-  sourceCommentId?: string | null;
-  sourceRunId?: string | null;
-  sourceIdentityContextId?: string | null;
-  addresseeAgentId?: string | null;
-  addresseeUserId?: string | null;
-  title?: string | null;
-  summary?: string | null;
-  status: IssueThreadInteractionStatus;
-  continuationPolicy: IssueThreadInteractionContinuationPolicy;
-  /** Read-time acceptance gate; omitted when no workspace preparation is pending. */
-  acceptanceBlocker?: "workspace_sync_pending";
-  /** @deprecated Read requestedResolverPolicy. Kept for API compatibility. */
-  resolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  requestedResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  effectiveResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-  resolverPolicyProvenance: IssueThreadInteractionResolverPolicyProvenance;
-  effectiveResolverPolicySource: IssueThreadInteractionEffectiveResolverPolicySource;
-  legacyResolverPolicyAliases: {
-    requested: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-    effective: IssueThreadInteractionLegacyResolverPolicyAlias | null;
-  };
-  createdAt: Date | string;
-  updatedAt: Date | string;
-  resolvedAt?: Date | string | null;
-}
-
 export interface SuggestTasksInteraction extends IssueThreadInteractionBase {
   kind: "suggest_tasks";
   payload: SuggestTasksPayload;
@@ -1552,30 +1513,7 @@ export type IssueThreadInteraction =
   | RequestItemVerdictsInteraction
   | ConnectionIntentInteraction;
 
-export type CompanyIssueThreadInteraction = IssueThreadInteraction & {
-  issueIdentifier: string | null;
-};
-
-export interface CompanyIssueThreadInteractionPage {
-  items: CompanyIssueThreadInteraction[];
-  nextCursor: string | null;
-}
-
-export type IssueThreadInteractionPayload =
-  | SuggestTasksPayload
-  | AskUserQuestionsPayload
-  | RequestConfirmationPayload
-  | RequestCheckboxConfirmationPayload
-  | RequestItemVerdictsPayload
-  | ConnectionIntentPayload;
-
-export type IssueThreadInteractionResult =
-  | SuggestTasksResult
-  | AskUserQuestionsResult
-  | RequestConfirmationResult
-  | RequestCheckboxConfirmationResult
-  | RequestItemVerdictsResult
-  | ConnectionIntentResult;
+export type { CompanyIssueThreadInteraction, CompanyIssueThreadInteractionPage, IssueThreadInteractionPayload, IssueThreadInteractionResult } from "./company-issue-interactions.js";
 
 export interface IssueAttachment {
   id: string;
