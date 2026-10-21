@@ -7,6 +7,7 @@ import type {
   SharedWorkspaceConcurrency,
 } from "@paperclipai/shared";
 import { asString, parseObject } from "../adapters/utils.js";
+import { issueExecutionWorkspaceSettingsSchema } from "@paperclipai/shared";
 
 export type ParsedExecutionWorkspaceMode = Exclude<ExecutionWorkspaceMode, "inherit" | "reuse_existing">;
 
@@ -216,6 +217,9 @@ export function parseIssueExecutionWorkspaceSettings(
   const workspaceStrategy = parseExecutionWorkspaceStrategy(parsed.workspaceStrategy);
   const sharedWorkspaceConcurrency = parseSharedWorkspaceConcurrency(parsed.sharedWorkspaceConcurrency);
   const mode = asString(parsed.mode, "");
+  const environmentSettings = options.includeEnvironmentId && parsed.environmentId !== undefined
+    ? { environmentId: issueExecutionWorkspaceSettingsSchema.shape.environmentId.parse(parsed.environmentId) }
+    : {};
   const normalizedMode = (() => {
     if (
       mode === "inherit" ||
@@ -247,9 +251,7 @@ export function parseIssueExecutionWorkspaceSettings(
       ? { mode: normalizedMode as IssueExecutionWorkspaceSettings["mode"] }
       : {}),
     ...(sharedWorkspaceConcurrency ? { sharedWorkspaceConcurrency } : {}),
-    ...(options.includeEnvironmentId && (typeof parsed.environmentId === "string" || parsed.environmentId === null)
-      ? { environmentId: parsed.environmentId }
-      : {}),
+    ...environmentSettings,
     ...(workspaceStrategy ? { workspaceStrategy } : {}),
     ...(parsed.workspaceRuntime && typeof parsed.workspaceRuntime === "object" && !Array.isArray(parsed.workspaceRuntime)
       ? { workspaceRuntime: { ...(parsed.workspaceRuntime as Record<string, unknown>) } }
@@ -266,13 +268,16 @@ export function selectEnvironmentExecutionWorkspaceSettings(
 ): IssueExecutionWorkspaceSettings | null {
   if (!parsedSettings) return null;
   if (isolatedWorkspacesEnabled) return parsedSettings;
-  return parsedSettings.networkEgress
-    ? { networkEgress: parsedSettings.networkEgress }
-    : null;
+  const settings = {
+    ...(parsedSettings.environmentId !== undefined ? { environmentId: parsedSettings.environmentId } : {}),
+    ...(parsedSettings.networkEgress ? { networkEgress: parsedSettings.networkEgress } : {}),
+  };
+  return Object.keys(settings).length > 0 ? settings : null;
 }
 
 export type ExecutionWorkspaceEnvironmentSource =
   | "issue"
+  | "task"
   | "agent"
   | "instance"
   | "default"
@@ -297,6 +302,7 @@ export class ManagedSandboxUnavailableError extends Error {
 export function resolveExecutionWorkspaceEnvironmentId(input: {
   /** Explicit operator-selected sandbox for a task with a low-trust boundary. */
   lowTrustIssueEnvironmentId?: string | null;
+  taskEnvironmentId?: string | null;
   agentDefaultEnvironmentId: string | null;
   instanceDefaultEnvironmentId: string | null;
   localDefaultEnvironmentId: string;
@@ -314,6 +320,9 @@ export function resolveExecutionWorkspaceEnvironmentId(input: {
   const resolved = ((): ExecutionWorkspaceEnvironmentResolution => {
     if (input.lowTrustIssueEnvironmentId) {
       return {environmentId: input.lowTrustIssueEnvironmentId, source: "issue"};
+    }
+    if (input.taskEnvironmentId) {
+      return { environmentId: input.taskEnvironmentId, source: "task" };
     }
     if (input.agentDefaultEnvironmentId) {
       return {

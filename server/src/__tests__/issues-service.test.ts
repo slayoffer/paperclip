@@ -3732,7 +3732,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("strips legacy environmentId values from execution workspace settings updates", async () => {
+  it("preserves a task environment selection when the assignee changes", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const projectWorkspaceId = randomUUID();
@@ -3799,6 +3799,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
     expect(overridden!.executionWorkspaceSettings).toEqual({
       mode: "shared_workspace",
+      environmentId: operatorEnvironmentId,
     });
 
     const reassigned = await svc.update(created.id, {
@@ -3806,6 +3807,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
     expect(reassigned!.executionWorkspaceSettings).toEqual({
       mode: "shared_workspace",
+      environmentId: operatorEnvironmentId,
     });
   });
 
@@ -5784,7 +5786,6 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
-        environmentId: "env-old",
         workspaceStrategy: {
           type: "git_worktree",
           provisionCommand: "bash ./scripts/provision-old.sh",
@@ -5797,7 +5798,6 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await svc.update(issueId, {
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
-        environmentId: "env-new",
         workspaceStrategy: {
           type: "cloud_sandbox",
           provisionCommand: "bash ./scripts/provision-new.sh",
@@ -5815,7 +5815,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(workspace?.metadata).toMatchObject({
       config: {
-        environmentId: null,
+        environmentId: "env-old",
         provisionCommand: "bash ./scripts/provision-new.sh",
         runtimeProvisionCommand: null,
         teardownCommand: "bash ./scripts/teardown-new.sh",
