@@ -18,12 +18,20 @@ import {
   type LocalGitWorkspaceSnapshot,
   shellQuote,
 } from "./ssh-config.js";
-import { runLocalGit, runSshScript } from "./ssh-command.js";
+import { runLocalGit as runLocalGitCommand, runSshScript } from "./ssh-command.js";
 import { createTransferProgress, streamLocalFileToSsh, streamSshToLocalFile } from "./ssh-transfer-progress.js";
 import { removeDeletedPathsOnSsh, syncDirectoryToSsh } from "./ssh-sync.js";
 
+// Bind every Git operation to this checkout. Missing metadata must never trigger
+// discovery of a parent repository, including between validation and restore.
+function runLocalGit(localDir: string, args: string[], options?: Parameters<typeof runLocalGitCommand>[2]) {
+  return runLocalGitCommand(localDir,
+    ["--git-dir", path.join(localDir, ".git"), "--work-tree", localDir, ...args], options);
+}
+
 export async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGitWorkspaceSnapshot | null> {
   try {
+    if (!await isLocalGitRepositoryRoot(localDir)) return null;
     const insideWorkTree = await runLocalGit(localDir, ["rev-parse", "--is-inside-work-tree"], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
@@ -176,6 +184,7 @@ export async function exportGitWorkspaceFromSsh(input: {
   resetLocalWorkspace?: boolean;
   onProgress?: RuntimeProgressSink;
 }): Promise<string> {
+  await runLocalGit(input.localDir, ["rev-parse", "--git-dir"]);
   const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-bundle-"));
   const bundlePath = path.join(bundleDir, "workspace.bundle");
   const importedRef = input.importedRef ?? `refs/paperclip/ssh-sync/imported/${randomUUID()}`;
@@ -263,7 +272,7 @@ export async function integrateImportedGitHead(input: {
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const snapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
-    if (!snapshot) return;
+    if (!snapshot) throw new Error("The local workspace has no Git checkout.");
 
     const currentHead = snapshot.headCommit;
     if (!currentHead || currentHead === input.importedHead) return;

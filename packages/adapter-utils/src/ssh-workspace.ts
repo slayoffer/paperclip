@@ -202,7 +202,7 @@ async function restoreWorkspaceRootFromSsh(input: {
       });
     } finally {
       if (importedRef) {
-        await runLocalGit(input.localDir, ["update-ref", "-d", importedRef], {
+        await runLocalGit(input.localDir, ["--git-dir", path.join(input.localDir, ".git"), "update-ref", "-d", importedRef], {
           timeout: 10_000,
           maxBuffer: 16 * 1024,
         }).catch(() => undefined);

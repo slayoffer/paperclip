@@ -1,3 +1,4 @@
+import { sshInPlaceGitProbeScript } from "./ssh-in-place-git-probe.js";
 import { sshWriterDirectory } from "@paperclipai/adapter-utils/ssh-writer-termination";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -137,7 +138,7 @@ export async function probeSshInPlaceWorkspace(input: {
       `if [ ! -d ${p} ]; then echo host_missing; exit 0; fi`,
       `if [ ! -w ${p} ]; then echo host_not_writable; exit 0; fi`,
       `if [ ! -f ${f} ] || [ "$(cat ${f})" != ${shellQuote(token)} ]; then echo host_path_mismatch; exit 0; fi`,
-      `if [ -e ${shellQuote(path.posix.join(localPath, ".git"))} ] && ! git -C ${p} rev-parse --git-dir >/dev/null 2>&1; then echo host_git_unusable; exit 0; fi`,
+      sshInPlaceGitProbeScript(localPath),
       `echo ok`,
     ].join("\n");
     const result = await runSsh(input.config, script, { timeoutMs: PROBE_TIMEOUT_MS });

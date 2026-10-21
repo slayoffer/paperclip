@@ -7,6 +7,7 @@ import type { StorageService } from "../storage/types.js";
 import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
 import { verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 export { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
+import { hasOwnLinkedWorktreeGitDirectory, repairMissingManagedWorktreeGit } from "./managed-worktree-git.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -2137,6 +2138,14 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   const expectedBranchName = input.expectedBranchName?.trim();
   if (!expectedBranchName) return { branchName: null, reconciledForward: false, warnings: [] };
 
+  if (!await hasOwnLinkedWorktreeGitDirectory(input.worktreePath, input.repoRoot)) {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Git metadata does not identify the execution worktree at "${input.worktreePath}".`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable", reasonCode: "wrong_git_directory",
+        worktreePath: input.worktreePath, executionWorkspaceId: input.executionWorkspaceId ?? null } },
+    );
+  }
+
   const currentBranch = input.actualBranchName !== undefined
     ? input.actualBranchName
     : await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], input.worktreePath).catch(() => null);
@@ -2909,6 +2918,17 @@ export async function inspectManagedGitWorktreeBranch(input: {
     };
   }
 
+  // A primary checkout inspected as its own owner has no linked-worktree administration directory.
+  if (worktreePath !== repoRoot && !await hasOwnLinkedWorktreeGitDirectory(worktreePath, repoRoot)) {
+    return {
+      ...base,
+      valid: false,
+      reason: "Git does not use this worktree's own administration directory",
+      reasonCode: "wrong_git_directory",
+      repoRoot,
+    };
+  }
+
   const actualBranchName = await runGit(
     ["symbolic-ref", "--quiet", "--short", "HEAD"],
     worktreePath,
@@ -3520,6 +3540,11 @@ export async function realizeExecutionWorkspace(input: {
   }
 
   async function validateReusableWorktree(reusablePath: string) {
+    const repairWarnings = await repairMissingManagedWorktreeGit({
+      repoRoot, worktreePath: reusablePath, branchName,
+      runtimeOwned: !requestedExistingBranch && input.recordedBranchOwnership?.createdByRuntime === true,
+      recorder: input.recorder,
+    });
     const validation = await validateLinkedGitWorktree({
       repoRoot,
       worktreePath: reusablePath,
@@ -3558,10 +3583,10 @@ export async function realizeExecutionWorkspace(input: {
       return {
         validation: nextValidation,
         branchName: effectiveBranchName,
-        warnings: coherence.warnings,
+        warnings: [...repairWarnings, ...coherence.warnings],
       };
     }
-    return { validation, branchName, warnings: [] };
+    return { validation, branchName, warnings: repairWarnings };
   }
 
   const existingWorktree = await directoryExists(worktreePath);
@@ -3585,7 +3610,11 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
-    throw new Error(`Configured worktree path "${worktreePath}" already exists and is not a reusable git worktree${reason}.`);
+    throw new WorkspaceRuntimeValidationFailure(
+      `Configured worktree path "${worktreePath}" already exists and is not a reusable git worktree${reason}.`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable",
+        reasonCode: validation && !validation.valid ? validation.reasonCode : null, worktreePath } },
+    );
   }
 
   const registeredBranchWorktree = await findRegisteredGitWorktreeByBranch(repoRoot, branchName);
@@ -3609,7 +3638,11 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
-    throw new Error(`Registered worktree for branch "${branchName}" at "${registeredBranchWorktree}" is not reusable${reason}.`);
+    throw new WorkspaceRuntimeValidationFailure(
+      `Registered worktree "${registeredBranchWorktree}" is not reusable${reason}.`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable",
+        reasonCode: validation && !validation.valid ? validation.reasonCode : null, worktreePath: registeredBranchWorktree } },
+    );
   }
 
   if (requestedExistingBranch) {
@@ -3931,8 +3964,12 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
     const reuseWorktreePath = realized.worktreePath ?? cwd;
-    const repairWarnings: string[] = [];
-    if (await isGitCheckout(reuseWorktreePath) && realized.branchCreatedByRuntime) {
+    const repairWarnings = await repairMissingManagedWorktreeGit({
+      repoRoot, worktreePath: reuseWorktreePath,
+      branchName: realized.branchName, runtimeOwned: realized.branchCreatedByRuntime === true,
+      recorder: input.recorder,
+    });
+    if (await hasOwnLinkedWorktreeGitDirectory(reuseWorktreePath, repoRoot) && realized.branchCreatedByRuntime) {
       // Branch-coherence repair may check out another branch, adopt a forward
       // branch, or move the recorded ref from a detached HEAD. Those repairs
       // are valid only for a branch that this runtime created. An attached
@@ -4370,6 +4407,7 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
 
   if (input.workspace.providerType === "git_worktree" && workspacePath) {
     const worktreeExists = await directoryExists(workspacePath);
+    let worktreeRemoved = !worktreeExists;
     if (worktreeExists) {
       if (!repoRoot) {
         warnings.push(`Could not resolve git repo root for "${workspacePath}".`);
@@ -4394,12 +4432,16 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
             successMessage: `Removed git worktree ${workspacePath}\n`,
             failureLabel: `git worktree remove ${workspacePath}`,
           });
+          worktreeRemoved = !await directoryExists(workspacePath);
         } catch (err) {
           warnings.push(err instanceof Error ? err.message : String(err));
         }
       }
     }
-    if (branchCreatedByRuntime && input.workspace.branchName) {
+    if (branchCreatedByRuntime && input.workspace.branchName && !worktreeRemoved) {
+      warnings.push(`Preserved branch "${input.workspace.branchName}" because worktree removal did not complete.`);
+    }
+    if (branchCreatedByRuntime && input.workspace.branchName && worktreeRemoved) {
       if (!repoRoot) {
         warnings.push(`Could not resolve git repo root to delete branch "${input.workspace.branchName}".`);
       } else {
