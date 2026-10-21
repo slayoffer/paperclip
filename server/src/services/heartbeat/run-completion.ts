@@ -28,6 +28,7 @@ import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-n
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactRunResultSecrets } from "../run-result-redaction.js";
+import { wakeDependentsAfterFinalization } from "../dependency-finalize-wake.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
@@ -939,32 +940,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         }
       }
 
-      // Dependency wake re-check: if this run's issue was marked done mid-run,
-      // the route-time `issue_blockers_resolved` wake may have been gated by
-      // workspace finalization or merged into this run. Reuse the level-triggered
-      // dependency backstop so finalize and periodic recovery share idempotency,
-      // readiness, active-path, and observability rules.
       if (issueId && finalizedRun) {
-        try {
-          const blockerIssueStatus = await db
-            .select({ status: issues.status })
-            .from(issues)
-            .where(eq(issues.id, issueId))
-            .then((rows) => rows[0]?.status ?? null);
-          if (blockerIssueStatus === "done") {
-            await recovery.reconcileResolvedDependencyWakeBackstop({
-              runId: finalizedRun.id,
-              companyId: finalizedRun.companyId,
-              blockerIssueId: issueId,
-              source: "workspace.finalize",
-            });
-          }
-        } catch (finalizeWakeErr) {
-          logger.warn(
-            { err: finalizeWakeErr, runId: run.id, issueId },
-            "failed to evaluate dependent wakes after workspace_finalize",
-          );
-        }
+        await wakeDependentsAfterFinalization(db, recovery, finalizedRun, issueId);
       }
     }
 
