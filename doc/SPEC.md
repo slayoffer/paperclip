@@ -28,6 +28,7 @@ new sessions and resume failure.
 
 The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
 The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
+The fork permits [saved review waits](review-waits.md) with a board owner and an exact saved head.
 
 ---
 

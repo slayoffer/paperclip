@@ -8,7 +8,10 @@ on:
       - .github/workflows/synthiq-recovery-bridge.yml
       - packages/adapter-utils/src/**
       - server/src/__tests__/issue-recovery*.test.ts
+      - server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
       - server/src/routes/issues.ts
+      - server/src/services/review-wait.ts
+      - server/src/services/self-block-guard*.ts
       - server/src/services/issue-recovery-actions.ts
       - server/src/services/recovery/**
       - packages/db/src/**
@@ -64,3 +67,5 @@ jobs:
           packages/adapter-utils/src/sandbox-callback-bridge-recovery.test.ts
           server/src/__tests__/issue-recovery-actions.test.ts
           server/src/__tests__/issue-recovery-bridge.test.ts
+          server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+          server/src/services/self-block-guard.test.ts
