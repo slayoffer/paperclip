@@ -1,479 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
-import os from "node:os";
-import { DatabaseSync } from "node:sqlite";
-import { createWorkspaceManifest, WorkspaceManifestMap, type PathManifest, type WorkspacePaths } from "./workspace-manifest.js";
-import { resolvePaperclipInstanceRootForAdapter } from "./server-utils.js";
-import { entriesMatch, directoryMergeConflicts, DirectoryMergeConflict, excludedReplacementConflicts } from "./workspace-restore-safety.js";
+import { WorkspaceManifestMap } from "./workspace-manifest.js";
+import { captureDirectorySnapshot, disposeDirectorySnapshot, entriesMatch, type DirectorySnapshot, type SnapshotEntry } from "./workspace-directory-snapshot.js";
+import { withDirectoryMergeLock } from "./workspace-directory-lock.js";
+import { sshWorkspaceOperations } from "./workspace-operation-schedule.js";
+import type { RuntimeProgressSink } from "./runtime-progress.js";
+
+export * from "./workspace-directory-snapshot.js";
+export * from "./workspace-directory-lock.js";
+import { directoryMergeConflicts, DirectoryMergeConflict, excludedReplacementConflicts } from "./workspace-restore-safety.js";
 export { directoryMergeConflicts, DirectoryMergeConflict } from "./workspace-restore-safety.js";
-import type { WorkspaceRestoreDiagnostic } from "./workspace-restore-diagnostics.js";
-import { hashWorkspaceFile } from "./workspace-file-hasher.js";
-import { scanWorkspaceSnapshot } from "./workspace-snapshot-worker-client.js";
-
-export type SnapshotEntry =
-  | { kind: "dir" }
-  | { kind: "file"; mode: number; hash: string }
-  | { kind: "symlink"; target: string };
-
-export interface DirectorySnapshot {
-  exclude: string[];
-  entries: Map<string, SnapshotEntry> | WorkspaceManifestMap<SnapshotEntry>;
-  ignoredPaths?: WorkspacePaths;
-}
-
-export interface LegacySerializedDirectorySnapshot {
-  version: 1;
-  exclude: string[];
-  entries: Array<[string, SnapshotEntry]>;
-}
-
-export type SerializedDirectorySnapshot = LegacySerializedDirectorySnapshot | {
-  version: 2;
-  exclude: string[];
-  entries: PathManifest;
-  ignoredPaths?: WorkspacePaths;
-};
-const ownedDirectorySnapshots = new WeakMap<DirectorySnapshot, string>();
-export async function disposeDirectorySnapshot(snapshot: DirectorySnapshot | null): Promise<void> {
-  if (!snapshot) return;
-  if (snapshot.entries instanceof WorkspaceManifestMap) {
-    snapshot.entries.close();
-    const ownedDirectory = ownedDirectorySnapshots.get(snapshot);
-    ownedDirectorySnapshots.delete(snapshot);
-    if (ownedDirectory) await fs.rm(ownedDirectory, { recursive: true, force: true });
-  }
-}
-
-function parseManifestEntry(value: string): SnapshotEntry {
-  const result = parseSnapshotEntry(JSON.parse(value));
-  if (!result) throw new Error("Invalid workspace baseline entry");
-  return result;
-}
-
-/** Call only after the controller validates a persisted manifest's path and digest. */
-export function openDirectorySnapshot(value: Extract<SerializedDirectorySnapshot, { version: 2 }>): DirectorySnapshot {
-  return { exclude: value.exclude, entries: new WorkspaceManifestMap(value.entries, parseManifestEntry), ignoredPaths: value.ignoredPaths };
-}
-
-function isSafeSnapshotRelativePath(value: string): boolean {
-  if (!value || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) {
-    return false;
-  }
-  return !value.split(/[\\/]/).some((segment) => segment === "..");
-}
-
-function parseSnapshotEntry(value: unknown): SnapshotEntry | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (candidate.kind === "dir") return { kind: "dir" };
-  if (candidate.kind === "symlink" && typeof candidate.target === "string") {
-    return { kind: "symlink", target: candidate.target };
-  }
-  if (
-    candidate.kind === "file" &&
-    typeof candidate.mode === "number" &&
-    Number.isInteger(candidate.mode) &&
-    candidate.mode >= 0 &&
-    typeof candidate.hash === "string" &&
-    /^[0-9a-f]{64}$/.test(candidate.hash)
-  ) {
-    return { kind: "file", mode: candidate.mode, hash: candidate.hash };
-  }
-  return null;
-}
-
-export function serializeDirectorySnapshot(
-  snapshot: DirectorySnapshot,
-): SerializedDirectorySnapshot {
-  if (snapshot.entries instanceof WorkspaceManifestMap) return {
-    version: 2, exclude: [...snapshot.exclude], entries: snapshot.entries.manifest,
-    ...(snapshot.ignoredPaths ? { ignoredPaths: snapshot.ignoredPaths } : {}),
-  };
-  return {
-    version: 1,
-    exclude: [...snapshot.exclude],
-    entries: [...snapshot.entries.entries()].sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
-  };
-}
-
-export function parseDirectorySnapshot(
-  value: unknown,
-): DirectorySnapshot | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (
-    candidate.version !== 1 ||
-    !Array.isArray(candidate.exclude) ||
-    !candidate.exclude.every((entry) => typeof entry === "string") ||
-    !Array.isArray(candidate.entries)
-  ) {
-    return null;
-  }
-  const entries = new Map<string, SnapshotEntry>();
-  for (const rawEntry of candidate.entries) {
-    if (!Array.isArray(rawEntry) || rawEntry.length !== 2) return null;
-    const [relative, rawSnapshotEntry] = rawEntry;
-    if (typeof relative !== "string" || !isSafeSnapshotRelativePath(relative)) {
-      return null;
-    }
-    const entry = parseSnapshotEntry(rawSnapshotEntry);
-    if (!entry || entries.has(relative)) return null;
-    entries.set(relative, entry);
-  }
-  return {
-    exclude: [...new Set(candidate.exclude as string[])],
-    entries,
-  };
-}
-
-export function directorySnapshotSha256(snapshot: DirectorySnapshot): string {
-  if (!(snapshot.entries instanceof WorkspaceManifestMap)) return createHash("sha256")
-    .update(JSON.stringify(serializeDirectorySnapshot(snapshot))).digest("hex");
-  const digest = createHash("sha256").update("workspace-baseline-v2\0").update(JSON.stringify(snapshot.exclude));
-  for (const entry of snapshot.entries) digest.update(JSON.stringify(entry)).update("\0");
-  return digest.digest("hex");
-}
-
-async function readSnapshotEntry(root: string, relative: string): Promise<SnapshotEntry | null> {
-  const fullPath = path.join(root, relative);
-  let stats;
-  try {
-    stats = await fs.lstat(fullPath);
-  } catch {
-    return null;
-  }
-
-  if (stats.isDirectory()) return { kind: "dir" };
-  if (stats.isSymbolicLink()) {
-    return {
-      kind: "symlink",
-      target: await fs.readlink(fullPath),
-    };
-  }
-  if (!stats.isFile()) return null;
-
-  return {
-    kind: "file",
-    mode: stats.mode,
-    hash: await hashWorkspaceFile(fullPath),
-  };
-}
-
-
-const LOCK_WAIT_MS = 30_000;
-const LOCK_DIAGNOSTIC_READ_TIMEOUT_MS = 100;
-const activeDirectoryMergeLocks = new Set<string>();
-const MAX_LOCK_DIAGNOSTIC_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-export type DirectoryMergeLockOperation =
-  | "agent_directory_prepare"
-  | "agent_directory_release"
-  | "agent_directory_collect"
-  | "agent_directory_checkpoint"
-  | "agent_directory_handoff";
-
-/** Evidence only: neither process age nor this module's holder set can prove
- * that a lock in another process or PID namespace is safe to reclaim. */
-async function directoryMergeLockDiagnostics(lockDir: string, waitMs: number, ownerPath: string): Promise<Record<string, string | number | boolean>> {
-  const diagnostics: Record<string, string | number | boolean> = {
-    ownerState: "unknown",
-    knownLocalHolder: activeDirectoryMergeLocks.has(lockDir),
-    waitMs: Math.min(MAX_LOCK_DIAGNOSTIC_AGE_MS, Math.max(0, Math.floor(waitMs))),
-  };
-  const controller = new AbortController();
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Abort is best effort: race the read as well so a stalled filesystem
-    // cannot keep the original lock timeout from reaching its caller.
-    const raw = await Promise.race([
-      fs.readFile(ownerPath, { encoding: "utf8", signal: controller.signal }),
-      new Promise<undefined>((resolve) => {
-        timeout = setTimeout(() => resolve(undefined), LOCK_DIAGNOSTIC_READ_TIMEOUT_MS);
-      }),
-    ]);
-    if (raw === undefined) return diagnostics;
-    let owner: { pid?: unknown; createdAt?: unknown } | null;
-    try {
-      owner = JSON.parse(raw) as typeof owner;
-    } catch {
-      diagnostics.ownerState = "invalid";
-      return diagnostics;
-    }
-    if (!owner || !Number.isSafeInteger(owner.pid) || (owner.pid as number) <= 0) {
-      diagnostics.ownerState = "invalid";
-      return diagnostics;
-    }
-    const pid = owner.pid as number;
-    diagnostics.ownerSameProcess = pid === process.pid;
-    try {
-      process.kill(pid, 0);
-      diagnostics.ownerState = "alive";
-    } catch (error) {
-      diagnostics.ownerState = (error as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown";
-    }
-    const createdAt = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : NaN;
-    const ageMs = Date.now() - createdAt;
-    if (Number.isFinite(ageMs) && ageMs >= 0) {
-      diagnostics.ownerAgeMs = Math.min(MAX_LOCK_DIAGNOSTIC_AGE_MS, Math.floor(ageMs));
-      if (pid === process.pid) diagnostics.ownerPredatesProcess = ageMs > process.uptime() * 1000 + 1000;
-    }
-  } catch (error) {
-    diagnostics.ownerState = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown";
-  } finally {
-    clearTimeout(timeout);
-    controller.abort();
-  }
-  return diagnostics;
-}
-
-/**
- * The stable `code` a lock-timeout error carries, so a caller can identify it
- * without matching on the error message text (the message embeds the lock
- * directory path).
- */
-export const WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE = "ERR_WORKSPACE_RESTORE_LOCK_TIMEOUT";
-
-/**
- * The closed set of codes a failed workspace restore can carry off the
- * sandbox. Every code is safe to store on a run record readable by any
- * same-company actor: none embeds a filesystem path, a raw error message, or
- * a process id.
- */
-export type WorkspaceRestoreFailureCode =
-  | "restore_permission_denied"
-  | "restore_lock_timeout"
-  | "restore_unsafe_archive"
-  | "restore_failed";
-
-/**
- * The outcome of one workspace restore. `ok: true` on a clean restore. `ok:
- * false` carries one allowlisted {@link WorkspaceRestoreFailureCode} — never a
- * raw error, a path, or a process id.
- */
-export type WorkspaceRestoreOutcome =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly code: WorkspaceRestoreFailureCode; readonly diagnostic?: WorkspaceRestoreDiagnostic };
-
-/**
- * Classifies a caught workspace-restore error into one allowlisted code. Maps
- * `EACCES` and `EPERM` to a permission failure, the merge-lock timeout
- * (matched by {@link WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE}, never by the error
- * message text) to a lock-timeout failure, and every other error to a generic
- * failure. The known Daytona confinement diagnostic also identifies unsafe
- * archives across plugin transports that retain only a message. Never returns
- * raw messages, paths or process IDs.
- */
-export function classifyWorkspaceRestoreFailure(error: unknown): WorkspaceRestoreFailureCode {
-  const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
-  if (code === "EACCES" || code === "EPERM") return "restore_permission_denied";
-  if (code === WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE) return "restore_lock_timeout";
-  const message = error instanceof Error ? error.message : "";
-  const archiveRefused = /Daytona syncOut refusing (?:tarball (?:with an unparseable entry listing|(?:link whose target|member that) escapes the extraction dir)|unparseable or ambiguous (?:sym|hard)link entry)/.test(message);
-  const outboundPathRefused = /Daytona sync source path (?:is not a confined absolute path|escapes the workspace remote dir):/.test(message);
-  // These are the fail-closed guard's own exit codes. Transport/command failures
-  // with other exit codes retain the existing transient failure policy.
-  const outboundGuardRefused = /Daytona outbound symlink-escape guard command failed \(exit (?:40|41|42|44|45)\)/.test(message);
-  if (code === "WORKSPACE_RESTORE_UNSAFE_ARCHIVE" ||
-      archiveRefused || outboundPathRefused || outboundGuardRefused) {
-    return "restore_unsafe_archive";
-  }
-  return "restore_failed";
-}
-
-/**
- * The fixed, allowlisted line an ACP adapter writes to the run log when a
- * workspace restore fails. Every call site must pass this to `onLog` instead
- * of the caught error's own message: the caught error can carry a host
- * filesystem path or the lock owner's process id, and the run log is
- * readable by any same-company actor. Never add the code's raw
- * `Error.message` to this text.
- */
-export function describeWorkspaceRestoreFailure(code: WorkspaceRestoreFailureCode): string {
-  switch (code) {
-    case "restore_permission_denied":
-      return "the restore could not write to the workspace (permission denied)";
-    case "restore_lock_timeout":
-      return "the restore timed out waiting for the workspace merge lock";
-    case "restore_unsafe_archive":
-      return "the archive contains an unsafe link or path; workspace repair is required";
-    case "restore_failed":
-      return "the restore failed";
-  }
-}
-
-async function acquireDirectoryMergeLock(lockDir: string, operation?: DirectoryMergeLockOperation, waitMs: number = LOCK_WAIT_MS): Promise<() => Promise<void>> {
-  const startedAt = performance.now();
-  const deadline = Date.now() + waitMs;
-  const databasePath = `${lockDir}.sqlite`;
-  const ownerPath = `${lockDir}.owner.json`;
-  async function waitForLock(diagnosticOwnerPath: string) {
-    if (Date.now() >= deadline) {
-      const timeoutError: NodeJS.ErrnoException & { workspaceRestoreLock?: Record<string, string | number | boolean> } = new Error(
-        `Timed out waiting for workspace restore lock at ${lockDir}`,
-      );
-      timeoutError.code = WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE;
-      // Keep the original timeout if the diagnostic read itself fails.
-      timeoutError.workspaceRestoreLock = await directoryMergeLockDiagnostics(lockDir, performance.now() - startedAt, diagnosticOwnerPath).catch(() => undefined);
-      if (operation && timeoutError.workspaceRestoreLock) timeoutError.workspaceRestoreLock.operation = operation;
-      throw timeoutError;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-
-  // SQLite's RESERVED file lock is the authority, including across processes
-  // and PID namespaces. It is released by the OS on a crash. The empty database
-  // is permanent: unlinking it would let contenders lock different inodes.
-  // node:sqlite is already required for workspace manifests; no native add-on
-  // or external flock command is needed on macOS, Linux, or Windows.
-  const databaseStat = await fs.lstat(databasePath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (databaseStat && (!databaseStat.isFile() || databaseStat.isSymbolicLink() || databaseStat.nlink !== 1)) {
-    throw new Error("Directory merge lock database is not a plain, unshared file.");
-  }
-  // Let SQLite create and manage every descriptor for this inode. On POSIX,
-  // closing a raw fs.open descriptor could release another connection's locks.
-  // The parent is private (0700), including while a new file is chmodded.
-  const database = new DatabaseSync(databasePath, { allowExtension: false });
-  try {
-    await fs.chmod(databasePath, 0o600);
-    // Never block the event loop while another async operation holds the lock.
-    database.exec("PRAGMA busy_timeout=0;");
-    while (true) {
-      try {
-        database.exec("BEGIN IMMEDIATE;");
-        break;
-      } catch (error) {
-        const code = (error as { errcode?: number }).errcode;
-        if (typeof code !== "number" || (code & 0xff) !== 5) throw error; // SQLITE_BUSY
-        await waitForLock(ownerPath);
-      }
-    }
-
-    // Old processes do not participate in the SQLite protocol. Never infer
-    // that a legacy owner is dead from PID existence, age, or missing metadata.
-    // Drain old writers before upgrading. A leftover legacy directory requires
-    // explicit offline cleanup; a live legacy holder can still release normally.
-    while (await fs.lstat(lockDir).then(() => true, (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return false;
-      throw error;
-    })) await waitForLock(path.join(lockDir, "owner.json"));
-
-    const owner = await fs.open(ownerPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
-    try {
-      await owner.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
-    } finally { await owner.close(); }
-    activeDirectoryMergeLocks.add(lockDir);
-    let released = false;
-    return async () => {
-      if (released) return;
-      released = true;
-      try {
-        // This sidecar is diagnostic only. A failed removal cannot retain
-        // ownership, and the next holder replaces it while holding the DB lock.
-        await fs.unlink(ownerPath).catch(() => undefined);
-      } finally {
-        activeDirectoryMergeLocks.delete(lockDir);
-        database.close();
-      }
-    };
-  } catch (error) {
-    database.close();
-    throw error;
-  }
-}
-
-const DIRECTORY_MERGE_LOCK_ROOT_MODE = 0o700;
-
-function nonEmpty(value: string | undefined): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-/**
- * Resolves the private, instance-scoped root for every directory-merge lock:
- * `<instance root>/locks/directory-merge`. Every process that can mutate one
- * target directory must resolve to the same `PAPERCLIP_HOME` and
- * `PAPERCLIP_INSTANCE_ID`. That shared resolution is what keeps mutual
- * exclusion true for all five callers of `withDirectoryMergeLock`, including
- * the three Codex credential call sites that never touch a workspace.
- *
- * This never falls back to `os.tmpdir()` and never places the lock beside the
- * target directory: both paths funnel through this one instance-scoped root,
- * so a read-only target parent (the workspace-restore bug) cannot block a
- * lock acquisition.
- *
- * The root reads `PAPERCLIP_HOME` and `PAPERCLIP_INSTANCE_ID` from `env`, so an
- * environment-parameterized caller (a Codex credential call site that builds
- * its own `env` object instead of reading `process.env`) resolves its lock
- * root under the same instance root as the directory it protects. This never
- * reads `process.env` when the caller passes an `env`: every fallback inside
- * the resolver also reads from that same `env` object. A caller that omits
- * `env` gets `process.env`, which keeps the resolution unchanged for the
- * workspace-restore call site.
- *
- * The root is validated, not trusted: `lstat` rejects a symlink and rejects
- * any non-directory before use (fail closed). `fs.mkdir` does not change the
- * mode of a directory that already exists, so an existing valid directory
- * keeps whatever mode it already has; only a freshly created root gets mode
- * `0o700`.
- *
- * The existence check and the `mkdir` below are two separate calls, so a
- * racing writer can plant a symlink at `lockRoot` in between them. `fs.mkdir`
- * with `recursive: true` does not fail on a leaf that already exists as a
- * symlink to a real directory, so a successful `mkdir` call alone does not
- * prove the path is a plain directory. The `lstat` after `mkdir` closes that
- * window: it validates what is actually at `lockRoot` (never a `stat`, which
- * would follow the symlink) before any caller treats it as the lock root.
- */
-async function resolveDirectoryMergeLockRoot(env: NodeJS.ProcessEnv = process.env): Promise<string> {
-  const instanceRoot = resolvePaperclipInstanceRootForAdapter({
-    homeDir: nonEmpty(env.PAPERCLIP_HOME) ?? undefined,
-    instanceId: nonEmpty(env.PAPERCLIP_INSTANCE_ID) ?? undefined,
-    env,
-  });
-  const lockRoot = path.join(instanceRoot, "locks", "directory-merge");
-  const existing = await fs.lstat(lockRoot).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (existing) {
-    if (existing.isSymbolicLink() || !existing.isDirectory()) {
-      throw new Error(`Directory merge lock root at ${lockRoot} is not a plain directory.`);
-    }
-    return lockRoot;
-  }
-  await fs.mkdir(lockRoot, { recursive: true, mode: DIRECTORY_MERGE_LOCK_ROOT_MODE });
-  const created = await fs.lstat(lockRoot);
-  if (created.isSymbolicLink() || !created.isDirectory()) {
-    throw new Error(`Directory merge lock root at ${lockRoot} is not a plain directory.`);
-  }
-  return lockRoot;
-}
-
-export async function withDirectoryMergeLock<T>(
-  targetDir: string,
-  fn: (canonicalTargetDir: string) => Promise<T>,
-  env: NodeJS.ProcessEnv = process.env,
-  diagnosticOperation?: DirectoryMergeLockOperation,
-  // Test seam only: overrides how long acquisition waits before it reports a
-  // timeout. Production callers must omit this and keep the real budget.
-  waitMs: number = LOCK_WAIT_MS,
-): Promise<T> {
-  // Canonicalize before we hash or lock: a retargeted symlink must not let the
-  // lock protect one directory while the caller mutates another.
-  const canonicalTargetDir = await fs.realpath(targetDir);
-  const lockRoot = await resolveDirectoryMergeLockRoot(env);
-  const lockKey = createHash("sha256").update(canonicalTargetDir).digest("hex");
-  const releaseLock = await acquireDirectoryMergeLock(path.join(lockRoot, `${lockKey}.lock`), diagnosticOperation, waitMs);
-  try {
-    return await fn(canonicalTargetDir);
-  } finally {
-    await releaseLock();
-  }
-}
 
 async function copySnapshotEntry(sourceDir: string, targetDir: string, relative: string, entry: SnapshotEntry): Promise<void> {
   const sourcePath = path.join(sourceDir, relative);
@@ -514,50 +51,6 @@ async function copySnapshotEntry(sourceDir: string, targetDir: string, relative:
 
 }
 
-export async function captureDirectorySnapshot(
-  rootDir: string,
-  options: { exclude?: string[]; ignoredPaths?: WorkspacePaths; diskBacked?: boolean } = {},
-): Promise<DirectorySnapshot> {
-  const exclude = [...new Set(options.exclude ?? [])];
-  const manifestDirectory = options.diskBacked
-    ? await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-baseline-")) : undefined;
-  try {
-    const entries = await scanWorkspaceSnapshot({ rootDir, exclude, ignoredPaths: options.ignoredPaths, manifestDirectory });
-    const snapshot: DirectorySnapshot = {
-      exclude, ignoredPaths: options.ignoredPaths,
-      entries: entries instanceof Map ? entries : new WorkspaceManifestMap(entries, parseManifestEntry),
-    };
-    if (manifestDirectory) ownedDirectorySnapshots.set(snapshot, manifestDirectory);
-    return snapshot;
-  } catch (error) {
-    if (manifestDirectory) await fs.rm(manifestDirectory, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-/** A disk-backed subset for independent nested-repository merges. */
-export async function selectDirectorySnapshot(snapshot: DirectorySnapshot, options: {
-  prefix?: string; omit?: string[]; exclude: string[]; ignoredPaths?: WorkspacePaths;
-}): Promise<DirectorySnapshot> {
-  const writer = await createWorkspaceManifest("paperclip-workspace-baseline-");
-  try {
-    for (const [relative, entry] of snapshot.entries) {
-      if (options.prefix && !relative.startsWith(options.prefix)) continue;
-      if (options.omit?.some((omit) => relative === omit || relative.startsWith(`${omit}/`))) continue;
-      writer.add("baseline", options.prefix ? relative.slice(options.prefix.length) : relative, JSON.stringify(entry));
-    }
-    const result: DirectorySnapshot = { exclude: options.exclude, ignoredPaths: options.ignoredPaths,
-      entries: new WorkspaceManifestMap(writer.paths("baseline"), parseManifestEntry) };
-    writer.close();
-    ownedDirectorySnapshots.set(result, path.dirname(writer.filePath));
-    return result;
-  } catch (error) {
-    writer.close(false);
-    await fs.rm(path.dirname(writer.filePath), { recursive: true, force: true });
-    throw error;
-  }
-}
-
 function orderedEntries(snapshot: DirectorySnapshot, reverse = false): Iterable<[string, SnapshotEntry]> {
   if (snapshot.entries instanceof WorkspaceManifestMap) return snapshot.entries.entries(reverse);
   return [...snapshot.entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0) * (reverse ? -1 : 1));
@@ -570,18 +63,36 @@ export async function mergeDirectoryWithBaseline(input: {
   conflictPolicy?: "reject";
   beforeApply?: () => Promise<void>;
   afterApply?: () => Promise<void>;
+  onProgress?: RuntimeProgressSink;
   /** Caller holds the target's writer lock and validated an immutable sparse
    * source. Unchanged entries need no payload and are never copied. */
   snapshots?: { source: DirectorySnapshot; current: DirectorySnapshot };
 }): Promise<void> {
+  // Direct merges obey the same ordering as SSH restores. Nested restores
+  // retain their existing slot through AsyncLocalStorage.
+  return sshWorkspaceOperations.run(() => mergeDirectoryWithBaselineInner(input));
+}
+
+async function mergeDirectoryWithBaselineInner(input: Parameters<typeof mergeDirectoryWithBaseline>[0]): Promise<void> {
   const options = { exclude: input.baseline.exclude, ignoredPaths: input.baseline.ignoredPaths, diskBacked: true };
+  const currentOptions = input.conflictPolicy === "reject" ? { exclude: [], diskBacked: true } : options;
   const source = input.snapshots?.source ?? await captureDirectorySnapshot(input.sourceDir, options);
+  let warm: DirectorySnapshot | undefined;
   try {
+    // Hash target contents before acquiring the writer lock. The locked scan
+    // checks nanosecond metadata and hashes only files that changed meanwhile.
+    if (!input.snapshots) warm = await captureDirectorySnapshot(input.targetDir,
+      { ...currentOptions, cacheMetadata: true }).catch((error: NodeJS.ErrnoException) => {
+        // Another writer can remove a path or change its type after lstat.
+        // Discard this optional cache and repeat the scan under the lock.
+        if (["ENOENT", "ENOTDIR", "EISDIR", "EINVAL", "ELOOP", "WORKSPACE_SNAPSHOT_CHANGED"].includes(error.code ?? "")) return undefined;
+        throw error;
+      });
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {
       // Strict preflight must see excluded children before a directory is
       // replaced. The merge still applies only the filtered source/baseline.
       const current = input.snapshots?.current ?? await captureDirectorySnapshot(canonicalTargetDir,
-        input.conflictPolicy === "reject" ? { exclude: [], diskBacked: true } : options);
+        { ...currentOptions, reuseSnapshot: warm });
       try {
         if (input.conflictPolicy === "reject") {
           const conflicts = directoryMergeConflicts(input.baseline, source, current);
@@ -608,14 +119,9 @@ export async function mergeDirectoryWithBaseline(input: {
         }
         await input.afterApply?.();
       } finally { await disposeDirectorySnapshot(current); }
-    });
-  } finally { await disposeDirectorySnapshot(source); }
-}
-
-export async function directoryEntryMatchesBaseline(
-  rootDir: string,
-  relative: string,
-  baselineEntry: SnapshotEntry,
-): Promise<boolean> {
-  return entriesMatch(await readSnapshotEntry(rootDir, relative), baselineEntry);
+    }, process.env, undefined, undefined, input.onProgress);
+  } finally {
+    await disposeDirectorySnapshot(warm ?? null);
+    await disposeDirectorySnapshot(source);
+  }
 }
