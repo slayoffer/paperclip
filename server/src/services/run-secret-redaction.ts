@@ -10,6 +10,14 @@ const REGISTRY_KEY = "paperclipSecretRedactions";
 // Project only the registry: run contexts can contain megabytes of prompt data.
 const registrySnapshot = sql`jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')`;
 
+/** Preserve concurrent registrations when the execution replaces its context snapshot. */
+export function preserveRunSecretRegistry(context: Record<string, unknown>) {
+  return sql`(${JSON.stringify(context)}::jsonb - 'paperclipSecretRedactions') ||
+    (case when ${heartbeatRuns.contextSnapshot} ? 'paperclipSecretRedactions'
+      then jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')
+      else '{}'::jsonb end)`;
+}
+
 type RegistryEntry = {
   fingerprintSha256: string;
   material: StoredSecretVersionMaterial;

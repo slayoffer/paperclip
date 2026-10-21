@@ -601,7 +601,8 @@ import {
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
-import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, preserveRunSecretRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
+import { createRunLogRedactor } from "./run-log-redactor.js";
 import { declaredSecretValues, redactRunLogText, redactRunPersistencePatch, redactRunResultSecrets } from "./run-result-redaction.js";
 import {
   hasSessionCompactionThresholds,
@@ -12958,7 +12959,14 @@ export function heartbeatService(
     try {
       registered = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
     } catch (err) {
-      logger.warn({ err, runId: run.id }, "run secret registry unavailable; masking token shapes and declared values only");
+      logger.warn({ runId: run.id }, "run secret registry unavailable; suppressing persisted output");
+      return {
+        ...patch,
+        ...(patch.error != null ? { error: "***REDACTED***" } : {}),
+        ...(patch.stdoutExcerpt != null ? { stdoutExcerpt: "***REDACTED***" } : {}),
+        ...(patch.stderrExcerpt != null ? { stderrExcerpt: "***REDACTED***" } : {}),
+        ...(patch.resultJson != null ? { resultJson: { redactionUnavailable: true } } : {}),
+      };
     }
     const declared = readRunPersistSecrets(run.id);
     return redactRunPersistencePatch(patch, [...declared, ...registered]);
@@ -22711,7 +22719,7 @@ export function heartbeatService(
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: preserveRunSecretRegistry(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -23082,7 +23090,7 @@ export function heartbeatService(
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: preserveRunSecretRegistry(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -23324,6 +23332,7 @@ export function heartbeatService(
         },
       };
 
+      let flushRunLog: (() => Promise<void>) | undefined;
       let handle: RunLogHandle | null = null;
       const goalCheckpointSession: {
         current: {
@@ -23375,7 +23384,7 @@ export function heartbeatService(
             startedAt,
             sessionIdBefore:
               runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-            contextSnapshot: context,
+            contextSnapshot: preserveRunSecretRegistry(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id))
@@ -23468,16 +23477,15 @@ export function heartbeatService(
         const logRegisteredValues = async () => {
           const version = runSecretRegistryVersion(run.id);
           if (version !== logRegistryVersion) {
-            try {
-              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
-              logRegistryVersion = version;
-            } catch {
-              // Keep the previous values; the run row is scanned again when it is written.
-            }
+            logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+            logRegistryVersion = version;
           }
           return [...(readRunPersistSecrets(run.id)), ...logRegistryValues];
         };
-        const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const bufferedLog = createRunLogRedactor({ values: logRegisteredValues, write: persistLog });
+        flushRunLog = () => bufferedLog.flush();
+        const onLog = bufferedLog.append;
+        async function persistLog(stream: "stdout" | "stderr", chunk: string) {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
             MAX_PERSISTED_LOG_CHUNK_CHARS,
@@ -23553,7 +23561,7 @@ export function heartbeatService(
               truncated: payloadChunk.length !== sanitizedChunk.length,
             },
           });
-        };
+        }
         if (runScopedMentionedSkillKeys.length > 0) {
           await onLog(
             "stdout",
@@ -23615,7 +23623,7 @@ export function heartbeatService(
           await db
             .update(heartbeatRuns)
             .set({
-              contextSnapshot: context,
+              contextSnapshot: preserveRunSecretRegistry(context),
               updatedAt: new Date(),
             })
             .where(eq(heartbeatRuns.id, run.id));
@@ -24569,6 +24577,7 @@ export function heartbeatService(
                 localAgentJwtScope,
               )
             : null;
+        if (authToken) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, authToken);
         if (
           nativeRuntimeResolution.kind === "legacy" &&
           adapter.supportsLocalAgentJwt &&
@@ -24824,6 +24833,7 @@ export function heartbeatService(
               runId: run.id,
               expectedAssignmentDigest: expectedNativeMcpDigest,
             });
+            for (const server of nativeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
             if ("runtimeContext" in nativeExecution) {
               if (nativeMcpServers.length > 1)
                 throw new Error(
@@ -25064,6 +25074,7 @@ export function heartbeatService(
               runId: run.id,
               responsibleUserId: run.responsibleUserId,
             });
+            if (runtimeTools) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, runtimeTools.bearerToken);
             if (!runtimeTools) {
               logger.warn(
                 {
@@ -25079,6 +25090,7 @@ export function heartbeatService(
               agent,
               runId: run.id,
             });
+            for (const server of runtimeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
             const runtimeToolDelivery =
               adapter.runtimeToolDelivery ?? "invocation_context";
             if (runtimeTools && runtimeToolDelivery === "native_mcp") {
@@ -25133,6 +25145,7 @@ export function heartbeatService(
                       : undefined,
                     runtimeMcp,
                     runtimeTools,
+                    registerSecretValue: (value) => createRunSecretRedactionRegistry(db).register(run.companyId, run.id, value),
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,
@@ -25497,7 +25510,7 @@ export function heartbeatService(
           await db
             .update(heartbeatRuns)
             .set({
-              contextSnapshot: context,
+              contextSnapshot: preserveRunSecretRegistry(context),
               updatedAt: new Date(),
             })
             .where(eq(heartbeatRuns.id, run.id));
@@ -25601,6 +25614,7 @@ export function heartbeatService(
           compressed: boolean;
         } | null = null;
         if (handle) {
+          await flushRunLog?.();
           logSummary = await runLogStore.finalize(handle);
         }
         const finalLogBytes = logSummary?.bytes;
@@ -26293,7 +26307,12 @@ export function heartbeatService(
           recordedResponsibleUserDenialCode ??
           nativeTerminalFailureCode ??
           "adapter_failed";
-        logger.error({ err, runId }, "heartbeat execution failed");
+        const safeError = await redactRunPatchForPersistence(run, {
+          resultJson: err instanceof Error
+            ? { name: err.name, message: err.message, stack: err.stack }
+            : { message: String(err) },
+        });
+        logger.error({ err: safeError?.resultJson, runId }, "heartbeat execution failed");
 
         let logSummary: {
           bytes: number | null;
@@ -26302,6 +26321,7 @@ export function heartbeatService(
         } | null = null;
         if (handle) {
           try {
+            await flushRunLog?.();
             logSummary = await runLogStore.finalize(handle);
           } catch (finalizeErr) {
             logger.warn(
