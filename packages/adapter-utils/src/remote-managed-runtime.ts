@@ -1,4 +1,6 @@
 import path from "node:path";
+import { sshRuntimeIsolationScript } from "./ssh-runtime-isolation.js";
+import { linkSshProviderSessionScript, sshProviderSessionDirectories } from "./ssh-provider-sessions.js";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -115,9 +117,17 @@ async function prepareRemoteManagedRuntimeInner(input: {
   spec: SshRemoteExecutionSpec;
   runId: string;
   adapterKey: string;
+  companyId?: string;
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /**
+   * Explicit host folder for the runtime assets of this run. Use it only for a
+   * folder that belongs to this run alone (SSH `in_place`): `restoreWorkspace`
+   * removes it after the asset restore hooks ran. Without it, the root stays
+   * `<workspaceRemoteDir>/.paperclip-runtime/<adapterKey>` and nothing removes it.
+   */
+  runtimeRootDir?: string | null;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
   assets?: RemoteManagedRuntimeAsset[];
@@ -138,7 +148,38 @@ async function prepareRemoteManagedRuntimeInner(input: {
         "workspace",
       )
     : baseWorkspaceRemoteDir;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const explicitRuntimeRootDir = input.runtimeRootDir?.trim() || null;
+  if (explicitRuntimeRootDir && !path.posix.isAbsolute(explicitRuntimeRootDir)) {
+    throw new Error(`Remote runtime root is not an absolute path: ${explicitRuntimeRootDir}`);
+  }
+  const runtimeRootDir = explicitRuntimeRootDir ??
+    path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const providerSessions = explicitRuntimeRootDir ? sshProviderSessionDirectories({
+    runtimeRoot: explicitRuntimeRootDir,
+    adapterKey: input.adapterKey,
+    companyId: input.companyId,
+    workspace: workspaceRemoteDir,
+    assetKeys: (input.assets ?? []).map((asset) => asset.key),
+  }) : [];
+  if (explicitRuntimeRootDir) {
+    // Check the host view before any credential or configuration upload.
+    await runSshCommand(input.spec, sshRuntimeIsolationScript(workspaceRemoteDir,
+      [explicitRuntimeRootDir,
+        ...(input.assets ?? []).map((asset) => path.posix.join(explicitRuntimeRootDir, asset.key)),
+        ...providerSessions.map((session) => session.directory)]),
+    { timeoutMs: 30_000 });
+  }
+  // Remove the per-run runtime folder. Run it after the asset restore hooks,
+  // because a hook can read a file from the folder (Codex auth copy-back).
+  // The parent `runs/<runId>` folder is removed only when it is empty.
+  const removeExplicitRuntimeRoot = async () => {
+    if (!explicitRuntimeRootDir) return;
+    await runSshCommand(
+      input.spec,
+      `rm -rf -- ${shellQuote(explicitRuntimeRootDir)} && (rmdir -- ${shellQuote(path.posix.dirname(explicitRuntimeRootDir))} 2>/dev/null || true)`,
+      { timeoutMs: 60_000 },
+    );
+  };
 
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
@@ -176,16 +217,23 @@ async function prepareRemoteManagedRuntimeInner(input: {
   try {
     for (const asset of input.assets ?? []) {
       const remoteDir = path.posix.join(runtimeRootDir, asset.key);
+      const sessionExcludes = providerSessions.filter((session) => session.assetKey === asset.key)
+        .flatMap((session) => [session.name, `${session.name}/*`]);
       assetDirs[asset.key] = remoteDir;
       await timeWorkspaceStep(input.onProgress, `Asset ${asset.key} sync`, () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: asset.localDir,
         remoteDir,
         followSymlinks: asset.followSymlinks,
-        exclude: asset.exclude,
+        exclude: sessionExcludes.length ? [...(asset.exclude ?? []), ...sessionExcludes] : asset.exclude,
         onProgress: input.onProgress,
         progressLabel: asset.key,
       }));
+      for (const session of providerSessions.filter((session) => session.assetKey === asset.key)) {
+        await runSshCommand(input.spec,
+          linkSshProviderSessionScript(path.posix.join(remoteDir, session.name), session.directory),
+          { timeoutMs: 30_000 });
+      }
     }
   } catch (error) {
     if (preparedWorkspace && baselineSnapshot) {
@@ -199,6 +247,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
         repositories: repositoryBaselines,
       });
     }
+    await removeExplicitRuntimeRoot().catch(() => undefined);
     throw error;
   }
 
@@ -267,11 +316,18 @@ async function prepareRemoteManagedRuntimeInner(input: {
           repositories: repositoryBaselines,
         });
       }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+      try {
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } finally {
+        // Cleanup is best effort: a stale run folder must not fail the run.
+        await removeExplicitRuntimeRoot().catch((error) => {
+          console.warn(`[paperclip] Failed to remove run runtime folder ${explicitRuntimeRootDir}: ${String(error)}`);
         });
       }
     }),

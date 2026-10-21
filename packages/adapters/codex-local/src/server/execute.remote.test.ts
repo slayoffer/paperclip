@@ -627,6 +627,65 @@ describe("codex remote execution", () => {
     expect(call?.[3].remoteExecution?.remoteCwd).toBe("/app");
   });
 
+  it("keeps CODEX_HOME in the per-run runtime root for a same-host SSH in_place run and removes it at the end", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-in-place-runtime-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "worktree");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+    const runtimeRoot = "/home/slayo/paperclip-work/.paperclip-runtime/runs/run-in-place";
+
+    await execute({
+      runId: "run-in-place",
+      agent: { id: "agent-1", companyId: "company-1", name: "CodexCoder", adapterType: "codex_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { engine: "cli", command: "codex", env: { CODEX_HOME: codexHomeDir } },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "task_session" } },
+      executionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd: workspaceDir,
+        workspaceRealization: {
+          mode: "in_place",
+          authoritativeRoot: workspaceDir,
+          runtimeRoot,
+          pathAliases: [],
+          outboundRestorePaths: [],
+        },
+        spec: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/home/slayo/paperclip-work",
+          remoteCwd: "/home/slayo/paperclip-work",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+    const homeSyncArgs = (syncDirectoryToSsh.mock.calls[0] as unknown[])?.[0] as { remoteDir: string };
+    expect(homeSyncArgs.remoteDir).toBe(`${runtimeRoot}/codex/home`);
+    const call = runChildProcess.mock.calls[0] as unknown as
+      | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
+      | undefined;
+    expect(call?.[3].env.CODEX_HOME).toBe(`${runtimeRoot}/codex/home`);
+    expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(workspaceDir);
+    // The SSH spawn runs in the worktree, not in the environment's base folder.
+    expect(call?.[3].remoteExecution?.remoteCwd).toBe(workspaceDir);
+    expect(runSshCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      `rm -rf -- '${runtimeRoot}/codex' && (rmdir -- '${runtimeRoot}' 2>/dev/null || true)`,
+      { timeoutMs: 60_000 },
+    );
+  });
+
   it("reselects the full assignment and bootstrap guidance after a failed resume", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-cli-fallback-context-"));
     cleanupDirs.push(rootDir);
