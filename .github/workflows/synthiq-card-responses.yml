@@ -29,6 +29,10 @@ on:
       - "server/src/__tests__/interaction-*-postgres.test.ts"
       - "server/src/__tests__/question-response-delivery.test.ts"
       - "ui/src/api/issues.ts"
+      - "ui/src/components/AttentionQueueRow*"
+      - "ui/src/components/CompactDecisionActions.tsx"
+      - "ui/src/components/AttentionInteractionResolver*"
+      - "ui/src/pages/Pipelines*"
 
 permissions:
   contents: read
@@ -91,3 +95,6 @@ jobs:
           server/src/__tests__/question-response-delivery.test.ts
           server/src/__tests__/question-response-legacy-authorization.test.ts
           server/src/services/native-runtime/native-question-bridge.test.ts
+          ui/src/components/AttentionQueueRow.test.tsx
+          ui/src/components/AttentionInteractionResolver.test.tsx
+          ui/src/pages/Pipelines.test.tsx
