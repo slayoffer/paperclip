@@ -1,0 +1,60 @@
+# Fork-only publication authority checks. Do not include this workflow in an upstream patch.
+name: Synthiq publication authority tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-publication-authority.yml
+      - server/src/services/publication-authority*.ts
+      - packages/db/src/**
+      - packages/shared/src/**
+      - package.json
+      - pnpm-lock.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-publication-authority-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  publication-authority:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Locate the package store
+        id: store
+        run: |
+          corepack enable
+          echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: synthiq-publication-authority-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/package.json') }}
+      - name: Install dependencies
+        # Release metadata requires an update to the inherited lockfile.
+        run: corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test durable publication authority and protected reconciliation
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism
+          server/src/services/publication-authority.test.ts
+          server/src/services/publication-authority-races.test.ts
+          server/src/services/publication-authority-reconciliation.test.ts
+          server/src/services/publication-authority-repositories.test.ts

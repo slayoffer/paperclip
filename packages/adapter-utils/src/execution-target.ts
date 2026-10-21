@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
+import { githubOperationLauncherDirectory, type GitHubLauncherLocation } from "./github-launcher-directory.js";
 import { githubLauncherSource } from "./github-launcher.js";
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import {
@@ -123,6 +124,13 @@ export interface AdapterWorkspaceRealization {
   authoritativeRoot: string;
   pathAliases: AdapterWorkspacePathAlias[];
   outboundRestorePaths: string[];
+  /**
+   * Host folder for this run's adapter runtime assets. Set only for an SSH
+   * `in_place` realization: the assets then stay outside the worktree, and the
+   * adapter removes the folder at run end. See
+   * `resolveAdapterExecutionTargetInPlaceRuntimeRootDir`.
+   */
+  runtimeRoot?: string | null;
 }
 
 interface AdapterExecutionTargetWorkspaceMetadata {
@@ -502,6 +510,24 @@ export function adapterExecutionTargetRemoteCwd(
   return target?.kind === "remote" ? target.remoteCwd : localCwd;
 }
 
+/**
+ * Return the host folder for this run's adapter runtime assets when the target
+ * is an SSH `in_place` realization with a per-run runtime root. Pass the result
+ * as `runtimeRootDir` to `prepareAdapterExecutionTargetRuntime`. Return null for
+ * every other target: the adapter then keeps the default runtime root.
+ */
+export function resolveAdapterExecutionTargetInPlaceRuntimeRootDir(
+  target: AdapterExecutionTarget | null | undefined,
+  adapterKey: string,
+): string | null {
+  if (!target || target.kind !== "remote" || target.transport !== "ssh") return null;
+  const realization = target.workspaceRealization;
+  if (realization?.mode !== "in_place") return null;
+  const runtimeRoot = realization.runtimeRoot?.trim();
+  if (!runtimeRoot || !path.posix.isAbsolute(runtimeRoot)) return null;
+  return path.posix.join(runtimeRoot, adapterKey);
+}
+
 export function overrideAdapterExecutionTargetRemoteCwd(
   target: AdapterExecutionTarget | null | undefined,
   remoteCwd: string | null | undefined,
@@ -510,7 +536,10 @@ export function overrideAdapterExecutionTargetRemoteCwd(
   if (!target || target.kind !== "remote" || !nextRemoteCwd) {
     return target;
   }
-  if (target.remoteCwd === nextRemoteCwd) {
+  if (
+    target.remoteCwd === nextRemoteCwd &&
+    (target.transport !== "ssh" || target.spec.remoteCwd === nextRemoteCwd)
+  ) {
     return target;
   }
   if (target.transport === "ssh") {
@@ -1425,10 +1454,13 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   runId: string;
   target: AdapterExecutionTarget | null | undefined;
   adapterKey: string;
+  companyId?: string;
   workspaceLocalDir: string;
   timeoutSec?: number;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /** SSH per-run assets. Cleanup preserves company-scoped provider transcripts. */
+  runtimeRootDir?: string | null;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
   workspaceBaseline?: DirectorySnapshot;
@@ -1474,9 +1506,11 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       spec: target.spec,
       runId: input.runId,
       adapterKey: input.adapterKey,
+      companyId: input.companyId,
       workspaceLocalDir: input.workspaceLocalDir,
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,
+      runtimeRootDir: input.runtimeRootDir,
       workspaceFileMode: input.workspaceFileMode,
       workspaceExclude: input.workspaceExclude,
       assets: input.assets,
@@ -1547,18 +1581,6 @@ export function runtimeAssetDir(
   fallbackRemoteCwd: string,
 ): string {
   return prepared.assetDirs[key] ?? path.posix.join(fallbackRemoteCwd, ".paperclip-runtime", key);
-}
-
-type GitHubLauncherLocation = {
-  runId: string; target: AdapterExecutionTarget | null | undefined;
-};
-
-function githubOperationLauncherDirectory(input: GitHubLauncherLocation): string {
-  // Only controller-generated run IDs may name a removable directory.
-  if (!/^[a-zA-Z0-9_-]+$/.test(input.runId)) throw new Error("Invalid GitHub launcher run ID");
-  return input.target?.kind === "remote"
-    ? path.posix.join(input.target.remoteCwd, ".paperclip-runtime", "github", input.runId)
-    : path.join(os.tmpdir(), "paperclip-github-runtime", input.runId);
 }
 
 /** Call only after execution settles, before releasing its remote environment lease. */
@@ -1733,8 +1755,7 @@ export async function prepareGitHubOperationLaunchers(input: {
     .join("");
   const profile = `export PATH=${shellQuote(managedPath)}\n${clearEmptyGitIdentity}`;
   const files: Record<string, string> = Object.fromEntries([
-    // Remote launchers live beneath the checkout. Pin their own package scope
-    // so an enclosing project's "type": "module" cannot reinterpret require().
+    // Pin the launcher package scope so an enclosing package cannot reinterpret require().
     ["package.json", '{"type":"commonjs"}\n'],
     ...["git", "gh"].map((name) => [name, githubLauncherSource()] as const),
     ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile] as const),
