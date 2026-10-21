@@ -737,11 +737,11 @@ describe("ssh env-lab fixture", () => {
     const input = { spec: { ...config, remoteCwd: started.workspaceDir }, localDir,
       remoteDir: started.workspaceDir, workspaceFileMode: "all" as const };
     expect(await prepareWorkspaceForSshExecution(input)).toEqual({ gitBacked: false });
-    expect(await readFile(path.join(started.workspaceDir, "node_modules", "personal.bin"))).toEqual(binary);
+    await expect(stat(path.join(started.workspaceDir, "node_modules"))).rejects.toThrow("ENOENT");
     await rm(path.join(localDir, "removed.txt"));
     await prepareWorkspaceForSshExecution(input);
     await expect(stat(path.join(started.workspaceDir, "removed.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(path.join(started.workspaceDir, "node_modules", "personal.bin"))).toEqual(binary);
+    await expect(stat(path.join(started.workspaceDir, "node_modules"))).rejects.toThrow("ENOENT");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips a git workspace through the SSH fixture", async () => {

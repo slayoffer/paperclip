@@ -25,6 +25,7 @@ vi.mock("./ssh.js", () => ({
   syncDirectoryToSsh,
 }));
 
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
 import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
@@ -32,7 +33,7 @@ import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
 describe("remote managed runtime", () => {
   const cleanupDirs: string[] = [];
 
-  it("stages all files over SSH without Git or cache exclusions and restores the same baseline", async () => {
+  it("excludes generated files from the SSH workspace baseline", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-plain-"));
     cleanupDirs.push(root);
     await mkdir(path.join(root, "node_modules"));
@@ -50,12 +51,12 @@ describe("remote managed runtime", () => {
     await prepared.restoreWorkspace();
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledWith(expect.objectContaining({
       restoreGitHistory: false, baselineSnapshot: expect.objectContaining({
-        exclude: [".paperclip-runtime", "explicitly-excluded"],
+        exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, "explicitly-excluded"],
         entries: expect.any(Map),
       }),
     }));
     const args = vi.mocked(restoreWorkspaceFromSshExecution).mock.calls[0] as unknown as [{ baselineSnapshot: { entries: Map<string, unknown> } }];
-    expect(args[0].baselineSnapshot.entries.has("node_modules/personal.bin")).toBe(true);
+    expect(args[0].baselineSnapshot.entries.has("node_modules/personal.bin")).toBe(false);
   });
 
 

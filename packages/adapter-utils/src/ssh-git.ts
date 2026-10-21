@@ -1,3 +1,5 @@
+import { updateGitHeadAndIndex } from "./ssh-git-index.js";
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -190,35 +192,44 @@ export async function exportGitWorkspaceFromSsh(input: {
       'cat "$tmp_bundle"',
     ].join("\n");
 
-    // The remote bundle size isn't known before streaming, so report bytes
-    // received (MB mode) with a terminal completion line.
-    const progress = input.onProgress
-      ? createTransferProgress({
-        onProgress: input.onProgress,
-        phase: "Exporting git history",
-        direction: "from",
-        totalBytes: null,
-        estimated: false,
-      })
-      : null;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        // The remote bundle size isn't known before streaming, so report bytes
+        // received (MB mode) with a terminal completion line.
+        const progress = input.onProgress
+          ? createTransferProgress({
+            onProgress: input.onProgress,
+            phase: "Exporting git history",
+            direction: "from",
+            totalBytes: null,
+            estimated: false,
+          })
+          : null;
 
-    try {
-      await streamSshToLocalFile({
-        spec: input.spec,
-        remoteScript: exportScript,
-        localFile: bundlePath,
-        progress: progress ?? undefined,
-      });
-      await progress?.finish();
-    } catch (error) {
-      await progress?.fail();
-      throw error;
+        try {
+          await streamSshToLocalFile({
+            spec: input.spec,
+            remoteScript: exportScript,
+            localFile: bundlePath,
+            progress: progress ?? undefined,
+          });
+          await progress?.finish();
+        } catch (error) {
+          await progress?.fail();
+          throw error;
+        }
+
+        await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024,
+        });
+        break;
+      } catch (error) {
+        const failure = error as { message?: string; stderr?: string };
+        const detail = `${failure.message ?? ""}\n${failure.stderr ?? ""}`;
+        if (attempt !== 0 || !/early EOF|index-pack/i.test(detail)) throw error;
+      }
     }
-
-    await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
-      timeout: 60_000,
-      maxBuffer: 1024 * 1024,
-    });
     if (input.resetLocalWorkspace !== false) {
       await runLocalGit(input.localDir, ["reset", "--hard", importedRef], {
         timeout: 60_000,
@@ -278,10 +289,7 @@ export async function integrateImportedGitHead(input: {
 
     if (mergeBaseHead === currentHead) {
       try {
-        await runLocalGit(input.localDir, ["update-ref", headRef, input.importedHead, currentHead], {
-          timeout: 10_000,
-          maxBuffer: 16 * 1024,
-        });
+        await updateGitHeadAndIndex(input.localDir, headRef, currentHead, input.importedHead);
         return;
       } catch (error) {
         if (isConcurrentRefUpdateError(error) && attempt < 4) continue;
@@ -300,10 +308,7 @@ export async function integrateImportedGitHead(input: {
         syncLabel: "Paperclip SSH sync",
       });
       try {
-        await runLocalGit(input.localDir, ["update-ref", headRef, graftCommit, currentHead], {
-          timeout: 10_000,
-          maxBuffer: 16 * 1024,
-        });
+        await updateGitHeadAndIndex(input.localDir, headRef, currentHead, graftCommit);
         return;
       } catch (error) {
         if (isConcurrentRefUpdateError(error) && attempt < 4) continue;
@@ -347,10 +352,7 @@ export async function integrateImportedGitHead(input: {
       },
     );
     try {
-      await runLocalGit(input.localDir, ["update-ref", headRef, mergeCommit.stdout.trim(), currentHead], {
-        timeout: 10_000,
-        maxBuffer: 16 * 1024,
-      });
+      await updateGitHeadAndIndex(input.localDir, headRef, currentHead, mergeCommit.stdout.trim());
       return;
     } catch (error) {
       if (isConcurrentRefUpdateError(error) && attempt < 4) continue;
@@ -423,7 +425,7 @@ export async function transportGitWorkspaceToSsh(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir: input.remoteDir,
-    exclude: [".git", ".paperclip-runtime", ...(input.exclude ?? [])],
+    exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.exclude ?? [])],
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   }));
