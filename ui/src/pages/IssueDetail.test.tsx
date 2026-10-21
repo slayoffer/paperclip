@@ -1,3 +1,4 @@
+import { createPendingCompletionInteraction } from "./IssueDetail.interaction-fixtures";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { TaskChatPausedTakeover, type TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 // @vitest-environment jsdom
@@ -5072,80 +5073,52 @@ describe("IssueDetail", () => {
     });
   });
 
-  it("reports the selected continuation action after rejecting completion", async () => {
-    const pendingInteraction = {
-      id: "interaction-continue",
-      companyId: "company-1",
-      issueId: "issue-1",
-      kind: "request_confirmation",
-      title: "Review completion",
-      summary: null,
-      status: "pending",
-      continuationPolicy: "wake_assignee",
-      resolverPolicy: "human_only",
-      requestedResolverPolicy: "human_only",
-      effectiveResolverPolicy: "human_only",
-      resolverPolicyProvenance: "explicit",
-      effectiveResolverPolicySource: "requested",
-      legacyResolverPolicyAliases: {
-        requested: "board_only",
-        effective: "board_only",
-      },
-      createdByAgentId: "agent-1",
-      createdByUserId: null,
-      resolvedByAgentId: null,
-      resolvedByUserId: null,
-      createdAt: new Date("2026-09-06T12:00:00.000Z"),
-      updatedAt: new Date("2026-09-06T12:00:00.000Z"),
-      resolvedAt: null,
-      payload: {
-        version: 1,
-        prompt: "Is this task ready to complete?",
-        acceptLabel: "Approve completion",
-        rejectLabel: "Continue work",
-      },
-      result: null,
-    } satisfies RequestConfirmationInteraction;
-    const rejectedInteraction = {
-      ...pendingInteraction,
-      status: "rejected",
-      resolvedAt: new Date("2026-09-06T12:01:00.000Z"),
-      result: { version: 1, outcome: "rejected", reason: "Run turn 2" },
-    } satisfies RequestConfirmationInteraction;
-    mockIssuesApi.get.mockResolvedValue(createIssue());
-    mockIssuesApi.rejectInteraction.mockResolvedValue(rejectedInteraction);
+  it.each(["completion-revision-1", undefined])(
+    "reports the selected continuation action after rejecting completion (revision: %s)",
+    async (revision) => {
+      const pendingInteraction = createPendingCompletionInteraction(revision);
+      const rejectedInteraction = {
+        ...pendingInteraction,
+        status: "rejected",
+        resolvedAt: new Date("2026-09-06T12:01:00.000Z"),
+        result: { version: 1, outcome: "rejected", reason: "Run turn 2" },
+      } satisfies RequestConfirmationInteraction;
+      mockIssuesApi.get.mockResolvedValue(createIssue());
+      mockIssuesApi.rejectInteraction.mockResolvedValue(rejectedInteraction);
 
-    await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <IssueDetail />
-        </QueryClientProvider>,
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail />
+          </QueryClientProvider>,
+        );
+      });
+      await flushReact();
+
+      const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+        onRejectInteraction?: (
+          interaction: RequestConfirmationInteraction,
+          reason?: string,
+        ) => Promise<void>;
+      };
+      expect(props.onRejectInteraction).toBeTypeOf("function");
+
+      await act(async () => {
+        await props.onRejectInteraction?.(pendingInteraction, "Run turn 2");
+      });
+
+      expect(mockIssuesApi.rejectInteraction).toHaveBeenCalledWith(
+        "PAP-1",
+        pendingInteraction.id,
+        "Run turn 2",
+        { expectedRevision: revision },
       );
-    });
-    await flushReact();
-
-    const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
-      onRejectInteraction?: (
-        interaction: RequestConfirmationInteraction,
-        reason?: string,
-      ) => Promise<void>;
-    };
-    expect(props.onRejectInteraction).toBeTypeOf("function");
-
-    await act(async () => {
-      await props.onRejectInteraction?.(pendingInteraction, "Run turn 2");
-    });
-
-    expect(mockIssuesApi.rejectInteraction).toHaveBeenCalledWith(
-      "PAP-1",
-      pendingInteraction.id,
-      "Run turn 2",
-    );
-    expect(mockPushToast).toHaveBeenCalledWith({
-      title: "Selected “Continue work”",
-      tone: "success",
-    });
-  });
+      expect(mockPushToast).toHaveBeenCalledWith({
+        title: "Selected “Continue work”",
+        tone: "success",
+      });
+    },
+  );
 
   it("passes ask work mode to the issue chat thread", async () => {
     mockIssuesApi.get.mockResolvedValue(createIssue({ workMode: "ask" }));
