@@ -7,6 +7,8 @@ import { readObject, readSecretProposalContinuationContext } from "../routes/int
 
 import { resumeAcceptedBinding } from "./interaction-binding-execution.js";
 
+import type { AuthorizationActor } from "./authorization.js";
+
 type Wakes = typeof interactionResolutionOutbox.$inferInsert.wakes;
 
 /** Capture intents in the answer transaction. Do not dispatch before its commit. */
@@ -14,6 +16,7 @@ export async function persistInteractionResolutionWakes(
   db: Db,
   interaction: IssueThreadInteraction,
   collect: (heartbeat: IssueAssignmentWakeupDeps) => Promise<void>,
+  authorizationContext?: AuthorizationActor,
 ) {
   const wakes: Wakes = [];
   await collect({ wakeup: async (agentId, options) => {
@@ -25,6 +28,7 @@ export async function persistInteractionResolutionWakes(
   } });
   if (wakes.length || (interaction.status === "accepted" && readObject(interaction.payload).secretProposal)) await db.insert(interactionResolutionOutbox).values({
     interactionId: interaction.id, companyId: interaction.companyId, issueId: interaction.issueId, wakes,
+    authorizationContext: authorizationContext ? structuredClone(authorizationContext) : null,
   });
 }
 

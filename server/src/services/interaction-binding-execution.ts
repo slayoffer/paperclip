@@ -4,6 +4,7 @@ import { conflict, forbidden, HttpError } from "../errors.js";
 import { readObject, readSecretProposalContinuationContext } from "../routes/interaction-continuation-context.js";
 import { assertCanResolveProposal } from "./secret-proposal-authorization.js";
 import { createSecretProposalsService } from "./secret-proposals.js";
+import type { AuthorizationActor } from "./authorization.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 
 /** The accepted interaction and its outbox row are the durable execution intent.
@@ -11,6 +12,7 @@ import { issueThreadInteractionService } from "./issue-thread-interactions.js";
  * result in one transaction. Parallel retries cannot apply the binding twice. */
 export async function resumeAcceptedBinding(db: Db, intent: {
   companyId: string; issueId: string; interactionId: string;
+  authorizationContext?: Record<string, unknown> | null;
 }) {
   let bindingId: string | undefined;
   try {
@@ -45,11 +47,18 @@ export async function resumeAcceptedBinding(db: Db, intent: {
       }
       const userId = interaction.resolvedByUserId;
       if (!userId || interaction.resolvedByAgentId) throw forbidden("Binding execution requires its board user");
+      // Old intents without authenticated context must fail closed. Never infer
+      // a session source from the resolving user's identity.
+      const actor = intent.authorizationContext as AuthorizationActor | null | undefined;
+      if (actor?.type !== "board" || actor.userId !== userId || !actor.source ||
+          !["local_implicit", "session", "board_key", "mcp_oauth", "cloud_tenant", "cloud_control"].includes(actor.source)) {
+        throw forbidden("Binding execution requires its original authorization context");
+      }
       await proposals.approve(intent.companyId, proposal.id, {
         resolvedByUserId: userId,
         assertCanResolve: (lockedProposal, txDb) => assertCanResolveProposal({
           db: txDb, companyId: intent.companyId, proposal: lockedProposal,
-          actor: { type: "board", source: "session", userId },
+          actor,
         }),
       });
     });

@@ -1,6 +1,7 @@
 import { isClosedIssueStatus, shouldImplicitlyMoveCommentedIssueToTodo, shouldHumanCommentResumeInProgressScheduledRetry, isExplicitResumeCapableStatus, isAssigneeSelfCommentOnTerminalIssue } from "./issue-comment-lifecycle.js";
 import type { IssueThreadInteraction } from "@paperclipai/shared";
-import { interactionResolutionOutboxService, persistInteractionResolutionWakes } from "../services/interaction-resolution-outbox.js";
+import { interactionResolutionOutboxService } from "../services/interaction-resolution-outbox.js";
+import { interactionResolutionMutationOptions } from "../services/interaction-resolution-mutation-options.js";
 import { persistInteractionResolutionRouteEffects } from "../services/interaction-resolution-route-effects.js";
 import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
 import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
@@ -15929,10 +15930,7 @@ export function issueRoutes(
           acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
         });
       };
-      const mutationOptions = durableEffects ? {
-        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
-          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
-      } : {};
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
 
       if (
         current.kind === "request_confirmation" &&
@@ -16178,10 +16176,7 @@ export function issueRoutes(
           acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
         });
       };
-      const mutationOptions = durableEffects ? {
-        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
-          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
-      } : {};
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
 
       if (
         current.kind === "request_confirmation" &&
@@ -16274,10 +16269,7 @@ export function issueRoutes(
           acceptedPlanConfirmation: result.interaction.status === "accepted" && target?.issueId === issue.id && target.key === "plan",
         });
       };
-      const mutationOptions = durableEffects ? {
-        afterRevisionResolveInTransaction: async (tx: Db, result: Parameters<typeof persistEffects>[1]) =>
-          persistInteractionResolutionWakes(tx, result.interaction, (wake) => persistEffects(tx, result, wake)),
-      } : {};
+      const mutationOptions = interactionResolutionMutationOptions(durableEffects, persistEffects, req.actor);
 
       const interaction = await interactionSvc.answerQuestions(
         issue,

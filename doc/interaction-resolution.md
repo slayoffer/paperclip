@@ -71,9 +71,15 @@ Tests apply it only to isolated databases. Production migration and deployment n
 
 A revision-protected acceptance saves its binding execution intent in the continuation outbox.
 It saves this intent even when no continuation wake is requested.
+The private outbox stores the authenticated server actor in `authorization_context`.
+This context includes the original actor source and authorization restrictions.
+The request body cannot supply or replace this context.
 A receipt retry or background delivery worker resumes the accepted binding before the continuation.
 The worker locks the issue and proposal in the existing order.
-It rechecks the linked target, issue state, expiry, and the original board user's current configuration permission.
+It rechecks the linked target, issue state, expiry, and configuration permission with the saved actor.
+It preserves `local_implicit` authority and the `cloud_tenant` exclusion of legacy administrator rows.
+It also preserves `ignoreInstanceAdmin` and delegated authorization restrictions.
+An old intent without its original context fails closed. Recovery never assumes a session actor.
 Binding approval and the execution result commit in one transaction.
 Database failures leave the intent pending. Permission and proposal expiry failures can record a failed execution.
 Closed issues prevent binding execution.

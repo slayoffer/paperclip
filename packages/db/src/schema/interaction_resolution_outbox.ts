@@ -8,6 +8,7 @@ export const interactionResolutionOutbox = pgTable("interaction_resolution_outbo
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
   wakes: jsonb("wakes").$type<Array<{ agentId: string; options: Record<string, unknown> }>>().notNull(),
+  authorizationContext: jsonb("authorization_context").$type<Record<string, unknown>>(),
   deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({ pendingIdx: index("interaction_resolution_outbox_pending_idx").on(table.deliveredAt, table.createdAt) }));

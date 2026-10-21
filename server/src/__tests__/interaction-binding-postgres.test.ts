@@ -5,9 +5,11 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, activityLog, agents, agentWakeupRequests, companies,
-  companyMemberships, companySecretProposals, companySecrets, heartbeatRuns, principalPermissionGrants,
+  companyMemberships, instanceUserRoles, companySecretProposals, companySecrets, heartbeatRuns, principalPermissionGrants,
   createDb, interactionResolutionOutbox, issues, issueThreadInteractions,
 } from "@paperclipai/db";
+import type { AuthorizationActor } from "../services/authorization.js";
+import { assertCanResolveProposal } from "../services/secret-proposal-authorization.js";
 import * as audit from "../services/activity-log.js";
 import * as heartbeats from "../services/heartbeat.js";
 import * as interactions from "../services/issue-thread-interactions.js";
@@ -18,7 +20,6 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 
 const support = await getEmbeddedPostgresTestSupport();
 if (!support.supported) throw new Error(`Binding database tests unavailable: ${support.reason}`);
-const userId = "binding-board-user";
 
 describe("binding recovery with PostgreSQL", () => {
   let db: ReturnType<typeof createDb>;
@@ -30,11 +31,17 @@ describe("binding recovery with PostgreSQL", () => {
   afterEach(() => vi.restoreAllMocks());
   afterAll(async () => { await db?.$client.end(); await temporary?.cleanup(); });
 
-  async function fixture(continuationPolicy: "wake_assignee" | "none" = "wake_assignee") {
+  async function fixture(continuationPolicy: "wake_assignee" | "none" = "wake_assignee", options: {
+    source?: AuthorizationActor["source"]; role?: string; grant?: boolean;
+    legacyAdmin?: boolean; ignoreInstanceAdmin?: boolean; interrupt?: boolean;
+  } = {}) {
+    const userId = randomUUID();
     const companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Binding recovery", issuePrefix: `B${companyId.slice(0, 7)}` });
-    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, membershipRole: "owner" });
-    await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: userId,
+    if (options.source !== "local_implicit") await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: userId, membershipRole: options.role ?? "owner" });
+    if (options.legacyAdmin) await db.insert(instanceUserRoles).values({ userId, role: "instance_admin" });
+    if (options.grant !== false) await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: userId,
       permissionKey: "agents:configure" });
     const [agent] = await db.insert(agents).values({ companyId, name: "Fixture target", role: "engineer",
       adapterType: "process", status: "idle" }).returning();
@@ -57,7 +64,7 @@ describe("binding recovery with PostgreSQL", () => {
           expiresAt: proposal.expiresAt.toISOString() } } }).returning();
     await db.update(companySecretProposals).set({ interactionId: card.id }).where(eq(companySecretProposals.id, proposal.id));
     const realService = interactions.issueThreadInteractionService;
-    let interrupt = true;
+    let interrupt = options.interrupt ?? true;
     vi.spyOn(interactions, "issueThreadInteractionService").mockImplementation((...args) => {
       const service = realService(...args);
       return { ...service, acceptInteraction: async (...input: Parameters<typeof service.acceptInteraction>) => {
@@ -72,10 +79,15 @@ describe("binding recovery with PostgreSQL", () => {
       return null;
     });
     vi.spyOn(heartbeats, "heartbeatService").mockReturnValue({ wakeup } as never);
+    const actor: AuthorizationActor = {
+      type: "board", source: options.source ?? "session", userId, companyIds: [companyId],
+      isInstanceAdmin: false, ignoreInstanceAdmin: options.ignoreInstanceAdmin,
+      memberships: options.source === "local_implicit" ? [] : [
+        { companyId, status: "active", membershipRole: options.role ?? "owner" }],
+    };
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => {
-      req.actor = { type: "board", source: "session", userId, companyIds: [companyId], isInstanceAdmin: false,
-        memberships: [{ companyId, status: "active", membershipRole: "owner" }] }; next();
+      req.actor = structuredClone(actor); next();
     });
     app.use("/api", issueRoutes(db, {} as never, {})); app.use(errorHandler);
     const server = app.listen(0, "127.0.0.1");
@@ -92,7 +104,7 @@ describe("binding recovery with PostgreSQL", () => {
       wakes: await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agent.id)),
       effects: await db.select().from(activityLog).where(and(eq(activityLog.entityId, agent.id), eq(activityLog.action, "agent.updated"))),
     });
-    return { companyId, issue, card, proposal, post, close, worker, read, secret, wakeup };
+    return { companyId, issue, card, proposal, post, close, worker, read, secret, wakeup, actor, userId };
   }
 
   it.each(["receipt retry", "recovery worker", "concurrent workers"])("resumes execution through %s", async (path) => {
@@ -100,7 +112,7 @@ describe("binding recovery with PostgreSQL", () => {
     try {
       expect((await f.post()).status).toBe(500);
       const pending = await f.read();
-      expect(pending.card.status).toBe("accepted"); expect(pending.card.resolvedByUserId).toBe(userId);
+      expect(pending.card.status).toBe("accepted"); expect(pending.card.resolvedByUserId).toBe(f.userId);
       expect(pending.card.resolutionRequest).not.toBeNull(); expect(pending.proposal.status).toBe("pending");
       expect(pending.effects).toHaveLength(0); expect(pending.wakes).toHaveLength(0);
       expect(pending.intents).toHaveLength(1); expect(pending.intents[0].deliveredAt).toBeNull();
@@ -108,7 +120,7 @@ describe("binding recovery with PostgreSQL", () => {
       else if (path === "recovery worker") await f.worker().sweepPending();
       else await Promise.all([f.post(), f.worker().sweepPending(), f.worker().deliver(f.card.id)]);
       const done = await f.read();
-      expect(done.proposal.status).toBe("approved"); expect(done.proposal.resolvedByUserId).toBe(userId);
+      expect(done.proposal.status).toBe("approved"); expect(done.proposal.resolvedByUserId).toBe(f.userId);
       expect(done.card.result).toMatchObject({ secretProposal: { status: "executed" } });
       expect(done.target.adapterConfig).toMatchObject({ env: { TEST_REFERENCE: { type: "secret_ref", secretId: f.secret.id } } });
       expect(done.effects).toHaveLength(1); expect(done.wakes).toHaveLength(1);
@@ -171,4 +183,68 @@ describe("binding recovery with PostgreSQL", () => {
       expect(failed.effects).toHaveLength(0); expect(failed.target.adapterConfig).not.toHaveProperty("env.TEST_REFERENCE");
     } finally { await f.close(); }
   });
+
+  it.each([
+    ["local_implicit", false], ["cloud_tenant", false],
+    ["local_implicit", true], ["cloud_tenant", true],
+  ] as const)("preserves %s authority after HTTP acceptance with interruption=%s", async (source, interrupt) => {
+    const f = await fixture("none", { source, role: "operator", grant: false,
+      legacyAdmin: source === "cloud_tenant", interrupt });
+    try {
+      const authorize = () => assertCanResolveProposal({ db, companyId: f.companyId, proposal: f.proposal, actor: f.actor });
+      if (source === "local_implicit") await expect(authorize()).resolves.toBeUndefined();
+      else await expect(authorize()).rejects.toMatchObject({ status: 403 });
+      expect((await f.post()).status).toBe(interrupt ? 500 : 200);
+      const accepted = await f.read();
+      expect(accepted.card.resolvedByUserId).toBe(f.userId);
+      expect(accepted.intents[0].authorizationContext).toEqual(JSON.parse(JSON.stringify(f.actor)));
+      // A fresh service uses only durable database state after process loss.
+      if (interrupt) await f.worker().deliver(f.card.id);
+      const done = await f.read();
+      if (source === "local_implicit") {
+        expect(done.proposal.status).toBe("approved");
+        expect(done.target.adapterConfig).toMatchObject({ env: { TEST_REFERENCE: { type: "secret_ref", secretId: f.secret.id } } });
+        expect(done.card.result).toMatchObject({ secretProposal: { status: "executed" } });
+        expect(done.effects).toHaveLength(1);
+      } else {
+        expect(done.proposal.status).toBe("rejected");
+        expect(done.target.adapterConfig).not.toHaveProperty("env.TEST_REFERENCE");
+        expect(done.card.result).toMatchObject({ secretProposal: { status: "failed", errorCode: "http_403" } });
+        expect(done.effects).toHaveLength(0);
+      }
+      expect(done.intents[0].deliveredAt).not.toBeNull();
+      expect((await f.post()).status).toBe(200);
+      expect((await f.read()).effects).toHaveLength(source === "local_implicit" ? 1 : 0);
+    } finally { await f.close(); }
+  });
+
+  it.each(["session", "mcp_oauth"] as const)("preserves administrator restrictions for %s", async (source) => {
+    const f = await fixture("none", { source, role: "operator", grant: false,
+      legacyAdmin: true, ignoreInstanceAdmin: true });
+    try {
+      expect((await f.post()).status).toBe(500);
+      expect((await f.read()).intents[0].authorizationContext).toMatchObject({ source, ignoreInstanceAdmin: true });
+      await f.worker().deliver(f.card.id);
+      const denied = await f.read();
+      expect(denied.proposal.status).toBe("rejected");
+      expect(denied.effects).toHaveLength(0);
+      expect(denied.target.adapterConfig).not.toHaveProperty("env.TEST_REFERENCE");
+    } finally { await f.close(); }
+  });
+
+  it.each([null, { type: "board", source: "session", userId: "different-user" }])(
+    "refuses an intent without its authenticated actor: %j", async (authorizationContext) => {
+      const f = await fixture("none");
+      try {
+        expect((await f.post()).status).toBe(500);
+        await db.update(interactionResolutionOutbox).set({ authorizationContext })
+          .where(eq(interactionResolutionOutbox.interactionId, f.card.id));
+        await f.worker().deliver(f.card.id);
+        const denied = await f.read();
+        expect(denied.proposal.status).toBe("rejected");
+        expect(denied.effects).toHaveLength(0);
+        expect(denied.target.adapterConfig).not.toHaveProperty("env.TEST_REFERENCE");
+      } finally { await f.close(); }
+    },
+  );
 });

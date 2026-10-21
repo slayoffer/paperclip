@@ -1,0 +1,1 @@
+ALTER TABLE "interaction_resolution_outbox" ADD COLUMN "authorization_context" jsonb;
