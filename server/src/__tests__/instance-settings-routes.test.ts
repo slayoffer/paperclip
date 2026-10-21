@@ -18,7 +18,10 @@ const mockHeartbeatService = vi.hoisted(() => ({
   applyTaskDrain: vi.fn(),
   stopTaskDrain: vi.fn(),
   getTaskDrainStatus: vi.fn(),
+  // The route reads process-local idle state through this method.
+  getLocalTaskDrainStatus: vi.fn(),
 }));
+const mockTaskDrain = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn() }));
 const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
   findManagedSandboxEnvironment: vi.fn(),
@@ -34,6 +37,7 @@ const mockReadIdleSleepSafety = vi.hoisted(() => vi.fn());
 
 function registerModuleMocks() {
   vi.doMock("../services/idle-sleep-safety.js", () => ({ readIdleSleepSafety: mockReadIdleSleepSafety }));
+  vi.doMock("../services/task-drain.js", () => ({ taskDrainService: () => mockTaskDrain }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => mockCompanyService,
     heartbeatService: () => mockHeartbeatService,
@@ -924,20 +928,11 @@ describe("instance settings routes", () => {
   });
 
   describe("task drain", () => {
-    const adminActor = {
-      type: "board",
-      userId: "admin-1",
-      source: "session",
-      isInstanceAdmin: true,
-      companyIds: ["company-1"],
-    };
-    const nonAdminActor = {
-      type: "board",
-      userId: "user-1",
-      source: "session",
-      isInstanceAdmin: false,
-      companyIds: ["company-1"],
-    };
+    const admin = { type: "board", userId: "admin-1", source: "session", isInstanceAdmin: true, companyIds: ["company-1"] };
+    const lease = { leaseId: "bb8243bf-6760-443f-bd01-930d885bba4b", ownerId: "admin-1", startedAt: "2026-10-21T00:00:00.000Z", expiresAt: "2026-10-21T00:15:00.000Z" };
+    // Upstream's idle-purpose drain stays process-local; these fixtures cover it.
+    const adminActor = admin;
+    const nonAdminActor = { ...admin, userId: "user-1", isInstanceAdmin: false };
     const idleStatus = {
       draining: false,
       startedAt: null,
@@ -948,12 +943,25 @@ describe("instance settings routes", () => {
     };
 
     afterEach(() => {
-      // A drain the mock left active must not carry over into an unrelated
-      // test, so every test starts from the idle status again.
-      mockHeartbeatService.getTaskDrainStatus.mockReset();
+      mockHeartbeatService.getTaskDrainStatus.mockReset().mockReturnValue(idleStatus);
       mockHeartbeatService.computeTaskDrain.mockReset();
       mockHeartbeatService.applyTaskDrain.mockReset();
       mockHeartbeatService.stopTaskDrain.mockReset();
+      mockReadIdleSleepSafety.mockReset();
+    });
+
+    beforeEach(() => {
+      mockHeartbeatService.getTaskDrainStatus.mockReset().mockReturnValue(idleStatus);
+      mockHeartbeatService.getLocalTaskDrainStatus.mockReset()
+        .mockImplementation(() => mockHeartbeatService.getTaskDrainStatus());
+      mockTaskDrain.acquire.mockReset().mockImplementation(async (_owner, _input, audit) => {
+        await audit(TX_SENTINEL, lease);
+        return lease;
+      });
+      mockTaskDrain.release.mockReset().mockImplementation(async (_owner, _id, audit) => {
+        await audit(TX_SENTINEL, { wasActive: true });
+        return { wasActive: true };
+      });
     });
 
     it("returns the idle status", async () => {
@@ -985,7 +993,10 @@ describe("instance settings routes", () => {
       mockHeartbeatService.getTaskDrainStatus.mockReturnValue({ ...idleStatus, draining: true, ownerId: "current-owner" });
       const app = createApp(adminActor);
       await request(app).post("/api/instance/task-drain").send({}).expect(409);
-      await request(app).delete("/api/instance/task-drain").expect(409);
+      expect(mockTaskDrain.acquire).not.toHaveBeenCalled();
+      // Synthiq fork: a DELETE without ownerId is a lease release and needs a lease ID.
+      await request(app).delete("/api/instance/task-drain").expect(400);
+      expect(mockTaskDrain.release).not.toHaveBeenCalled();
       await request(app).delete("/api/instance/task-drain?ownerId=previous-owner").expect(409);
       expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
       expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
@@ -1074,363 +1085,63 @@ describe("instance settings routes", () => {
       expect(mockReadIdleSleepSafety).not.toHaveBeenCalled();
     });
 
-    it("writes an activity record for every company, then applies the same drain values, in one transaction", async () => {
-      const drain = { startedAt: "2026-08-29T00:00:00.000Z", expiresAt: "2026-08-29T06:00:00.000Z" };
-      mockHeartbeatService.computeTaskDrain.mockReturnValue(drain);
-      const app = await createApp(adminActor);
+    it("awaits stored status", async () => {
+      mockHeartbeatService.getTaskDrainStatus.mockResolvedValue({ draining: true, lease, persistedRunningRuns: 2, quiescent: false });
+      const result = await request(createApp(admin)).get("/api/instance/task-drain");
+      expect(result.status).toBe(200);
+      expect(result.body.persistedRunningRuns).toBe(2);
+    });
 
-      const res = await request(app)
-        .post("/api/instance/task-drain")
-        .send({ ttlMs: 21_600_000 });
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual(drain);
-      expect(mockHeartbeatService.computeTaskDrain).toHaveBeenCalledWith({ ttlMs: 21_600_000 });
-      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    it("acquires for the authenticated owner and audits each company in the lease transaction", async () => {
+      const result = await request(createApp(admin)).post("/api/instance/task-drain").send({ ttlMs: 1000 });
+      expect(result.status).toBe(200);
+      expect(result.body).toEqual(lease);
+      expect(mockTaskDrain.acquire).toHaveBeenCalledWith("admin-1", { ttlMs: 1000 }, expect.any(Function));
       expect(mockLogActivity).toHaveBeenCalledTimes(2);
       for (const call of mockLogActivity.mock.calls) {
         expect(call[0]).toBe(TX_SENTINEL);
-        expect(call[1]).toMatchObject({
-          action: "instance.task_drain.started",
-          details: { startedAt: drain.startedAt, expiresAt: drain.expiresAt },
-        });
+        expect(call[1]).toMatchObject({ action: "instance.task_drain.started", details: lease });
       }
-      // The mutation applies the same values the audit rows already carry,
-      // and only after the shared transaction commits.
-      expect(mockHeartbeatService.applyTaskDrain).toHaveBeenCalledTimes(1);
-      expect(mockHeartbeatService.applyTaskDrain).toHaveBeenCalledWith(drain);
       expect(mockPublishActivity).toHaveBeenCalledTimes(2);
     });
 
-    it("starts an indefinite drain when the caller sends no ttlMs", async () => {
-      mockHeartbeatService.computeTaskDrain.mockReturnValue({ startedAt: "2026-08-29T00:00:00.000Z", expiresAt: null });
-      const app = await createApp(adminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBe(200);
-      expect(mockHeartbeatService.computeTaskDrain).toHaveBeenCalledWith({ ttlMs: null });
-    });
-
-    it("writes an activity record for every company, then stops the drain, using one wasActive value throughout", async () => {
-      mockHeartbeatService.getTaskDrainStatus.mockReturnValue({
-        draining: true,
-        startedAt: new Date(),
-        expiresAt: null,
-        activeRuns: 0,
-        pendingWakes: 0,
-        quiescent: true,
-      });
-      const app = await createApp(adminActor);
-
-      const res = await request(app).delete("/api/instance/task-drain");
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ wasActive: true });
-      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    it("releases only the supplied lease with the authenticated owner", async () => {
+      const result = await request(createApp(admin)).delete("/api/instance/task-drain").send({ leaseId: lease.leaseId });
+      expect(result.status).toBe(200);
+      expect(mockTaskDrain.release).toHaveBeenCalledWith("admin-1", lease.leaseId, expect.any(Function));
       expect(mockLogActivity).toHaveBeenCalledTimes(2);
-      for (const call of mockLogActivity.mock.calls) {
-        expect(call[0]).toBe(TX_SENTINEL);
-        expect(call[1]).toMatchObject({
-          action: "instance.task_drain.stopped",
-          details: { wasActive: true },
-        });
-      }
-      // The mutation runs only after the shared transaction commits.
-      expect(mockHeartbeatService.stopTaskDrain).toHaveBeenCalledWith();
-      expect(mockPublishActivity).toHaveBeenCalledTimes(2);
+      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
     });
 
-    it("does not apply a drain when the company list read fails", async () => {
-      mockInstanceSettingsService.listCompanyIds.mockRejectedValue(new Error("db unavailable"));
-      const app = await createApp(adminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBeGreaterThanOrEqual(500);
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
+    it.each([null, 0, -1, 86400001])("rejects invalid finite durations: %s", async (ttlMs) => {
+      expect((await request(createApp(admin)).post("/api/instance/task-drain").send({ ttlMs })).status).toBe(400);
+      expect(mockTaskDrain.acquire).not.toHaveBeenCalled();
     });
 
-    it("commits no activity record for any company when one company's audit write fails", async () => {
-      // company-1 succeeds, company-2 fails. A real transaction rolls both
-      // back together; here we prove the route puts both writes in the
-      // SAME transaction (rather than firing one independent write per
-      // company) and never publishes a record for the company that did
-      // succeed before the shared transaction rejected.
-      mockHeartbeatService.computeTaskDrain.mockReturnValue({
-        startedAt: "2026-08-29T00:00:00.000Z",
-        expiresAt: null,
-      });
-      mockLogActivity.mockImplementation((_db: unknown, input: { companyId: string }) => (
-        input.companyId === "company-2"
-          ? Promise.reject(new Error("activity insert failed"))
-          : Promise.resolve({ id: `activity-${input.companyId}` })
-      ));
-      const app = await createApp(adminActor);
+    it("requires the lease ID for release", async () => {
+      expect((await request(createApp(admin)).delete("/api/instance/task-drain").send({})).status).toBe(400);
+      expect(mockTaskDrain.release).not.toHaveBeenCalled();
+    });
 
-      const res = await request(app).post("/api/instance/task-drain").send({});
+    it.each([
+      { ...admin, isInstanceAdmin: false },
+      { type: "agent", agentId: "agent-1", source: "agent_key", companyId: "company-1" },
+    ])("rejects writes without instance administrator access", async (actor) => {
+      expect((await request(createApp(actor)).post("/api/instance/task-drain").send({})).status).toBe(403);
+      expect((await request(createApp(actor)).delete("/api/instance/task-drain").send({ leaseId: lease.leaseId })).status).toBe(403);
+      expect(mockTaskDrain.acquire).not.toHaveBeenCalled();
+      expect(mockTaskDrain.release).not.toHaveBeenCalled();
+    });
 
-      expect(res.status).toBeGreaterThanOrEqual(500);
-      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
-      for (const call of mockLogActivity.mock.calls) {
-        expect(call[0]).toBe(TX_SENTINEL);
-      }
+    it("reports persistence failures without publication", async () => {
+      mockTaskDrain.acquire.mockRejectedValue(new Error("storage unavailable"));
+      expect((await request(createApp(admin)).post("/api/instance/task-drain").send({})).status).toBe(500);
       expect(mockPublishActivity).not.toHaveBeenCalled();
     });
 
-    it("does not apply the drain when the audit transaction rejects", async () => {
-      mockHeartbeatService.computeTaskDrain.mockReturnValue({
-        startedAt: "2026-08-29T00:00:00.000Z",
-        expiresAt: null,
-      });
-      mockLogActivity.mockRejectedValue(new Error("activity insert failed"));
-      const app = await createApp(adminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBeGreaterThanOrEqual(500);
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
-    });
-
-    it("still reports the started drain when publishing its committed audit record fails", async () => {
-      // The audit row already committed by the time publish runs, so a
-      // publish failure must not turn the response into a false failure:
-      // the caller asked to start a drain, and the drain did start.
-      const drain = { startedAt: "2026-08-29T00:00:00.000Z", expiresAt: null };
-      mockHeartbeatService.computeTaskDrain.mockReturnValue(drain);
-      mockPublishActivity.mockImplementation(() => {
-        throw new Error("live event bus unavailable");
-      });
-      const app = await createApp(adminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual(drain);
-      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
-      expect(mockLogActivity).toHaveBeenCalledTimes(2);
-      expect(mockHeartbeatService.applyTaskDrain).toHaveBeenCalledWith(drain);
-    });
-
-    it("does not stop the drain when the company list read fails", async () => {
-      mockInstanceSettingsService.listCompanyIds.mockRejectedValue(new Error("db unavailable"));
-      const app = await createApp(adminActor);
-
-      const res = await request(app).delete("/api/instance/task-drain");
-
-      expect(res.status).toBeGreaterThanOrEqual(500);
-      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
-    });
-
-    it("does not stop the drain when the audit transaction rejects", async () => {
-      mockHeartbeatService.getTaskDrainStatus.mockReturnValue({
-        draining: true,
-        startedAt: new Date(),
-        expiresAt: null,
-        activeRuns: 0,
-        pendingWakes: 0,
-        quiescent: true,
-      });
-      mockLogActivity.mockRejectedValue(new Error("activity insert failed"));
-      const app = await createApp(adminActor);
-
-      const res = await request(app).delete("/api/instance/task-drain");
-
-      expect(res.status).toBeGreaterThanOrEqual(500);
-      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
-    });
-
-    it("still reports the stopped drain when publishing its committed audit record fails", async () => {
-      mockHeartbeatService.getTaskDrainStatus.mockReturnValue({
-        draining: true,
-        startedAt: new Date(),
-        expiresAt: null,
-        activeRuns: 0,
-        pendingWakes: 0,
-        quiescent: true,
-      });
-      mockPublishActivity.mockImplementation(() => {
-        throw new Error("live event bus unavailable");
-      });
-      const app = await createApp(adminActor);
-
-      const res = await request(app).delete("/api/instance/task-drain");
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ wasActive: true });
-      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
-      expect(mockLogActivity).toHaveBeenCalledTimes(2);
-      expect(mockHeartbeatService.stopTaskDrain).toHaveBeenCalledWith();
-    });
-
-    it("still publishes the second company's record when the first company's publish fails", async () => {
-      // Each committed audit record publishes independently, so one
-      // company's publish failure must not stop the rest from publishing.
-      const drain = { startedAt: "2026-08-29T00:00:00.000Z", expiresAt: null };
-      mockHeartbeatService.computeTaskDrain.mockReturnValue(drain);
-      mockPublishActivity.mockImplementation((publication: { companyId: string }) => {
-        if (publication.companyId === "company-1") throw new Error("live event bus unavailable");
-      });
-      const app = await createApp(adminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual(drain);
-      expect(mockPublishActivity).toHaveBeenCalledTimes(2);
-      expect(mockPublishActivity.mock.calls.map(([publication]: [{ companyId: string }]) => publication.companyId)).toEqual([
-        "company-1",
-        "company-2",
-      ]);
-    });
-
-    it("queues an overlapping DELETE behind a POST whose audit transaction is still pending, so the audit order and the live state always agree", async () => {
-      // Model the real drain state instead of a canned return value, so
-      // this test can prove the applied state, the audit rows, and the
-      // response all agree even when the earlier request's transaction
-      // resolves after the later request's would have.
-      const liveState = { draining: false };
-      mockHeartbeatService.computeTaskDrain.mockReturnValue({
-        startedAt: "2026-08-29T00:00:00.000Z",
-        expiresAt: null,
-      });
-      mockHeartbeatService.applyTaskDrain.mockImplementation(() => {
-        liveState.draining = true;
-      });
-      mockHeartbeatService.stopTaskDrain.mockImplementation(() => {
-        const wasActive = liveState.draining;
-        liveState.draining = false;
-        return { wasActive };
-      });
-      mockHeartbeatService.getTaskDrainStatus.mockImplementation(() => ({
-        draining: liveState.draining,
-        startedAt: liveState.draining ? "2026-08-29T00:00:00.000Z" : null,
-        expiresAt: null,
-        activeRuns: 0,
-        pendingWakes: 0,
-        quiescent: true,
-      }));
-
-      // The POST's transaction call blocks until the test releases it. The
-      // DELETE's transaction call, if it is ever reached, commits at once —
-      // so if the route let the two requests race, the DELETE would commit
-      // its audit row, and reach stopTaskDrain, first.
-      const transactionCalls: string[] = [];
-      let releasePostTransaction: (() => void) | undefined;
-      let sawFirstCall = false;
-      // Resolves the instant the first (blocked) transaction call starts.
-      // The test then waits for this real event, not a fixed duration.
-      // Under CPU contention the event loop can take far longer than any
-      // fixed budget to reach this call, so a timer would flake here.
-      let notifyFirstTransactionStarted: (() => void) | undefined;
-      const firstTransactionStarted = new Promise<void>((resolve) => {
-        notifyFirstTransactionStarted = resolve;
-      });
-      mockDb.transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
-        if (!sawFirstCall) {
-          sawFirstCall = true;
-          transactionCalls.push("post-start");
-          notifyFirstTransactionStarted?.();
-          return new Promise((resolve) => {
-            releasePostTransaction = () => {
-              transactionCalls.push("post-commit");
-              resolve(fn(TX_SENTINEL));
-            };
-          });
-        }
-        transactionCalls.push("delete-start-and-commit");
-        return fn(TX_SENTINEL);
-      });
-
-      // Each route handler awaits listCompanyIds as its last step before it
-      // enters the task-drain transition queue, so a second call proves the
-      // DELETE passed authorization and reached the queue — not merely that
-      // it has not arrived yet.
-      let listCompanyIdsCallCount = 0;
-      let notifySecondListCompanyIdsCall: (() => void) | undefined;
-      const secondListCompanyIdsCall = new Promise<void>((resolve) => {
-        notifySecondListCompanyIdsCall = resolve;
-      });
-      mockInstanceSettingsService.listCompanyIds.mockImplementation(async () => {
-        listCompanyIdsCallCount += 1;
-        if (listCompanyIdsCallCount === 2) notifySecondListCompanyIdsCall?.();
-        return ["company-1", "company-2"];
-      });
-
-      const app = await createApp(adminActor);
-
-      // supertest only sends a request once something calls .then() on it,
-      // so force the POST to send now instead of waiting for the final
-      // Promise.all below to do it.
-      const postPromise = request(app).post("/api/instance/task-drain").send({});
-      postPromise.then(() => {}, () => {});
-      // Wait for the POST's transaction call to start before the test sends
-      // the DELETE. At that point the POST already called listCompanyIds,
-      // already entered the task-drain transition queue, and sits blocked
-      // inside the mocked db.transaction call — the POST holds the queue.
-      // Only a real event proves this; a fixed wait would not, because the
-      // event loop can take far longer than any fixed budget under CPU
-      // contention. Sending the DELETE only after this event fixes the
-      // request order by the queue, not by which socket the operating
-      // system happens to service first.
-      await firstTransactionStarted;
-      const deletePromise = request(app).delete("/api/instance/task-drain");
-      deletePromise.then(() => {}, () => {});
-      // Wait for the DELETE's own listCompanyIds call. It proves the DELETE
-      // passed authorization and reached the transition queue behind the
-      // POST — not merely that it has not shown up yet.
-      await secondListCompanyIdsCall;
-      expect(transactionCalls).toEqual(["post-start"]);
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
-      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
-
-      releasePostTransaction?.();
-      const [postRes, deleteRes] = await Promise.all([postPromise, deletePromise]);
-
-      expect(postRes.status).toBe(200);
-      expect(deleteRes.status).toBe(200);
-      // The DELETE's transaction only starts once the POST's has committed
-      // and the POST has already applied its drain — audit order matches
-      // application order.
-      expect(transactionCalls).toEqual(["post-start", "post-commit", "delete-start-and-commit"]);
-      // The DELETE observed the drain the POST applied, so its audit row
-      // and its response correctly report an active drain, and the live
-      // state ends idle — not stuck "draining" from a stale POST that
-      // applied after the DELETE that was meant to be the final word.
-      expect(deleteRes.body).toEqual({ wasActive: true });
-      expect(liveState.draining).toBe(false);
-    });
-
-    it("rejects a board actor without instance admin rights", async () => {
-      const app = await createApp(nonAdminActor);
-
-      const res = await request(app).post("/api/instance/task-drain").send({});
-
-      expect(res.status).toBe(403);
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
-    });
-
-    it("rejects a ttl above the maximum", async () => {
-      const app = await createApp(adminActor);
-
-      const res = await request(app)
-        .post("/api/instance/task-drain")
-        .send({ ttlMs: 24 * 60 * 60 * 1000 + 1 });
-
-      expect(res.status).toBe(400);
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
-    });
-
-    it("rejects a zero or negative ttl", async () => {
-      const app = await createApp(adminActor);
-
-      const zeroRes = await request(app).post("/api/instance/task-drain").send({ ttlMs: 0 });
-      expect(zeroRes.status).toBe(400);
-
-      const negativeRes = await request(app).post("/api/instance/task-drain").send({ ttlMs: -1 });
-      expect(negativeRes.status).toBe(400);
-
-      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
+    it("keeps a committed lease when activity publication fails", async () => {
+      mockPublishActivity.mockImplementation(() => { throw new Error("publication unavailable"); });
+      expect((await request(createApp(admin)).post("/api/instance/task-drain").send({})).status).toBe(200);
     });
   });
 
