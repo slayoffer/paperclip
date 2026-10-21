@@ -350,6 +350,7 @@ import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
 import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled, skipSelfUnblockWake } from "../services/self-block-guard.js";
+import { hasSavedReviewWait } from "../services/review-wait.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -14164,7 +14165,12 @@ export function issueRoutes(
         const owner = descriptor.owner;
         if (
           req.actor.type === "agent" &&
-          (owner === "board" || "userId" in owner)
+          (owner === "board" || "userId" in owner) &&
+          !(await hasSavedReviewWait(db, {
+            ...existing,
+            assigneeAgentId: updateFields.assigneeAgentId === undefined
+              ? existing.assigneeAgentId : updateFields.assigneeAgentId,
+          }, req.actor.agentId === existing.assigneeAgentId ? req.actor.agentId : undefined, descriptor))
         ) {
           throw forbidden(
             "Agents may only name themselves as an unblock owner",
