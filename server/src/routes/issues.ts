@@ -5,6 +5,7 @@ import { persistInteractionResolutionRouteEffects } from "../services/interactio
 import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wakeup.js";
 import { isInteractionResolutionReplay } from "../services/interaction-revision.js";
 import { secretProposalExecutionErrorCode, readToolActionContinuationContext, readSecretProposalContinuationContext, readObject, readNonEmptyString, readToolActionExecutionStatus } from "./interaction-continuation-context.js";
+import { createDependencyResolvedWakeup } from "./issue-dependency-wakeup.js";
 import { registerCompanyInteractionReads } from "./company-interaction-reads.js";
 import { registerIssueInteractionReads } from "./issue-interaction-reads.js";
 import { setIssueTitle } from "../services/issue-title.js";
@@ -282,8 +283,6 @@ import {
 } from "../services/onboarding-first-task-assets.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  buildIssueBlockersResolvedWakeStateKey,
-  findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
@@ -14460,48 +14459,9 @@ export function issueRoutes(
           source: string;
           mutation: string;
         }) => {
-          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          try {
-            const existingWake =
-              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-                companyId: issue.companyId,
-                dependentIssueId: input.dependentIssueId,
-                blockerIssueIds: input.blockerIssueIds,
-                blockedTransitionAt: input.blockedTransitionAt,
-              });
-            if (existingWake) return;
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check existing dependency wake before issue update wake",
-            );
-          }
-          addWakeup(input.agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            payload: {
-              issueId: input.dependentIssueId,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-              mutation: input.mutation,
-            },
-            idempotencyKey,
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: input.dependentIssueId,
-              taskId: input.dependentIssueId,
-              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-              source: input.source,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-            },
-          });
+          const wakeup = await createDependencyResolvedWakeup(db, issue.companyId, actor, input,
+            typeof svc.releaseDependencyWait === "function" ? () => svc.releaseDependencyWait(issue.companyId, input.dependentIssueId) : undefined);
+          if (wakeup) addWakeup(input.agentId, wakeup);
         };
 
         if (executionStageWakeup && deferWakeForGoal !== true) {
@@ -14660,9 +14620,9 @@ export function issueRoutes(
           }
         }
 
-        const becameDone =
-          existing.status !== "done" && issue.status === "done";
-        if (becameDone) {
+        const blockerEnded =
+          existing.status !== issue.status && ["done", "cancelled"].includes(issue.status);
+        if (blockerEnded) {
           const dependents = await svc.listWakeableBlockedDependents(issue.id);
           for (const dependent of dependents) {
             await addDependencyResolvedWakeup({
@@ -17862,48 +17822,9 @@ export function issueRoutes(
           blockerIssueIds: string[];
           blockedTransitionAt?: Date | string | null;
         }) => {
-          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          try {
-            const existingWake =
-              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-                companyId: currentIssue.companyId,
-                dependentIssueId: input.dependentIssueId,
-                blockerIssueIds: input.blockerIssueIds,
-                blockedTransitionAt: input.blockedTransitionAt,
-              });
-            if (existingWake) return;
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check existing dependency wake before issue comment wake",
-            );
-          }
-          addWakeup(input.agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            payload: {
-              issueId: input.dependentIssueId,
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-              mutation: "comment",
-            },
-            idempotencyKey,
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: input.dependentIssueId,
-              taskId: input.dependentIssueId,
-              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-              source: "issue.blockers_resolved",
-              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-              blockerIssueIds: input.blockerIssueIds,
-            },
-          });
+          const wakeup = await createDependencyResolvedWakeup(db, currentIssue.companyId, actor, { ...input, source: "issue.blockers_resolved", mutation: "comment" },
+            typeof svc.releaseDependencyWait === "function" ? () => svc.releaseDependencyWait(currentIssue.companyId, input.dependentIssueId) : undefined);
+          if (wakeup) addWakeup(input.agentId, wakeup);
         };
 
         if (commentDecisionStageWakeup) {

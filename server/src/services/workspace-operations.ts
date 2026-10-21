@@ -1,3 +1,5 @@
+import { withWorkspaceFinalizationActivity } from "./workspace-finalization-activity.js";
+export { isNativeWorkspaceFinalizationOperationActive } from "./workspace-finalization-activity.js";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { workspaceOperations } from "@paperclipai/db";
@@ -95,22 +97,6 @@ function readRuntimeControlOwner(metadata: unknown): RuntimeControlOwnerStamp | 
  * so it is safe to terminalize immediately instead of waiting out the staleness window.
  */
 const liveRuntimeControlOperationIds = new Set<string>();
-
-type NativeFinalizationActivityScope = {
-  operationId: string;
-  companyId: string;
-  runId: string;
-  issueId: string;
-};
-// Presentation-only positive proof. Persisted running rows can outlive a crash;
-// this registry only exists while this process awaits the actual export callback.
-const liveNativeFinalizationOperations = new Map<string, NativeFinalizationActivityScope>();
-
-export function isNativeWorkspaceFinalizationOperationActive(scope: NativeFinalizationActivityScope): boolean {
-  const active = liveNativeFinalizationOperations.get(scope.operationId);
-  return Boolean(active && active.companyId === scope.companyId
-    && active.runId === scope.runId && active.issueId === scope.issueId);
-}
 
 /**
  * Whether the process that stamped an operation is still alive on this host. A dead owner can
@@ -595,22 +581,10 @@ export function workspaceOperationService(db: Db) {
           };
 
           const timeoutMs = recordInput.timeoutMs ?? defaultRuntimeControlTimeoutMs(runtimeControlAction);
-          const runWithActivity = async () => {
-            const nativeFinalization = recordInput.phase === "workspace_finalize"
-              && recordInput.metadata?.owningService === "native_workspace_finalizer"
-              && input.heartbeatRunId && input.issueId;
-            if (nativeFinalization) liveNativeFinalizationOperations.set(id, {
-              operationId: id, companyId: input.companyId,
-              runId: input.heartbeatRunId!, issueId: input.issueId!,
-            });
-            try {
-              return await recordInput.run(reportProgress);
-            } finally {
-              // Join the underlying callback, even if the recorder's timeout
-              // already fired. A deadline cannot prove physical export stopped.
-              liveNativeFinalizationOperations.delete(id);
-            }
-          };
+          const runWithActivity = () => withWorkspaceFinalizationActivity({
+            operationId: id, companyId: input.companyId, runId: input.heartbeatRunId,
+            issueId: input.issueId, phase: recordInput.phase, metadata: recordInput.metadata,
+          }, () => recordInput.run(reportProgress));
           const settle = async () => {
             if (!timeoutMs || timeoutMs <= 0) return await runWithActivity();
             const timeout = new Promise<never>((_resolve, reject) => {
