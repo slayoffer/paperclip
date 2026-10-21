@@ -31,6 +31,13 @@ It retains each recovery record and its original evidence.
 It marks replay as `not_required` and records `actionOutcome: not_started`.
 Conflicting execution evidence retains the hold.
 This includes actions whose status is already `resolved` but whose replay flag still blocks execution.
+The periodic sweep also selects assigned `todo` issues with these historical holds.
+Those issues need no release receipt or dependency relation for evidence settlement.
+The sweep checks retained dispatch evidence before it checks dependency readiness.
+It preserves cancelled recovery records and holds with conflicting execution evidence.
+Relation-free settlement retains issue status and creates no dependency wake.
+Normal scheduling can then admit the issue through its existing guards.
+Repeated sweeps do not repeat settlement or dependency wakes.
 
 Homelab owns deployment and live verification.
 After deployment, its normal release event resolves false holds on the affected dependents.
