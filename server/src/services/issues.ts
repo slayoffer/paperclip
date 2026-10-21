@@ -15,7 +15,7 @@ import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
 import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
-import { createIssueDependencyReadiness, listIssueDependencyReadinessMap, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
+import { createIssueDependencyReadiness, listIssueDependencyReadinessMap, readIssueDependencyReadiness, type IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 export type { IssueDependencyReadiness } from "./issue-dependency-readiness.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
@@ -8987,22 +8987,8 @@ export function issueService(db: Db) {
       };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
-      const issue = await dbOrTx
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then(
-          (rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null,
-        );
-      if (!issue) throw notFound("Issue not found");
-      const readiness = await listIssueDependencyReadinessMap(
-        dbOrTx,
-        issue.companyId,
-        [issueId],
-      );
-      return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
-    },
+    getDependencyReadiness: (issueId: string, dbOrTx: any = db, blockerIssueIds?: string[]) =>
+      readIssueDependencyReadiness(dbOrTx, issueId, blockerIssueIds),
 
     releaseDependencyWait: (companyId: string, issueId: string) => releaseReadyDependencyWait(db, companyId, issueId),
 
