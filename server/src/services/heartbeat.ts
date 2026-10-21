@@ -15,6 +15,8 @@ import { bindHeartbeatRunnerHomeMode, prepareHeartbeatExecutionConfiguration } f
 import { createHeartbeatRunOutput } from "./heartbeat/run-output.js";
 import { prepareHeartbeatSession, resolveHeartbeatAdapterSession } from "./heartbeat/session-preparation.js";
 import { prepareHeartbeatTaskContext } from "./heartbeat/task-context.js";
+import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
+import { taskDrainService } from "./task-drain.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
 import { reconcileMuseNativeTerminalRun } from "./native-runtime/muse-terminal-reconciliation.js";
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
@@ -848,6 +850,7 @@ export function heartbeatService(
   } = createHeartbeatRunPreparation(db);
   let shutdownInProgress = false;
   const instanceSettings = instanceSettingsService(db);
+  const durableTaskDrain = taskDrainService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
@@ -901,9 +904,16 @@ export function heartbeatService(
   };
   const getSchedulingSuppression = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
-    return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
+    const local = resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,
     });
+    if (local.suppressed) return local;
+    // Read durable state before every admission, including the first admission
+    // after server recreation. A storage failure keeps queued work pending.
+    if (await durableTaskDrain.blocksAdmission()) {
+      return { suppressed: true, reason: "task_drain" as const };
+    }
+    return local;
   };
   const getWorktreeExecutionCutoff = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
@@ -1284,7 +1294,6 @@ export function heartbeatService(
   });
 
   const {
-    releaseRunClaimedJustBeforeSuppression,
     claimQueuedRun,
     withChatControlRecoveryGate,
     trackWakeup,
@@ -1761,17 +1770,7 @@ export function heartbeatService(
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
-    if ((await getSchedulingSuppression()).suppressed) {
-      try {
-        await releaseRunClaimedJustBeforeSuppression(runId);
-      } catch (err) {
-        logger.error(
-          { err, runId },
-          "failed to release run claimed just before task-drain suppression; the run row stays running, and the orphan reaper finalizes it and releases the issue lock on its next cycle",
-        );
-      }
-      return;
-    }
+    if (await suppressRunAdmission(db, runId, runOptions, await getSchedulingSuppression())) return;
 
     let legacyAdapterEntered = false;
     let legacyLocalAdapterEntered = false;
@@ -3630,6 +3629,7 @@ export function heartbeatService(
     } catch (outerErr) {
       if (
         nativeOwnershipHeld ||
+        (!nativeDispatchStarted && isRunnerReattachment(runOptions.nativeRestartRecovery)) ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
         nativeOwnershipHeld = true;
@@ -4080,7 +4080,9 @@ export function heartbeatService(
     drainActiveRunExecutions,
     startTaskDrain,
     stopTaskDrain,
-    getTaskDrainStatus,
+    getTaskDrainStatus: () => durableTaskDrain.status(getTaskDrainStatus()),
+    /** Process-local drain state only; upstream's idle-purpose drain reads it. */
+    getLocalTaskDrainStatus: getTaskDrainStatus,
     computeTaskDrain,
     applyTaskDrain,
 

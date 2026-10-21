@@ -7,6 +7,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { createPostgresWakeQueueAdapter } from "../../modules/wake-queue/adapters/postgres.js";
 import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 import { createHeartbeatQueue, type HeartbeatQueueDependencies } from "./queue.js";
+import { releaseRunClaimedJustBeforeSuppression } from "../heartbeat-task-drain-admission.js";
 
 import { createHeartbeatQueueTestDependencies as callbacks } from "../../__tests__/helpers/heartbeat-queue.js";
 
@@ -203,7 +204,7 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
   it.each(["claimed", "cancelled"] as const)("releases a running claim while preserving a %s wake", async (wakeStatus) => {
     const { run, issue, wake } = await fixture();
     await db.update(agentWakeupRequests).set({ status: wakeStatus }).where(eq(agentWakeupRequests.id, wake.id));
-    await createHeartbeatQueue(db, callbacks(db)).releaseRunClaimedJustBeforeSuppression(run.id);
+    await releaseRunClaimedJustBeforeSuppression(db, run.id);
     const [released] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     const [releasedIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
     const [releasedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
@@ -217,7 +218,7 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     const { run, issue, agent, company } = await fixture();
     const [newOwner] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, status: "running", invocationSource: "assignment" }).returning();
     await db.update(issues).set({ executionRunId: newOwner.id }).where(eq(issues.id, issue.id));
-    await createHeartbeatQueue(db, callbacks(db)).releaseRunClaimedJustBeforeSuppression(run.id);
+    await releaseRunClaimedJustBeforeSuppression(db, run.id);
     const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
     expect(current.executionRunId).toBe(newOwner.id);
   });

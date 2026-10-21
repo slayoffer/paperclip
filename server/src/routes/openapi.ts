@@ -1,5 +1,7 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
+import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
+import { registerTaskDrainPaths } from "./openapi-task-drain.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
@@ -239,7 +241,6 @@ import {
   patchInstanceGeneralSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
-  startTaskDrainRequestSchema,
   // Resource memberships
   updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
@@ -347,22 +348,6 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
-type OpenApiResponse = Record<string, unknown>;
-type OpenApiPathRegistration = {
-  method: string;
-  path: string;
-  request?: {
-    params?: z.ZodTypeAny;
-    query?: z.ZodTypeAny;
-    body?: {
-      content: Record<string, { schema: unknown }>;
-      required?: boolean;
-    };
-  };
-  responses?: Record<string, OpenApiResponse>;
-  [key: string]: unknown;
-};
-
 // Zod 4 stores each schema definition on `_def` with a lowercase `type`
 // discriminator and moves the wrapped members onto that def. This loose view
 // lets the converter read those members, because Zod 4 does not export a
@@ -6910,40 +6895,7 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
-registry.registerPath({
-  method: "get",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Get the task-drain status for this process only; quiescent counts in-process work, and a process restart clears it even when the database still holds running rows",
-  request: { query: z.object({ ownerId: z.string().uuid().optional(), idleSleepSafety: z.literal("1").optional().describe("Instance admins can request a conservative durable-work report while admission and ingress are held. Unknown or present work must prevent automatic sleep."), scheduledWake: z.enum(["1", "2"]).optional().describe("Cloud control callers may request routine deadlines (1), or routines and issue monitors (2). Cloud must acknowledge a durable alarm and revalidate this report before stopping the instance.") }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Start a task drain, so new run admission holds until active runs finish",
-  request: { body: jsonBody(startTaskDrainRequestSchema) },
-  responses: {
-    200: r.ok(),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-    409: r.conflict,
-  },
-});
-
-registry.registerPath({
-  method: "delete",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary: "End a task drain and restore run admission",
-  request: { query: z.object({ ownerId: z.string().uuid().optional() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
-});
+registerTaskDrainPaths(registry, r);
 
 registry.registerPath({
   method: "get",
