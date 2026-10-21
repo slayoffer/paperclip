@@ -144,3 +144,9 @@ in the task's verification document. Confirm that the run belongs to the expecte
 [GitHub's event reference](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)
 describes pull request activity types, merge references, and branch filters.
 This workflow does not authorize a merge, deployment, settings write, or label mutation.
+
+A later release run found a stale rejection assertion in `IssueDetail.test.tsx`.
+The request now includes `expectedRevision` as its fourth argument.
+The tests check the saved revision and the absent revision.
+Both cases preserve the continuation message assertion.
+A separate fixture module keeps the large test file from growing.
