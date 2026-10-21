@@ -101,6 +101,7 @@ export function AttentionInteractionResolver({
       rememberAction?: boolean;
     }) =>
       issuesApi.acceptInteraction(issueId, input.interaction.id, {
+        expectedRevision: input.interaction.revision,
         selectedClientKeys: input.selectedClientKeys,
         selectedOptionIds: input.selectedOptionIds,
         rememberAction: input.rememberAction,
@@ -109,14 +110,14 @@ export function AttentionInteractionResolver({
   });
 
   const rejectMutation = useMutation({
-    mutationFn: (input: { interactionId: string; reason?: string }) =>
-      issuesApi.rejectInteraction(issueId, input.interactionId, input.reason),
+    mutationFn: (input: { interactionId: string; expectedRevision?: string; reason?: string }) =>
+      issuesApi.rejectInteraction(issueId, input.interactionId, input.reason, { expectedRevision: input.expectedRevision }),
     onSuccess: invalidate,
   });
 
   const respondMutation = useMutation({
-    mutationFn: (input: { interactionId: string; answers: AskUserQuestionsAnswer[] }) =>
-      issuesApi.respondToInteraction(issueId, input.interactionId, { answers: input.answers }),
+    mutationFn: (input: { interactionId: string; expectedRevision?: string; answers: AskUserQuestionsAnswer[] }) =>
+      issuesApi.respondToInteraction(issueId, input.interactionId, { answers: input.answers, expectedRevision: input.expectedRevision }),
     onSuccess: invalidate,
   });
 
@@ -169,10 +170,10 @@ export function AttentionInteractionResolver({
         acceptMutation.mutateAsync({ interaction: target, selectedClientKeys, selectedOptionIds, rememberAction }).then(() => undefined)
       }
       onRejectInteraction={(target, reason) =>
-        rejectMutation.mutateAsync({ interactionId: target.id, reason }).then(() => undefined)
+        rejectMutation.mutateAsync({ interactionId: target.id, expectedRevision: target.revision, reason }).then(() => undefined)
       }
       onSubmitInteractionAnswers={(target: AskUserQuestionsInteraction, answers) =>
-        respondMutation.mutateAsync({ interactionId: target.id, answers }).then(() => undefined)
+        respondMutation.mutateAsync({ interactionId: target.id, expectedRevision: target.revision, answers }).then(() => undefined)
       }
       onCancelInteraction={(target: AskUserQuestionsInteraction) =>
         cancelMutation.mutateAsync({ interactionId: target.id }).then(() => undefined)

@@ -4,7 +4,9 @@ import type { IssueSummary } from "@paperclipai/shared";
 import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type { IssueContextUsage } from "@paperclipai/shared";
 import type {
+  AcceptIssueThreadInteraction,
   AcceptedPlanDecompositionSummary,
+  RejectIssueThreadInteraction,
   RespondIssueThreadInteractionInput,
   Approval,
   CompactIssue,
@@ -51,6 +53,9 @@ import { api, ApiError, detachInflightGet, type RequestOptions } from "./client"
 import { CommentSubmissionUnknownError } from "../lib/comment-submit-result";
 import { classifySendFailure } from "../lib/pending-send";
 import { interactionResolutionErrorCode } from "../lib/interaction-resolution-error";
+import { issueListSearchParams, type IssueListFilters } from "./issue-list-search-params";
+
+export type { IssueListFilters } from "./issue-list-search-params";
 
 function hasCommentReceipt(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -100,14 +105,10 @@ function sameText(left: string | null | undefined, right: string | null | undefi
   return (left?.trim() || null) === (right?.trim() || null);
 }
 
-type AcceptInteractionInput = {
-  selectedClientKeys?: string[];
-  selectedOptionIds?: string[];
-  rememberAction?: boolean;
-};
+type InteractionResolutionPreconditions = Pick<RejectIssueThreadInteraction, "expectedRevision" | "idempotencyKey">;
 
 /** Whether a stored accepted resolution records exactly this accept request. */
-export function acceptedResolutionMatches(current: IssueThreadInteraction, data: AcceptInteractionInput | undefined): boolean {
+export function acceptedResolutionMatches(current: IssueThreadInteraction, data: AcceptIssueThreadInteraction | undefined): boolean {
   if (current.status !== "accepted") return false;
   if (current.kind === "suggest_tasks") {
     // The server skips every suggested task that was not selected.
@@ -129,25 +130,29 @@ export function rejectedResolutionMatches(current: IssueThreadInteraction, reaso
 }
 
 /** Whether stored answers record exactly these answers. */
-export function answeredResolutionMatches(current: IssueThreadInteraction, answers: AskUserQuestionsAnswer[]): boolean {
+export function answeredResolutionMatches(current: IssueThreadInteraction, answers: RespondIssueThreadInteractionInput["answers"]): boolean {
   if (current.status !== "answered" || current.kind !== "ask_user_questions") return false;
   const saved = current.result?.answers ?? [];
   if (saved.length !== answers.length) return false;
   return answers.every((answer) => {
     const match = saved.find((row) => row.questionId === answer.questionId);
-    return Boolean(match && sameSet(match.optionIds, answer.optionIds) && sameText(match.otherText, answer.otherText));
+    return Boolean(match && sameSet(match.optionIds, answer.optionIds) && sameText(match.otherText, answer.text ?? answer.otherText));
   });
 }
 
 async function resolveInteractionOnce(
   issueId: string,
   interactionId: string,
+  preconditions: InteractionResolutionPreconditions | undefined,
   /** Identifies this exact request; a different answer is a different resolution. */
   requestFingerprint: string,
   matchesRequest: (current: IssueThreadInteraction) => boolean,
   request: () => Promise<IssueThreadInteraction>,
 ): Promise<IssueThreadInteraction> {
-  const key = `${issueId}:${interactionId}:${requestFingerprint}`;
+  // A keyed request can recover its receipt from the server. Matching visible
+  // card content cannot establish that this actor and request own that receipt.
+  if (preconditions?.idempotencyKey !== undefined) return request();
+  const key = `${issueId}:${interactionId}:${preconditions?.expectedRevision ?? ""}:${requestFingerprint}`;
   try {
     const result = await request();
     transientlyFailedResolutions.delete(key);
@@ -189,99 +194,6 @@ export type ResolveRecoveryActionResponse = {
   issue: Issue;
   recoveryAction: IssueRecoveryAction;
 };
-
-export type IssueListFilters = {
-  ids?: readonly string[];
-  parentIds?: readonly string[];
-  oneChildPerParent?: boolean;
-  projection?: "index" | "rows";
-  attention?: "blocked";
-  status?: string;
-  displayStatus?: string;
-  projectId?: string;
-  parentId?: string;
-  assigneeAgentId?: string;
-  participantAgentId?: string;
-  assigneeUserId?: string;
-  touchedByUserId?: string;
-  inboxArchivedByUserId?: string;
-  unreadForUserId?: string;
-  labelId?: string;
-  workspaceId?: string;
-  executionWorkspaceId?: string;
-  originKind?: string;
-  originKindPrefix?: string;
-  originId?: string;
-  descendantOf?: string;
-  createdFromIssueId?: string;
-  includeAgentCreatedTasks?: boolean;
-  includeParticipatedTasks?: boolean;
-  includeRoutineExecutions?: boolean;
-  includeBlockedBy?: boolean;
-  includeBlockedInboxAttention?: boolean;
-  includeLiveDescendantSummary?: boolean;
-  hasPlanDocument?: boolean;
-  q?: string;
-  limit?: number;
-  offset?: number;
-  sortField?: "updated" | "created" | "id";
-  afterId?: string;
-  sortDir?: "asc" | "desc";
-};
-
-function issueListSearchParams(filters?: IssueListFilters) {
-  const params = new URLSearchParams();
-  if (filters?.attention) params.set("attention", filters.attention);
-  if (filters?.status) params.set("status", filters.status);
-  if (filters?.displayStatus) params.set("displayStatus", filters.displayStatus);
-  if (filters?.projectId) params.set("projectId", filters.projectId);
-  if (filters?.parentId) params.set("parentId", filters.parentId);
-  if (filters?.parentIds) params.set("parentIds", filters.parentIds.join(","));
-  if (filters?.oneChildPerParent) params.set("oneChildPerParent", "true");
-  if (filters?.assigneeAgentId)
-    params.set("assigneeAgentId", filters.assigneeAgentId);
-  if (filters?.participantAgentId)
-    params.set("participantAgentId", filters.participantAgentId);
-  if (filters?.assigneeUserId)
-    params.set("assigneeUserId", filters.assigneeUserId);
-  if (filters?.touchedByUserId)
-    params.set("touchedByUserId", filters.touchedByUserId);
-  if (filters?.inboxArchivedByUserId)
-    params.set("inboxArchivedByUserId", filters.inboxArchivedByUserId);
-  if (filters?.unreadForUserId)
-    params.set("unreadForUserId", filters.unreadForUserId);
-  if (filters?.labelId) params.set("labelId", filters.labelId);
-  if (filters?.workspaceId) params.set("workspaceId", filters.workspaceId);
-  if (filters?.executionWorkspaceId)
-    params.set("executionWorkspaceId", filters.executionWorkspaceId);
-  if (filters?.originKind) params.set("originKind", filters.originKind);
-  if (filters?.originKindPrefix)
-    params.set("originKindPrefix", filters.originKindPrefix);
-  if (filters?.originId) params.set("originId", filters.originId);
-  if (filters?.descendantOf) params.set("descendantOf", filters.descendantOf);
-  if (filters?.createdFromIssueId) params.set("createdFromIssueId", filters.createdFromIssueId);
-  if (filters?.includeParticipatedTasks) params.set("includeParticipatedTasks", "true");
-  if (filters?.includeAgentCreatedTasks !== undefined)
-    params.set("includeAgentCreatedTasks", String(filters.includeAgentCreatedTasks));
-  if (filters?.includeRoutineExecutions)
-    params.set("includeRoutineExecutions", "true");
-  if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");
-  if (filters?.includeBlockedInboxAttention)
-    params.set("includeBlockedInboxAttention", "true");
-  if (filters?.includeLiveDescendantSummary)
-    params.set("includeLiveDescendantSummary", "true");
-  if (filters?.hasPlanDocument !== undefined) {
-    params.set("hasPlanDocument", filters.hasPlanDocument ? "true" : "false");
-  }
-  if (filters?.q) params.set("q", filters.q);
-  if (filters?.limit) params.set("limit", String(filters.limit));
-  if (filters?.offset !== undefined)
-    params.set("offset", String(filters.offset));
-  if (filters?.sortField) params.set("sortField", filters.sortField);
-  if (filters?.sortDir) params.set("sortDir", filters.sortDir);
-  if (filters?.afterId) params.set("afterId", filters.afterId);
-  return params;
-}
 
 export const issuesApi = {
   inboxMine: (companyId: string, options?: RequestOptions) => {
@@ -599,12 +511,13 @@ export const issuesApi = {
   acceptInteraction: (
     id: string,
     interactionId: string,
-    data?: AcceptInteractionInput,
+    data?: AcceptIssueThreadInteraction,
   ) =>
     resolveInteractionOnce(
       id,
       interactionId,
-      `accept:${JSON.stringify([data?.selectedClientKeys ?? null, data?.selectedOptionIds ?? null])}`,
+      data,
+      `accept:${JSON.stringify([data?.selectedClientKeys ?? null, data?.selectedOptionIds ?? null, data?.rememberAction ?? false])}`,
       (current) => acceptedResolutionMatches(current, data),
       () =>
         api.post<IssueThreadInteraction>(
@@ -612,16 +525,22 @@ export const issuesApi = {
           data ?? {},
         ),
     ),
-  rejectInteraction: (id: string, interactionId: string, reason?: string) =>
+  rejectInteraction: (
+    id: string,
+    interactionId: string,
+    reason?: string,
+    preconditions?: InteractionResolutionPreconditions,
+  ) =>
     resolveInteractionOnce(
       id,
       interactionId,
+      preconditions,
       `reject:${JSON.stringify(reason ?? null)}`,
       (current) => rejectedResolutionMatches(current, reason),
       () =>
         api.post<IssueThreadInteraction>(
           `/issues/${id}/interactions/${interactionId}/reject`,
-          reason ? { reason } : {},
+          { ...preconditions, ...(reason ? { reason } : {}) },
         ),
     ),
   cancelInteraction: (id: string, interactionId: string, reason?: string) =>
@@ -644,8 +563,11 @@ export const issuesApi = {
     resolveInteractionOnce(
       id,
       interactionId,
-      `respond:${JSON.stringify(data.answers)}`,
-      (current) => answeredResolutionMatches(current, data.answers),
+      data,
+      `respond:${JSON.stringify([data.answers, data.summaryMarkdown ?? null])}`,
+      (current) => current.kind === "ask_user_questions"
+        && sameText(current.result?.summaryMarkdown, data.summaryMarkdown)
+        && answeredResolutionMatches(current, data.answers),
       () =>
         api.post<IssueThreadInteraction>(
           `/issues/${id}/interactions/${interactionId}/respond`,

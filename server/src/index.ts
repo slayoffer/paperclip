@@ -70,6 +70,8 @@ import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWo
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
 import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
+import type { BetterAuthSessionResult, EmbeddedPostgresInstance, EmbeddedPostgresCtor, StartedServer, StartupDatabaseTeardown } from "./server-startup-types.js";
+export type { StartedServer } from "./server-startup-types.js";
 import { createTerminalWorkspaceSweepReporter } from "./services/terminal-workspace-sweep-report.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
@@ -100,7 +102,7 @@ import { acknowledgeNativeStartupCleanup } from "./services/native-runtime/nativ
 import { executionControlSchedule, registerExecutionControlWork } from "./services/execution-control-work.js";
 import { connectionIntentDeliveryService } from "./services/connection-intent-delivery.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import type { Server, RequestListener } from "node:http";
+import type { RequestListener } from "node:http";
 import { createPaperclipHttpServer } from "./http/server.js";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -171,7 +173,8 @@ import {
   toolAccessService,
   workspaceOperationService,
 } from "./services/index.js";
-import { questionResponseDeliveryService, registerQuestionResponseDeliveryWork } from "./services/question-response-delivery.js";
+import { registerQuestionResponseDeliveryWork } from "./services/question-response-delivery.js";
+import { interactionDeliveryService } from "./services/interaction-deliveries.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
 import { registerStatusCardEvaluationWork, statusCardEvaluationService } from "./services/status-card-evaluation.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
@@ -221,52 +224,7 @@ import { flushInFlightRunLogMirrors } from "./services/run-log-store.js";
 import {
   createEmbeddedPostgresSupervisor,
   type EmbeddedPostgresSupervisor,
-  type SupervisedEmbeddedPostgres,
 } from "./embedded-postgres-supervisor.js";
-
-type BetterAuthSessionUser = {
-  id: string;
-  email?: string | null;
-  name?: string | null;
-};
-
-type BetterAuthSessionResult = {
-  session: { id: string; userId: string } | null;
-  user: BetterAuthSessionUser | null;
-};
-
-type EmbeddedPostgresInstance = SupervisedEmbeddedPostgres & {
-  initialise(): Promise<void>;
-};
-
-type EmbeddedPostgresCtor = new (opts: {
-  databaseDir: string;
-  user: string;
-  password: string;
-  port: number;
-  persistent: boolean;
-  initdbFlags?: string[];
-  onLog?: (message: unknown) => void;
-  onError?: (message: unknown) => void;
-}) => EmbeddedPostgresInstance;
-
-
-export interface StartedServer {
-  server: Server;
-  host: string;
-  listenPort: number;
-  apiUrl: string;
-  databaseUrl: string;
-  shutdown: (signal?: "SIGINT" | "SIGTERM") => Promise<void>;
-}
-
-// Set by the boot sequence once the primary pool exists. A boot that fails
-// after that point (a bootstrap query that throws, for example) must end the
-// pool before the caller exits: the driver keeps idle connections open until
-// the process dies, and in a restart loop the leftover backends of every
-// failed generation can exhaust `max_connections` before the next boot even
-// gets a connection.
-type StartupDatabaseTeardown = { close: (() => Promise<void>) | null };
 
 // Ends the pool behind a drizzle client. Tolerates a client without `$client`
 // (test doubles) and never throws, so it is safe on every exit path.
@@ -1320,7 +1278,7 @@ async function startServerWithDatabaseTeardown(
   const environmentLeaseCleanupHeartbeat = accountingHeartbeat;
   const chatCompletionDeliveries = chatCompletionDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
   const connectionDeliveries = connectionIntentDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
-  const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
+  const questionResponseDeliveries = interactionDeliveryService(db as any, {
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });

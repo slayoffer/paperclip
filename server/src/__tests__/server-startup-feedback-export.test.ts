@@ -19,6 +19,7 @@ import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { decisionService, decisionRetentionService, toolAccessService, githubConnectionEventService, reconcileBuiltInAgentsOnStartup, reconcileCodexLocalManagedHomesOnStartup, reconcilePersistedRuntimeServicesOnStartup } from "../services/index.js";
 
 import { companies, runDatabaseBackup, type Db } from "@paperclipai/db";
+import { buildTestConfig, ORIGINAL_PAPERCLIP_API_URL, ORIGINAL_PAPERCLIP_RUNTIME_API_URL, ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON, ORIGINAL_PAPERCLIP_LISTEN_HOST, ORIGINAL_PAPERCLIP_LISTEN_PORT } from "./helpers/server-startup-config.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveLocalRuntimeApiUrl } from "../runtime-api.js";
 import { onNativeWorkspaceFinalizationRelease, releaseNativeWorkspaceFinalization } from "../services/native-workspace-finalization-notifications.js";
@@ -55,11 +56,6 @@ vi.mock("../services/delivery-work-notifications.js", async () => ({
   subscribeDeliveryWork: vi.fn(() => () => {}),
 }));
 
-const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
-const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
-const ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON;
-const ORIGINAL_PAPERCLIP_LISTEN_HOST = process.env.PAPERCLIP_LISTEN_HOST;
-const ORIGINAL_PAPERCLIP_LISTEN_PORT = process.env.PAPERCLIP_LISTEN_PORT;
 
 const {
   caseHandoffDeliveryServiceFactoryMock,
@@ -318,46 +314,6 @@ const {
 
 let fakeServer = createFakeServer();
 
-function buildTestConfig(overrides: Record<string, unknown> = {}) {
-  return {
-    deploymentMode: "authenticated",
-    deploymentExposure: "private",
-    bind: "loopback",
-    customBindHost: undefined,
-    host: "127.0.0.1",
-    port: 3210,
-    allowedHostnames: [],
-    authBaseUrlMode: "auto",
-    authPublicBaseUrl: undefined,
-    authDisableSignUp: false,
-    databaseMode: "postgres",
-    databaseUrl: "postgres://paperclip:paperclip@127.0.0.1:5432/paperclip",
-    embeddedPostgresDataDir: "/tmp/paperclip-test-db",
-    embeddedPostgresPort: 54329,
-    databaseBackupEnabled: false,
-    databaseBackupIntervalMinutes: 60,
-    databaseBackupRetentionDays: 30,
-    databaseBackupDir: "/tmp/paperclip-test-backups",
-    serveUi: false,
-    uiDevMiddleware: false,
-    secretsProvider: "local_encrypted",
-    secretsStrictMode: false,
-    secretsMasterKeyFilePath: "/tmp/paperclip-master.key",
-    storageProvider: "local_disk",
-    storageLocalDiskBaseDir: "/tmp/paperclip-storage",
-    storageS3Bucket: "paperclip-test",
-    storageS3Region: "us-east-1",
-    storageS3Endpoint: undefined,
-    storageS3Prefix: "",
-    storageS3ForcePathStyle: false,
-    feedbackExportBackendUrl: "https://telemetry.example.com",
-    feedbackExportBackendToken: "telemetry-token",
-    heartbeatSchedulerEnabled: false,
-    heartbeatSchedulerIntervalMs: 30000,
-    companyDeletionEnabled: false,
-    ...overrides,
-  };
-}
 
 vi.mock("node:http", () => ({
   createServer: vi.fn(() => fakeServer),
@@ -367,18 +323,10 @@ vi.mock("detect-port", () => ({
   default: detectPortMock,
 }));
 
-vi.mock("@paperclipai/db", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@paperclipai/db")>(),
-  createDb: createDbMock,
-  ensurePostgresDatabase: vi.fn(),
-  getPostgresDataDirectory: vi.fn(),
-  inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
-  applyPendingMigrations: vi.fn(),
-  reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
-  formatDatabaseBackupResult: vi.fn(() => "ok"),
-  runDatabaseBackup: vi.fn(),
-  closeLivenessDb: vi.fn(async () => {}),
-}));
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const { createStartupDatabaseMock } = await import("./helpers/server-startup-config.js");
+  return createStartupDatabaseMock(createDbMock, await importOriginal<typeof import("@paperclipai/db")>());
+});
 
 vi.mock("../app.js", () => ({
   createApp: createAppMock,
@@ -580,9 +528,8 @@ vi.mock("../services/connection-intent-delivery.js", () => ({
   })),
 }));
 
-vi.mock("../services/question-response-delivery.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../services/question-response-delivery.js")>(),
-  questionResponseDeliveryService: vi.fn(() => ({
+vi.mock("../services/interaction-deliveries.js", () => ({
+  interactionDeliveryService: vi.fn(() => ({
     hasPending: vi.fn(async () => false),
     sweepPending: vi.fn(async () => ({
       scanned: 0,

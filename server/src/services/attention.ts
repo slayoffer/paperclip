@@ -1,6 +1,8 @@
 import { recoveryActionAttentionCondition, ATTENTION_BUDGET_WARNING_PERCENT, ATTENTION_AGENT_ERROR_STATUS, collapsePendingConfirmationsToNewest, loadNewestSettledConfirmationAt, readRunIssueId, listFailedRunsWithNewerRun, requiresReviewAttention, terminalBlockerRequiresAttention } from "./attention-source-eligibility.js";
 import { approvalExecutionIssueCondition, firstApprovalIssueId } from "./approval-visibility.js";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { interactionResolverAudience } from "./attention-interaction-audience.js";
+export { interactionResolverAudience } from "./attention-interaction-audience.js";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -40,15 +42,12 @@ import type {
   AttentionItemDetail,
   AttentionProjectRef,
   AttentionQueueRef,
-  AttentionResolverAudience,
   AttentionSeverity,
   AttentionSortMode,
   AttentionSourceKind,
   AttentionSubject,
   AttentionTriageAttribution,
   AttentionWorkspaceRef,
-  IssueThreadInteractionEffectiveResolverPolicySource,
-  IssueThreadInteractionResolverPolicyProvenance,
   IssueReviewPolicy,
 } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
@@ -724,47 +723,6 @@ function interactionVerbs(kind: string, payload: Record<string, unknown>) {
   );
 }
 
-/**
- * The resolver audience carried by an `issue_thread_interaction` feed row
- * (PAP-17287). A collapsed queue row offers Accept/Reject long before anything
- * fetches the interaction itself, so the audience the server will enforce has
- * to ride along with the item — the queue must never ask for a decision without
- * saying whose decision it is.
- *
- * Facts only. The stored columns are canonicalized through the same helper the
- * resolution evaluator uses, so a pre-migration row cannot read as `Anyone`
- * here while the API still treats it as `not_creator`.
- */
-export function interactionResolverAudience(
-  row: {
-    addresseeAgentId: string | null;
-    addresseeUserId?: string | null;
-    createdByAgentId: string | null;
-    requestedResolverPolicy: string;
-    effectiveResolverPolicy: string;
-    resolverPolicyProvenance: string | null;
-    effectiveResolverPolicySource: string | null;
-  },
-  agentName: (agentId: string) => string | null,
-): AttentionResolverAudience {
-  const provenance = (row.resolverPolicyProvenance
-    ?? (row.requestedResolverPolicy === "board_only" || row.requestedResolverPolicy === "board_or_agents"
-      ? "legacy_inherited_restriction"
-      : "inherited")) as IssueThreadInteractionResolverPolicyProvenance;
-  return {
-    requestedResolverPolicy: canonicalizeStoredResolverPolicy(row.requestedResolverPolicy, provenance),
-    effectiveResolverPolicy: canonicalizeStoredResolverPolicy(row.effectiveResolverPolicy, provenance),
-    effectiveResolverPolicySource:
-      (row.effectiveResolverPolicySource ?? "requested") as IssueThreadInteractionEffectiveResolverPolicySource,
-    resolverPolicyProvenance: provenance,
-    addresseeAgentId: row.addresseeAgentId,
-    addresseeUserId: row.addresseeUserId ?? null,
-    addresseeName: row.addresseeAgentId ? agentName(row.addresseeAgentId) : null,
-    createdByAgentId: row.createdByAgentId,
-    createdByAgentName: row.createdByAgentId ? agentName(row.createdByAgentId) : null,
-  };
-}
-
 function budgetObservedPercent(amountObserved: number, amountLimit: number) {
   return amountLimit > 0 ? Math.round((amountObserved / amountLimit) * 10_000) / 100 : 0;
 }
@@ -1174,6 +1132,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const interactionRows = await db
         .select({
           id: issueThreadInteractions.id,
+          revision: issueThreadInteractions.revision,
           issueId: issueThreadInteractions.issueId,
           kind: issueThreadInteractions.kind,
           status: issueThreadInteractions.status,
@@ -1261,6 +1220,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             href: issue ? `${issueHref(prefix, issue)}#interaction-${interaction.id}` : null,
             metadata: {
               kind: interaction.kind,
+              revision: interaction.revision,
               issueId: interaction.issueId,
               createdByAgentId: interaction.createdByAgentId,
               isPlanTarget,

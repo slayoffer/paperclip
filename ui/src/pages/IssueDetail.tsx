@@ -17,6 +17,7 @@ import { WorkspaceBaseRefRecoveryProvider } from "../components/WorkspaceBaseRef
 import { WorkspaceRetryControl } from "../components/WorkspaceRetryButton";
 import { isLockedIssueStub, LockedIssueChip } from "@/components/LockedIssueChip";
 import { canManageIssuePrivacy } from "../lib/issuePrivacy";
+import { isPlanConfirmationInteraction, buildPlanDecisionResponseText } from "./plan-decision";
 import { TextAttachmentContext } from "../context/TextAttachmentContext";
 import { useTaskPluginPanels, taskPluginPanelActivationKey } from "@/hooks/useTaskPluginPanels";
 import { useTaskBrowsers, useBrowserArrivals } from "@/hooks/useTaskBrowsers";
@@ -455,24 +456,6 @@ type IssueDetailComment = (IssueComment | OptimisticIssueComment) & {
   conversationAnchorAt?: Date | string | null;
   conversationAnchorSequence?: number;
 };
-
-function isPlanConfirmationInteraction(
-  interaction: IssueThreadInteraction,
-): interaction is RequestConfirmationInteraction {
-  return (
-    interaction.kind === "request_confirmation" &&
-    interaction.payload.target?.type === "issue_document" &&
-    interaction.payload.target.key === "plan"
-  );
-}
-
-function buildPlanDecisionResponseText(
-  interaction: RequestConfirmationInteraction,
-) {
-  if (interaction.status === "accepted") return "Approved plan";
-  const reason = interaction.result?.reason?.trim();
-  return reason ? `Requested changes\n\n${reason}` : "Requested changes";
-}
 
 const FEEDBACK_TERMS_URL =
   import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() ||
@@ -5240,6 +5223,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       rememberAction?: boolean;
     }) =>
       issuesApi.acceptInteraction(issueId!, interaction.id, {
+        expectedRevision: interaction.revision,
         selectedClientKeys,
         selectedOptionIds,
         rememberAction,
@@ -5294,7 +5278,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     }: {
       interaction: ActionableIssueThreadInteraction;
       reason?: string;
-    }) => issuesApi.rejectInteraction(issueId!, interaction.id, reason),
+    }) => issuesApi.rejectInteraction(issueId!, interaction.id, reason, { expectedRevision: interaction.revision }),
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       invalidateIssueDetail();
@@ -5324,7 +5308,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     }: {
       interaction: IssueThreadInteraction;
       answers: AskUserQuestionsAnswer[];
-    }) => issuesApi.respondToInteraction(issueId!, interaction.id, { answers }),
+    }) => issuesApi.respondToInteraction(issueId!, interaction.id, { answers, expectedRevision: interaction.revision }),
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       invalidateIssueDetail();
