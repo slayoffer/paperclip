@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
@@ -24,6 +25,12 @@ vi.mock("../services/environment-config.js", async (importOriginal) => ({
     ({ driver: "ssh", config: environment.config }),
 }));
 const support = await getSshEnvLabSupport();
+const containmentSupported = await promisify(execFile)("systemd-run", ["--user", "--scope", "--quiet", "--expand-environment=no", "true"], {
+  env: { ...process.env, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.()}` },
+}).then(() => true, () => false);
+if (process.env.PAPERCLIP_REQUIRE_WRITER_CONTAINMENT_TESTS === "1" && !containmentSupported) {
+  throw new Error("Writer containment tests require a systemd user manager and cgroup v2");
+}
 const roots: string[] = [];
 const leases: string[] = [];
 afterEach(async () => {
@@ -35,7 +42,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
-it.skipIf(!support.supported || process.platform !== "linux")("realizes consecutive runs in place and recovers terminal ownership after a disconnect", async () => {
+it.skipIf(!support.supported || !containmentSupported)("realizes consecutive runs in place and recovers terminal ownership after a disconnect", async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "ssh-receipt-")));
   roots.push(root);
   const worktree = path.join(root, "worktree");
@@ -97,6 +104,38 @@ it.skipIf(!support.supported || process.platform !== "linux")("realizes consecut
       expect(readSshInPlaceWorktreeLockHolder(worktree)).toBeNull();
     }
     expect(info.mock.calls.filter(call => call[1] === "SSH workspace realized in place on the shared host path")).toHaveLength(2);
+    // A detached descendant still owns the worktree after its launcher exits.
+    const detached = lease();
+    await realize(detached);
+    const detachedSource = path.join(root, "detached.cjs");
+    const detachedStop = path.join(root, "detached-stop");
+    const detachedOutput = path.join(worktree, "detached-writes");
+    await writeFile(detachedSource, `const { spawn } = require('node:child_process');
+      const code = "const fs = require('node:fs'); const timer = setInterval(() => { if (fs.existsSync(process.argv[2])) clearInterval(timer); else fs.appendFileSync(process.argv[1], 'x'); }, 20); setTimeout(() => clearInterval(timer), 30000).unref();";
+      const child = spawn(process.execPath, ['-e', code, ${JSON.stringify(detachedOutput)}, ${JSON.stringify(detachedStop)}], { detached: true, stdio: 'ignore' });
+      child.unref();`);
+    connection = await launch(detached, process.execPath, [detachedSource]);
+    expect((await connection.exited)[0]).toBe(0);
+    await expect.poll(() => readFile(detachedOutput, "utf8").then(x => x.length, () => 0)).toBeGreaterThan(0);
+    const detachedBefore = (await readFile(detachedOutput, "utf8")).length;
+    await driver.releaseRunLease({ environment, lease: stored.get(detached.id)!, status: "released" });
+    expect(hasRemoteTerminationReceipt(stored.get(detached.id)!)).toBe(false);
+    expect(readSshInPlaceWorktreeLockHolder(worktree)?.leaseId).toBe(detached.id);
+    await expect.poll(async () => (await readFile(detachedOutput, "utf8")).length).toBeGreaterThan(detachedBefore);
+    terminal.add(detached.heartbeatRunId!);
+    const afterDetached = lease();
+    await realize(afterDetached);
+    expect(readSshInPlaceWorktreeLockHolder(worktree)?.leaseId).toBe(detached.id);
+    await writeFile(detachedStop, "stop");
+    await expect.poll(async () => {
+      await realize(afterDetached);
+      return readSshInPlaceWorktreeLockHolder(worktree)?.leaseId;
+    }, { timeout: 15_000 }).toBe(afterDetached.id);
+    expect(hasRemoteTerminationReceipt(stored.get(detached.id)!)).toBe(true);
+    connection = await launch(afterDetached, "true", []);
+    expect((await connection.exited)[0]).toBe(0);
+    await driver.releaseRunLease({ environment, lease: stored.get(afterDetached.id)!, status: "released" });
+    await connection.cleanup();
     const row = lease();
     await realize(row);
     const source = path.join(root, "writer.cjs");
@@ -106,7 +145,7 @@ it.skipIf(!support.supported || process.platform !== "linux")("realizes consecut
       fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
       setInterval(() => fs.appendFileSync(${JSON.stringify(output)}, 'x'), 20);`);
     connection = await launch(row, process.execPath, [source]);
-    await expect.poll(() => readFile(pidFile, "utf8").catch(() => "")).not.toBe("");
+    await expect.poll(() => readFile(pidFile, "utf8").catch(() => ""), { timeout: 10_000 }).not.toBe("");
     writerPid = Number(await readFile(pidFile, "utf8"));
     await expect.poll(() => readFile(output, "utf8").then(x => x.length, () => 0)).toBeGreaterThan(0);
     connection.child.kill("SIGKILL");
@@ -124,7 +163,7 @@ it.skipIf(!support.supported || process.platform !== "linux")("realizes consecut
     await realize(candidate);
     expect(hasRemoteTerminationReceipt(stored.get(row.id)!)).toBe(true);
     expect(readSshInPlaceWorktreeLockHolder(worktree)?.leaseId).toBe(candidate.id);
-    console.info("Two consecutive runs realized in place. Dead terminal ownership recovered. Live disconnected writer retained ownership.");
+    console.info("Two consecutive runs realized in place. Dead terminal ownership recovered. Live disconnected and detached writers retained ownership.");
   } finally {
     if (writerPid) { try { process.kill(writerPid, "SIGTERM"); } catch { /* Already stopped. */ } }
     if (connection?.child.exitCode === null && connection.child.signalCode === null) connection.child.kill("SIGKILL");

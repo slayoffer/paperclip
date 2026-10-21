@@ -41,6 +41,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes openssh-server
+      - name: Require writer containment tests
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "PAPERCLIP_REQUIRE_WRITER_CONTAINMENT_TESTS=1" >> "$GITHUB_ENV"
+          systemd-run --user --scope --quiet --expand-environment=no true
       - name: Install dependencies
         run: |
           corepack enable

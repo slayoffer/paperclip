@@ -87,13 +87,15 @@ copy mode").
   Stale ownership transfers require an inactive lease and a bound provider termination receipt.
   Missing termination evidence keeps the lock, including after normal lease release.
   SSH client exit, run success, failure, cancellation, and timeout do not prove writer termination.
-  On Linux, each SSH provider invocation starts in a dedicated session through `setsid`.
-  The launcher records its session ID and kernel boot ID before it executes the provider.
+  On supported Linux hosts, each provider invocation starts in a unique systemd scope.
+  The scope uses a control group in version 2 of the Linux control group filesystem.
+  Descendants remain in that group when they create new sessions or process groups.
+  The launcher records the control group and kernel boot identity before provider execution.
   These records remain under `<remoteWorkspacePath>/.paperclip-runtime/ssh-writers/<runId>`.
   They remain outside adapter runtime cleanup.
-  At release, the driver checks all recorded sessions through SSH on the original endpoint.
-  A child in any recorded session prevents release, even after its parent exits.
-  A complete process scan with no remaining session produces a bound provider termination receipt.
+  At release, the driver checks all recorded groups through SSH on the original endpoint.
+  A populated group prevents release, including when only detached descendants remain.
+  An empty group, a removed verified scope, or a different kernel boot proves termination.
   The driver saves the receipt before it removes ownership.
   At the next run startup, acquisition repeats this check for a terminal owner run.
   This also recovers an active bookkeeping lease after a controller interruption.
@@ -114,8 +116,13 @@ server worktree was the run's workspace the whole time.
   sees the in_place run's edits as local changes.
 - Older runs have no writer records. Their ownership remains until an operator proves termination.
   Manual recovery requires separate authorization. This change does not remove old locks by age.
-- The receipt covers the recorded Linux sessions. A provider must not detach a writer into a separate session.
-- Non-Linux hosts and hosts without `setsid` cannot supply these receipts.
+- Receipts require Linux control groups version 2 and a reachable systemd user manager.
+  The `systemd-run` command must support `--expand-environment=no` (systemd 254 or newer).
+  Without these capabilities, commands run without containment and ownership remains.
+  A scope creation failure fails the command and preserves ownership.
+- Earlier session-only records cannot prove termination. Their ownership remains.
+- The scope contains ordinary descendants, including detached children.
+  This mechanism does not isolate hostile processes with permission to move into another control group.
 - Writer identity records persist for recovery. They contain no credentials or command arguments.
 - Production acceptance requires homelab to compare consecutive realizations and restore-lock timeout counts after deployment.
 - Provider transcripts remain on the SSH host until an operator removes them.
