@@ -109,3 +109,13 @@ export function releaseSshInPlaceWorktreeLocksForLease(leaseId: string): number 
   }
   return released;
 }
+
+/** Call only after persistence of a receipt for this exact lease. */
+export function releaseConfirmedSshInPlaceWorktreeLock(key: string, leaseId: string): boolean {
+  return withGuard(key, () => {
+    if (readSshInPlaceWorktreeLockHolder(key)?.leaseId !== leaseId) return false;
+    unlinkSync(lockPaths(key).file);
+    ownedKeys.delete(key);
+    return true;
+  }) ?? false;
+}
