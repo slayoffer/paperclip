@@ -93,7 +93,7 @@ copy mode").
   These properties keep provider arguments and environment values out of systemd journal descriptions.
   The scope uses a control group in version 2 of the Linux control group filesystem.
   Descendants remain in that group when they create new sessions or process groups.
-  The launcher records the control group and kernel boot identity before provider execution.
+  The launcher records the remote PID, control group, and kernel boot identity before provider execution.
   These records remain under `<remoteWorkspacePath>/.paperclip-runtime/ssh-writers/<runId>`.
   They remain outside adapter runtime cleanup.
   At release, the driver checks all recorded groups through SSH on the original endpoint.
@@ -101,6 +101,15 @@ copy mode").
   An empty group, a removed verified scope, or a different kernel boot proves termination.
   The driver saves the receipt before it removes ownership.
   At the next run startup, acquisition repeats this check for a terminal owner run.
+  Server startup and periodic execution reconciliation also check terminal owners.
+  Each sweep scans at most twenty leases and advances through older uncertain rows.
+  It validates company, run, lease, worktree, and original SSH endpoint identities.
+  Legacy leases can recover their worktree path from the execution workspace.
+  A recorded remote PID must be absent. A surviving PID or an uncertain check preserves ownership.
+  Existing containment records without a PID still require verified empty control groups.
+  These checks use the same SSH path. Permission errors preserve ownership.
+  The local SSH client PID cannot prove remote termination.
+  A saved receipt permits ownership release after a server interruption.
   This also recovers an active bookkeeping lease after a controller interruption.
   Missing records, unsupported hosts, failed checks, and changed endpoints preserve ownership.
   Do not remove ownership files based only on a run status or elapsed time.
