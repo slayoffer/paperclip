@@ -471,7 +471,9 @@ import {
 import {
   executionWorkspaceService,
   mergeExecutionWorkspaceConfig,
+  requiresTaskEnvironmentBinding,
 } from "./execution-workspaces.js";
+import { assertEnvironmentSelectionForCompany } from "../routes/environment-selection.js";
 import {
   workspaceOperationService,
   type WorkspaceOperationRecorder,
@@ -20855,6 +20857,7 @@ export function heartbeatService(
       const parsedIssueExecutionWorkspaceSettings =
         parseIssueExecutionWorkspaceSettings(
           issueContext?.executionWorkspaceSettings,
+          { includeEnvironmentId: true },
         );
       const issueExecutionWorkspaceSettings = isolatedWorkspacesEnabled
         ? parsedIssueExecutionWorkspaceSettings
@@ -21515,6 +21518,7 @@ export function heartbeatService(
         ? await environmentsSvc.findManagedSandboxEnvironment(agent.companyId)
         : null;
       const environmentResolution = resolveExecutionWorkspaceEnvironmentId({
+        taskEnvironmentId: environmentExecutionWorkspaceSettings?.environmentId,
         agentDefaultEnvironmentId: agent.defaultEnvironmentId,
         instanceDefaultEnvironmentId:
           resolvedInstanceSettings.defaultEnvironmentId ?? null,
@@ -21610,6 +21614,30 @@ export function heartbeatService(
           : selectedEnvironmentId
             ? await environmentsSvc.getById(selectedEnvironmentId)
             : null;
+      if (environmentExecutionWorkspaceSettings?.environmentId) {
+        await assertEnvironmentSelectionForCompany(
+          environmentsSvc,
+          agent.companyId,
+          environmentExecutionWorkspaceSettings.environmentId,
+          { allowedDrivers: ["local", "ssh", "sandbox"] },
+        );
+        // Validate availability before any workspace or shared binding changes.
+        await envOrchestrator.resolveEnvironment({
+          companyId: agent.companyId,
+          selectedEnvironmentId,
+          localEnvironmentId: localEnvironment.id,
+        });
+      }
+      const separateTaskEnvironmentBinding = requiresTaskEnvironmentBinding(
+        reusableExistingExecutionWorkspace,
+        selectedEnvironmentId,
+      );
+      if (nativeRecoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+        throw new ConfigurationIncompleteFailure(
+          "The task environment changed during a suspended native run. Start a new execution.",
+          { configurationIncomplete: { reason: "task_environment_changed", issueId } },
+        );
+      }
       const nativeChatWorkspaceScope = await findNativeChatWorkspaceScope(db, {
         adapterType: agent.adapterType,
         environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
@@ -22436,11 +22464,11 @@ export function heartbeatService(
         selectedEnvironmentForConfig?.driver === "sandbox" &&
         selectedEnvironmentConfigForFingerprint.reuseLease === true &&
         selectedEnvironmentConfigForFingerprint.runnerLifecycleMode === "warm";
-      // Native provider checkpoints bind to the workspace row, including ordinary
-      // local shared workspaces. Persist that binding independently of the opt-in
-      // isolated-workspace UI, just as warm sandbox continuity already does.
-      const nativeSharedWorkspace = agent.adapterType === "paperclip_runner" &&
-        requestedExecutionWorkspaceMode === "shared_workspace";
+      // Native checkpoints and task environment selection require a saved binding.
+      // Persist it independently of the opt-in isolated-workspace controls.
+      const runtimeSharedWorkspace = separateTaskEnvironmentBinding || (
+        agent.adapterType === "paperclip_runner" && requestedExecutionWorkspaceMode === "shared_workspace"
+      );
       const bindIssueToPersistedExecutionWorkspace = async (
         workspace: ExecutionWorkspace | null,
       ) => {
@@ -22454,7 +22482,7 @@ export function heartbeatService(
           issueRef?.executionWorkspacePreference === "reuse_existing" ||
           requestedExecutionWorkspaceMode === "isolated_workspace" ||
           requestedExecutionWorkspaceMode === "operator_branch" ||
-          warmReusableExecutionWorkspace || nativeSharedWorkspace;
+          warmReusableExecutionWorkspace || runtimeSharedWorkspace;
         const nextIssuePatch: Record<string, unknown> = {};
         if (issueExecutionWorkspaceIdForRun !== workspace.id) {
           nextIssuePatch.executionWorkspaceId = workspace.id;
@@ -22472,7 +22500,7 @@ export function heartbeatService(
         ) {
           nextIssuePatch.executionWorkspacePreference = "reuse_existing";
           nextIssuePatch.executionWorkspaceSettings = {
-            ...(issueExecutionWorkspaceSettings ?? {}),
+            ...(parsedIssueExecutionWorkspaceSettings ?? {}),
             mode: nextIssueWorkspaceMode,
           };
         }
@@ -22483,7 +22511,7 @@ export function heartbeatService(
             db,
             undefined,
             undefined,
-            { bindRuntimeSharedWorkspace: (warmReusableExecutionWorkspace || nativeSharedWorkspace) && workspace.mode === "shared_workspace" },
+            { bindRuntimeSharedWorkspace: (warmReusableExecutionWorkspace || runtimeSharedWorkspace) && workspace.mode === "shared_workspace" },
           );
           issueExecutionWorkspaceIdForRun = workspace.id;
           issueProjectWorkspaceIdForRun =
@@ -22497,7 +22525,7 @@ export function heartbeatService(
       const baseExecutionWorkspaceMetadata =
         mergeExecutionWorkspaceMetadataForPersistence({
           existingMetadata:
-            resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace
+            resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace && !separateTaskEnvironmentBinding
               ? (reusableExistingExecutionWorkspace?.metadata ?? null)
               : null,
           source: executionWorkspace.source,
@@ -22508,11 +22536,11 @@ export function heartbeatService(
           strategyType: executionWorkspace.strategy,
           configSnapshot,
           shouldReuseExisting:
-            resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace,
+            resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace && !separateTaskEnvironmentBinding,
           shouldRefreshConfigSnapshot:
             resolvedWorkspaceReusePolicy.shouldRefreshWorkspaceConfigSnapshot,
           workspaceConfigMetadata:
-            resolvedWorkspaceReusePolicy.shouldPersistLatestWorkspaceConfigMetadata
+            separateTaskEnvironmentBinding || resolvedWorkspaceReusePolicy.shouldPersistLatestWorkspaceConfigMetadata
               ? latestWorkspaceConfigMetadata
               : null,
           baseRef: executionWorkspace.repoRef,
@@ -22553,6 +22581,10 @@ export function heartbeatService(
       }
       const nextExecutionWorkspaceMetadata = {
         ...baseExecutionWorkspaceMetadata,
+        ...(separateTaskEnvironmentBinding ? {
+          taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
+          createdByRuntime: false,
+        } : {}),
         ...(persistedWorktreeInstanceRoot
           ? {
               [WORKTREE_INSTANCE_ROOT_METADATA_KEY]:
@@ -22568,7 +22600,8 @@ export function heartbeatService(
       try {
         persistedExecutionWorkspace =
           resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
-          reusableExistingExecutionWorkspace
+          reusableExistingExecutionWorkspace &&
+          !separateTaskEnvironmentBinding
             ? await executionWorkspacesSvc.update(
                 reusableExistingExecutionWorkspace.id,
                 {
@@ -22597,6 +22630,9 @@ export function heartbeatService(
                   projectId: resolvedProjectId,
                   projectWorkspaceId: resolvedProjectWorkspaceId,
                   sourceIssueId: issueRef?.id ?? null,
+                  ...(separateTaskEnvironmentBinding ? {
+                    derivedFromExecutionWorkspaceId: reusableExistingExecutionWorkspace!.id,
+                  } : {}),
                   mode:
                     requestedExecutionWorkspaceMode === "isolated_workspace"
                       ? "isolated_workspace"
@@ -22697,6 +22733,7 @@ export function heartbeatService(
         activeWorkspaceId: persistedExecutionWorkspace?.id ?? null,
       });
       if (
+        !separateTaskEnvironmentBinding &&
         reusableExistingExecutionWorkspace &&
         persistedExecutionWorkspace &&
         reusableExistingExecutionWorkspace.id !==
