@@ -41,6 +41,7 @@ import {
   SSH_IN_PLACE_LOCK_WAIT_MS_ENV,
 } from "../services/ssh-in-place-workspace.ts";
 import { environmentRuntimeService } from "../services/environment-runtime.ts";
+import { environmentService } from "../services/environments.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import {
   createGitRepo,
@@ -337,8 +338,8 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     try {
       const worktree = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-in-place-shared-"));
       tempRoots.push(worktree);
-      const environment = await db.select().from(environments).where(eq(environments.id, environmentId))
-        .then((rows) => rows[0]!);
+      const environment = await environmentService(db).getById(environmentId);
+      if (!environment) throw new Error("Expected the test environment");
       const runtime = environmentRuntimeService(db);
       const runIds = [randomUUID(), randomUUID(), randomUUID()];
       for (const id of runIds) {

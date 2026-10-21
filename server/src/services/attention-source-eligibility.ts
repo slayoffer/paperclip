@@ -1,5 +1,6 @@
-import { and, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { heartbeatRuns, issueRecoveryActions, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { agentRunActivityIssueIdSql } from "./agent-run-activity.js";
 
 export const HUMAN_RECOVERY_OWNER_TYPES = ["user", "board"] as const;
 const OPEN_RECOVERY_ATTENTION_STATUSES = ["active", "escalated"] as const;
@@ -124,7 +125,7 @@ export async function listFailedRunsWithNewerRun(db: Db, companyId: string, fail
       eq(heartbeatRuns.companyId, companyId),
       inArray(heartbeatRuns.agentId, agentIds.slice(start, start + FAILED_RUN_PROBE_BATCH_SIZE)),
       gt(heartbeatRuns.createdAt, oldestCreatedAt),
-      sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', ${heartbeatRuns.contextSnapshot} ->> 'taskId', '') = ''`,
+      isNull(agentRunActivityIssueIdSql()),
     )).groupBy(heartbeatRuns.agentId);
     for (const row of rows) latestByAgent.set(row.agentId, row.createdAt);
   }
@@ -140,20 +141,16 @@ async function listFailedRunBatchWithNewerRun(db: Db, companyId: string, failedR
     failedRuns.map((run) => sql`(${run.id}::uuid, ${run.agentId}::uuid, ${run.issueId}::text, ${new Date(run.createdAt.getTime() + 1).toISOString()}::timestamptz)`),
     sql`, `,
   );
-  const runIssueId = sql`(${heartbeatRuns.contextSnapshot} ->> 'issueId')`;
-  const runTaskId = sql`(${heartbeatRuns.contextSnapshot} ->> 'taskId')`;
-  const newerRunExists = (match: SQL) => sql`exists (
-    select 1 from ${heartbeatRuns}
-    where ${heartbeatRuns.companyId} = ${companyId}
-      and ${heartbeatRuns.agentId} = failed.agent_id
-      and ${heartbeatRuns.createdAt} >= failed.newer_from
-      and ${match}
-  )`;
   const rows = await db.execute(sql`
     select failed.id
     from (values ${failed}) as failed (id, agent_id, issue_id, newer_from)
-    where ${newerRunExists(sql`${runIssueId} = failed.issue_id`)}
-      or ${newerRunExists(sql`${runTaskId} = failed.issue_id and ${runIssueId} is null`)}
+    where exists (
+      select 1 from ${heartbeatRuns}
+      where ${heartbeatRuns.companyId} = ${companyId}
+        and ${heartbeatRuns.agentId} = failed.agent_id
+        and ${heartbeatRuns.createdAt} >= failed.newer_from
+        and ${agentRunActivityIssueIdSql()} = failed.issue_id
+    )
   `) as unknown as Array<{ id: string }>;
   return rows.map((row) => row.id);
 }

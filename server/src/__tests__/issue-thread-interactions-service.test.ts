@@ -367,6 +367,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     await expect(interactionsSvc.answerQuestions(issue, created.id, input, { agentId, runId }))
       .rejects.toMatchObject({ status: 403 });
     const answered = await interactionsSvc.answerQuestions(issue, created.id, input, { userId: "local-board" });
+    if (answered.kind !== "ask_user_questions") throw new Error("expected answered questions");
     expect(answered.status).toBe("answered");
     expect(answered.result?.answers.map((answer) => answer.otherText)).toEqual([
       "https://example.test/repo", "Selected files", "Local host",

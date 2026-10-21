@@ -89,7 +89,9 @@ if (!support.supported) console.warn(`Company flow database tests skipped: ${sup
     app.use("/api", companyFlowRoutes(db));
     const onError: ErrorRequestHandler = (err, _req, res, _next) => res.status(err.status ?? 500).json({ error: err.message });
     app.use(onError);
-    await new Promise<void>((resolve) => { server = app.listen(0, "127.0.0.1", resolve); });
+    await new Promise<void>((resolve, reject) => {
+      server = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve());
+    });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Test server has no TCP address");
     baseUrl = `http://127.0.0.1:${address.port}/api/companies`;

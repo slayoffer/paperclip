@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { clearNativeQuestionFixtures } from "./native-question-bridge.test-fixture.js";
+import { clearCompanyFixtures as clearNativeQuestionFixtures } from "../../__tests__/helpers/clear-company-fixtures.js";
 
 import {
   activityLog,

@@ -26,7 +26,8 @@ describePostgres("shared connection credential synchronization", () => {
   async function fixture(existingCompany?: typeof companies.$inferSelect) {
     const company = existingCompany ?? await db.insert(companies).values({
       name: "Credential synchronization", issuePrefix: `RC${randomUUID().slice(0, 6).toUpperCase()}`,
-    }).returning().then((rows) => rows[0]!);
+    }).returning().then((rows) => rows[0]);
+    if (!company) throw new Error("Expected the company fixture");
     const [agent] = await db.insert(agents).values({
       companyId: company.id, name: "Caller", role: "engineer", adapterType: "process",
     }).returning();
@@ -141,12 +142,17 @@ describePostgres("shared connection credential synchronization", () => {
       await replaceCredential(context, "update");
       let connection = await context.access.getConnection(context.connection.id);
       if (field === "reference order") {
+        const refs = connection.credentialRefs;
+        const primaryRef = refs?.[0];
+        if (!refs || !primaryRef) throw new Error("Expected the primary credential reference");
         await context.access.updateConnection(connection.id, { credentialRefs: [
-          ...connection.credentialRefs,
-          { ...connection.credentialRefs[0], name: "credentials.secondary", key: "X-Secondary" },
+          ...refs,
+          { ...primaryRef, name: "credentials.secondary", key: "X-Secondary" },
         ] });
         connection = await context.access.getConnection(connection.id);
       }
+      const credentialRefs = connection.credentialRefs;
+      if (!credentialRefs) throw new Error("Expected the connection credential references");
       await context.access.revokeConnectionGrant(context.connection.id, context.grant.id, {
         actorType: "user", actorId: "board",
       });
@@ -159,20 +165,20 @@ describePostgres("shared connection credential synchronization", () => {
       await context.access.updateConnection(context.connection.id, {
         name: "Renamed connection",
         ...(field === "policy" || field === "policy transition" ? { credentialPolicy: "shared" as const } : {}),
-        ...(field === "placements" ? { credentialRefs: connection.credentialRefs } : {}),
+        ...(field === "placements" ? { credentialRefs } : {}),
         ...(field === "secret references" ? { credentialSecretRefs: connection.credentialSecretRefs } : {}),
         ...(field === "reference labels" ? {
           credentialSecretRefs: connection.credentialSecretRefs.map((ref) => ({ ...ref, label: "New label" })),
         } : {}),
         ...(field === "default version" ? {
-          credentialRefs: connection.credentialRefs.map(({ version: _version, ...ref }) => ref),
+          credentialRefs: credentialRefs.map(({ version: _version, ...ref }) => ref),
         } : {}),
         ...(field === "reference order" ? {
-          credentialRefs: [...connection.credentialRefs].reverse(),
+          credentialRefs: [...credentialRefs].reverse(),
           credentialSecretRefs: [...connection.credentialSecretRefs].reverse(),
         } : {}),
         ...(field === "reference path" ? {
-          credentialRefs: connection.credentialRefs.map((ref) => ({ ...ref, name: "credentials.renamed" })),
+          credentialRefs: credentialRefs.map((ref) => ({ ...ref, name: "credentials.renamed" })),
           credentialSecretRefs: connection.credentialSecretRefs.map((ref) => ({ ...ref, configPath: "credentials.renamed" })),
         } : {}),
         ...(field === "credential removal" ? { credentialRefs: [] } : {}),

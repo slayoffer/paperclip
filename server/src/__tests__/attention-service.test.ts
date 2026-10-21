@@ -71,6 +71,7 @@ describeEmbeddedPostgres("attention service", () => {
       // CASCADE emits a notice for every related table; keep cleanup quiet while
       // retaining warnings/errors and the same complete database reset.
       await tx.execute(sql`SET LOCAL client_min_messages = warning`);
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
       await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
     });
   });

@@ -12,7 +12,7 @@ import {
 } from "@paperclipai/db";
 import { conflict, forbidden } from "../errors.js";
 import { notifyChatRunMilestones } from "./chat-run-milestone-notifications.js";
-import { boundRunIssueId, boundRunIssueIdSql, runTaskContextColumn } from "./run-task-binding.js";
+import { boundRunIssueId, boundRunIssueIdSql } from "./run-task-binding.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { queuedCommentIdsFromRunContext, queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
 
@@ -57,6 +57,14 @@ export async function explicitOperatorRunIdentity(
   return { actorId, cause: "queued_comment_interrupt" };
 }
 
+const runIdentityColumns = {
+  id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+  status: heartbeatRuns.status, activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
+  wakeupRequestId: heartbeatRuns.wakeupRequestId,
+  nativeIssueId: heartbeatRuns.nativeIssueId, issueId: heartbeatRuns.issueId,
+  contextSnapshot: heartbeatRuns.contextSnapshot,
+};
+
 export type RunIdentityContext = typeof runIdentityContexts.$inferSelect;
 type Executor = Pick<Db, "select" | "insert" | "update">;
 
@@ -74,7 +82,7 @@ async function lockIdentityTask(
 ) {
   const [run] = await executor
     .select({
-      contextSnapshot: runTaskContextColumn,
+      legacyIssueId: heartbeatRuns.contextTaskIdentity,
       nativeIssueId: heartbeatRuns.nativeIssueId,
       issueId: heartbeatRuns.issueId,
     })
@@ -82,8 +90,8 @@ async function lockIdentityTask(
     .where(
       and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)),
     );
-  const issueId = run?.nativeIssueId ?? run?.issueId ?? run?.contextSnapshot?.issueId ?? run?.contextSnapshot?.taskId;
-  const legacyIssueId = run?.contextSnapshot?.issueId ?? run?.contextSnapshot?.taskId;
+  const issueId = run?.nativeIssueId ?? run?.issueId ?? run?.legacyIssueId;
+  const legacyIssueId = run?.legacyIssueId;
   if ([issueId, legacyIssueId].some(id => id !== undefined && id !== null &&
       (typeof id !== "string" || !isUuidLike(id)))) {
     throw forbidden("Run task identity is invalid");
@@ -159,12 +167,8 @@ async function activate(executor: Executor, context: RunIdentityContext) {
         eq(heartbeatRuns.companyId, context.companyId),
       ),
     )
-    .returning({
-      nativeIssueId: heartbeatRuns.nativeIssueId,
-      issueId: heartbeatRuns.issueId,
-      contextSnapshot: runTaskContextColumn,
-    });
-  const issueId = run ? boundRunIssueId(run) : null;
+    .returning({ issueId: boundRunIssueIdSql() });
+  const issueId = run?.issueId;
   if (typeof issueId === "string")
     await executor
       .update(issues)
@@ -192,7 +196,7 @@ export async function initializeRunIdentity(
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(
@@ -245,7 +249,7 @@ export async function initializeRunIdentity(
     }
     const [parent] = input.parentRunId
       ? await tx
-          .select()
+          .select({ activeIdentityContextId: heartbeatRuns.activeIdentityContextId })
           .from(heartbeatRuns)
           .where(
             and(
@@ -336,7 +340,7 @@ export async function prepareSteeredIdentity(
   },
 ) {
   const [run] = await executor
-    .select()
+    .select(runIdentityColumns)
     .from(heartbeatRuns)
     .where(
       and(
@@ -388,7 +392,7 @@ export async function reserveSteeredIdentity(
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(
@@ -518,6 +522,8 @@ type IdentityRun = Pick<FullIdentityRun, keyof typeof runIdentityFields>;
 type TaskIdentityRun = Pick<FullIdentityRun, keyof typeof runIdentityTaskFields>;
 type BrokerIdentityRun = Pick<FullIdentityRun, keyof typeof runIdentityBrokerFields>;
 type ProjectIdentityRun = Pick<FullIdentityRun, keyof typeof runIdentityProjectFields>;
+type RunIdentityBinding = { companyId: string; runId: string; agentId: string };
+type ContextlessIdentityCapture = { run: IdentityRun & { contextSnapshot: null }; context: RunIdentityContext | null };
 export type RunIdentityReadScope = "github_credentials" | "request_authentication" | "identity" | "task_authorization" | "token_broker" | "project_execution";
 export type RunIdentityCapture<Scope extends RunIdentityReadScope | undefined = undefined> = {
   run: Scope extends "identity" ? IdentityRun : Scope extends "task_authorization" ? TaskIdentityRun :
@@ -525,20 +531,31 @@ export type RunIdentityCapture<Scope extends RunIdentityReadScope | undefined = 
   context: RunIdentityContext | null;
 };
 
+export function captureRunIdentity(
+  db: Db,
+  input: RunIdentityBinding & { includeContext: false },
+): Promise<ContextlessIdentityCapture>;
+export function captureRunIdentity<Scope extends RunIdentityReadScope | undefined = undefined>(
+  db: Db,
+  input: RunIdentityBinding,
+  options?: { readScope: Scope },
+): Promise<RunIdentityCapture<Scope>>;
 export async function captureRunIdentity<Scope extends RunIdentityReadScope | undefined = undefined>(
   db: Db,
-  input: { companyId: string; runId: string; agentId: string },
+  input: RunIdentityBinding & { includeContext?: false },
   options?: { readScope: Scope },
-): Promise<RunIdentityCapture<Scope>> {
+): Promise<RunIdentityCapture<Scope> | ContextlessIdentityCapture> {
+  const readScope = options?.readScope;
   // Lock acquisition serializes with steering delivery and its durable acknowledgement.
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select(options?.readScope === "identity" ? runIdentityFields :
-        options?.readScope === "task_authorization" ? runIdentityTaskFields :
-        options?.readScope === "token_broker" ? runIdentityBrokerFields :
-        options?.readScope === "project_execution" ? runIdentityProjectFields :
-        options?.readScope === "github_credentials" || options?.readScope === "request_authentication" ? {
+      .select(input.includeContext === false ? { ...runIdentityFields, contextSnapshot: sql<null>`null` } :
+        readScope === "identity" ? runIdentityFields :
+        readScope === "task_authorization" ? runIdentityTaskFields :
+        readScope === "token_broker" ? runIdentityBrokerFields :
+        readScope === "project_execution" ? runIdentityProjectFields :
+        readScope === "github_credentials" || readScope === "request_authentication" ? {
         ...getTableColumns(heartbeatRuns),
         contextSnapshot: sql<Record<string, unknown> | null>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
           then jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
@@ -592,7 +609,7 @@ export async function captureRunIdentity<Scope extends RunIdentityReadScope | un
             ),
           )
       : [];
-    return { run, context: context ?? null } as RunIdentityCapture<Scope>;
+    return { run, context: context ?? null } as RunIdentityCapture<Scope> | ContextlessIdentityCapture;
   });
 }
 
@@ -621,7 +638,7 @@ export async function reconcileSteeredIdentity(
   await db.transaction(async (tx) => {
     await lockIdentityTask(tx, context.companyId, context.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(

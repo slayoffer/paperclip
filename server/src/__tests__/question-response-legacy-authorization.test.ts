@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedQuestionResponseDelivery } from "./helpers/question-response-delivery.js";
+import type { InternalSetupState } from "../services/chat-channels/runtime-types.js";
 import {
   buildQuestionResponseDeliveryEnvelope,
   isRetiredExternalChatQuestionSource,
@@ -99,6 +100,9 @@ describe("legacy question response authorization", () => {
     const inboundId = randomUUID();
     const applicationId = randomUUID();
     const connectionId = randomUUID();
+    const setup = { step: "complete", runtimeGeneration: 1 } satisfies InternalSetupState;
+    const resolvedAt = fixture.interaction.resolvedAt;
+    if (!resolvedAt) throw new Error("Expected the question to have a resolution time");
     await db.insert(toolApplications).values({
       id: applicationId, companyId: fixture.companyId, applicationKey: `chat:${endpointId}`,
       name: "Test GitHub", type: "chat", status: "active",
@@ -109,7 +113,7 @@ describe("legacy question response authorization", () => {
     });
     await db.insert(chatEndpoints).values({
       id: endpointId, connectionId, companyId: fixture.companyId, provider: "github", publicId: randomUUID(),
-      assignedAgentId: fixture.agentId, status: "active", setup: { runtimeGeneration: 1 },
+      assignedAgentId: fixture.agentId, status: "active", setup,
     });
     await db.insert(chatConversations).values({
       id: conversationId, companyId: fixture.companyId, endpointId,
@@ -140,7 +144,7 @@ describe("legacy question response authorization", () => {
       companyId: fixture.companyId, endpointId, conversationId, issueId: fixture.issueId,
       state: "published", providerMessageId: "test-question",
       idempotencyKey: `interaction:${fixture.interaction.id}:${endpointId}`,
-      publishedAt: new Date(fixture.interaction.resolvedAt!.getTime() - 1000),
+      publishedAt: new Date(new Date(resolvedAt).getTime() - 1000),
       payload: {
         interactionId: fixture.interaction.id, progressState: "waiting_for_input",
         card: { kind: "question", actions: [{ type: "link", url: "https://board.example" }] },

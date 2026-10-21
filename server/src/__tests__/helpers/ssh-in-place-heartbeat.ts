@@ -116,7 +116,6 @@ export async function seedRunTarget(db: Db, input: { repoRoot: string; remoteBas
   });
   await db.insert(environments).values({
     id: environmentId,
-    companyId,
     name: `Same host ${environmentId}`,
     driver: "ssh",
     status: "active",

@@ -83,28 +83,31 @@ describe("heartbeat lifecycle module boundary", () => {
     expect(deps.emitTerminalAgentTaskRun).not.toHaveBeenCalled();
   });
 
-  it("rejects late progress after re-reading a terminal run through the service callback", async () => {
-    const database = guardedDatabase();
-    const deps = callbacks(database.db);
+  // Synthiq fork: progress re-reads only the run status columns, not the full run row through getRun.
+  it("rejects late progress after re-reading a terminal run status", async () => {
     const run = { id: "late-progress", companyId: "company", agentId: "agent", status: "running", contextSnapshot: {} } as Run;
-    deps.getRunStatus.mockResolvedValue({ ...run, status: "succeeded" });
-    expect(await createHeartbeatLifecycle(database.db, deps).recordCurrentHeartbeatRunRuntimeProgress(run, { phase: "finalize", message: "late update" }, null)).toBeNull();
-    expect(deps.getRunStatus).toHaveBeenCalledWith(run.id);
+    const where = vi.fn(async () => [{ id: run.id, companyId: run.companyId, agentId: run.agentId, status: "succeeded" }]);
+    const select = vi.fn(() => ({ from: () => ({ where }) }));
+    const db = { select } as unknown as Db;
+    const deps = callbacks(db);
+    expect(await createHeartbeatLifecycle(db, deps).recordCurrentHeartbeatRunRuntimeProgress(run, { phase: "finalize", message: "late update" }, null)).toBeNull();
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(where).toHaveBeenCalledTimes(1);
+    expect(deps.getRun).not.toHaveBeenCalled();
     expect(getHeartbeatRunRuntimeStatus(run.id)).toBeNull();
-    expect(database.access).not.toHaveBeenCalled();
   });
 
   it("does not publish progress when the current status read fails", async () => {
-    const database = guardedDatabase();
-    const deps = callbacks(database.db);
-    deps.getRunStatus.mockRejectedValue(new Error("status read failed"));
+    const where = vi.fn().mockRejectedValue(new Error("status read failed"));
+    const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Db;
+    const deps = callbacks(db);
     const run = { id: "unavailable-progress", companyId: "company", agentId: "agent", status: "running" };
     vi.mocked(publishLiveEvent).mockClear();
-    await expect(createHeartbeatLifecycle(database.db, deps)
+    await expect(createHeartbeatLifecycle(db, deps)
       .recordCurrentHeartbeatRunRuntimeProgress(run, { phase: "restore", message: "restoring" }, null))
       .rejects.toThrow("status read failed");
     expect(publishLiveEvent).not.toHaveBeenCalled();
-    expect(database.access).not.toHaveBeenCalled();
+    expect(deps.getRun).not.toHaveBeenCalled();
   });
 });
 

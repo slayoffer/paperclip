@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -32,10 +32,13 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
 
   async function seed(script: string, extra: Record<string, unknown> = {}) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, email: `${userId}@example.test`, name: "Fixture owner", createdAt: new Date(), updatedAt: new Date() });
     await db.insert(companies).values({
       id: companyId, name: "Redaction", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: userId,
     });
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", membershipRole: "owner", status: "active" });
     await db.insert(agents).values({
       id: agentId, companyId, name: "Printer", role: "engineer", status: "idle", adapterType: "process",
       adapterConfig: { command: process.execPath, args: ["-e", script], ...extra },
@@ -43,7 +46,7 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     });
     await db.insert(issues).values({
       id: issueId, companyId, title: "Print", status: "todo", priority: "high",
-      assigneeAgentId: agentId, responsibleUserId: "responsible-user",
+      assigneeAgentId: agentId, responsibleUserId: userId,
     });
     return { companyId, agentId, issueId };
   }
