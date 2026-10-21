@@ -1,6 +1,8 @@
+import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
 import { recordCurrentRunRuntimeProgress, publishHeartbeatRunRuntimeProgress } from "./heartbeat-runtime-progress.js";
 import { wakeDependentsAfterFinalization } from "./dependency-finalize-wake.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { taskDrainService, taskDrainBlocksAdmission } from "./task-drain.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
 import { externalObjectService } from "./external-objects.js";
@@ -9573,6 +9575,7 @@ export function heartbeatService(
 ) {
   let shutdownInProgress = false;
   const instanceSettings = instanceSettingsService(db);
+  const durableTaskDrain = taskDrainService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
@@ -9626,9 +9629,16 @@ export function heartbeatService(
   };
   const getSchedulingSuppression = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
-    return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
+    const local = resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,
     });
+    if (local.suppressed) return local;
+    // Read durable state before every admission, including the first admission
+    // after server recreation. A storage failure keeps queued work pending.
+    if (await durableTaskDrain.blocksAdmission()) {
+      return { suppressed: true, reason: "task_drain" as const };
+    }
+    return local;
   };
   const getWorktreeExecutionCutoff = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
@@ -17693,6 +17703,7 @@ export function heartbeatService(
       !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
         ? await db
             .transaction(async (tx) => {
+              if (await taskDrainBlocksAdmission(tx)) return { kind: "stale" as const, run: null };
               // Match the queue-edit lock order: issue, wake, then run. Once the
               // run becomes running, a concurrent discard must observe the
               // claimed wake and return an explicit conflict; if discard wins,
@@ -17999,7 +18010,9 @@ export function heartbeatService(
     }
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) => {
+      : await withChatControlRecoveryGate(run, "claim", async (gateDb) => gateDb.transaction(async (transaction) => {
+          const tx = transaction as unknown as Db;
+          if (await taskDrainBlocksAdmission(tx)) return null;
           const claimValues = {
             status: "running",
             runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
@@ -18027,7 +18040,7 @@ export function heartbeatService(
             await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
             return claimedRun;
           });
-        });
+        }));
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -18095,71 +18108,6 @@ export function heartbeatService(
     }
 
     return claimed;
-  }
-
-  // startNextQueuedRunForAgent checks admission suppression once, then claims
-  // runs (sets status "running"), then dispatches each to executeRun, which
-  // checks suppression again before it does any work. Suppression (task
-  // drain, worktree mode, a database restore) can start in the gap between
-  // those two checks. When executeRun's check catches that, the run is
-  // already claimed — release it back to "queued" so it does not keep a
-  // running execution lock that nothing will ever process. This runs inside
-  // the same promise startNextQueuedRunForAgent already tracks in
-  // activeRunExecutionPromises, so getTaskDrainStatus() keeps reporting the
-  // run as active until the release finishes.
-  //
-  // The run row, the wakeup request, and the issue execution lock all guard
-  // the same claim, so one transaction commits all three writes together. A
-  // partial write (for example the run flips to "queued" but the wakeup or
-  // issue update then fails) would let the execution promise clear from
-  // activeRunExecutionPromises while the wakeup stayed "claimed" or the
-  // issue stayed locked to a queued run — task-drain status would then read
-  // quiescent while the database still held part of the old claim.
-  async function releaseRunClaimedJustBeforeSuppression(runId: string) {
-    const now = new Date();
-    await db.transaction(async (tx) => {
-      const released = await tx
-        .update(heartbeatRuns)
-        .set({
-          status: "queued",
-          startedAt: null,
-          responsibleUserId: null,
-          updatedAt: now,
-        })
-        .where(
-          and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")),
-        )
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (!released) return;
-
-      if (released.wakeupRequestId) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({ status: "queued", claimedAt: null, updatedAt: now })
-          .where(and(eq(agentWakeupRequests.id, released.wakeupRequestId), ne(agentWakeupRequests.status, "cancelled")));
-      }
-
-      const context = parseObject(released.contextSnapshot);
-      const issueId = readNonEmptyString(context.issueId);
-      if (issueId) {
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: null,
-            executionAgentNameKey: null,
-            executionLockedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(issues.id, issueId),
-              eq(issues.companyId, released.companyId),
-              eq(issues.executionRunId, released.id),
-            ),
-          );
-      }
-    });
   }
 
   async function cancelQueuedRunForBlockedDependencies(
@@ -20413,17 +20361,7 @@ export function heartbeatService(
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
-    if ((await getSchedulingSuppression()).suppressed) {
-      try {
-        await releaseRunClaimedJustBeforeSuppression(runId);
-      } catch (err) {
-        logger.error(
-          { err, runId },
-          "failed to release run claimed just before task-drain suppression; the run row stays running, and the orphan reaper finalizes it and releases the issue lock on its next cycle",
-        );
-      }
-      return;
-    }
+    if (await suppressRunAdmission(db, runId, runOptions, await getSchedulingSuppression())) return;
 
     let legacyAdapterEntered = false;
     let run = await getRun(runId);
@@ -26532,6 +26470,7 @@ export function heartbeatService(
     } catch (outerErr) {
       if (
         nativeOwnershipHeld ||
+        (!nativeDispatchStarted && isRunnerReattachment(runOptions.nativeRestartRecovery)) ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
         nativeOwnershipHeld = true;
@@ -27290,11 +27229,11 @@ export function heartbeatService(
 
     const schedulingSuppression = await getSchedulingSuppression();
     // A task drain holds ADMISSION, not the request. The drain is a
-    // process-local pre-restart hold, so a wake that arrives while it is
+    // persistent admission hold, so a wake that arrives while it is
     // active still names real work that must run once the process comes
     // back: leave it in the durable queue and let the dispatch-side checks
     // (startNextQueuedRunForAgent / executeRun) keep it from starting until
-    // the drain lifts or the restart clears it. Writing it as `skipped`
+    // the lease expires or its owner releases it. Writing it as `skipped`
     // here dropped the wake permanently — an accepted plan whose
     // continuation wake landed mid-drain left its issue in `todo` with no
     // run and no path until a person noticed.
@@ -30514,7 +30453,7 @@ export function heartbeatService(
     drainActiveRunExecutions,
     startTaskDrain,
     stopTaskDrain,
-    getTaskDrainStatus,
+    getTaskDrainStatus: () => durableTaskDrain.status(getTaskDrainStatus()),
     computeTaskDrain,
     applyTaskDrain,
 
