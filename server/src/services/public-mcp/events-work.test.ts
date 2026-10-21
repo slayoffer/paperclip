@@ -57,7 +57,11 @@ describe.skipIf(!support.supported)("MCP event committed work", () => {
     db = createDb(externalUrl ?? temporary.connectionString, { maxConnections: 4 });
   }, 90000);
   beforeEach(async () => {
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      // Publication history is immutable; disable triggers only for fixture reset.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    });
     draining = false; standby = false; calls = []; received = []; errors = []; status = 204; failRead = false; duringDelivery = undefined;
     companyId = randomUUID(); userId = randomUUID(); taskId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "MCP idle", issuePrefix: "MCP" });
@@ -70,7 +74,10 @@ describe.skipIf(!support.supported)("MCP event committed work", () => {
   afterEach(async () => {
     await service?.stop(); await coordinator?.stop();
     vi.useRealTimers();
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    });
     await db.delete(authUsers).where(eq(authUsers.id, userId));
   });
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await temporary?.cleanup(); vi.unstubAllEnvs(); });

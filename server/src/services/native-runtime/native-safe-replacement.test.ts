@@ -1,4 +1,5 @@
 import { createDeliveryWorkCoordinator } from "../delivery-work-coordinator.js";
+import { clearCompanyFixtures } from "../../__tests__/helpers/clear-company-fixtures.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { createRunDispatch, deriveCommentId } from "../../modules/run-dispatch/index.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
@@ -25,7 +26,7 @@ import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { tmpdir } from "node:os";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -70,9 +71,8 @@ const support = externalDatabaseUrl
       db = createDb(database.connectionString);
     }, 30_000);
     afterEach(async () => {
-      // Each sweep scans all companies. Keep earlier tests' unresolved runs out
-      // of later tests so every case exercises only its own recovery fixtures.
-      await db.execute(sql`TRUNCATE companies CASCADE`);
+      // Remove earlier fixtures before the next company sweep.
+      await clearCompanyFixtures(db);
     });
     afterAll(async () => {
       if (externalDatabaseUrl) await db?.$client.end();

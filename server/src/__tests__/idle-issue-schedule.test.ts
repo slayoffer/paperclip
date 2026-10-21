@@ -23,7 +23,11 @@ if (!support.supported) console.warn(`Skipping issue schedule Postgres tests: ${
     database = await startEmbeddedPostgresTestDatabase("idle-issue-schedule-");
     db = createDb(database.connectionString);
   }, 60_000);
-  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   const readScheduled = () => readIdleSleepSafety(db, owned, () => now, ownerId, emptyLocal, undefined, undefined, true);
   const readIssueSchedules = () => readIdleSleepSafety(db, owned, () => now, ownerId, emptyLocal, undefined, undefined, true, true);

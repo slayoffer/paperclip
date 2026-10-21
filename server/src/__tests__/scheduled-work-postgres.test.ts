@@ -69,7 +69,11 @@ describe.skipIf(!support.supported)("scheduled deadline database queries", () =>
     expect(tasks.get(DELIVERY_QUEUES.routineSchedules)!.nextRunAt!()).toBeGreaterThan(now);
     expect(await heartbeatService(db).nextIssueMonitorAt()).toBe(at(-1).getTime());
     expect(tasks.get(DELIVERY_QUEUES.issueMonitors)!.nextRunAt!()).toBe(now + 60_000);
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE. Disable triggers for this fixture reset.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
     vi.setSystemTime(at(2));
     for (const task of tasks.values()) await task.run(new AbortController().signal);
     for (const task of tasks.values()) expect(task.nextRunAt!()).toBeNull();

@@ -1,12 +1,13 @@
 import { hashPassword } from "better-auth/crypto";
 import { createBetterAuthInstance, createBetterAuthHandler, resolveBetterAuthSession } from "../../auth/better-auth.js";
 import type { Config } from "../../config.js";
+import { clearCompanyFixtures } from "./clear-company-fixtures.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { agents, authUsers, authAccounts, companies, companyMemberships, createDb, applyPendingMigrations, closeRegisteredClients, heartbeatRuns, issues, projects, projectWorkspaces, activityLog, issueComments, assets, goals, approvals, documents, documentRevisions, issueDocuments, issueRelations, issueThreadInteractions, connectionIntentDeliveries, toolApplications, toolConnections, toolConnectionInstalls, connectionGrants, toolCatalogEntries, toolProfiles, toolProfileBindings } from "@paperclipai/db";
 import { documentService } from "../../services/documents.js";
 import { connectionIntentService } from "../../services/connection-intents.js";
@@ -79,8 +80,8 @@ export async function startRunnerApiTestServer(options: {
     },
     async fixture(options: { mode?: "standard" | "ask" | "planning"; apiToolsEnabled?: boolean; reset?: boolean; conversation?: boolean; connectionScenario?: RunnerConnectionScenario; contextSnapshot?: Record<string, unknown>; disableWakeOnDemand?: boolean } = {}) {
       if (options.connectionScenario !== undefined && !CONNECTION_SCENARIOS.includes(options.connectionScenario)) throw new Error(`Unknown connection eval scenario: ${String(options.connectionScenario)}`);
-      // This DB is created inside this helper, never supplied by a caller. Paid
-      // paired runs reset it between attempts so modeled IDs and data match.
+      // Paid paired runs reset this disposable database between attempts so
+      // modeled IDs and data match.
       // The helper's own app runs background sweeps against this DB, and one
       // can hold row locks when the reset fires; Postgres then picks a
       // deadlock victim (observed against TRUNCATE in CI on 2026-09-10). The
@@ -89,7 +90,7 @@ export async function startRunnerApiTestServer(options: {
       if (options.reset) {
         for (let attempt = 0; ; attempt += 1) {
           try {
-            await db.execute(sql`TRUNCATE companies CASCADE`);
+            await clearCompanyFixtures(db);
             break;
           } catch (error) {
             const code =

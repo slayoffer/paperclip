@@ -25,7 +25,11 @@ if (!support.supported) console.warn(`Skipping response-wait database tests: ${s
     database = await startEmbeddedPostgresTestDatabase("idle-response-waits-");
     db = createDb(database.connectionString);
   }, 60_000);
-  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   const read = (schedules = true) => readIdleSleepSafety(db, owned, () => now, ownerId,
     async () => "none", undefined, undefined, schedules, schedules);

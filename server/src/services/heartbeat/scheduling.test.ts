@@ -107,7 +107,11 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
   });
   beforeEach(async () => {
     await reconcileDatabaseWork(db, DELIVERY_QUEUES.issueMonitors);
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE. Disable triggers for this fixture reset.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
   });
 
   async function fixture(adapterType = "paperclip_runner") {

@@ -1,3 +1,4 @@
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { randomUUID } from "node:crypto";
 import {
   afterAll,
@@ -8,7 +9,6 @@ import {
   it,
   vi,
 } from "vitest";
-import { sql } from "drizzle-orm";
 import {
   agents,
   companies,
@@ -101,27 +101,7 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
     );
     expect(pendingRuns).toEqual([]);
     vi.clearAllMocks();
-    await db.execute(
-      sql.raw(`
-      TRUNCATE TABLE
-        "native_run_finalizations",
-        "status_decisions",
-        "work_assessments",
-        "native_run_results",
-        "completion_contracts",
-        "environment_leases",
-        "environments",
-        "activity_log",
-        "heartbeat_run_events",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "agent_runtime_state",
-        "company_skills",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `),
-    );
+    await clearCompanyFixtures(db);
   });
 
   afterAll(async () => {

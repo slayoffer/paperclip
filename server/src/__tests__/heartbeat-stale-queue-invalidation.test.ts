@@ -31,7 +31,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
-import { truncateTablesWithDeadlockRetry } from "./helpers/truncate-with-deadlock-retry.js";
+import { clearCompanyFixturesWithDeadlockRetry } from "./helpers/clear-company-fixtures.js";
 import {
   MAX_TURN_CONTINUATION_RETRY_REASON,
   MAX_TURN_CONTINUATION_WAKE_REASON,
@@ -100,28 +100,8 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
 }
 
 async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createDb>) {
-  await truncateTablesWithDeadlockRetry(
+  await clearCompanyFixturesWithDeadlockRetry(
     db,
-    `
-      TRUNCATE TABLE
-        "company_skills",
-        "issue_comments",
-        "issue_documents",
-        "document_revisions",
-        "documents",
-        "issue_relations",
-        "issue_tree_holds",
-        "issues",
-        "heartbeat_run_events",
-        "cost_events",
-        "activity_log",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "agent_runtime_state",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `,
     { attempts: 10, delayMs: () => 100 },
   );
 }
@@ -186,7 +166,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     // that has not yet written its run row. The shared drain helper awaits
     // both in-flight wakeup promises and in-flight run executions first, then
     // re-checks the run table, so a late writer cannot still be in flight when
-    // the TRUNCATE below runs.
+    // fixture deletion starts.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     await cleanupHeartbeatInvalidationFixture(db);
     await db.delete(authUsers).where(eq(authUsers.id, "responsible-user"));

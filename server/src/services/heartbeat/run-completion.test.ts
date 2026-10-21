@@ -161,7 +161,11 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     await db.execute(sql`set client_min_messages = warning`);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); vi.restoreAllMocks(); });
-  beforeEach(async () => { await db.execute(sql`truncate table companies restart identity cascade`); });
+  beforeEach(async () => { await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    }); });
 
   async function fixture(patch: Partial<typeof heartbeatRuns.$inferInsert> = {}, issuePrefix = "CMP") {
     const [company] = await db.insert(companies).values({ name: "Completion", issuePrefix }).returning();

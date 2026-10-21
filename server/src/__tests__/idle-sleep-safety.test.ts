@@ -174,7 +174,13 @@ if (!support.supported) console.warn(`Skipping idle sleep Postgres tests: ${supp
     if (!externalDatabaseUrl) database = await startEmbeddedPostgresTestDatabase("idle-sleep-safety-");
     db = createDb(externalDatabaseUrl ?? database.connectionString, { maxConnections: 4 });
   }, 60_000);
-  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => {
+    await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE. Disable triggers for this fixture reset.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    });
+  });
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await database?.cleanup(); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   const read = () => readIdleSleepSafety(db, owned, () => now, ownerId, emptyLocal);
