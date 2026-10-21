@@ -17,7 +17,11 @@ if (!support.supported) console.warn(`Skipping provider credential database test
 (support.supported ? describe : describe.skip)("historical provider credential identity", () => {
   let db: ReturnType<typeof createDb>, database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("historical-credentials-"); db = createDb(database.connectionString); }, 60_000);
-  afterEach(async () => { resolve.mockReset(); await db.execute(sql`SET client_min_messages = warning; TRUNCATE companies CASCADE`); });
+  afterEach(async () => { resolve.mockReset(); await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   async function seed() {
     const companyId = randomUUID(); await db.insert(companies).values({ id: companyId, name: "Credential fixture", issuePrefix: `T${companyId.slice(0, 6)}` });

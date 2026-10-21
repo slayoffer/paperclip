@@ -2612,6 +2612,20 @@
       "when": 1792713110842,
       "tag": "0374_rare_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1792433293974,
+      "tag": "0375_exotic_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0376_simple_sleeper",
+      "breakpoints": true
     }
   ]
 }

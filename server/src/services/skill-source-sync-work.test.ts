@@ -59,7 +59,11 @@ describe.skipIf(!support.supported)('skill source committed work and deadlines',
     await service?.stop();
     await coordinator?.stop();
     vi.useRealTimers();
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      // Publication history is immutable; disable triggers only for fixture reset.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    });
   });
   afterAll(async () => {
     if (oldHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = oldHome;

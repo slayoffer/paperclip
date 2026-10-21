@@ -1,8 +1,9 @@
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -116,21 +117,7 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     await heartbeatService(db).drainActiveRunExecutions();
     capturedRuns.length = 0;
     await instanceSettingsService(db).updateExperimental({ enableBetaSkills: false });
-    await db.execute(sql.raw(`
-      TRUNCATE TABLE
-        "activity_log",
-        "environment_leases",
-        "environments",
-        "heartbeat_run_events",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "agent_runtime_state",
-        "company_skill_versions",
-        "company_skills",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `));
+    await clearCompanyFixtures(db);
     await Promise.all(Array.from(cleanupDirs, (dir) => fs.rm(dir, { recursive: true, force: true })));
     cleanupDirs.clear();
   });

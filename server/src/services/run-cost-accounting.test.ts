@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, costEvents, createDb, heartbeatRuns, promptInjectionInvocations, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
+import { clearCompanyFixtures } from "../__tests__/helpers/clear-company-fixtures.js";
 import { accountRunCost, createCostAccountingReconciler, readCostAccountingWork } from "./run-cost-accounting.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -18,10 +19,10 @@ const support = await getEmbeddedPostgresTestSupport();
     db = createDb(database.connectionString);
     directory = await fs.mkdtemp(path.join(os.tmpdir(), "run-cost-work-"));
   }, 60_000);
-  afterEach(async () => { await db.transaction(async tx => {
-    await tx.execute(sql`SET LOCAL client_min_messages = warning`);
-    await tx.execute(sql`TRUNCATE companies CASCADE`);
-  }); });
+  afterEach(async () => {
+    await db.delete(promptInjectionInvocations);
+    await clearCompanyFixtures(db);
+  });
   afterAll(async () => { if (directory) await fs.rm(directory, { force: true, recursive: true }); await database?.cleanup(); });
 
   async function seed(change: Partial<typeof heartbeatRuns.$inferInsert> = {}) {

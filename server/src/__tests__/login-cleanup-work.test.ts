@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { adapterAuthSessions, applyPendingMigrations, companies, createDb, environmentLeases, environments, type Db } from "@paperclipai/db";
@@ -97,7 +98,7 @@ describe.skipIf(!support.supported)("durable login cleanup", () => {
   }, 90000);
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await temporary?.cleanup(); });
   beforeEach(async () => {
-    await db.execute(sql`TRUNCATE TABLE companies, environments CASCADE`);
+    await clearCompanyFixtures(db);
     companyId = randomUUID(); environmentId = randomUUID(); calls = 0; failedDelete = false; errors.length = 0;
     await db.insert(companies).values({ id: companyId, name: "Login cleanup", issuePrefix: "LOG" });
     await db.insert(environments).values({ id: environmentId, name: environmentId, driver: "sandbox" });

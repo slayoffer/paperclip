@@ -58,7 +58,11 @@ describe.skipIf(!support.supported)("scheduled deadline database queries", () =>
     for (const task of tasks.values()) await task.run(new AbortController().signal);
     expect(tasks.get(DELIVERY_QUEUES.routineSchedules)!.nextRunAt!()).toBe(at(10).getTime());
     expect(tasks.get(DELIVERY_QUEUES.issueMonitors)!.nextRunAt!()).toBe(at(15).getTime());
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Publication history is immutable; disable triggers only for fixture reset.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
     for (const task of tasks.values()) await task.run(new AbortController().signal);
     for (const task of tasks.values()) expect(task.nextRunAt!()).toBeNull();
   });
