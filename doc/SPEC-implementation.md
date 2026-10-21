@@ -14,6 +14,10 @@ Task-only [environment selection](workspace-operations.md#task-environment-selec
 `PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
 The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
 
+The Synthiq fork supports [persistent owned task drains](task-drain.md).
+A finite lease blocks admission across server recreation.
+Lease release requires the authenticated owner and the matching lease ID.
+
 The fork also supports [saved review waits](review-waits.md).
 An agent can record a board-owned wait for its latest saved review handoff.
 
