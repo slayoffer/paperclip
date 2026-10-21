@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { promisify } from "node:util";
+import path from "node:path";
 
 const exec = promisify(execFile);
 
@@ -14,7 +15,7 @@ export async function updateGitHeadAndIndex(
   currentHead: string,
   nextHead: string,
 ): Promise<void> {
-  const git = (args: string[], indexFile?: string) => exec("git", ["-C", localDir, ...args], {
+  const git = (args: string[], indexFile?: string) => exec("git", ["-C", localDir, "--git-dir", path.join(localDir, ".git"), "--work-tree", localDir, ...args], {
     timeout: 10_000,
     maxBuffer: 64 * 1024,
     ...(indexFile ? { env: { ...process.env, GIT_INDEX_FILE: indexFile } } : {}),

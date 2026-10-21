@@ -71,8 +71,12 @@ copy mode").
 - Path proof: the server writes a probe file with a random token into the
   worktree, then reads it over SSH at the same path. The run uses `in_place` only
   if the host reads the same token, the folder is writable for the SSH user, and
-  `git rev-parse` works there (for a git workspace). The server removes the probe
-  file at once. Reasons: `local_missing`, `host_missing`, `host_not_writable`,
+  Git reports that exact folder as its repository root. A linked worktree must use
+  its own administration directory under the common repository's `worktrees` folder.
+  The administration directory must point back to that worktree's `.git` file.
+  A missing `.git` file cannot pass through discovery of a parent repository.
+  Managed worktree paths cannot use the plain-directory exception.
+  The server removes the probe file at once. Reasons: `local_missing`, `host_missing`, `host_not_writable`,
   `host_path_mismatch`, `host_git_unusable`, `probe_failed`.
 - Runtime isolation: the host resolves existing ancestors before the containment check.
   This check detects symlinks in the remote base and runtime paths.
@@ -146,3 +150,27 @@ Code: `server/src/services/ssh-in-place-workspace.ts` (flag, probe, lock),
 the SSH driver in `server/src/services/environment-runtime.ts`, and
 `resolveAdapterExecutionTargetInPlaceRuntimeRootDir` in
 `packages/adapter-utils/src/execution-target.ts`.
+
+## Missing Git metadata
+
+Workspace preparation checks Git ownership before branch repair. The check rejects
+parent discovery, foreign administration directories, and symbolic links at `.git`.
+
+When the administration directory remains, preparation restores its missing `.git`
+link. The backlink and common directory must identify the exact worktree.
+This repair preserves working files, staged changes, and the branch tip.
+
+When administration data is absent, preparation can reconstruct a runtime-owned
+branch under `.paperclip/worktrees`. It first moves the full old folder into
+`.paperclip/worktree-quarantine`. It then attaches the recorded branch at its
+existing tip. The warning and workspace operation record name the preserved folder.
+It does not create a missing branch or detach a branch from another worktree.
+An unsafe repair reports a structured workspace validation failure. The existing
+board recovery flow handles that failure instead of an unclassified setup error.
+
+A failed `git worktree remove --force` can leave this condition. Git can delete
+both `.git` and its administration directory before a protected file prevents
+folder removal. Cleanup preserves the branch when removal fails. This permits
+later reconstruction. Folder contents alone do not prove that a worktree remains.
+Inspect failed `worktree_cleanup` operations for permission errors before assigning
+this cause to a specific incident.
