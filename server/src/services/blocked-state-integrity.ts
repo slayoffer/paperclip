@@ -31,7 +31,7 @@ export function issueReferences(action: string | null | undefined): string[] {
 /** True when the action names issues and no other wait. */
 export function namesOnlyIssueReferences(action: string): boolean {
   if (!issueReferences(action).length) return false;
-  return action.replace(ISSUE_REFERENCE, " ").toLowerCase().split(/[^a-z0-9]+/)
+  return action.replace(ISSUE_REFERENCE, " ").toLowerCase().split(/[^\p{L}\p{N}]+/u)
     .every(word => !word || ISSUE_REFERENCE_FRAME.has(word));
 }
 

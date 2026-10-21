@@ -132,7 +132,12 @@ describeDatabase("blocked-state holds and stale waits", () => {
     expect(await svc.getById(source.id)).toMatchObject({ status: "todo", unblockDescriptor: null });
   });
 
-  it.each(["Wait for the vendor reply", "Wait for the vendor reply on SYNA-1780"])(
+  it.each([
+    "Wait for the vendor reply",
+    "Wait for the vendor reply on SYNA-1780",
+    "Ждать ответа поставщика по SYNA-1780",
+    "等待供应商回复 SYNA-1780",
+  ])(
     "keeps the outside wait %j when the blocker completes", async action => {
       const blocker = await issue("SYNA-1780");
       const unblockDescriptor = external(action);
