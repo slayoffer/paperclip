@@ -65,6 +65,17 @@ import {
 } from "./workspace-runtime-read-model.js";
 
 type ExecutionWorkspaceRow = typeof executionWorkspaces.$inferSelect;
+
+// A task selection must not replace the environment of an inherited binding.
+export function requiresTaskEnvironmentBinding(
+  workspace: { config: Pick<ExecutionWorkspaceConfig, "environmentId"> | null } | null,
+  selectedEnvironmentId: string | null | undefined,
+): boolean {
+  return Boolean(
+    workspace && selectedEnvironmentId && workspace.config?.environmentId !== selectedEnvironmentId,
+  );
+}
+
 type WorkspaceRuntimeServiceRow = typeof workspaceRuntimeServices.$inferSelect;
 type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];

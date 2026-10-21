@@ -3,6 +3,7 @@
 Target specification for the Paperclip control plane. Living document — updated incrementally during spec interviews.
 
 The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
+Tasks support validated [environment selection](workspace-operations.md#task-environment-selection) without changing inherited workspace bindings or agent defaults.
 The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
 The fork permits [saved review waits](review-waits.md) with a board owner and an exact saved head.
 

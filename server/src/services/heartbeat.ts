@@ -2394,6 +2394,7 @@ export function heartbeatService(
       const parsedIssueExecutionWorkspaceSettings =
         parseIssueExecutionWorkspaceSettings(
           issueContext?.executionWorkspaceSettings,
+          { includeEnvironmentId: true },
         );
       const issueExecutionWorkspaceSettings = isolatedWorkspacesEnabled
         ? parsedIssueExecutionWorkspaceSettings
@@ -3046,15 +3047,16 @@ export function heartbeatService(
         nativeChatWorkspaceScope,
         nativeChatExpectedCwd,
         useIsolatedTaskDirectory,
+        separateTaskEnvironmentBinding,
       } = await selectHeartbeatEnvironment(db, {
         run, agent,
         task: { issueRef, issueContext, issueId, context, executionProjectId, projectContext },
         policy: {
           trustPreset, requestedExecutionWorkspaceMode, isolatedWorkspacesEnabled,
-          projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings,
+          projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, environmentExecutionWorkspaceSettings,
         },
         config: { config, issueAssigneeOverrides },
-        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder },
+        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, envOrchestrator },
       });
       const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
         agentConfig: config,
@@ -3422,6 +3424,8 @@ export function heartbeatService(
           projectExecutionWorkspacePolicy,
           issueExecutionWorkspaceSettings,
           environmentExecutionWorkspaceSettings,
+          parsedIssueExecutionWorkspaceSettings,
+          separateTaskEnvironmentBinding,
           executionPolicy,
         },
         environment: {
