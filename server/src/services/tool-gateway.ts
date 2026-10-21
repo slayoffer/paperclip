@@ -1,4 +1,5 @@
-import { credentialTransferOperationSchema, type CredentialTransferOperation } from "@paperclipai/shared";
+import { validateTransferGatewayOperation } from "./credential-transfer-gateway-operation.js";
+import { type CredentialTransferOperation } from "@paperclipai/shared";
 import { isInteractionResolutionReplay } from "./interaction-revision.js";
 import { buildHumanizedActionPreview, ToolGatewayDescriptor, isIdentifierArgumentKey, humanizeArgumentValue, humanizeArgumentKey, REDACTED_ARGUMENT_SENTINEL, ToolGatewayProviderType, ConnectedMcpGatewayMetadata } from "./tool-action-preview.js";
 export type { ToolGatewayProviderType, ConnectedMcpGatewayMetadata, ToolGatewayDescriptor } from "./tool-action-preview.js";
@@ -8851,16 +8852,10 @@ export function createToolGatewayService(
     async authorizeCredentialTransfer(input: {
       sessionToken: string; companyId: string; issueId: string; agentId: string; userId: string;
       connectionId: string; grantId: string; toolNames: readonly string[]; operation: CredentialTransferOperation;
+      consumeRateLimit?: boolean;
     }) {
       // Only the validated, approved operation enters policy evaluation. No credential values enter here.
-      const parsed = credentialTransferOperationSchema.safeParse(input.operation);
-      if (!parsed.success || parsed.data.operation !== "r2_credential_transfer"
-        || parsed.data.companyId !== input.companyId || parsed.data.issueId !== input.issueId
-        || parsed.data.agentId !== input.agentId || parsed.data.userId !== input.userId
-        || ![parsed.data.source, parsed.data.destination].some(binding =>
-          binding.connectionId === input.connectionId && binding.grantId === input.grantId)) {
-        throw new ToolGatewayHttpError(403, "The transfer operation does not match.", "transfer_operation_mismatch");
-      }
+      const operation = validateTransferGatewayOperation(input);
       const session = await getActiveSession(input.sessionToken);
       await assertGatewayTokenAction(session, "tools/call");
       if (session.companyId !== input.companyId || session.issueId !== input.issueId
@@ -8884,7 +8879,8 @@ export function createToolGatewayService(
           throw new ToolGatewayHttpError(403, "The transfer tool does not match.", "transfer_tool_mismatch");
         }
         const decision = await policyService.decide(policyInputForTool({ session, tool,
-          parameters: parsed.data, consumeRateLimit: false }), { requireKnownArguments: true });
+          parameters: operation, consumeRateLimit: input.consumeRateLimit === true }),
+          { requireKnownArguments: true, authorityOnly: input.consumeRateLimit !== true });
         // Operation-document approval cannot override a gateway denial or an ask-first tool policy.
         if (!decision.allowed) {
           throw new ToolGatewayHttpError(403, "The transfer tool requires authority.", "transfer_tool_denied");

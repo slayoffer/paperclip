@@ -14,6 +14,11 @@ The service checks current grants, credential ownership, versions, and gateway p
 An operation approval cannot replace an Off or Ask first tool policy.
 Policy checks receive the approved operation fields, including the destination path.
 These checks run before inventory, cleanup arming, activation, issuance, storage, and verification.
+Each provider operation consumes quota through its server-owned tool mapping.
+The gateway uses the existing atomic policy counter before each operation.
+Repeated authority checks validate policy without inspecting or consuming that quota.
+The adapter must map inventory, arming, activation, issuance, each create call, and each verification read.
+Missing mappings stop execution. Cleanup does not consume quota because it must remain available after exhaustion.
 A condition on an unavailable argument causes denial. Secret values never enter policy arguments.
 
 The only destination is `synthiq-infra/prod /clpn-ha`.

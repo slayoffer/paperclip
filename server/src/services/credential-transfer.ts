@@ -26,9 +26,12 @@ export interface TransferJournal {
   get(companyId: string, id: string): Promise<TransferRow | null>;
   unfinished(companyId: string): Promise<TransferRow[]>;
 }
+export type TransferProviderOperation = "inspect" | "arm" | "activate" | "issue" | "createOnly" | "readCreated";
 export interface TransferAuthority {
   /** Reload both human approvals, current document revisions, ownership, and gateway policy. */
   check(actor: TransferActor, refs: CreateCredentialTransfer): Promise<CredentialTransferOperation>;
+  /** Charge the server-owned tool mapping once, immediately before each provider operation. */
+  consume(actor: TransferActor, refs: CreateCredentialTransfer, effect: TransferProviderOperation, expected: CredentialTransferOperation): Promise<void>;
 }
 export interface TransferProviders {
   /** Metadata only. Inventory must include all pages and all effective permissions. */
@@ -135,6 +138,8 @@ export function credentialTransferService(deps: {
         return await deps.journal.exclusive(actor.companyId, request.destination.connectionId, async assertHeld => {
           const operation = validateOperation(actor, request, await deps.authority.check(actor, request));
           await assertHeld();
+          await deps.authority.consume(actor, request, "inspect", operation);
+          await assertHeld();
           const inventory = await deps.providers.inspect(operation);
           requireCondition(inventory.complete && inventory.bucketOwned && inventory.identityExclusive
             && inventory.accountId === operation.accountId && inventory.bucket === operation.bucket
@@ -154,14 +159,20 @@ export function credentialTransferService(deps: {
             await deps.journal.save(row);
             await recheck(row);
             await assertHeld();
+            await deps.authority.consume(actor, request, "arm", operation);
+            await assertHeld();
             await deps.providers.arm({ ticketId: row.cleanupTicketId, transferId: row.id, operation,
               baselineGrantIds: row.baselineGrantIds });
             await recheck(row);
+            await assertHeld();
+            await deps.authority.consume(actor, request, "activate", operation);
             await assertHeld();
             await deps.providers.activate(row.cleanupTicketId);
             await recheck(row);
             row.state = "issuing";
             await deps.journal.save(row);
+            await assertHeld();
+            await deps.authority.consume(actor, request, "issue", operation);
             await assertHeld();
             const issued = await deps.providers.issue(row.cleanupTicketId);
             requireCondition(/^[a-f0-9]{32}$/.test(issued.credentialId), "credential_identifier_invalid");
@@ -177,10 +188,14 @@ export function credentialTransferService(deps: {
             for (const [index, name] of TRANSFER_NAMES.entries()) {
               await recheck(row);
               await assertHeld();
+              await deps.authority.consume(actor, request, "createOnly", operation);
+              await assertHeld();
               await deps.providers.createOnly(row.cleanupTicketId, name, values[index]!);
               row.storedNames.push(name);
               await deps.journal.save(row);
               await recheck(row);
+              await assertHeld();
+              await deps.authority.consume(actor, request, "readCreated", operation);
               await assertHeld();
               requireCondition(equalSecret(values[index]!, await deps.providers.readCreated(row.cleanupTicketId, name)), "storage_mismatch");
             }

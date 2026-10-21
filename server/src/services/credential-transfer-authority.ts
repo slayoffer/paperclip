@@ -2,15 +2,17 @@ import { isDeepStrictEqual } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { connectionGrants, documents, issueDocuments, issues, issueThreadInteractions, toolConnections, type Db } from "@paperclipai/db";
 import { credentialTransferOperationSchema, type CreateCredentialTransfer } from "@paperclipai/shared";
-import { CredentialTransferError, type TransferActor, type TransferAuthority } from "./credential-transfer.js";
+import { CredentialTransferError, type TransferActor, type TransferAuthority, type TransferProviderOperation } from "./credential-transfer.js";
 import { validateConnectionGrantSecretOwnership } from "./connection-credentials.js";
 import type { ToolGatewayService } from "./tool-gateway.js";
 
+export type TransferToolMap = Record<TransferProviderOperation, { source?: readonly string[]; destination?: readonly string[] }>;
+
 /** Tool names come from a server-owned provider adapter, never the request or an operation document. */
 export function credentialTransferAuthority(db: Db, gateway: Pick<ToolGatewayService, "authorizeCredentialTransfer">,
-  sessionToken: string, tools: { source: readonly string[]; destination: readonly string[] }): TransferAuthority {
+  sessionToken: string, tools: { source: readonly string[]; destination: readonly string[]; operations: TransferToolMap }): TransferAuthority {
   const deny = () => { throw new CredentialTransferError(403, "transfer_authority_invalid"); };
-  return {
+  const authority: TransferAuthority = {
     async check(actor: TransferActor, request: CreateCredentialTransfer) {
       const [issue] = await db.select({ id: issues.id, status: issues.status }).from(issues).where(and(
         eq(issues.companyId, actor.companyId), eq(issues.id, actor.issueId),
@@ -68,5 +70,24 @@ export function credentialTransferAuthority(db: Db, gateway: Pick<ToolGatewaySer
       }
       return operations[1]!;
     },
+    async consume(actor, request, effect, expected) {
+      const operation = await authority.check(actor, request);
+      if (!isDeepStrictEqual(operation, expected)) deny();
+      const mapping = tools.operations[effect];
+      if (!mapping || ![...(mapping.source ?? []), ...(mapping.destination ?? [])].length) deny();
+      for (const side of ["source", "destination"] as const) {
+        const names = mapping[side] ?? [];
+        if (names.some(name => !tools[side].includes(name))) deny();
+      }
+      for (const side of ["source", "destination"] as const) {
+        const names = mapping[side] ?? [];
+        if (!names.length) continue;
+        const binding = request[side];
+        await gateway.authorizeCredentialTransfer({ ...actor, sessionToken,
+          connectionId: binding.connectionId, grantId: binding.grantId, toolNames: [...new Set(names)],
+          operation, consumeRateLimit: true });
+      }
+    },
   };
+  return authority;
 }

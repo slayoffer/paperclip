@@ -71,7 +71,7 @@ export function transferFixture() {
       if (value) { value.closed = true; value.revoked ||= revoke; }
       grants.delete("c".repeat(32)); return { grantsRemoved: true, credentialRevoked: !value || value.revoked }; },
   };
-  const authority = { async check() { fault("authority"); await checkHook?.(); return structuredClone(operation); } };
+  const authority = { async consume() {}, async check() { fault("authority"); await checkHook?.(); return structuredClone(operation); } };
   const createService = () => credentialTransferService({ authority, journal, providers, now: () => clock });
   return { actor, request, operation, rows, snapshots, trace, tickets, vault, grants, journal, providers, authority, inventory,
     createService, get issueCount() { return issueCount; },
