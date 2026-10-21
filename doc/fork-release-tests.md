@@ -82,7 +82,12 @@ The contract check needs Node.js only. It needs no dependency installation.
 
 The standard events are `opened`, `synchronize`, `reopened`, and `ready_for_review`.
 The workflow also accepts `labeled` when the added label is `fork-release-tests`.
-Other label events skip the job.
+Other label events skip the job under the distinct name `Ignored label event`.
+Only events that execute the repository checks use `Fork release checks`.
+GitHub reports skipped jobs as successful, even for required checks.
+The separate name prevents an ignored label from satisfying the release check.
+The contract tests evaluate both expressions for standard events, the trigger label, and unrelated labels.
+See [GitHub's skipped-job behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-jobs-with-conditions).
 This event path permits an existing pull request to retain its head and target.
 The workflow must first reach the release branch through the normal review process.
 A source merge alone does not emit a new pull request event for another open request.

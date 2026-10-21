@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   release-tests:
-    name: Fork release checks
+    # Ignored labels must not publish a successful release-check identity.
+    name: ${{ (github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests') && 'Fork release checks' || 'Ignored label event' }}
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180

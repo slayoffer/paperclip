@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 const workflow = readFileSync(new URL("../../workflows/fork-release-tests.yml", import.meta.url), "utf8");
 const commands = ["pnpm -r typecheck", "pnpm test:run", "pnpm build"];
@@ -9,6 +10,37 @@ const actions = [
   "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
   "actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238",
 ];
+
+const releaseEvents = [
+  ["opened", undefined, true],
+  ["synchronize", undefined, true],
+  ["reopened", undefined, true],
+  ["ready_for_review", undefined, true],
+  ["labeled", "fork-release-tests", true],
+  ["labeled", "documentation", false],
+  ["labeled", "bug", false],
+  ["labeled", "", false],
+];
+
+// Evaluate the workflow's expressions, rather than a copy of their conditions.
+// These expressions use only string comparisons and Boolean operators.
+function evaluate(value, action, label) {
+  if (!value.startsWith("${{")) return value;
+  const expression = value.slice(3, -2).trim();
+  return runInNewContext(expression, {
+    github: { event: { action, label: { name: label } } },
+  }, { timeout: 100 });
+}
+
+function checkIdentity(source, action, label, shouldRun) {
+  const job = source.split("  release-tests:\n")[1];
+  assert.ok(job, "Missing release job");
+  const name = job.match(/^    name: (.+)$/m)?.[1];
+  const condition = job.match(/^    if: (.+)$/m)?.[1];
+  assert.ok(name && condition, "Missing check identity or condition");
+  assert.equal(evaluate(condition, action, label), shouldRun);
+  assert.equal(evaluate(name, action, label), shouldRun ? "Fork release checks" : "Ignored label event");
+}
 
 // This check protects this small workflow's explicit structure. actionlint
 // separately validates YAML and GitHub's workflow schema before handoff.
@@ -38,6 +70,7 @@ function checkContract(source) {
   assert.match(text, /^        run: npm install --global pnpm@9\.15\.4$/m);
   assert.match(text, /^        id: install\n        run: pnpm install --no-frozen-lockfile$/m);
   assert.match(text, /^        run: node --test \.github\/scripts\/tests\/fork-release-tests\.test\.mjs$/m);
+  for (const event of releaseEvents) checkIdentity(text, ...event);
   const steps = text.split(/^      - name: /m).slice(1);
   for (const command of commands) {
     const step = steps.find((step) => step.split("\n").includes(`        run: ${command}`));
@@ -63,13 +96,22 @@ function checkContract(source) {
 
 test("fork workflow satisfies the release-test contract", () => checkContract(workflow));
 
+for (const [action, label, shouldRun] of releaseEvents) {
+  test(`check identity for ${action} with label ${label ?? "absent"}`, () => {
+    checkIdentity(workflow, action, label, shouldRun);
+  });
+}
+
 for (const command of commands) {
   test(`reject a missing executable command: ${command}`, () => {
     assert.throws(() => checkContract(workflow.replace(`        run: ${command}\n`, `        # run: ${command}\n`)));
   });
 }
 
+const checkName = workflow.match(/^    name: (.+)$/m)?.[1];
 for (const [name, before, after] of [
+  ["a release-check name on ignored labels", `    name: ${checkName}`, "    name: Fork release checks"],
+  ["an ignored name on release events", `    name: ${checkName}`, "    name: Ignored label event"],
   ["a different target", 'branches: ["synthiq/*"]', 'branches: ["master"]'],
   ["cancellation by an unrelated label", "&& github.run_id || 'checks'", "&& 'checks' || 'checks'"],
   ["a skipped job", "    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}", "    if: ${{ false }}"],
