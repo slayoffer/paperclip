@@ -118,7 +118,8 @@ describe("Standard image remote provider pack", () => {
     expect(pack).toContain("Skipping remote provider pack");
     expect(production).toContain("--from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack");
     expect(production).not.toContain("--chown=node:node --from=runner-provider-pack");
-    expect(production).toContain("chmod -R a+rX /opt/paperclip-runner/provider-pack");
+    expect(pack).toContain("chmod -R a+rX /provider-pack");
+    expect(production).not.toContain("chmod -R a+rX /opt/paperclip-runner/provider-pack");
     expect(production).toContain("gosu 65534:65534 node");
     expect(production).toContain("Object.values(manifest.payload.artifacts)");
     expect(production).toContain("PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH=/opt/paperclip-runner/provider-pack");
