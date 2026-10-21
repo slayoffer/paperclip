@@ -45,7 +45,7 @@ import {
   isExternalChatWaitAuthorizationContention,
   resolveExternalChatResponseWaitAuthorizationInTransaction,
 } from "./chat-attachment-reuse.js";
-import { issueService } from "../issues.js";
+import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
@@ -1583,6 +1583,7 @@ export async function commitNativeStatusDecision(input: {
   }
   const publications: ActivityPublication[] = [];
   const terminalRunsToEmit: (typeof heartbeatRuns.$inferSelect)[] = [];
+  const postCommitActions: IssuePostCommitAction[] = [];
   const committed = await input.db.transaction(async (tx) => {
     const coordinator = await tx
       .select()
@@ -2025,7 +2026,7 @@ export async function commitNativeStatusDecision(input: {
       if (!updated) throw new NativeStatusRaceError();
     } else {
       failAt("status_projection", input.failpoint);
-      const projected = await issueService(tx as unknown as Db).update(
+      const projected = await issueService(input.db).update(
         input.issueId,
         {
           status: input.decision.toStatus,
@@ -2037,6 +2038,7 @@ export async function commitNativeStatusDecision(input: {
         },
         tx,
         publications,
+        postCommitActions,
       );
       if (!projected) throw new NativeStatusRaceError();
       updated = projected;
@@ -2053,9 +2055,9 @@ export async function commitNativeStatusDecision(input: {
     }
 
     if (input.decision.statusAction === "done" && issue.status !== "done") {
-      const issueSvc = issueService(tx as unknown as Db);
+      const issueSvc = issueService(input.db);
       const dependents = await issueSvc.listWakeableBlockedDependents(
-        input.issueId,
+        input.issueId, tx, publications, postCommitActions,
       );
       const completedResultSummary = await tx
         .select({ resultJson: nativeRunResults.resultJson })
@@ -2074,7 +2076,7 @@ export async function commitNativeStatusDecision(input: {
             : null;
         });
       const parent = issue.parentId
-        ? await issueSvc.getWakeableParentAfterChildCompletion(issue.parentId, {
+        ? await issueService(tx as unknown as Db).getWakeableParentAfterChildCompletion(issue.parentId, {
             issueId: input.issueId,
             summary: completedResultSummary,
           })
@@ -2255,6 +2257,7 @@ export async function commitNativeStatusDecision(input: {
     };
   });
 
+  await executeIssuePostCommitActions(input.db, postCommitActions);
   for (const publication of publications) publishActivity(publication);
   for (const terminalRun of terminalRunsToEmit)
     await emitAgentTaskRun(input.db, terminalRun);

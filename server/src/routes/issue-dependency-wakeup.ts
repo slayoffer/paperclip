@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import type { heartbeatService } from "../services/heartbeat.js";
 import { logger } from "../middleware/logger.js";
+import { blockedStateIntegrityEnabled } from "../services/blocked-state-integrity.js";
 import { buildIssueBlockersResolvedWakeStateKey, findExistingIssueBlockersResolvedWakeForReadyState,
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "../services/issue-dependency-wakeups.js";
 
@@ -23,7 +24,7 @@ export async function createDependencyResolvedWakeup(db: Db, companyId: string,
   let idempotencyKey = buildIssueBlockersResolvedWakeStateKey(input);
   try {
     const existing = await findExistingIssueBlockersResolvedWakeForReadyState(db, { companyId, ...input });
-    if (existing && (existing.status !== "completed" || existing.idempotencyKey?.endsWith(":release"))) return null;
+    if (existing && (blockedStateIntegrityEnabled() || existing.status !== "completed" || existing.idempotencyKey?.endsWith(":release"))) return null;
     if (existing) idempotencyKey += ":release";
   } catch (err) {
     logger.warn({ err, issueId: input.dependentIssueId, idempotencyKey }, "failed to check an existing dependency wake");
