@@ -1,5 +1,6 @@
 import { allowLegacyShutdownWorkspaceCleanup, legacyShutdownWorkspaceResourceProtected } from "./legacy-shutdown-workspace-settlement.js";
 import { beginIdleTrackedWork } from "./task-admission.js";
+import { sshInPlaceLockChecks } from "./ssh-in-place-lock-checks.js";
 import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, settleStopOnlyCleanup, stopOnlyCleanupKey } from "./sandbox-stop-and-retain.js";
 import { JsonRpcCallError, readEnvironmentAcquisitionDiagnostic, readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { preserveEnvironmentSyncOutErrorDiagnostic } from "./environment-sync-out-error.js";
@@ -85,6 +86,9 @@ import {
 } from "./plugin-environment-driver.js";
 import { collectSecretRefPaths } from "./json-schema-secret-refs.js";
 import { buildWorkspaceRealizationRecordFromDriverInput } from "./workspace-realization.js";
+import {
+  decideSshInPlaceRealization,
+} from "./ssh-in-place-workspace.js";
 import {
   createSandboxOrphanCleanupSpool,
   type DeferredOrphanCleanupRecord,
@@ -1223,18 +1227,91 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
     },
 
     async releaseRunLease(input) {
+      // SSH client settlement does not prove that the remote writer stopped.
+      // Keep ownership until sshInPlaceLockChecks verifies a provider stop receipt.
       return await environmentsSvc.releaseLease(input.lease.id, input.status);
     },
 
     async realizeWorkspace(input) {
+      const leaseRemoteCwd =
+        typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
+          ? input.lease.metadata.remoteCwd.trim()
+          : null;
+      const rawRequest = input.workspace.metadata?.workspaceRealizationRequest;
+      const request: Record<string, unknown> = isRecord(rawRequest) ? rawRequest : {};
+      const runId = input.lease.heartbeatRunId ??
+        (typeof request.heartbeatRunId === "string" ? request.heartbeatRunId : null);
+      const decision = await decideSshInPlaceRealization({
+        environmentId: input.environment.id,
+        adapterType: typeof request.adapterType === "string" ? request.adapterType : null,
+        localPath: input.workspace.localPath,
+        remoteCwd: leaseRemoteCwd ?? input.workspace.remotePath,
+        leaseId: input.lease.id,
+        runId,
+        resolveConfig: async () => {
+          const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, input.environment, {
+            issueId: input.lease.issueId,
+            heartbeatRunId: input.lease.heartbeatRunId,
+          });
+          if (parsed.driver !== "ssh") {
+            throw new Error(`Expected SSH environment config for driver "${input.environment.driver}".`);
+          }
+          return parsed.config;
+        },
+        ...sshInPlaceLockChecks(db, input.lease.companyId),
+      });
+      if (decision.mode === "in_place") {
+        // Same-host in_place: the run works in the server's worktree at the
+        // same absolute path. No copy, no restore. Runtime assets go to a
+        // per-run folder outside the worktree.
+        const record = buildWorkspaceRealizationRecordFromDriverInput({
+          environment: input.environment,
+          lease: input.lease,
+          workspace: input.workspace,
+          cwd: decision.authoritativeRoot,
+          providerMetadata: {
+            remoteCwd: decision.authoritativeRoot,
+            workspaceRealization: {
+              mode: "in_place",
+              authoritativeRoot: decision.authoritativeRoot,
+              runtimeRoot: decision.runtimeRoot,
+            },
+          },
+        });
+        logger.info(
+          {
+            environmentId: input.environment.id,
+            leaseId: input.lease.id,
+            heartbeatRunId: runId,
+            authoritativeRoot: decision.authoritativeRoot,
+            runtimeRoot: decision.runtimeRoot,
+          },
+          "SSH workspace realized in place on the shared host path",
+        );
+        return {
+          cwd: decision.authoritativeRoot,
+          metadata: {
+            workspaceRealization: record,
+          },
+        };
+      }
+      if (decision.warn) {
+        logger.warn(
+          {
+            environmentId: input.environment.id,
+            leaseId: input.lease.id,
+            heartbeatRunId: runId,
+            localPath: input.workspace.localPath ?? null,
+            reason: decision.reason,
+          },
+          "SSH same-host in_place is enabled for this environment, but this run uses the copy mode",
+        );
+      }
       const record = buildWorkspaceRealizationRecordFromDriverInput({
         environment: input.environment,
         lease: input.lease,
         workspace: input.workspace,
-        cwd:
-          typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
-            ? input.lease.metadata.remoteCwd.trim()
-            : input.workspace.remotePath ?? input.workspace.localPath ?? null,
+        cwd: leaseRemoteCwd ?? input.workspace.remotePath ?? input.workspace.localPath ?? null,
       });
       return {
         cwd: record.remote.path ?? record.local.path,
