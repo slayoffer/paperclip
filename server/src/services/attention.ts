@@ -1,3 +1,5 @@
+import { interactionResolverAudience } from "./attention-interaction-audience.js";
+export { interactionResolverAudience } from "./attention-interaction-audience.js";
 import { listNewerAgentRunActivity } from "./agent-run-activity.js";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -731,35 +733,6 @@ function interactionVerbs(kind: string, payload: Record<string, unknown>) {
  * resolution evaluator uses, so a pre-migration row cannot read as `Anyone`
  * here while the API still treats it as `not_creator`.
  */
-export function interactionResolverAudience(
-  row: {
-    addresseeAgentId: string | null;
-    addresseeUserId?: string | null;
-    createdByAgentId: string | null;
-    requestedResolverPolicy: string;
-    effectiveResolverPolicy: string;
-    resolverPolicyProvenance: string | null;
-    effectiveResolverPolicySource: string | null;
-  },
-  agentName: (agentId: string) => string | null,
-): AttentionResolverAudience {
-  const provenance = (row.resolverPolicyProvenance
-    ?? (row.requestedResolverPolicy === "board_only" || row.requestedResolverPolicy === "board_or_agents"
-      ? "legacy_inherited_restriction"
-      : "inherited")) as IssueThreadInteractionResolverPolicyProvenance;
-  return {
-    requestedResolverPolicy: canonicalizeStoredResolverPolicy(row.requestedResolverPolicy, provenance),
-    effectiveResolverPolicy: canonicalizeStoredResolverPolicy(row.effectiveResolverPolicy, provenance),
-    effectiveResolverPolicySource:
-      (row.effectiveResolverPolicySource ?? "requested") as IssueThreadInteractionEffectiveResolverPolicySource,
-    resolverPolicyProvenance: provenance,
-    addresseeAgentId: row.addresseeAgentId,
-    addresseeUserId: row.addresseeUserId ?? null,
-    addresseeName: row.addresseeAgentId ? agentName(row.addresseeAgentId) : null,
-    createdByAgentId: row.createdByAgentId,
-    createdByAgentName: row.createdByAgentId ? agentName(row.createdByAgentId) : null,
-  };
-}
 
 function collapsePendingConfirmationsToNewest<T extends {
   id: string;
@@ -1209,6 +1182,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const interactionRows = await db
         .select({
           id: issueThreadInteractions.id,
+          revision: issueThreadInteractions.revision,
           issueId: issueThreadInteractions.issueId,
           kind: issueThreadInteractions.kind,
           status: issueThreadInteractions.status,
@@ -1289,6 +1263,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             href: issue ? `${issueHref(prefix, issue)}#interaction-${interaction.id}` : null,
             metadata: {
               kind: interaction.kind,
+              revision: interaction.revision,
               issueId: interaction.issueId,
               createdByAgentId: interaction.createdByAgentId,
               isPlanTarget,

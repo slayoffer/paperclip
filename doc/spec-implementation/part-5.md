@@ -24,3 +24,4 @@ administrator remediation rather than promising a nonexistent approval step.
 ### 9.8.1 Issue-thread interaction resolver contract
 
 See [Issue-thread interactions](../issue-thread-interactions.md) for read routes and resolver rules.
+See [Answer preconditions](../interaction-resolution.md) for revision and retry rules.

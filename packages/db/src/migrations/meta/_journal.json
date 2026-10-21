@@ -2633,6 +2633,13 @@
       "when": 1792563986433,
       "tag": "0377_strange_romulus",
       "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
+      "when": 1792569002878,
+      "tag": "0378_wide_sersi",
+      "breakpoints": true
     }
   ]
 }
