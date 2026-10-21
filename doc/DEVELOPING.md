@@ -1552,6 +1552,13 @@ Environment overrides:
   cooldown and restores immediate reaping. A negative or non-numeric value falls
   back to the default.
 
+The reaper preserves PostgreSQL timestamp precision when it advances between
+candidate pages. It reports `skippedConcurrentSweep` when another sweep still
+runs. The periodic skip log includes reopened workspaces. `skippedUndelivered`
+includes `skippedDirty` and `skippedGitInspection`. These two counters separate
+uncommitted files from failed Git inspection. A delivered branch with uncommitted
+instruction files remains protected. A terminal issue alone does not prove delivery.
+
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,
 and in the default sibling `health/` directory.
