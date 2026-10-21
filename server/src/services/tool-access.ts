@@ -6,6 +6,7 @@ import { connectionHealthSchedule } from "./tool-access/catalog/health-schedule.
 import { assertAgentConnectionInstallAccess, type ConnectionManagementContext } from "./connection-management.js";
 import { connectionActorUserId } from "./tool-access/actor.js";
 import { restConnectorFor } from "./connectors/rest-registry.js";
+import { resolveConnectionCredentialUpdate, upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
 import { createConnectionCredentialValidation } from "./tool-access/connections/credential-validation.js";
 import { createConnectionGrants } from "./tool-access/connections/grants.js";
 import { createConnectionInstalls } from "./tool-access/connections/installs.js";
@@ -3760,6 +3761,9 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connection.id))
         .returning();
+      if (!personalIdentity && nextConnection.credentialPolicy === "shared") {
+        await ensureDefaultOrganizationGrant(nextConnection, tx);
+      }
       await syncConnectionCredentialBindings(tx, nextConnection,
         personalIdentity ? credentialSecretRefs : []);
       return nextConnection;
@@ -4688,13 +4692,16 @@ export function toolAccessService(
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, {
         excludeConnectionId: existing.id,
       });
+      const { credentialPolicy, credentialRefs, credentialSecretRefs, changed, replaced } =
+        resolveConnectionCredentialUpdate(existing, input);
       await assertSecretRefs(existing.companyId, [
-        ...(input.credentialRefs ?? existing.credentialRefs),
-        ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
+        ...credentialRefs,
+        ...credentialSecretRefs,
       ]);
       await managementContext?.reauthorize();
-      const write = (database: Db) => database
-        .update(toolConnections)
+      const write = async (database: Db) => {
+        const rows = await database
+          .update(toolConnections)
         .set({
           name: input.name ?? existing.name,
           status: input.status ?? existing.status,
@@ -4704,14 +4711,20 @@ export function toolAccessService(
           transportConfig: isGoogleSheetsConnectionConfig(config)
             ? config
             : (input.transportConfig ?? config),
-          credentialRefs: input.credentialRefs ?? existing.credentialRefs,
-          credentialSecretRefs:
-            input.credentialSecretRefs ?? existing.credentialSecretRefs,
-          credentialPolicy: input.credentialPolicy ?? existing.credentialPolicy,
+          credentialRefs,
+          credentialSecretRefs,
+          credentialPolicy,
           updatedAt: new Date(),
         })
         .where(eq(toolConnections.id, connectionId))
         .returning();
+        const updated = rows[0]!;
+        if (updated.credentialPolicy === "shared" && changed) {
+          await upsertDefaultOrganizationGrant(database, updated,
+            isRailwayConnection(updated) ? [RAILWAY_SSH_SECRET_PATH] : [], undefined, replaced);
+        }
+        return rows;
+      };
       const [row] = existing.transport === "chat_sdk"
         ? await db.transaction(async tx => {
             await notifyChatEndpointWork(tx, existing.id, existing.companyId);
