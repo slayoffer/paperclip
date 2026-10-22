@@ -58,3 +58,5 @@ jobs:
           server/src/services/publication-authority-races.test.ts
           server/src/services/publication-authority-reconciliation.test.ts
           server/src/services/publication-authority-repositories.test.ts
+          server/src/services/publication-authority-transport.test.ts
+          server/src/services/publication-authority-transport-revocation.test.ts

@@ -6,7 +6,7 @@ import {
   activityLog, createDb, heartbeatRuns, issues, publicationAuthorityClocks, publicationBrokers, publicationRequests,
 } from "@paperclipai/db";
 import { publicationReconciliationService } from "./publication-authority-reconciliation.js";
-import { authorityFixture, barrier, startAuthorityDatabase, waitForDatabaseWait } from "./publication-authority.test-fixture.js";
+import { authorityFixture, barrier, startAuthorityDatabase, waitForDatabaseWait } from "../__tests__/helpers/publication-authority.js";
 
 describe("protected reconciliation preserves single use without old broker authority", () => {
   let storage: Awaited<ReturnType<typeof startAuthorityDatabase>>;

@@ -5,7 +5,7 @@ import {
 } from "@paperclipai/db";
 import { publicationAuthorityService } from "./publication-authority.js";
 import type { PublicationTransaction } from "./publication-authority-context.js";
-import { authorityFixture, barrier, startAuthorityDatabase, waitForDatabaseWait } from "./publication-authority.test-fixture.js";
+import { authorityFixture, barrier, startAuthorityDatabase, waitForDatabaseWait } from "../__tests__/helpers/publication-authority.js";
 
 describe("publication decisions serialize with authoritative database writers", () => {
   let storage: Awaited<ReturnType<typeof startAuthorityDatabase>>;
