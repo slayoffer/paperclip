@@ -11,7 +11,7 @@ import { runLocalGit } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { prepareNativeWorkspaceSync } from "../services/native-runtime/native-workspace-sync.js";
 
 const runner: CommandManagedRuntimeRunner = {
-  execute: (input) => new Promise((resolve) => {
+  execute: (input) => new Promise((resolve, reject) => {
     const child = execFile(input.command, input.args ?? [], {
       cwd: input.cwd, env: { ...process.env, ...input.env },
       timeout: input.timeoutMs, maxBuffer: 16 * 1024 * 1024,
@@ -19,6 +19,11 @@ const runner: CommandManagedRuntimeRunner = {
       exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0,
       signal: error?.signal ?? null, timedOut: error?.killed ?? false, stdout, stderr,
     }));
+    // Git can exit before it consumes the supplied archive. Its exit result
+    // remains authoritative when the input pipe closes in that case.
+    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") reject(error);
+    });
     child.stdin?.end(input.stdin ?? "");
   }),
 };
@@ -28,6 +33,14 @@ async function git(cwd: string, ...args: string[]) {
 }
 
 describe("native warm workspace Git history", () => {
+  it.each([0, 17])("preserves exit code %i when the process does not consume standard input", async (exitCode) => {
+    const result = await runner.execute({
+      command: process.execPath,
+      args: ["-e", `process.exit(${exitCode})`],
+      stdin: "x".repeat(1024 * 1024),
+    });
+    expect(result.exitCode).toBe(exitCode);
+  });
   const oldHome = process.env.PAPERCLIP_HOME;
   const oldInstance = process.env.PAPERCLIP_INSTANCE_ID;
   const roots: string[] = [];
