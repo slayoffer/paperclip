@@ -1,4 +1,5 @@
 import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -111,9 +112,11 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
   }, 20_000);
 
   afterEach(async () => {
+    // Terminal status precedes final activity writes. Await execution completion
+    // before fixture deletion, even when finalization takes more than 100 ms.
+    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     capturedRuns.length = 0;
     await instanceSettingsService(db).updateExperimental({ enableBetaSkills: false });
-    await new Promise((resolve) => setTimeout(resolve, 100));
     await clearCompanyFixtures(db);
     await Promise.all(Array.from(cleanupDirs, (dir) => fs.rm(dir, { recursive: true, force: true })));
     cleanupDirs.clear();
