@@ -51,6 +51,8 @@ Document revisions retain events if a later revision replaces their text.
 A stale event does not wake the owner or clear a newer wait.
 Ordinary comments do not implicitly reopen a bridge wait.
 The board can explicitly resume the issue through the existing routes.
+Child completion does not send `issue_children_completed` while the parent has an unexpired bridge wait and status `blocked`.
+Expired bridge waits and parents without bridge waits keep the existing child-completion wake behavior.
 
 A matching event atomically clears the descriptor and changes the issue to `todo`.
 The same transaction saves a durable wake intent.

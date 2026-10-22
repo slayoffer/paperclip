@@ -9,6 +9,7 @@ import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked
 import { assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
+import { isReviewBridgeWait } from "./review-bridge-contract.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -8760,12 +8761,17 @@ export function issueService(db: Db) {
           assigneeAgentId: issues.assigneeAgentId,
           status: issues.status,
           companyId: issues.companyId,
+          unblockDescriptor: issues.unblockDescriptor,
         })
         .from(issues)
         .where(eq(issues.id, parentIssueId))
         .then((rows) => rows[0] ?? null);
       if (!parent || parent.conversationAgentId || !parent.assigneeAgentId || ["backlog", "cancelled"].includes(parent.status) ||
           (parent.status === "done" && parent.originKind !== "onboarding_first_task")) {
+        return null;
+      }
+      if (parent.status === "blocked" && isReviewBridgeWait(parent.unblockDescriptor)
+          && Date.parse(parent.unblockDescriptor.until) > Date.now()) {
         return null;
       }
 
