@@ -17,11 +17,11 @@ describe("native SSH deliverable output budget", () => {
     await writeFile(executable, `#!/bin/sh
 for arg do command=$arg; done
 case "$command" in
-  *"cat >"*) phase=upload ;;
-  *"cd "*) phase=command ;;
+  *'cat >'*) phase=upload ;;
+  *'cd '*) phase=command ;;
   *) phase=cleanup ;;
 esac
-printf '%s\\n' "$phase" >> '${join(root, "calls").replaceAll("'", "'\\''")}'
+printf '%s\\n' "$phase" >> ${JSON.stringify(join(root, "calls"))}
 exec /bin/sh -c "$command"
 `);
     await chmod(executable, 0o700);
