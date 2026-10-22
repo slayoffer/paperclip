@@ -1653,6 +1653,7 @@ export const requestConfirmationPayloadSchema = z.object({
   qualityReview: qualityReviewBindingSchema.optional(),
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
+  credentialOperation: z.boolean().optional(),
   acceptLabel: z.string().trim().min(1).max(80).nullable().optional(),
   rejectLabel: z.string().trim().min(1).max(80).nullable().optional(),
   rejectRequiresReason: z.boolean().optional(),
