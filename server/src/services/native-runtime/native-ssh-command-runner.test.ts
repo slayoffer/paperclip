@@ -11,9 +11,10 @@ describe("native SSH deliverable output budget", () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "paperclip-ssh-output-"));
     // Exercise the real SSH command adapter and its execFile output limit,
-    // replacing only the network executable with a deterministic byte source.
+    // replacing only the network executable with a local shell. Environment
+    // setup and cleanup must execute without returning the file payload.
     const executable = join(root, "ssh");
-    await writeFile(executable, `#!${process.execPath}\nprocess.stdout.write(require('node:fs').readFileSync(${JSON.stringify(join(root, "response"))}));\n`);
+    await writeFile(executable, '#!/bin/sh\nfor arg do command=$arg; done\nexec /bin/sh -c "$command"\n');
     await chmod(executable, 0o700);
     vi.stubEnv("PATH", `${root}:${process.env.PATH}`);
   });
@@ -25,17 +26,18 @@ describe("native SSH deliverable output budget", () => {
   const createRunner = () => createNativeSshCommandRunner({
     spec: {
       host: "fixture.invalid", port: 22, username: "fixture",
-      remoteWorkspacePath: "/workspace", remoteCwd: "/workspace",
+      remoteWorkspacePath: root, remoteCwd: root,
       privateKey: null, knownHosts: null, strictHostKeyChecking: true,
     },
-    defaultCwd: "/workspace",
+    defaultCwd: root,
   });
 
-  it.each([64, MAX_REMOTE_DELIVERABLE_BYTES])("returns exact verified bytes for a %i-byte file through the SSH adapter", async (byteSize) => {
+  // The real reader checks Linux descriptors through /proc/self/fd.
+  it.skipIf(process.platform !== "linux").each([64, MAX_REMOTE_DELIVERABLE_BYTES])("returns exact verified bytes for a %i-byte file through the SSH adapter", async (byteSize) => {
     const body = Buffer.alloc(byteSize, 65);
-    await writeFile(join(root, "response"), body.toString("base64"));
+    await writeFile(join(root, "result.md"), body);
     const result = await readVerifiedRemoteWorkspaceFile({
-      runner: createRunner(), workspaceRoot: "/workspace", contentRef: "result.md",
+      runner: createRunner(), workspaceRoot: root, contentRef: "result.md",
       byteSize, sha256: createHash("sha256").update(body).digest("hex"),
     });
     expect(result.equals(body)).toBe(true);
@@ -43,7 +45,10 @@ describe("native SSH deliverable output budget", () => {
 
   it("stops a remote command that exceeds the maximum encoded envelope", async () => {
     await writeFile(join(root, "response"), Buffer.alloc(4 * Math.ceil(MAX_REMOTE_DELIVERABLE_BYTES / 3) + 1, 65));
-    const result = await createRunner().execute({ command: "node", args: ["unused"], timeoutMs: 10_000 });
+    const result = await createRunner().execute({
+      command: "node", args: ["-e", "process.stdout.write(require('node:fs').readFileSync('response'))"],
+      timeoutMs: 10_000,
+    });
     expect(result.exitCode).not.toBe(0);
   });
 });
