@@ -1,3 +1,6 @@
+import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
+import { releaseBridgeWait } from "../services/review-bridge-waits.js";
+import { isReviewBridgeWait, parseBridgeEvent } from "../services/review-bridge-contract.js";
 import { getRestoredBlockedDependencyWake } from "../services/restored-dependency-wake.js";
 import { blockedStateIntegrityEnabled } from "../services/blocked-state-integrity.js";
 import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
@@ -4135,6 +4138,10 @@ export function issueRoutes(
     input: Parameters<typeof revalidateActiveSourceRecovery>[0],
   ) {
     try {
+      if (input.actor?.actorType === "user" && (input.resumeRequested || input.reopened || input.blockedToTodoRecovery)) {
+        await releaseBridgeWait(db, input.issue.companyId, input.issue.id, true);
+      }
+      await dispatchBridgeWakes(db, heartbeat.wakeup, { companyId: input.issue.companyId, issueId: input.issue.id });
       return await revalidateActiveSourceRecovery(input);
     } catch (err) {
       logger.warn(
@@ -12652,6 +12659,7 @@ export function issueRoutes(
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
+            !isReviewBridgeWait(existing.unblockDescriptor) &&
             !commentWakeSuppressed(commentBody, req.actor) &&
             shouldImplicitlyMoveCommentedIssueToTodo({
               issueStatus: existing.status,
@@ -14213,7 +14221,7 @@ export function issueRoutes(
           const shouldWakeAssigneeForComment =
             shouldWakeAssigneeForIssueComment({
               selfComment,
-              noWake: commentWakeSuppressed(commentBody, req.actor),
+              noWake: isReviewBridgeWait(existing.unblockDescriptor) || Boolean(commentBody && parseBridgeEvent(commentBody)) || commentWakeSuppressed(commentBody, req.actor),
               resumeRequested: resumeRequested === true,
               commentCreatedByRunId: comment.createdByRunId,
               issueAtCommentStart: existing,
@@ -16860,7 +16868,7 @@ export function issueRoutes(
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
-          (!commentWakeSuppressed(req.body.body, req.actor) &&
+          (!isReviewBridgeWait(issue.unblockDescriptor) && !commentWakeSuppressed(req.body.body, req.actor) &&
           shouldImplicitlyMoveCommentedIssueToTodo({
             issueStatus: issue.status,
             assigneeAgentId: issue.assigneeAgentId,
@@ -17489,7 +17497,7 @@ export function issueRoutes(
         // explicit resume from a completed prior run remains a valid new turn.
         const shouldWakeAssigneeForComment = shouldWakeAssigneeForIssueComment({
           selfComment,
-          noWake: commentWakeSuppressed(req.body.body, req.actor),
+          noWake: isReviewBridgeWait(issue.unblockDescriptor) || Boolean(parseBridgeEvent(req.body.body)) || commentWakeSuppressed(req.body.body, req.actor),
           resumeRequested: resumeRequested === true,
           commentCreatedByRunId: comment.createdByRunId,
           issueAtCommentStart: issue,
