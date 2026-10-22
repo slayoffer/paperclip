@@ -15,6 +15,7 @@ on:
       - server/src/__tests__/*redaction.test.ts
       - server/src/__tests__/heartbeat-credential-matrix.test.ts
       - server/src/__tests__/helpers/credential-persistence-fixture.ts
+      - server/src/__tests__/helpers/acp-credential-persistence-fixture.ts
       - server/src/__tests__/helpers/embedded-postgres.ts
       - packages/db/**
       - packages/shared/**

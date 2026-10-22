@@ -7,6 +7,7 @@ import { createRunSecretRedactionRegistry, preserveRunSecretRegistry } from "../
 import { redactRunPersistencePatch } from "../services/run-result-redaction.js";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { localSyntheticBridge, persistenceFixture } from "./helpers/credential-persistence-fixture.js";
+import { executeSyntheticRemoteAcp } from "./helpers/acp-credential-persistence-fixture.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 if (!support.supported && process.env.PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TESTS === "1") throw new Error(support.reason ?? "Embedded Postgres is required");
@@ -20,6 +21,40 @@ if (!support.supported && process.env.PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TE
   }, 60_000);
   afterEach(() => vi.restoreAllMocks());
   afterAll(async () => { await fixture?.close(); vi.unstubAllEnvs(); });
+
+  it("registers the remote ACP bridge value before transport exposure and masks persisted standalone output", async () => {
+    const binding = await fixture.seed();
+    let opaque = "";
+    let registrationFinished = false;
+    let adapterOutput = "";
+    vi.spyOn(processAdapter, "execute").mockImplementation(async ctx => {
+      const result = await executeSyntheticRemoteAcp({
+        ...ctx,
+        registerSecretValue: async value => {
+          await ctx.registerSecretValue!(value);
+          registrationFinished = true;
+        },
+      }, async value => {
+        expect(registrationFinished).toBe(true);
+        const values = await createRunSecretRedactionRegistry(fixture.db).valuesForRun(binding.companyId, ctx.runId);
+        expect(values).toContain(value);
+        opaque = value;
+      });
+      adapterOutput = result.summary ?? "";
+      await fixture.complete(binding.issueId);
+      return { ...result, resultJson: { ...result.resultJson, output: adapterOutput, neutral: 19 } };
+    });
+    const run = await fixture.start(binding);
+    await fixture.heartbeat.drainActiveRunExecutions();
+    const { row, log, reconstructed } = await fixture.read(run.id);
+    expect(opaque).not.toBe("");
+    expect(adapterOutput).toBe(opaque);
+    expect(row.status).toBe("succeeded");
+    expect(row.resultJson).toMatchObject({ output: "***REDACTED***", neutral: 19 });
+    expect(reconstructed).toContain("neutral ACP output");
+    expect(reconstructed).toContain("REDACTED");
+    expect(JSON.stringify([row.resultJson, row.error, row.stdoutExcerpt, row.stderrExcerpt, log, reconstructed])).not.toContain(opaque);
+  }, 60_000);
 
   for (const outcome of ["succeeded", "failed", "timed_out", "cancelled", "late_finalization"] as const) {
     it(`masks created bridge, run key, and header values for ${outcome}`, async () => {
