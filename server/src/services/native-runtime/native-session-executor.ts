@@ -1,3 +1,4 @@
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 import { resolveAcpxQualification } from "./acpx-qualification.js";
 import { readLocalAiCredentialFile } from "../local-ai-credential-file.js";
 import { prepareGrokRunnerCredentials } from "./grok-runner-credentials.js";
@@ -8296,8 +8297,14 @@ async function executePaperclipNativeSessionWithinScope(
         cwd: input.execution.workspace.cwd,
         env: resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment),
         resolveCredentials: (binding) => resolveGitHubOperationCredentials(input.db, binding),
+        registerSecretValue: (value) => createRunSecretRedactionRegistry(input.db).register(input.execution.binding.companyId, input.execution.binding.runId, value),
         onLog: input.onLog,
       });
+      // A warm provider keeps its transport. Register its values for each new run before activation.
+      for (const key of ["PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN"]) {
+        const value = githubAccess.env[key];
+        if (value) await createRunSecretRedactionRegistry(input.db).register(input.execution.binding.companyId, input.execution.binding.runId, value);
+      }
       releaseGitHubRun = githubAccess.activate(input.execution.binding);
       input = { ...input, runnerEnvironment: { ...input.runnerEnvironment, ...githubAccess.env } };
     }

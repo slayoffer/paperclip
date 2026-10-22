@@ -34,8 +34,22 @@ describe("native SSH deliverable output budget", () => {
   it.each([64, MAX_REMOTE_DELIVERABLE_BYTES])("returns exact verified bytes for a %i-byte file through the SSH adapter", async (byteSize) => {
     const body = Buffer.alloc(byteSize, 65);
     await writeFile(join(root, "response"), body.toString("base64"));
+    const runner = createRunner();
     const result = await readVerifiedRemoteWorkspaceFile({
-      runner: createRunner(), workspaceRoot: "/workspace", contentRef: "result.md",
+      runner: {
+        execute: async (input) => {
+          const output = await runner.execute(input);
+          // Report synthetic transport details before the reader removes them.
+          expect(output.exitCode, JSON.stringify({
+            signal: output.signal,
+            timedOut: output.timedOut,
+            stderr: output.stderr,
+            stdoutBytes: Buffer.byteLength(output.stdout ?? ""),
+          })).toBe(0);
+          return output;
+        },
+      },
+      workspaceRoot: "/workspace", contentRef: "result.md",
       byteSize, sha256: createHash("sha256").update(body).digest("hex"),
     });
     expect(result.equals(body)).toBe(true);
