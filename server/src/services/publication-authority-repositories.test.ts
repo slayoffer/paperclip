@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { projectWorkspaces, publicationRequests } from "@paperclipai/db";
 import { publicationReconciliationService } from "./publication-authority-reconciliation.js";
-import { authorityFixture, startAuthorityDatabase } from "./publication-authority.test-fixture.js";
+import { authorityFixture, startAuthorityDatabase } from "../__tests__/helpers/publication-authority.js";
 
 describe("publication repository identities cannot bypass reconciliation", () => {
   let storage: Awaited<ReturnType<typeof startAuthorityDatabase>>;

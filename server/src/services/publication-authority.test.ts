@@ -8,7 +8,7 @@ import {
 import { publicationDispatchWithinDeadline, type PublicationBindings, type PublicationDecision } from "@paperclipai/shared";
 import { publicationAuthorityService } from "./publication-authority.js";
 import { publicationReconciliationService } from "./publication-authority-reconciliation.js";
-import { authorityFixture, startAuthorityDatabase } from "./publication-authority.test-fixture.js";
+import { authorityFixture, startAuthorityDatabase } from "../__tests__/helpers/publication-authority.js";
 
 describe("offline publication authority with durable PostgreSQL records", () => {
   let storage: Awaited<ReturnType<typeof startAuthorityDatabase>>;
