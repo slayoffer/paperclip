@@ -71,6 +71,60 @@ describe("streamed run log masking", () => {
     expect(log.text()).toContain("neutral");
     expect(log.text().length).toBeLessThan(200);
   });
+  it("suppresses multiline credential continuations after oversized output at every split", async () => {
+    const value = "synthetic-private-key-header\nSYNTHETIC_PRIVATE_KEY_BODY_7V3m9\nsynthetic-private-key-footer";
+    for (const stream of ["stdout", "stderr"] as const) {
+      for (let split = 1; split < value.length; split++) {
+        const log = fixture([value]);
+        await log.append(stream, "x".repeat(70_000) + value.slice(0, split));
+        await log.append(stream, value.slice(split) + "\nneutral\n");
+        await log.flush();
+        for (const line of value.split("\n")) expect(log.text()).not.toContain(line);
+        expect(log.text()).toContain("neutral");
+        expect(log.text()).toContain("oversized log line");
+        expect(log.text().length).toBeLessThan(200);
+      }
+    }
+  });
+  it("keeps discard state across single-character callbacks and independent streams", async () => {
+    const value = "header\nprivate-body\nfooter";
+    const log = fixture([value]);
+    await log.append("stdout", "x".repeat(70_000) + value.slice(0, 3));
+    await log.append("stderr", "neutral stderr\n");
+    for (const char of value.slice(3)) {
+      await log.append("stdout", char);
+      expect(log.text()).not.toContain("private-body");
+    }
+    await log.append("stdout", "\nneutral stdout\n");
+    await log.flush();
+    expect(log.text()).not.toContain("footer");
+    expect(log.text()).toContain("neutral stderr");
+    expect(log.text()).toContain("neutral stdout");
+  });
+  it("suppresses overlapping multiline values during oversized recovery", async () => {
+    const log = fixture(["aba\naba\nshared", "shared\nprivate-footer"]);
+    await log.append("stdout", "x".repeat(70_000) + "aba\naba");
+    await log.append("stdout", "\nshared\nprivate-");
+    await log.append("stdout", "footer\nneutral\n");
+    await log.flush();
+    expect(log.text()).not.toContain("shared");
+    expect(log.text()).not.toContain("footer");
+    expect(log.text()).toContain("neutral");
+  });
+  it("suppresses a credential larger than the pending limit across repeated oversized callbacks", async () => {
+    const body = "Q".repeat(70_000);
+    const value = `header\n${body}\nprivate-footer`;
+    const log = fixture([value]);
+    await log.append("stdout", "x".repeat(70_000) + "head");
+    await log.append("stdout", "er\n" + body.slice(0, 35_000));
+    await log.append("stdout", body.slice(35_000) + "\nprivate-");
+    await log.append("stdout", "footer\nneutral\n");
+    await log.flush();
+    expect(log.text()).not.toContain("Q");
+    expect(log.text()).not.toContain("footer");
+    expect(log.text()).toContain("neutral");
+    expect(log.text().length).toBeLessThan(200);
+  });
   it("refuses storage when registry resolution fails", async () => {
     let writes = 0;
     const log = createRunLogRedactor({ values: async () => { throw new Error("registry unavailable"); }, write: async () => { writes++; } });

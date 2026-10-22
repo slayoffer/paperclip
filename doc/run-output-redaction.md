@@ -20,7 +20,10 @@ The log writer keeps incomplete lines in memory for each output stream.
 It also retains enough text to mask registered values that contain line breaks.
 Success, failure, timeout, and cancellation flush the remaining text through the same policy.
 A pending line above 65,536 characters becomes a redaction marker.
-The writer discards its remaining fragments until a line break arrives.
+The writer tracks registered prefixes while it discards the remaining fragments.
+Recovery requires a line break outside every partial registered value.
+Matching state depends on registered value lengths and does not grow with discarded output.
+Each stream keeps separate matching state, including across repeated oversized callbacks.
 A complete line still uses the existing chunk-size limit.
 Output without line breaks can appear later in the live view.
 
