@@ -1,4 +1,7 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { dispatchBridgeWakes } from "../review-bridge-wakes.js";
+import { isReviewBridgeWait } from "../review-bridge-contract.js";
+import { pendingBridgeWakeCondition } from "../review-bridge-waits.js";
 import type { LatestIssueRun } from "./run-types.js";
 import type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
 import { compactRecoveryPresentation, recoveryCauseTitle, recoveryNoticeMetadata } from "./notice-presentation.js";
@@ -3506,6 +3509,10 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
+    if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
+      await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
+      return "covered";
+    }
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
         ? legacyDispositionEpisode(latestRun) : undefined
@@ -4067,6 +4074,7 @@ export function recoveryService(
   async function reconcileStrandedAssignedIssues(opts?: {
     issueCreatedAtGte?: Date | null;
   }) {
+    await dispatchBridgeWakes(db, deps.enqueueWakeup);
     const candidates = await db
       .select()
       .from(issues)
@@ -4083,6 +4091,7 @@ export function recoveryService(
             : undefined,
           isNull(issues.hiddenAt),
           not(unadmittedChatWakeupCondition(issues.id, issues.companyId)),
+          not(pendingBridgeWakeCondition(issues.id, issues.companyId)),
         ),
       );
 

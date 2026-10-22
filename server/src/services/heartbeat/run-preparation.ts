@@ -1,3 +1,4 @@
+import type { DurableBridgeWakeupRequest } from "../durable-bridge-wakeup.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
 import { githubConfiguredInstructionSources } from "../chat-github-review-policy.js";
 import { CONFIGURED_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index.js";
@@ -820,6 +821,7 @@ export interface WakeupOptions {
   /** Exact failed run selected by an authenticated board Retry request. */
   failedRunId?: string | null;
   durableChatRequest?: DurableChatWakeupRequest;
+  durableBridgeRequest?: DurableBridgeWakeupRequest;
   /** Server-owned Dot admission receipt; never accepted from API payloads. */
   durableDotRequest?: {
     id: string;

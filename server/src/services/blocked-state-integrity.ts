@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, like, notInArray } from "drizzle-or
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issueComments, issues, issueThreadInteractions } from "@paperclipai/db";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
+import { isReviewBridgeWait } from "./review-bridge-contract.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { hasSavedReviewWait, parseReviewHandoffManifest } from "./review-wait.js";
 
@@ -62,6 +63,7 @@ export async function hasPendingHandoffWait(
   descriptor: IssueUnblockDescriptor | null | undefined = issue.unblockDescriptor,
   commentBody?: string | null,
 ): Promise<boolean> {
+  if (isReviewBridgeWait(descriptor)) return true;
   if (!blockedStateIntegrityEnabled() || !issue.assigneeAgentId || !descriptor) return false;
   if (descriptor.owner === "board") {
     if (!await hasSavedReviewWait(db, issue, issue.assigneeAgentId, descriptor)) return false;
@@ -136,9 +138,10 @@ export async function blockedWaitFacts(
 }
 
 export async function hasNonDependencyBlockedWait(db: Pick<Db, "select">, issueId: string) {
-  if (!blockedStateIntegrityEnabled()) return false;
   const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
   if (!issue || issue.status !== "blocked") return false;
+  if (isReviewBridgeWait(issue.unblockDescriptor)) return true;
+  if (!blockedStateIntegrityEnabled()) return false;
   const facts = await blockedWaitFacts(db, issue, issue.unblockDescriptor, []);
   return facts.hasTarget || facts.outside;
 }
