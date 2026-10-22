@@ -19,11 +19,22 @@ const deny = (reason: string, row?: Request): PublicationDecision => ({
 /** Offline source service. No production entry point imports or constructs this service. */
 export function publicationAuthorityService(db: Db, options: {
   clock?: AuthorityClock;
+  // Protected transport construction only. Execute under the broker row lock.
+  // Return the authenticated certificate's effective expiry, or null to refuse.
+  brokerGuard?: (tx: PublicationTransaction, identity: PublicationIdentity, nowMs: number) => Promise<number | null>;
 } = {}) {
   const clock = options.clock ?? databaseAuthorityClock;
   const predicate = (b: PublicationBindings) => and(
     eq(publicationRequests.companyId, b.companyId), eq(publicationRequests.id, b.requestId),
   );
+
+  async function lockBroker(tx: PublicationTransaction, identity: PublicationIdentity, nowMs: number) {
+    const broker = await lockPublicationBroker(tx, identity, nowMs);
+    if (!broker) return null;
+    const expiry = options.brokerGuard ? await options.brokerGuard(tx, identity, nowMs) : broker.validUntilMs;
+    return expiry !== null && Number.isSafeInteger(expiry) && nowMs < expiry
+      ? { ...broker, validUntilMs: Math.min(broker.validUntilMs, expiry) } : null;
+  }
 
   async function audit(tx: PublicationTransaction, identity: PublicationIdentity, b: PublicationBindings, action: string) {
     await tx.insert(activityLog).values({
@@ -39,12 +50,14 @@ export function publicationAuthorityService(db: Db, options: {
     if (b.companyId !== identity.companyId || b.brokerId !== identity.brokerId
       || b.agentId !== identity.agentId || b.runId !== identity.runId) return null;
     const now = await readAuthorityTime(tx, identity.companyId, clock);
-    if (now === null || !await lockPublicationBroker(tx, identity, now.wallMs)) return null;
+    if (now === null) return null;
+    const broker = await lockBroker(tx, identity, now.wallMs);
+    if (!broker) return null;
     const [row] = await tx.select().from(publicationRequests).where(predicate(b)).for("no key update");
     const decisionTime = await readAuthorityTime(tx, identity.companyId, clock);
     if (decisionTime === null) return null;
-    const broker = await lockPublicationBroker(tx, identity, decisionTime.wallMs);
-    return broker && row && isDeepStrictEqual(row.bindings, b)
+    // Trust reads and lock waits count toward expiry. The broker row stays locked.
+    return decisionTime.wallMs < broker.validUntilMs && row && isDeepStrictEqual(row.bindings, b)
       ? { row, now: decisionTime, brokerLifetimeMs: broker.validUntilMs - decisionTime.wallMs } : null;
   }
 
@@ -56,7 +69,7 @@ export function publicationAuthorityService(db: Db, options: {
         const invalid = await lockPublicationContext(tx, b, identity);
         if (invalid) return deny(invalid);
         const now = await readAuthorityTime(tx, identity.companyId, clock);
-        if (now === null || !await lockPublicationBroker(tx, identity, now.wallMs)) return deny("authority_unavailable");
+        if (now === null || !await lockBroker(tx, identity, now.wallMs)) return deny("authority_unavailable");
         // Never overwrite bindings or expiry on an idempotent replay.
         const [created] = await tx.insert(publicationRequests).values({
           id: b.requestId, companyId: b.companyId, brokerId: b.brokerId, issueId: b.issueId,
