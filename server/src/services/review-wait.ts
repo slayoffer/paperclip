@@ -22,15 +22,16 @@ export function parseReviewHandoffManifest(body: string) {
   return { repo, base, head, branch };
 }
 
-/** Permit only a board-owned review wait for the latest saved owner handoff. */
+/** Verify a review wait against the latest saved owner handoff. */
 export async function hasSavedReviewWait(
   db: Pick<Db, "select">,
   issue: { id: string; companyId: string; identifier: string | null; assigneeAgentId: string | null },
   actorAgentId: string | undefined,
   descriptor: IssueUnblockDescriptor,
 ): Promise<boolean> {
-  if (!actorAgentId || issue.assigneeAgentId !== actorAgentId || descriptor.owner !== "board") return false;
-  const head = /^waiting for the cross-vendor review of ([a-f0-9]{40})$/i.exec(descriptor.action)?.[1];
+  if (!actorAgentId || issue.assigneeAgentId !== actorAgentId || (descriptor.owner !== "board" && !("agentId" in descriptor.owner && descriptor.owner.agentId === actorAgentId))) return false;
+  if (descriptor.kind !== "review_bridge" && descriptor.owner !== "board") return false;
+  const head = descriptor.kind === "review_bridge" ? descriptor.bridge?.head : /^waiting for the cross-vendor review of ([a-f0-9]{40})$/i.exec(descriptor.action)?.[1];
   if (!head || !issue.identifier) return false;
 
   // Read persisted comments only. A comment in the same PATCH is not saved evidence.
@@ -48,5 +49,6 @@ export async function hasSavedReviewWait(
   if (!handoff) return false;
   const manifest = parseReviewHandoffManifest(handoff.body);
   return manifest !== null && manifest.head === head.toLowerCase()
+    && (descriptor.kind !== "review_bridge" || manifest.repo === descriptor.bridge?.repo)
     && manifest.branch === `review/${issue.identifier}`;
 }

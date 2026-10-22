@@ -38,6 +38,8 @@ export async function deliverAgentUnblockNotification(input: {
     return false;
   }
 
+  if (issue.unblockDescriptor.kind === "review_bridge") return false;
+
   const owner = issue.unblockDescriptor.owner;
   if (owner === "board" || !("agentId" in owner)) return false;
 
