@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
 
-import { capabilityGroups, validateInventorySchema, validateInventories } from "./lib/capability-inventory.mjs";
+import { buildSkillInventory, capabilityGroups, validateInventorySchema, validateInventories } from "./lib/capability-inventory.mjs";
 
 const inventorySchema = JSON.parse(await readFile(
   resolve(import.meta.dirname, "../spec/capability/inventory.schema.json"),
@@ -42,7 +43,7 @@ function validInventories() {
       schemaVersion: 2,
       inventoryRole: "normative",
       generatedFrom: ["skills/paperclip/SKILL.md"],
-      rows: Array.from({ length: 166 }, (_, index) => row(`capability-${index}`)),
+      rows: Array.from({ length: 167 }, (_, index) => row(`capability-${index}`)),
     },
     evaluations: {
       schemaVersion: 2,
@@ -92,4 +93,20 @@ test("capability inventory validator rejects missing, duplicate, and unknown MCP
   const errors = validateInventories(inventories);
   assert.ok(errors.some((error) => error.includes("must be folded exactly once")));
   assert.ok(errors.some((error) => error.includes("unknown normative row")));
+});
+
+
+test("skill inventory includes all six Markdown heading levels", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "paperclip-capability-headings-"));
+  try {
+    const contractDirectory = resolve(root, "packages/paperclip-runner/spec/capability");
+    await mkdir(contractDirectory, { recursive: true });
+    await writeFile(resolve(contractDirectory, "source-contract.json"), JSON.stringify({ skillSources: ["skill.md"] }));
+    await writeFile(resolve(root, "skill.md"), "# First\n## Second\n### Third\n#### Fourth\n##### Fifth\n###### Sixth ######\n");
+    const inventory = await buildSkillInventory(root);
+    assert.deepEqual(inventory.rows.map(row => row.title), ["First", "Second", "Third", "Fourth", "Fifth", "Sixth"]);
+    assert.deepEqual(inventory.rows.map(row => row.sourceAnchor), Array.from({ length: 6 }, (_, index) => `skill.md:${index + 1}`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
