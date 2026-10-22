@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,16 @@ describe("native SSH deliverable output budget", () => {
     // replacing only the network executable with a local shell. Environment
     // setup and cleanup must execute without returning the file payload.
     const executable = join(root, "ssh");
-    await writeFile(executable, '#!/bin/sh\nfor arg do command=$arg; done\nexec /bin/sh -c "$command"\n');
+    await writeFile(executable, `#!/bin/sh
+for arg do command=$arg; done
+case "$command" in
+  *"cat >"*) phase=upload ;;
+  *"cd "*) phase=command ;;
+  *) phase=cleanup ;;
+esac
+printf '%s\\n' "$phase" >> '${join(root, "calls").replaceAll("'", "'\\''")}'
+exec /bin/sh -c "$command"
+`);
     await chmod(executable, 0o700);
     vi.stubEnv("PATH", `${root}:${process.env.PATH}`);
   });
@@ -41,6 +50,7 @@ describe("native SSH deliverable output budget", () => {
       byteSize, sha256: createHash("sha256").update(body).digest("hex"),
     });
     expect(result.equals(body)).toBe(true);
+    expect(await readFile(join(root, "calls"), "utf8")).toBe("upload\ncommand\ncleanup\n");
   });
 
   it("stops a remote command that exceeds the maximum encoded envelope", async () => {
@@ -50,5 +60,6 @@ describe("native SSH deliverable output budget", () => {
       timeoutMs: 10_000,
     });
     expect(result.exitCode).not.toBe(0);
+    expect(await readFile(join(root, "calls"), "utf8")).toBe("command\n");
   });
 });
