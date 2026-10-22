@@ -72,6 +72,13 @@ export function isPrivateMuseHttpRequest(url:string|undefined):boolean {
   return false;
 }
 
+/** Transfer input and gateway headers have no diagnostic value. */
+export function isCredentialTransferHttpRequest(url: string | undefined): boolean {
+  return Boolean(url && /^\/api\/companies\/[^/]+\/credential-transfers(?:\/|$)/i.test(
+    normalizePath(url).replace(/^https?:\/\/[^/]*/i, ""),
+  ));
+}
+
 /** Provider payloads are private even when a method/signature is rejected. */
 export function isPrivateWebhookHttpRequest(
   method: string | undefined,
@@ -114,6 +121,7 @@ export function isSecretSensitiveHttpRequest(
   if (isPrivateAgentObservabilityHttpRequest(url)) return true;
   // Avatar uploads and dedicated Dot MCP calls may contain private image bytes.
   if (url && /^(?:\/mcp\/runner(?:\/|$)|\/api\/companies\/[^/]+\/agents\/[^/]+\/avatar(?:\/|$))/i.test(normalizePath(url).replace(/^https?:\/\/[^/]*/i, ""))) return true;
+  if (isCredentialTransferHttpRequest(url)) return true;
   if (!method || !url) return false;
   if (/^\/api\/chat-slack\/(?:managed\/)?oauth(?:\/|$)/i.test(normalizePath(url).replace(/^https?:\/\/[^/]*/i, ""))) return true;
   if (/^\/api\/chat-endpoints\/[^/]+\/slack(?:\/|$)/i.test(normalizePath(url).replace(/^https?:\/\/[^/]*/i, ""))) return true;

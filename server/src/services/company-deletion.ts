@@ -2,7 +2,8 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { agentObservabilityService } from "./agent-observability.js";
 import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import type { Db } from "@paperclipai/db";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray } from "drizzle-orm";
+import { unprocessable } from "../errors.js";
 import { createAgentLifecycle, processAgentLifecycle } from "./agent-lifecycle.js";
 import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { agentLifecycleCompanyDeletion } from "../modules/agent-lifecycle/company-deletion.js";
@@ -44,9 +45,20 @@ import {
   routineTriggers,
   routineRevisions,
   routines,
+  credentialTransfers,
 } from "@paperclipai/db";
 
+// Synthiq fork: keep credential transfer cleanup recoverable.
+// The company FK also rejects concurrent new transfers.
+async function assertCredentialTransfersFinished(db: Pick<Db, "select">, id: string) {
+  const [unfinishedTransfer] = await db.select({ id: credentialTransfers.id }).from(credentialTransfers)
+    .where(and(eq(credentialTransfers.companyId, id), notInArray(credentialTransfers.state, ["complete", "revoked"]))).limit(1);
+  if (unfinishedTransfer) throw unprocessable("Company removal requires credential transfer cleanup to finish.");
+}
+
 export async function deleteCompany(db: Db, id: string) {
+  // Check before agent termination, so a refused removal leaves agents intact.
+  await assertCredentialTransfersFinished(db, id);
   const lifecycle = createAgentLifecycle(db);
   const companyAgents = await db.select({ id: agents.id }).from(agents).where(eq(agents.companyId, id));
   for (const agent of companyAgents) {
@@ -60,6 +72,9 @@ export async function deleteCompany(db: Db, id: string) {
         const [existing] = await tx.select({ id: companies.id }).from(companies)
           .where(eq(companies.id, id)).for("no key update");
         if (!existing) return null;
+        await assertCredentialTransfersFinished(tx, id);
+        await tx.delete(credentialTransfers).where(and(eq(credentialTransfers.companyId, id),
+          inArray(credentialTransfers.state, ["complete", "revoked"])));
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
         await agentObservabilityService(tx as unknown as Db).removeForCompanyDeletion(id);
         // Finance can reference costs and both can reference runs. Incidents
