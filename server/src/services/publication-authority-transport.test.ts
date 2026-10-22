@@ -113,6 +113,15 @@ describe("isolated mutual TLS publication authority", () => {
 
   it("keeps production startup disconnected and construction disabled by default", () => {
     expect(createPublicationAuthorityListener()).toBeNull();
+    const environment = process.env.NODE_ENV;
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      expect(createPublicationAuthorityListener({
+        enabled: true, db: storage.db, key: material.server.key, cert: material.server.cert,
+        issuers: [{ id: f.identity.issuerId, certificatePem: material.ca }],
+        readTrust: async () => f.snapshot,
+      })).toBeNull();
+    } finally { vi.stubEnv("NODE_ENV", environment); }
     const sourceRoot = new URL("../", import.meta.url);
     const files = readdirSync(sourceRoot, { recursive: true, withFileTypes: true });
     const consumers = files.filter((file) => file.isFile() && file.name.endsWith(".ts")

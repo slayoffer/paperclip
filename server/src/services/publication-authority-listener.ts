@@ -44,7 +44,7 @@ async function readBindings(req: IncomingMessage) {
  * No environment flag starts it. Only explicit protected construction can create a server.
  */
 export function createPublicationAuthorityListener(options?: PublicationListenerOptions) {
-  if (options?.enabled !== true) return null;
+  if (process.env.NODE_ENV === "production" || options?.enabled !== true) return null;
   const trust = publicationTrust(options.issuers, options.readTrust);
   const server = createServer({
     key: options.key, cert: options.cert, ca: options.issuers.map((issuer) => issuer.certificatePem),

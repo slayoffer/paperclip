@@ -95,6 +95,7 @@ The caller must then bind that server to a fixture endpoint.
 No production module imports the factory. No environment setting enables it.
 The ordinary application router exposes no authority routes.
 
+The factory also returns no listener when `NODE_ENV=production`, even with explicit options.
 The listener requires mutual Transport Layer Security (TLS) version 1.3 and an explicit issuer bundle.
 It requires a client certificate with the client authentication purpose.
 It verifies the direct issuer signature and the complete certificate fingerprint against protected registrations.
