@@ -5,6 +5,7 @@ import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { conflict, forbidden, unprocessable } from "../errors.js";
 import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled } from "./self-block-guard.js";
 import { blockedStateIntegrityEnabled, blockedWaitFacts } from "./blocked-state-integrity.js";
+import { assertReviewBridgeWait } from "./review-bridge-contract.js";
 import { hasSavedReviewWait } from "./review-wait.js";
 
 export async function assertBlockedIssueUpdate(input: {
@@ -22,9 +23,13 @@ export async function assertBlockedIssueUpdate(input: {
   if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
     throw unprocessable("unblockDescriptor requires blocked status");
   }
-  const descriptor = integrity && nextStatus === "blocked"
+  const descriptor = nextStatus === "blocked"
     ? updateFields.unblockDescriptor === undefined ? existing.unblockDescriptor : updateFields.unblockDescriptor
     : updateFields.unblockDescriptor ?? null;
+  const bridgeWait = descriptor?.kind === "review_bridge";
+  if (bridgeWait && (updateFields.unblockDescriptor || updateFields.assigneeAgentId !== undefined)) {
+    await assertReviewBridgeWait(db, existing, actor, updateFields, descriptor);
+  }
   const facts = integrity && nextStatus === "blocked"
     ? await blockedWaitFacts(db, existing, descriptor, requestedBlockerIds, actor.type === "agent" && actor.agentId === existing.assigneeAgentId ? commentBody : null)
     : null;
@@ -70,7 +75,7 @@ export async function assertBlockedIssueUpdate(input: {
           "Agents may only name themselves as an unblock owner",
         );
       }
-      if (actor.type === "agent" && actor.agentId === owner.agentId && selfBlockGuardEnabled() && !(facts && (facts.hasTarget || facts.outside))) {
+      if (actor.type === "agent" && actor.agentId === owner.agentId && selfBlockGuardEnabled() && !bridgeWait && !(facts && (facts.hasTarget || facts.outside))) {
         throw conflict(SELF_BLOCK_REFUSAL, { code: "self_block_refused" });
       }
     } else if (owner !== "board" && "userId" in owner) {

@@ -19,6 +19,7 @@ on:
       - "server/src/__tests__/issue-blocker*.test.ts"
       - "server/src/__tests__/issue-dependency-wakeups-routes.test.ts"
       - "server/src/__tests__/disposition-repair*.test.ts"
+      - "server/src/__tests__/review-bridge-*.ts"
 
 permissions:
   contents: read
@@ -68,6 +69,9 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism
           packages/shared/src/validators/issue.test.ts
+          server/src/__tests__/review-bridge-waits.test.ts
+          server/src/__tests__/review-bridge-routes.test.ts
+          server/src/__tests__/review-bridge-admission.test.ts
           server/src/__tests__/blocked-state-integrity.test.ts
           server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts
           server/src/__tests__/dependency-release-wakes.test.ts

@@ -9,3 +9,5 @@ export * from "./exports/part-4.js";
 export * from "./exports/part-5.js";
 export * from "./exports/part-6.js";
 export * from "./exports/part-7.js";
+
+export { reviewBridgeTargetSchema } from "./validators/issue-unblock.js";

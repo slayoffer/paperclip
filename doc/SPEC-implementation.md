@@ -19,7 +19,9 @@ A finite lease blocks admission across server recreation.
 Lease release requires the authenticated owner and the matching lease ID.
 
 The fork also supports [saved review waits](review-waits.md).
-An agent can record a board-owned wait for its latest saved review handoff.
+An agent can record a bounded bridge wait for its latest saved review handoff.
+Matching board events or expiry release the wait through durable wake delivery.
+Disposition recovery preserves the wait and existing execution safety holds.
 
 ## 2. V1 Outcomes
 

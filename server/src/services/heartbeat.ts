@@ -1,3 +1,4 @@
+import { assertDurableBridgeWakeupRequest, assertDurableBridgeWakeupReceipt, type DurableBridgeWakeupRequest } from "./durable-bridge-wakeup.js";
 import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
 import { recordCurrentRunRuntimeProgress, publishHeartbeatRunRuntimeProgress } from "./heartbeat-runtime-progress.js";
 import { wakeDependentsAfterFinalization } from "./dependency-finalize-wake.js";
@@ -3838,6 +3839,7 @@ interface WakeupOptions {
   /** Exact failed run selected by an authenticated board Retry request. */
   failedRunId?: string | null;
   durableChatRequest?: DurableChatWakeupRequest;
+  durableBridgeRequest?: DurableBridgeWakeupRequest;
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
   reason?: string | null;
@@ -27103,9 +27105,14 @@ export function heartbeatService(
       }
     }
 
-    const durableRequest = opts.durableChatRequest;
+    const durableRequest = opts.durableChatRequest ?? opts.durableBridgeRequest;
+    if (opts.durableChatRequest && opts.durableBridgeRequest) throw new Error("ambiguous_durable_wakeup");
     if (durableRequest) {
-      assertDurableChatWakeupRequest(durableRequest, {
+      if (opts.durableBridgeRequest) assertDurableBridgeWakeupRequest(opts.durableBridgeRequest, {
+        agentId, companyId: agent.companyId, issueId,
+        requestedByActorType: opts.requestedByActorType, requestedByActorId: opts.requestedByActorId,
+      });
+      else assertDurableChatWakeupRequest(opts.durableChatRequest!, {
         agentId,
         companyId: agent.companyId,
         issueId,
@@ -27135,7 +27142,10 @@ export function heartbeatService(
         .where(eq(agentWakeupRequests.id, durableRequest.id))
         .limit(1)
         .then((rows) => rows[0] ?? null);
-      if (receipt) assertDurableChatWakeupReceipt(durableRequest, receipt);
+      if (receipt) {
+        if (opts.durableBridgeRequest) assertDurableBridgeWakeupReceipt(opts.durableBridgeRequest, receipt);
+        else assertDurableChatWakeupReceipt(opts.durableChatRequest!, receipt);
+      }
       return receipt;
     };
     const priorReceipt = await existingDurableReceipt(db);
@@ -28025,7 +28035,7 @@ export function heartbeatService(
           if (executionBlocker && !(await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
-            reason: durableRequest && !failedChatRetry ? "issue_commented" : reason,
+            reason: opts.durableChatRequest && !failedChatRetry ? "issue_commented" : reason,
             commentId: wakeCommentId ?? null, failedRunId: opts.failedRunId, successorRunId: explicitContinuationRunId,
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
@@ -28791,7 +28801,7 @@ export function heartbeatService(
           const explicitContinuation = await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
-            reason: durableRequest && !failedChatRetry ? "issue_commented" : reason,
+            reason: opts.durableChatRequest && !failedChatRetry ? "issue_commented" : reason,
             commentId: wakeCommentId ?? null, failedRunId: opts.failedRunId, successorRunId: explicitContinuationRunId,
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
