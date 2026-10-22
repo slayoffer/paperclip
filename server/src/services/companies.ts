@@ -2,6 +2,7 @@ import { and, count, eq, gte, inArray, isNull, lt, notInArray, sql } from "drizz
 import type { Db } from "@paperclipai/db";
 import {
   companies,
+  credentialTransfers,
   companyLogos,
   assets,
   agents,
@@ -537,6 +538,12 @@ export function companyService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        // Keep cleanup recoverable. The company FK also rejects concurrent new transfers.
+        const [unfinishedTransfer] = await tx.select({ id: credentialTransfers.id }).from(credentialTransfers)
+          .where(and(eq(credentialTransfers.companyId, id), notInArray(credentialTransfers.state, ["complete", "revoked"]))).limit(1);
+        if (unfinishedTransfer) throw unprocessable("Company removal requires credential transfer cleanup to finish.");
+        await tx.delete(credentialTransfers).where(and(eq(credentialTransfers.companyId, id),
+          inArray(credentialTransfers.state, ["complete", "revoked"])));
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +13,17 @@ describe("native SSH deliverable output budget", () => {
     // Exercise the real SSH command adapter and its execFile output limit,
     // replacing only the network executable with a deterministic byte source.
     const executable = join(root, "ssh");
-    await writeFile(executable, `#!${process.execPath}\nprocess.stdout.write(require('node:fs').readFileSync(${JSON.stringify(join(root, "response"))}));\n`);
+    await writeFile(executable, `#!${process.execPath}
+const fs = require('node:fs');
+const command = process.argv.at(-1);
+const phase = command.includes('cat >') ? 'upload' : command.includes('cd ') ? 'command' : 'cleanup';
+fs.appendFileSync(${JSON.stringify(join(root, "calls"))}, phase + '\\n');
+if (phase === 'upload') {
+  process.stdin.resume();
+} else if (phase === 'command') {
+  process.stdout.write(fs.readFileSync(${JSON.stringify(join(root, "response"))}));
+}
+`);
     await chmod(executable, 0o700);
     vi.stubEnv("PATH", `${root}:${process.env.PATH}`);
   });
@@ -39,11 +49,13 @@ describe("native SSH deliverable output budget", () => {
       byteSize, sha256: createHash("sha256").update(body).digest("hex"),
     });
     expect(result.equals(body)).toBe(true);
+    expect(await readFile(join(root, "calls"), "utf8")).toBe("upload\ncommand\ncleanup\n");
   });
 
   it("stops a remote command that exceeds the maximum encoded envelope", async () => {
     await writeFile(join(root, "response"), Buffer.alloc(4 * Math.ceil(MAX_REMOTE_DELIVERABLE_BYTES / 3) + 1, 65));
     const result = await createRunner().execute({ command: "node", args: ["unused"], timeoutMs: 10_000 });
     expect(result.exitCode).not.toBe(0);
+    expect(await readFile(join(root, "calls"), "utf8")).toBe("command\n");
   });
 });
