@@ -1,4 +1,6 @@
+import { commonOpenApiResponses } from "./openapi-responses.js";
 import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
+import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
 import { registerTaskDrainPaths } from "./openapi-task-drain.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { updateFastResponseSchema } from "@paperclipai/shared";
@@ -663,53 +665,7 @@ const cliAuthChallengeIdParamSchema = z.string().trim()
 
 const ErrorSchema = registry.register("Error", z.object({ error: z.string() }));
 
-const responses = {
-  ok: (schema: z.ZodTypeAny = z.record(z.string(), z.unknown())) => ({
-    description: "Success",
-    content: { "application/json": { schema } },
-  }),
-  noContent: { description: "No content" },
-  badRequest: {
-    description: "Bad request",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unauthorized: {
-    description: "Unauthorized",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  forbidden: {
-    description: "Forbidden",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  notFound: {
-    description: "Not found",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  conflict: {
-    description: "Conflict",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  payloadTooLarge: {
-    description: "Payload too large",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unsupportedMediaType: {
-    description: "Unsupported media type",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unprocessable: {
-    description: "Unprocessable entity",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  serverError: {
-    description: "Internal server error",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  tooManyRequests: {
-    description: "Too many requests",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-};
+const responses = commonOpenApiResponses(ErrorSchema);
 
 const jsonBody = (schema: z.ZodTypeAny) => ({
   content: { "application/json": { schema } },
@@ -12154,6 +12110,8 @@ for (const [method, path, body] of experimentalApiPaths) {
     },
   });
 }
+
+registerCredentialTransferPaths(registry, responses);
 
 // ─── Spec builder ─────────────────────────────────────────────────────────────
 
