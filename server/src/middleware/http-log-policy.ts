@@ -44,6 +44,13 @@ const SECRET_SENSITIVE_HTTP_PATHS = [
 ];
 const SECRET_SENSITIVE_HTTP_METHODS = new Set(["POST", "PUT", "PATCH"]);
 
+/** Transfer input and gateway headers have no diagnostic value. */
+export function isCredentialTransferHttpRequest(url: string | undefined): boolean {
+  return Boolean(url && /^\/api\/companies\/[^/]+\/credential-transfers(?:\/|$)/i.test(
+    normalizePath(url).replace(/^https?:\/\/[^/]*/i, ""),
+  ));
+}
+
 /** Provider payloads are private even when a method/signature is rejected. */
 export function isPrivateWebhookHttpRequest(
   method: string | undefined,
@@ -79,6 +86,7 @@ export function isSecretSensitiveHttpRequest(
   url: string | undefined,
 ): boolean {
   if (isPrivateWebhookHttpRequest(method, url)) return true;
+  if (isCredentialTransferHttpRequest(url)) return true;
   if (!method || !url) return false;
   if (!SECRET_SENSITIVE_HTTP_METHODS.has(method.toUpperCase())) return false;
   const pathname = normalizePath(url);

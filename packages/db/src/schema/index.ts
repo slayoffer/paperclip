@@ -225,5 +225,6 @@ export * from "./public_mcp.js";
 export * from "./ai_connection_routing.js";
 export { toolConnectionAppSnapshots } from "./tool_connection_app_snapshots.js";
 export { toolConnectionAppSyncs } from "./tool_connection_app_syncs.js";
+export { credentialTransfers } from "./credential_transfers.js";
 export { interactionResolutionOutbox } from "./interaction_resolution_outbox.js";
 export { publicationAuthorityClocks, publicationBrokers, publicationRequests } from "./publication_requests.js";
