@@ -102,6 +102,8 @@ An exit code alone does not prove successful cleanup or a callback cause.
 Cleanup stops the worker before it requests the remote supervisor to stop.
 It seals the diagnostic runner and waits for its outstanding commands.
 An uncertain command outcome prevents directory removal and lease release.
+SSH exit 255, signal termination, and an absent or invalid exit status remain uncertain.
+These results do not confirm remote command termination. Preserve the directory and lease until termination is confirmed.
 It requires the supervisor's stop acknowledgement before it removes the owned directory.
 It then releases only the diagnostic lease.
 Unconfirmed cleanup retains the directory and lease identifiers for the operator.

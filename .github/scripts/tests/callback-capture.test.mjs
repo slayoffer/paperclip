@@ -140,6 +140,56 @@ function simulated(m) {
   return {runtime, calls, trace:{failed:false, requestIds:[randomUUID(), randomUUID(), randomUUID()]}};
 }
 
+test('uncertain SSH results preserve the diagnostic directory and lease', async t => {
+  const root = await temporary(t);
+  const outcomes = [
+    {exitCode:255, timedOut:false, signal:null},
+    {exitCode:null, timedOut:false, signal:null},
+    {timedOut:false, signal:null},
+    {exitCode:0, timedOut:false, signal:'SIGTERM'},
+    {exitCode:null, timedOut:false, signal:'SIGKILL'},
+    {exitCode:-1, timedOut:false, signal:null},
+    {exitCode:256, timedOut:false, signal:null},
+  ];
+  for (const [index, outcome] of outcomes.entries()) {
+    const m = manifest();
+    const {runtime, calls} = simulated(m);
+    const trace = createCaptureTrace(path.join(root, `trace-${index}.jsonl`), m.captureId);
+    const runner = tracedRunner({execute:async () => outcome}, trace);
+    runtime.prepareSupervisor = () => runner.execute({});
+    runtime.cleanRoot = async (_paths, _started, signal) => {
+      await runner.sealAndDrain(signal);
+      calls.push('cleanRoot');
+    };
+    const result = await captureSession(m, runtime, trace);
+    const message = JSON.stringify(outcome);
+    assert.equal(result.outcome, 'failed', message);
+    assert.equal(result.cleanup, 'incomplete', message);
+    assert.equal(result.remoteRoot, capturePaths(m).root, message);
+    assert.ok(UUID.test(result.leaseId), message);
+    assert.equal(trace.failed, true, message);
+    assert.deepEqual(calls, ['createRoot', 'acquire', 'stopWorker'], message);
+    await assert.rejects(runner.sealAndDrain(), /uncertain/, message);
+  }
+});
+
+test('a known SSH command failure permits directory removal and lease release', async t => {
+  const m = manifest();
+  const {runtime, calls} = simulated(m);
+  const trace = createCaptureTrace(path.join(await temporary(t), 'trace.jsonl'), m.captureId);
+  const runner = tracedRunner({execute:async () => ({exitCode:1, timedOut:false, signal:null})}, trace);
+  runtime.prepareSupervisor = () => runner.execute({});
+  runtime.cleanRoot = async (_paths, _started, signal) => {
+    await runner.sealAndDrain(signal);
+    calls.push('cleanRoot');
+  };
+  const result = await captureSession(m, runtime, trace);
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.cleanup, 'complete');
+  assert.equal(trace.failed, true);
+  assert.deepEqual(calls, ['createRoot', 'acquire', 'stopWorker', 'cleanRoot', 'release']);
+});
+
 test('three successful probes read the saved comment and release only the diagnostic lease', async () => {
   const m = manifest();
   const {runtime, calls, trace} = simulated(m);

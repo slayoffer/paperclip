@@ -14,7 +14,7 @@ it("runs the callback diagnostic safety and process tests", async () => {
     // Vitest otherwise hides the child assertions when execFile rejects.
     throw new Error(`${error.message}\n${error.stdout ?? ""}\n${error.stderr ?? ""}`, { cause: error });
   });
-  expect(stdout).toMatch(/^# tests 21$/m);
-  expect(stdout).toMatch(/^# pass 21$/m);
+  expect(stdout).toMatch(/^# tests 23$/m);
+  expect(stdout).toMatch(/^# pass 23$/m);
   expect(stdout).toMatch(/^# fail 0$/m);
 }, 25_000);

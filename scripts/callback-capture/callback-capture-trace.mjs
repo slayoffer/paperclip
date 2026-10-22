@@ -97,7 +97,12 @@ export function tracedRunner(runner, trace) {
         pending.add(task);
         try {
           const result = await task;
-          if (result.timedOut) uncertain = true;
+          // SSH exit 255 reports a transport failure. The remote command can still run.
+          if (result.timedOut || result.signal != null || !Number.isInteger(result.exitCode) ||
+              result.exitCode < 0 || result.exitCode >= 255) {
+            uncertain = true;
+            throw new Error(result.timedOut ? 'timeout' : 'Diagnostic command outcome is uncertain.');
+          }
           return result;
         } catch (error) { uncertain = true; throw error; }
         finally { pending.delete(task); }
