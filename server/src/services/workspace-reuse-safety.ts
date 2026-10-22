@@ -1,4 +1,5 @@
-import { and, eq, ne, or } from "drizzle-orm";
+import fs from "node:fs/promises";
+import { and, eq, ne } from "drizzle-orm";
 import { executionWorkspaces, issues, type Db } from "@paperclipai/db";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 
@@ -14,17 +15,37 @@ export async function assertWorkspaceReuseIsSafe(input: {
   if (!input.issueId || input.sourceIssueId === input.issueId) return;
   let sourceIssueId = input.sourceIssueId;
   if (!sourceIssueId && input.db) {
-    const owners = await input.db.select({
+    const candidates = await input.db.select({
       sourceIssueId: executionWorkspaces.sourceIssueId,
       linkedIssueId: issues.id,
+      cwd: executionWorkspaces.cwd,
+      providerRef: executionWorkspaces.providerRef,
     }).from(executionWorkspaces).leftJoin(issues, and(
       eq(issues.companyId, input.companyId),
       eq(issues.executionWorkspaceId, executionWorkspaces.id),
       ne(issues.id, input.issueId),
-    )).where(and(
-        eq(executionWorkspaces.companyId, input.companyId),
-        or(eq(executionWorkspaces.cwd, input.cwd), eq(executionWorkspaces.providerRef, input.cwd)),
-    ));
+    )).where(eq(executionWorkspaces.companyId, input.companyId));
+    // Git can return a canonical path while the saved path contains a symlink.
+    // Resolve both paths before selecting owners. Cache only within this check.
+    const identities = new Map<string, Promise<string>>();
+    function identity(value: string) {
+      let resolved = identities.get(value);
+      if (!resolved) {
+        resolved = fs.realpath(value).catch(() => value);
+        identities.set(value, resolved);
+      }
+      return resolved;
+    }
+    const cwdIdentity = await identity(input.cwd);
+    const owners: typeof candidates = [];
+    for (const candidate of candidates) {
+      for (const value of [candidate.cwd, candidate.providerRef]) {
+        if (value && await identity(value) === cwdIdentity) {
+          owners.push(candidate);
+          break;
+        }
+      }
+    }
     // The original owner can resume even when other issues link to its row.
     if (owners.some((owner) => owner.sourceIssueId === input.issueId)) return;
     sourceIssueId = owners.find((owner) => owner.sourceIssueId)?.sourceIssueId

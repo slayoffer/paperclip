@@ -140,6 +140,79 @@ const support = await getEmbeddedPostgresTestSupport();
       .resolves.toMatchObject({ cwd: worktree, branchName: "parent" });
   });
 
+  it.each(["cwd", "providerRef"] as const)("protects a dirty branch when its saved %s is a symbolic link", async (field) => {
+    const f = await fixture();
+    const worktree = path.join(f.root, "parent");
+    await git(f.root, "worktree", "add", "-b", "parent", worktree);
+    const alias = path.join(f.root, "parent-alias");
+    await fs.symlink(worktree, alias, "dir");
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "isolated_workspace", strategyType: "git_worktree", name: "Parent alias",
+      [field]: alias, branchName: "parent" });
+    await fs.writeFile(path.join(worktree, "tracked.txt"), "parent work\n");
+    const before = await git(worktree, "status", "--porcelain");
+    const config = { workspaceStrategy: { type: "git_worktree", existingBranch: "parent",
+      baseRef: "base", provisionCommand: "touch provisioned" } };
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+        workspaceValidation: { reason: "cross_issue_workspace_not_clean", sourceIssueId },
+      } });
+    await expect(fs.access(path.join(worktree, "provisioned"))).rejects.toThrow();
+    expect(await git(worktree, "status", "--porcelain")).toBe(before);
+    expect(await fs.readFile(path.join(worktree, "tracked.txt"), "utf8")).toBe("parent work\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base,
+      config: { workspaceStrategy: { ...config.workspaceStrategy, provisionCommand: "true" } },
+      issue: { ...issue, id: sourceIssueId }, agent,
+    })).resolves.toMatchObject({ cwd: worktree, branchName: "parent" });
+    await git(worktree, "checkout", "--", "tracked.txt");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config, issue, agent }))
+      .resolves.toMatchObject({ cwd: worktree, branchName: "parent" });
+  });
+
+  it("protects a legacy binding when the candidate path is a symbolic link", async () => {
+    const f = await fixture();
+    const aliasRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-reuse-alias-"));
+    roots.push(aliasRoot);
+    const alias = path.join(aliasRoot, "checkout");
+    await fs.symlink(f.root, alias, "dir");
+    const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Legacy alias", cwd: f.root,
+    }).returning();
+    await db.update(issues).set({ executionWorkspaceId: workspace.id }).where(eq(issues.id, sourceIssueId));
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "parent work\n");
+    const base = { ...f.base, baseCwd: alias };
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+        workspaceValidation: { sourceIssueId, cleanliness: "dirty" },
+      } });
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, base,
+      workspace: { ...f.workspace, cwd: alias, providerRef: alias, sourceIssueId: null }, issue, agent,
+    })).rejects.toMatchObject({ code: "workspace_validation_failed" });
+    await expect(realizeExecutionWorkspace({ db, base, config: {},
+      issue: { ...issue, id: sourceIssueId }, agent,
+    })).resolves.toMatchObject({ cwd: alias });
+  });
+
+  it("keeps canonical owner selection inside the company", async () => {
+    const f = await fixture();
+    const otherCompanyId = randomUUID();
+    const otherProjectId = randomUUID();
+    const otherIssueId = randomUUID();
+    await db.insert(companies).values({ id: otherCompanyId, name: "Other", issuePrefix: "OTHER" });
+    await db.insert(projects).values({ id: otherProjectId, companyId: otherCompanyId, name: "Other" });
+    await db.insert(issues).values({ id: otherIssueId, companyId: otherCompanyId, title: "Other" });
+    const aliasRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-reuse-company-"));
+    roots.push(aliasRoot);
+    const alias = path.join(aliasRoot, "checkout");
+    await fs.symlink(f.root, alias, "dir");
+    await db.insert(executionWorkspaces).values({ companyId: otherCompanyId, projectId: otherProjectId,
+      sourceIssueId: otherIssueId, mode: "shared_workspace", strategyType: "project_primary",
+      name: "Other company alias", cwd: alias });
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "parent work\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: f.root });
+  });
+
   it("protects a legacy workspace through the other issue's binding", async () => {
     const f = await fixture();
     const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId,

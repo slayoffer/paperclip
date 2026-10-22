@@ -18,6 +18,7 @@ A dirty workspace or failed status check causes `workspace_validation_failed`.
 The runtime does not repair or provision that workspace for the other issue.
 The source issue can resume its own dirty workspace.
 The check covers persisted bindings and registered worktrees selected by branch.
+Owner selection compares canonical paths within the company, including saved and candidate symbolic-link paths.
 Company and project access checks still apply.
 
 ## Task environment selection
