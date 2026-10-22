@@ -61,6 +61,7 @@ describeDatabase("review bridge wait routes", () => {
       .send({ body: "Continue this issue.", resume: true });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect((await f.current()).status).toBe("todo");
+    expect((await f.current()).unblockDescriptor).toBeNull();
     await vi.waitFor(() => expect(f.enqueue).toHaveBeenCalledTimes(1));
     expect((await f.db.select().from(issueRecoveryActions))[0]).toMatchObject({ status: "resolved",
       evidence: { automaticRecovery: { replay: "not_required" } } });
