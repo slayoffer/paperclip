@@ -62,8 +62,10 @@ An expired wait creates one intent. A stable admission receipt prevents repeated
 A failed dispatch remains pending. A skipped admission can retry after its gate clears.
 Admission can defer a receipt behind an existing run or an execution hold.
 Startup recovery revisits deferred bridge receipts, including timeout and document events without comments.
-It uses the normal queue-release path after the prior run becomes terminal.
-That path preserves the receipt identifier and checks current execution holds before it creates a successor.
+It uses normal admission without requiring a historical run or matching run context.
+Admission rechecks the server dispatch identity and current issue version under the issue lock.
+It preserves the receipt identifier and execution holds before it creates a successor.
+A live executor keeps the receipt deferred. A changed issue version cancels the obsolete receipt.
 Repeated recovery sweeps do not create another successor for the same receipt.
 
 Recovery leaves recorded bridge waits alone, including expired waits that await their timeout transaction.

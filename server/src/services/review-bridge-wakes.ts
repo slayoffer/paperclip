@@ -99,3 +99,22 @@ export async function dispatchBridgeWakes(db: Db, enqueue: ReturnType<typeof hea
   }
   return delivered;
 }
+
+/** Retry normal admission from the saved receipt without a historical run. */
+export async function resumeDeferredBridgeReceipt(db: Db, companyId: string, queueId: string,
+  enqueue: (agentId: string, opts: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1],
+    requestId: string, bridgeReceiptRecovery: boolean) => Promise<unknown>) {
+  const [wake] = await db.select().from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.id, queueId), eq(agentWakeupRequests.companyId, companyId),
+    eq(agentWakeupRequests.status, "deferred_issue_execution"), isDeferredBridgeReceipt(),
+  ));
+  if (!wake) return;
+  const payload = wake.payload ?? {};
+  const context = payload._paperclipWakeContext as Record<string, unknown> | undefined;
+  await enqueue(wake.agentId, {
+    source: wake.source as "automation", triggerDetail: wake.triggerDetail as "system",
+    reason: typeof context?.wakeReason === "string" ? context.wakeReason : wake.reason,
+    payload, contextSnapshot: context, allowRunCoalescing: false,
+    requestedByActorType: "system", requestedByActorId: wake.requestedByActorId,
+  }, wake.id, true);
+}

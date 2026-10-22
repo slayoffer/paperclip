@@ -15,13 +15,14 @@ export interface QueuedRunRecoveryDependencies {
   isHeartbeatRunTerminalStatus: (status: string) => boolean;
   resumeSavedLegacyComments: (companyId: string, queueId: string) => Promise<void>;
   releaseIssueExecutionAndPromote: (run: Run, options: { suppressImmediateRecovery: boolean }) => Promise<void>;
+  resumeDeferredBridgeReceipt: (companyId: string, queueId: string) => Promise<void>;
   startNextQueuedRunForAgent: (agentId: string) => Promise<unknown>;
 }
 
 export async function recoverQueuedRuns(db: Db, deps: QueuedRunRecoveryDependencies) {
   const { getSchedulingSuppression, resumeExecutionWaitComments, getWorktreeExecutionCutoff,
     resumeQueuedCommentInterrupt, readQueuedInteractionResponse, isHeartbeatRunTerminalStatus,
-    resumeSavedLegacyComments, releaseIssueExecutionAndPromote, startNextQueuedRunForAgent } = deps;
+    resumeSavedLegacyComments, releaseIssueExecutionAndPromote, startNextQueuedRunForAgent, resumeDeferredBridgeReceipt } = deps;
   if ((await getSchedulingSuppression()).suppressed) return;
   await resumeExecutionWaitComments();
   const cutoff = await getWorktreeExecutionCutoff();
@@ -60,7 +61,13 @@ export async function recoverQueuedRuns(db: Db, deps: QueuedRunRecoveryDependenc
       cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
     .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
   for (const { wake, bridgeReceipt } of strandedQueues) {
-    if (!bridgeReceipt && !queuedCommentIdsFromWakePayload(wake.payload).length &&
+    if (bridgeReceipt) {
+      await resumeDeferredBridgeReceipt(wake.companyId, wake.id).catch(err => {
+        logger.warn({ err, queueId: wake.id }, "failed to admit deferred bridge receipt");
+      });
+      continue;
+    }
+    if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
         !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
     const [latest] = await db.select().from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, wake.companyId), eq(heartbeatRuns.agentId, wake.agentId),
@@ -69,10 +76,10 @@ export async function recoverQueuedRuns(db: Db, deps: QueuedRunRecoveryDependenc
     await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
       eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
     ));
-    if (!latest || (!bridgeReceipt && latest.runtimeMode !== "legacy") || !isHeartbeatRunTerminalStatus(latest.status)) continue;
+    if (!latest || latest.runtimeMode !== "legacy" || !isHeartbeatRunTerminalStatus(latest.status)) continue;
     const cancelledAdmission = latest.status === "cancelled" && !latest.startedAt &&
       latest.errorCode === "execution_reconciliation_required";
-    if (!bridgeReceipt && (latest.status !== "cancelled" || cancelledAdmission) && await getExecutionBlocker(db, wake.companyId, String(wake.payload?.issueId))) {
+    if ((latest.status !== "cancelled" || cancelledAdmission) && await getExecutionBlocker(db, wake.companyId, String(wake.payload?.issueId))) {
       await resumeSavedLegacyComments(wake.companyId, wake.id).catch(err => {
         logger.warn({ err, queueId: wake.id }, "failed to deliver saved legacy comment after recovery stopped");
       });

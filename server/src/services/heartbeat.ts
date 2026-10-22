@@ -1,3 +1,5 @@
+import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
+import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
 import { assertDurableBridgeWakeupRequest, assertDurableBridgeWakeupReceipt, type DurableBridgeWakeupRequest } from "./durable-bridge-wakeup.js";
 import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
@@ -19653,7 +19655,8 @@ export function heartbeatService(
     return recoverQueuedRuns(db, { getSchedulingSuppression, resumeExecutionWaitComments,
       getWorktreeExecutionCutoff, resumeQueuedCommentInterrupt, readQueuedInteractionResponse,
       isHeartbeatRunTerminalStatus, resumeSavedLegacyComments, releaseIssueExecutionAndPromote,
-      startNextQueuedRunForAgent });
+      startNextQueuedRunForAgent, resumeDeferredBridgeReceipt: (companyId, queueId) =>
+        resumeDeferredBridgeReceipt(db, companyId, queueId, enqueueWakeup) });
   }
 
   async function recoverActiveSessionGoals() {
@@ -26900,7 +26903,7 @@ export function heartbeatService(
     }
   }
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
+  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -27501,35 +27504,12 @@ export function heartbeatService(
           );
 
           if (executionWaitRequestId) {
-            const [pending] = await tx.select().from(agentWakeupRequests).where(and(
-              eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
-              eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
-              // A user message can join a queue originally created by a
-              // system wake. Admission validates the saved user comment or board click.
-              (opts.queuedCommentInterruptId ?? opts.queuedCommentRequestId) === executionWaitRequestId
-                ? undefined : eq(agentWakeupRequests.requestedByActorType, "user"),
-              opts.queuedCommentInterruptId === executionWaitRequestId
-                ? sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt'->>'actorId' = ${opts.requestedByActorId ?? ""}`
-                : opts.queuedCommentRequestId === executionWaitRequestId ? undefined
-                  : eq(agentWakeupRequests.requestedByActorId, opts.requestedByActorId ?? ""),
-              sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
-            ));
-            // The issue lock serializes cleanup callbacks and periodic workers.
-            // An adopted, discarded, or edited receipt is no longer authority.
-            if (!pending || (!(wakeCommentId && queuedCommentIdsFromWakePayload(pending.payload).includes(wakeCommentId)) &&
-                !(opts.queuedCommentInterruptId && await readQueuedInteractionResponse(tx as unknown as Db,
-                  agent.companyId, issueId, pending.payload)))) {
-              return { kind: "deferred" as const };
-            }
-            if (opts.queuedCommentRequestId) {
-              const ids = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
-                agent.companyId, issueId, agentId, queuedCommentIdsFromWakePayload(pending.payload));
-              if (!wakeCommentId || !ids.includes(wakeCommentId)) return { kind: "deferred" as const };
-              pending.payload = withQueuedCommentIdsInWakePayload(parseObject(pending.payload), ids);
-              await tx.update(agentWakeupRequests).set({ payload: pending.payload }).where(and(
-                eq(agentWakeupRequests.id, pending.id), eq(agentWakeupRequests.companyId, agent.companyId),
-              ));
-            }
+            const pending = await readDeferredWakeForAdmission(tx as unknown as Db, {
+              companyId: agent.companyId, issueId, agentId, requestId: executionWaitRequestId,
+              actorId: opts.requestedByActorId, wakeCommentId, bridgeReceiptRecovery,
+              queuedCommentInterruptId: opts.queuedCommentInterruptId, queuedCommentRequestId: opts.queuedCommentRequestId,
+            }, { readQueuedInteractionResponse, undeliveredLegacyUserCommentIds });
+            if (!pending) return { kind: "deferred" as const };
             if (!opts.queuedCommentInterruptId && !opts.queuedCommentRequestId && pending.payload?.manualUserWake === true) {
               // A persisted manual wake keeps its actor when an execution wait
               // resumes. The locked receipt above has revalidated that actor.
@@ -28259,6 +28239,9 @@ export function heartbeatService(
             }
           }
 
+          // An existing bridge receipt waits behind a live executor without creating another receipt.
+          if (bridgeReceiptRecovery && activeExecutionRun) return { kind: "deferred" as const };
+
           const dependencyReadiness = await issuesSvc
             .listDependencyReadiness(issue.companyId, [issue.id], tx)
             .then((rows) => rows.get(issue.id) ?? null);
@@ -28295,6 +28278,7 @@ export function heartbeatService(
             !dependencyReadiness.isDependencyReady &&
             !blockedInteractionWake
           ) {
+            if (bridgeReceiptRecovery) return { kind: "deferred" as const };
             await recordExecutionWait(tx as unknown as Db, {
               issueId: issue.id,
               coalesce: coalesceExecutionWait,
@@ -28717,7 +28701,9 @@ export function heartbeatService(
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
           }
 
-          const wakeupRequest = await tx
+          const wakeupRequest = bridgeReceiptRecovery
+            ? await queueDeferredBridgeReceipt(tx as unknown as Db, executionWaitRequestId!, payload)
+            : await tx
             .insert(agentWakeupRequests)
             .values({
               ...durableReceiptFields,
