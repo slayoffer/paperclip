@@ -117,7 +117,8 @@ An incident still requires affected-worker verification after its correction.
 node --test .github/scripts/tests/callback-capture.test.mjs
 ```
 
-The existing trusted workflow includes this test through `.github/scripts/tests/*.test.mjs`.
+The upstream trusted workflow includes this test through `.github/scripts/tests/*.test.mjs`.
+The fork release workflow runs it through `packages/adapter-utils/src/callback-capture-diagnostic.test.ts`.
 The tests use temporary local files, simulated runtime boundaries, and real child processes.
 They do not create a live lease, access SSH, or write a Paperclip comment.
 
