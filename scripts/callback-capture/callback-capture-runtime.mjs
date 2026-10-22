@@ -48,8 +48,10 @@ export async function installedRuntime(manifest, appRoot, outputDir, trace, env 
     async acquire() {
       const record = await runtime.acquireRunLease({companyId:manifest.companyId, environment:isolated,
         issueId:manifest.issueId, heartbeatRunId:null, persistedExecutionWorkspace:null, assertCompanyBinding:true});
-      if (record.lease.provider !== 'ssh' || record.lease.metadata?.remoteCwd !== paths.root) throw new Error('Lease isolation differs.');
       return record.lease;
+    },
+    validateLease(lease) {
+      if (lease.provider !== 'ssh' || lease.metadata?.remoteCwd !== paths.root) throw new Error('Lease isolation differs.');
     },
     async startWorker(_, signal) {
       const client = tracedQueue(modules.bridge.createCommandManagedSandboxCallbackBridgeQueueClient({

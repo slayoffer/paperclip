@@ -11,7 +11,7 @@ it("runs the callback diagnostic safety and process tests", async () => {
   const { stdout } = await execute(process.execPath, [
     "--test", ".github/scripts/tests/callback-capture.test.mjs",
   ], { cwd: repository, timeout: 20_000, maxBuffer: 256 * 1024 });
-  expect(stdout).toMatch(/^# tests 19$/m);
-  expect(stdout).toMatch(/^# pass 19$/m);
+  expect(stdout).toMatch(/^# tests 21$/m);
+  expect(stdout).toMatch(/^# pass 21$/m);
   expect(stdout).toMatch(/^# fail 0$/m);
 }, 25_000);

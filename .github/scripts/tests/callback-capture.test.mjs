@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { capturePaths, isolatedEnvironment, databaseUrl, checkInstalledIdentity, REQUIRED_FILES,
+import { capturePaths, isolatedEnvironment, databaseUrl, checkInstalledIdentity, REQUIRED_FILES, UUID,
   diagnosticArgv } from '../../../scripts/callback-capture/callback-capture-policy.mjs';
 import { createCaptureTrace, tracedRunner, tracedQueue } from '../../../scripts/callback-capture/callback-capture-trace.mjs';
 import { captureSession } from '../../../scripts/callback-capture/callback-capture-session.mjs';
@@ -185,6 +185,29 @@ test('cleanup failure retains the lease and identifies the retained directory', 
   assert.equal(result.remoteRoot, capturePaths(m).root);
   assert.ok(result.leaseId);
   assert.ok(!calls.includes('release'));
+});
+
+test('an uncertain lease insertion preserves its root without repeating acquisition', async () => {
+  const m = manifest();
+  const {runtime, calls, trace} = simulated(m);
+  runtime.acquire = async () => { calls.push('acquire'); throw Error('uncertain database write'); };
+  const result = await captureSession(m, runtime, trace);
+  assert.equal(result.cleanup, 'incomplete');
+  assert.equal(result.leaseId, null);
+  assert.equal(calls.filter(c => c === 'acquire').length, 1);
+  assert.ok(!calls.includes('cleanRoot'));
+  assert.ok(!calls.includes('release'));
+});
+
+test('a lease validation failure records its identifier before disposal', async () => {
+  const m = manifest();
+  const {runtime, calls, trace} = simulated(m);
+  runtime.validateLease = () => { throw Error('isolation differs'); };
+  const result = await captureSession(m, runtime, trace);
+  assert.ok(UUID.test(result.leaseId));
+  assert.equal(result.cleanup, 'complete');
+  assert.ok(calls.includes('release'));
+  assert.ok(!calls.includes('GET'));
 });
 
 test('late startup settles before cleanup and cannot start a probe after the deadline', async () => {

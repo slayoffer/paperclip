@@ -32,7 +32,12 @@ export async function captureSession(manifest, runtime, trace, limits = {}) {
     await active(async () => { await runtime.createRoot(paths); rootCreated = true; });
     await active(async () => {
       // Save a late lease result even after the deadline. Never repeat acquisition.
-      leasePending = runtime.acquire(paths).then(lease => { result.leaseId = lease.id; save(); return lease; });
+      leasePending = runtime.acquire(paths).then(lease => {
+        result.leaseId = lease.id;
+        save();
+        runtime.validateLease?.(lease);
+        return lease;
+      });
       await leasePending;
     });
     if (!UUID.test(result.leaseId)) throw new Error('Invalid diagnostic lease.');
@@ -82,6 +87,7 @@ export async function captureSession(manifest, runtime, trace, limits = {}) {
       await worker?.stop({drainTimeoutMs:1000});
       checkDisposal();
       if (result.rootAttempted && !rootCreated) throw new Error('Root creation outcome is unknown.');
+      if (leasePending && !result.leaseId) throw new Error('Lease acquisition outcome is unknown.');
       if (rootCreated) await runtime.cleanRoot(paths, result.startAttempted, cleanupController.signal);
       checkDisposal();
       // A timed-out lease insertion can finish during teardown. Do not release an unknown lease.
