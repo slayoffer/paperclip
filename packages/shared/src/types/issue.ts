@@ -1423,6 +1423,8 @@ export interface ConnectionIntentResult {
 export interface RequestConfirmationPayload {
   version: 1;
   prompt: string;
+  /** Identifies credential operations for external approval coordinators. */
+  credentialOperation?: boolean;
   acceptLabel?: string | null;
   rejectLabel?: string | null;
   rejectRequiresReason?: boolean;
