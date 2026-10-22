@@ -59,8 +59,13 @@ export async function recoverQueuedRuns(db: Db, deps: QueuedRunRecoveryDependenc
       ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`),
       sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
       cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
-    .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
+    .orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.id)).limit(50);
   for (const { wake, bridgeReceipt } of strandedQueues) {
+    // Rotate every attempted receipt, including admission that remains deferred.
+    // Otherwise 50 waiting bridge receipts can exclude later ready work forever.
+    await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
+      eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+    ));
     if (bridgeReceipt) {
       await resumeDeferredBridgeReceipt(wake.companyId, wake.id).catch(err => {
         logger.warn({ err, queueId: wake.id }, "failed to admit deferred bridge receipt");
@@ -73,9 +78,6 @@ export async function recoverQueuedRuns(db: Db, deps: QueuedRunRecoveryDependenc
       eq(heartbeatRuns.companyId, wake.companyId), eq(heartbeatRuns.agentId, wake.agentId),
       sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(wake.payload?.issueId)}`,
     )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
-    await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
-      eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
-    ));
     if (!latest || latest.runtimeMode !== "legacy" || !isHeartbeatRunTerminalStatus(latest.status)) continue;
     const cancelledAdmission = latest.status === "cancelled" && !latest.startedAt &&
       latest.errorCode === "execution_reconciliation_required";

@@ -67,6 +67,9 @@ Admission rechecks the server dispatch identity and current issue version under 
 It preserves the receipt identifier and execution holds before it creates a successor.
 A live executor keeps the receipt deferred. A changed issue version cancels the obsolete receipt.
 Repeated recovery sweeps do not create another successor for the same receipt.
+Each sweep attempts the 50 oldest eligible receipts and refreshes their attempt timestamps before admission.
+Receipts that remain deferred move behind older candidates, including ordinary comments.
+A ready receipt behind 50 waiting receipts reaches admission within two sweeps if no older candidates arrive.
 
 Recovery leaves recorded bridge waits alone, including expired waits that await their timeout transaction.
 A pending durable intent also prevents disposition recovery.
