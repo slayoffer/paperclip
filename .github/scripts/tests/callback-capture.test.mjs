@@ -1,4 +1,5 @@
 import test from 'node:test';
+import './callback-capture-runtime.test.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';

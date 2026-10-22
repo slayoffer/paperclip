@@ -98,7 +98,7 @@ export async function installedRuntime(manifest, appRoot, outputDir, trace, env 
         const fs=require('node:fs'); let s=''; process.stdin.on('data',c=>s+=c); process.stdin.on('end',()=>{
           const p=JSON.parse(s); fs.writeFileSync(p.root+'/supervisor.mjs',p.source,{flag:'wx',mode:0o600});
           fs.writeFileSync(p.root+'/node',p.shim,{flag:'wx',mode:0o700}); console.log('{}');
-        });`, {root:paths.root, source, shim});
+        });`, {root:paths.root, source, shim}, runner);
     },
     async startServer() {
       gatewayAttempted = true;
