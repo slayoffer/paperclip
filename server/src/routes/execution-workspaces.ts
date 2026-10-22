@@ -538,6 +538,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
               repoRef: existing.baseRef,
             },
             workspace: {
+              sourceIssueId: existing.sourceIssueId,
               mode: existing.mode,
               strategyType: existing.strategyType,
               cwd: existing.cwd,

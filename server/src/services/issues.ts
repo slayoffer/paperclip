@@ -478,9 +478,6 @@ function buildPreRealizationExecutionWorkspaceSettings(
       ...(settings.workspaceStrategy.branchTemplate
         ? { branchTemplate: settings.workspaceStrategy.branchTemplate }
         : {}),
-      ...(settings.workspaceStrategy.existingBranch
-        ? { existingBranch: settings.workspaceStrategy.existingBranch }
-        : {}),
       ...(settings.workspaceStrategy.worktreeParentDir
         ? { worktreeParentDir: settings.workspaceStrategy.worktreeParentDir }
         : {}),
@@ -8915,7 +8912,7 @@ export function issueService(db: Db) {
       const {
         acceptanceCriteria,
         blockParentUntilDone,
-        executionWorkspaceInheritanceMode = "linkage",
+        executionWorkspaceInheritanceMode = "strategy_only",
         actorAgentId,
         actorUserId,
         ...issueData
@@ -8928,16 +8925,6 @@ export function issueService(db: Db) {
       // boundary; create() then resolves the target project's own workspaces.
       const childProjectId = issueData.projectId ?? parent.projectId;
       const childInheritsParentProject = childProjectId === parent.projectId;
-      const hasExplicitExecutionWorkspaceOverride =
-        issueData.executionWorkspaceId !== undefined ||
-        issueData.executionWorkspacePreference !== undefined ||
-        issueData.executionWorkspaceSettings !== undefined;
-      const inheritedPreRealizationWorkspaceSettings =
-        inheritStrategyOnly && !hasExplicitExecutionWorkspaceOverride
-          ? buildPreRealizationExecutionWorkspaceSettings(
-              parent.executionWorkspaceSettings,
-            )
-          : null;
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
         parentId: parent.id,
@@ -8961,15 +8948,9 @@ export function issueService(db: Db) {
           issueData.description,
           acceptanceCriteria,
         ),
-        ...(inheritedPreRealizationWorkspaceSettings
-          ? {
-              executionWorkspaceSettings:
-                inheritedPreRealizationWorkspaceSettings,
-            }
+        ...(!inheritStrategyOnly
+          ? { inheritExecutionWorkspaceFromIssueId: parent.id }
           : {}),
-        ...(inheritStrategyOnly
-          ? { skipExecutionWorkspaceInheritance: true }
-          : { inheritExecutionWorkspaceFromIssueId: parent.id }),
       });
 
       if (blockParentUntilDone) {
@@ -9574,6 +9555,15 @@ export function issueService(db: Db) {
           }
           if (
             inheritsSourceProject &&
+            !hasExplicitExecutionWorkspaceOverride &&
+            inheritExecutionWorkspaceFromIssueId == null
+          ) {
+            executionWorkspaceSettings = buildPreRealizationExecutionWorkspaceSettings(
+              workspaceSource.executionWorkspaceSettings,
+            );
+          }
+          if (
+            inheritsSourceProject &&
             isolatedWorkspacesEnabled &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
@@ -9591,7 +9581,12 @@ export function issueService(db: Db) {
                 ),
               )
               .then((rows) => rows[0] ?? null);
-            if (sourceWorkspace) {
+            if (sourceWorkspace && inheritExecutionWorkspaceFromIssueId == null) {
+              executionWorkspaceSettings = {
+                ...executionWorkspaceSettings,
+                mode: issueExecutionWorkspaceModeForPersistedWorkspace(sourceWorkspace.mode),
+              };
+            } else if (sourceWorkspace) {
               executionWorkspaceId = sourceWorkspace.id;
               executionWorkspacePreference = "reuse_existing";
               executionWorkspaceSettings = {

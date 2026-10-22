@@ -1,3 +1,4 @@
+import { assertWorkspaceReuseIsSafe } from "./workspace-reuse-safety.js";
 import { hasOwnLinkedWorktreeGitDirectory, repairMissingManagedWorktreeGit } from "./managed-worktree-git.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
@@ -3247,6 +3248,12 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: input.base.baseCwd,
+    });
     return {
       ...input.base,
       strategy: "project_primary",
@@ -3333,6 +3340,12 @@ export async function realizeExecutionWorkspace(input: {
   await fs.mkdir(worktreeParentDir, { recursive: true });
 
   async function reuseExistingWorktree(reusablePath: string, effectiveBranchName = branchName, extraWarnings: string[] = []) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: reusablePath,
+    });
     // An exact-branch attach must never move the requested branch, so skip
     // the unstarted-worktree fast-forward that template-derived reuse gets.
     const refresh = currentBaseRefSha && !requestedExistingBranch
@@ -3409,6 +3422,12 @@ export async function realizeExecutionWorkspace(input: {
   }
 
   async function validateReusableWorktree(reusablePath: string) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: reusablePath,
+    });
     const repairWarnings = await repairMissingManagedWorktreeGit({
       repoRoot, worktreePath: reusablePath, branchName,
       runtimeOwned: !requestedExistingBranch && input.recordedBranchOwnership?.createdByRuntime === true,
@@ -3668,6 +3687,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   base: ExecutionWorkspaceInput;
   workspace: {
     id?: string | null;
+    sourceIssueId?: string | null;
     mode: string | null | undefined;
     strategyType: string | null | undefined;
     cwd: string | null | undefined;
@@ -3693,6 +3713,17 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
   if (!cwd) return null;
+
+  if (await directoryExists(cwd)) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      sourceIssueId: input.workspace.sourceIssueId,
+      issueId: input.issue?.id,
+      cwd,
+      executionWorkspaceId: input.workspace.id,
+    });
+  }
 
   const strategy = input.workspace.strategyType === "git_worktree" ? "git_worktree" : "project_primary";
   const realized: RealizedExecutionWorkspace = {
