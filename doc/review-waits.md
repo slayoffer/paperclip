@@ -60,6 +60,11 @@ That context includes the expired deadline and target.
 The periodic recovery sweep and startup recovery process outstanding waits and wake intents.
 An expired wait creates one intent. A stable admission receipt prevents repeated timeout delivery after a restart.
 A failed dispatch remains pending. A skipped admission can retry after its gate clears.
+Admission can defer a receipt behind an existing run or an execution hold.
+Startup recovery revisits deferred bridge receipts, including timeout and document events without comments.
+It uses the normal queue-release path after the prior run becomes terminal.
+That path preserves the receipt identifier and checks current execution holds before it creates a successor.
+Repeated recovery sweeps do not create another successor for the same receipt.
 
 Recovery leaves recorded bridge waits alone, including expired waits that await their timeout transaction.
 A pending durable intent also prevents disposition recovery.

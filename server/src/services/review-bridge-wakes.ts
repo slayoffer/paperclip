@@ -7,6 +7,22 @@ import { BRIDGE_DISPATCH_ACTOR, BRIDGE_DISPATCH_PENDING, reconcileBridgeWaits } 
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import { logger } from "../middleware/logger.js";
 
+/** Only server-created receipts can enter bridge restart recovery. */
+export function isDeferredBridgeReceipt() {
+  return sql<boolean>`${agentWakeupRequests.requestedByActorType} = 'system' and exists (
+    select 1 from agent_wakeup_requests bridge_intent
+    where bridge_intent.company_id = ${agentWakeupRequests.companyId}
+      and bridge_intent.agent_id = ${agentWakeupRequests.agentId}
+      and bridge_intent.requested_by_actor_type = 'system'
+      and bridge_intent.requested_by_actor_id = ${BRIDGE_DISPATCH_ACTOR}
+      and bridge_intent.status in ('dispatching_bridge', 'completed_bridge_dispatch')
+      and bridge_intent.payload->>'receiptId' = ${agentWakeupRequests.id}::text
+      and bridge_intent.payload->>'issueId' = ${agentWakeupRequests.payload}->>'issueId'
+      and ${agentWakeupRequests.requestedByActorId} = 'bridge-dispatch:' || bridge_intent.id::text
+      and ${agentWakeupRequests.idempotencyKey} = bridge_intent.idempotency_key || ':receipt'
+  )`;
+}
+
 /** Durable intent plus stable admission receipt prevents duplicate delivery after a crash. */
 export async function dispatchBridgeWakes(db: Db, enqueue: ReturnType<typeof heartbeatService>["wakeup"],
   opts?: { companyId?: string | null; issueId?: string }) {

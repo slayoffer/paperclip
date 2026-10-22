@@ -72,6 +72,7 @@ jobs:
           server/src/__tests__/review-bridge-waits.test.ts
           server/src/__tests__/review-bridge-routes.test.ts
           server/src/__tests__/review-bridge-admission.test.ts
+          server/src/__tests__/review-bridge-restart.test.ts
           server/src/__tests__/blocked-state-integrity.test.ts
           server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts
           server/src/__tests__/dependency-release-wakes.test.ts
