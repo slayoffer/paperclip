@@ -281,8 +281,9 @@ function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: ob
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
   const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
+  // Lock lifetimes follow the callback, including long provider waits.
   dedicatedDbFactories.set(db, () => createDbClient(url, {
-    ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
+    ...resolved, maxConnections: 1, idleTimeoutSeconds: 0, maxLifetimeSeconds: 0, applicationName: "paperclip-workspace-finalization-lock",
   }, db));
   return db;
 }
