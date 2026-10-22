@@ -126,7 +126,9 @@ An issuer entry in the current trust snapshot disables every certificate for tha
 A signed standard run token separately authenticates the agent, run, and company.
 The certificate registration supplies the broker, host, and company.
 Current authority checks validate the issue, assignment, repository, and immutable bindings.
-The effective certificate, issuer, registration, and overlap expiry can shorten the remaining dispatch lifetime.
+The effective certificate, issuer, registration, overlap, and run token expiry can shorten the remaining dispatch lifetime.
+The listener rechecks the signed run token after each protected trust read.
+The final authority deadline includes token expiry after subsequent request lock waits.
 Trust reads and database lock waits count toward expiry.
 Missing trust, durable records, or reliable authority time prevents dispatch.
 

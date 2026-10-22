@@ -97,11 +97,13 @@ export function createPublicationAuthorityListener(options?: PublicationListener
       const service = publicationAuthorityService(options!.db, {
         clock: options!.clock,
         brokerGuard: async (tx, authenticated, now) => {
-          // Recheck the signed run token after authority lock waits.
+          const certificateExpiry = await trust.check(tx, peer, authenticated, now, mapped.record.hostId);
+          // Recheck the signed run token after authority lock waits and the protected trust read.
           const current = verifyLocalAgentJwt(token!);
           if (!current || current.sub !== identity.agentId || current.run_id !== identity.runId
-            || current.company_id !== identity.companyId) return null;
-          return trust.check(tx, peer, authenticated, now, mapped.record.hostId);
+            || current.company_id !== identity.companyId || Date.now() >= current.exp * 1_000) return null;
+          // The service checks this deadline again after subsequent request lock waits.
+          return certificateExpiry === null ? null : Math.min(certificateExpiry, current.exp * 1_000);
         },
       });
       const operation = match[1];

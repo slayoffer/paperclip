@@ -1,9 +1,10 @@
 import { randomUUID, X509Certificate } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { publicationAuthorityClocks, publicationBrokers, issues } from "@paperclipai/db";
+import { publicationAuthorityClocks, publicationBrokers, publicationRequests, issues } from "@paperclipai/db";
 import { publicationDispatchWithinDeadline } from "@paperclipai/shared";
-import { startAuthorityDatabase } from "./publication-authority.test-fixture.js";
+import { createLocalAgentJwt } from "../agent-auth-jwt.js";
+import { barrier, startAuthorityDatabase, waitForDatabaseWait } from "./publication-authority.test-fixture.js";
 import { certificateFingerprint } from "./publication-authority-trust.js";
 import { syntheticCertificates, transportFixture } from "./publication-authority-tls.test-fixture.js";
 
@@ -19,7 +20,7 @@ describe("current transport authorization on established connections", () => {
     storage = await startAuthorityDatabase();
   }, 90_000);
   beforeEach(async () => { f = await transportFixture(storage.db, material); });
-  afterEach(async () => { await f?.close(); });
+  afterEach(async () => { await f?.close(); vi.restoreAllMocks(); });
   afterAll(async () => { await storage?.database.cleanup(); material?.dispose(); vi.unstubAllEnvs(); });
 
   it.each(["broker", "issuer", "certificate", "assignment"])("applies current %s revocation to the same connection", async (kind) => {
@@ -142,5 +143,68 @@ describe("current transport authorization on established connections", () => {
       overlapEndsAtMs: (await f.clock()).wallMs + 300 }], revokedIssuerIds: [] });
     f.beforeTrustRead((count) => { if (count === 2) f.advance(301); });
     expect((await client.post(path("dispatch"))).decision.dispatch).toBe(false);
+  });
+
+  function shortRunToken() {
+    let wallMs = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => wallMs);
+    const previousTtl = process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS;
+    vi.stubEnv("PAPERCLIP_AGENT_JWT_TTL_SECONDS", "1");
+    const token = createLocalAgentJwt(f.identity.agentId, f.identity.companyId, "codex_local", f.identity.runId)!;
+    vi.stubEnv("PAPERCLIP_AGENT_JWT_TTL_SECONDS", previousTtl);
+    return {
+      headers: { Authorization: `Bearer ${token}` },
+      expiresAtMs: (Math.floor(wallMs / 1_000) + 1) * 1_000,
+      advance: (ms: number) => { wallMs += ms; f.advance(ms); },
+    };
+  }
+
+  it.each(["at", "after"])("refuses run token expiry %s the locked trust read", async (when) => {
+    const client = f.client();
+    await client.post(path("request"));
+    const run = shortRunToken();
+    const elapsed = when === "at" ? run.expiresAtMs - Date.now() : 3_000;
+    f.beforeTrustRead((count) => { if (count === 2) run.advance(elapsed); });
+    expect(await client.post(path("dispatch"), f.bindings, run.headers)).toMatchObject({
+      status: 200, decision: { dispatch: false, reason: "authority_unavailable" },
+    });
+    const [row] = await storage.db.select().from(publicationRequests).where(eq(publicationRequests.id, f.bindings.requestId));
+    expect(row.state).toBe("pending");
+  });
+
+  it("bounds the dispatch lifetime by run token expiry", async () => {
+    const client = f.client();
+    await client.post(path("request"));
+    const run = shortRunToken();
+    expect((await client.post(path("dispatch"), f.bindings, run.headers)).decision).toMatchObject({
+      dispatch: true, remainingLifetimeMs: run.expiresAtMs - (await f.clock()).wallMs,
+    });
+  });
+
+  it("refuses run token expiry during a request lock wait after the trust read", async () => {
+    const client = f.client();
+    await client.post(path("request"));
+    const run = shortRunToken();
+    const locked = barrier(), release = barrier();
+    let pid = 0;
+    const writer = storage.db.transaction(async (tx) => {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      pid = row.pid;
+      await tx.select().from(publicationRequests).where(eq(publicationRequests.id, f.bindings.requestId)).for("no key update");
+      locked.release();
+      await release.ready;
+    });
+    await locked.ready;
+    const dispatch = client.post(path("dispatch"), f.bindings, run.headers);
+    try {
+      await waitForDatabaseWait(storage.db, pid);
+      run.advance(3_000);
+    } finally {
+      release.release();
+      await writer;
+    }
+    expect((await dispatch).decision.dispatch).toBe(false);
+    const [row] = await storage.db.select().from(publicationRequests).where(eq(publicationRequests.id, f.bindings.requestId));
+    expect(row.state).toBe("pending");
   });
 });

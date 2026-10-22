@@ -20,7 +20,7 @@ const deny = (reason: string, row?: Request): PublicationDecision => ({
 export function publicationAuthorityService(db: Db, options: {
   clock?: AuthorityClock;
   // Protected transport construction only. Execute under the broker row lock.
-  // Return the authenticated certificate's effective expiry, or null to refuse.
+  // Return the earliest authentication expiry, or null to refuse.
   brokerGuard?: (tx: PublicationTransaction, identity: PublicationIdentity, nowMs: number) => Promise<number | null>;
 } = {}) {
   const clock = options.clock ?? databaseAuthorityClock;
