@@ -1,5 +1,5 @@
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -30260,6 +30260,11 @@ export function heartbeatService(
             }
           : undefined,
       );
+      // An owner run keeps its thread under owner-project:<projectId>; reset that row for the issue too.
+      const ownerKey = taskKey ? await ownerSessionKeyForIssueReset(db, { agent, taskKey }) : null;
+      const clearedOwnerSessions = ownerKey
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey: ownerKey, adapterType: agent.adapterType })
+        : 0;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,
@@ -30281,7 +30286,7 @@ export function heartbeatService(
         ...updated,
         sessionDisplayId: null,
         sessionParamsJson: null,
-        clearedTaskSessions,
+        clearedTaskSessions: clearedTaskSessions + clearedOwnerSessions,
       };
     },
 

@@ -20,7 +20,17 @@ WITH parameters AS (
          END AS raw_input_tokens,
          CASE WHEN jsonb_typeof(r.usage_json -> 'inputTokens') = 'number'
               THEN (r.usage_json ->> 'inputTokens')::numeric
-         END AS reported_input_tokens
+         END AS reported_input_tokens,
+         -- The service's cumulative sample (readRawUsageTotals): raw value, else reported value, else 0.
+         greatest(0, floor(coalesce(
+           CASE WHEN jsonb_typeof(r.usage_json -> 'rawInputTokens') = 'number' THEN (r.usage_json ->> 'rawInputTokens')::numeric END,
+           CASE WHEN jsonb_typeof(r.usage_json -> 'inputTokens') = 'number' THEN (r.usage_json ->> 'inputTokens')::numeric END, 0))) AS sample_input,
+         greatest(0, floor(coalesce(
+           CASE WHEN jsonb_typeof(r.usage_json -> 'rawCachedInputTokens') = 'number' THEN (r.usage_json ->> 'rawCachedInputTokens')::numeric END,
+           CASE WHEN jsonb_typeof(r.usage_json -> 'cachedInputTokens') = 'number' THEN (r.usage_json ->> 'cachedInputTokens')::numeric END, 0))) AS sample_cached,
+         greatest(0, floor(coalesce(
+           CASE WHEN jsonb_typeof(r.usage_json -> 'rawOutputTokens') = 'number' THEN (r.usage_json ->> 'rawOutputTokens')::numeric END,
+           CASE WHEN jsonb_typeof(r.usage_json -> 'outputTokens') = 'number' THEN (r.usage_json ->> 'outputTokens')::numeric END, 0))) AS sample_output
   FROM heartbeat_runs r
   JOIN agents a ON a.id = r.agent_id AND a.company_id = r.company_id
   CROSS JOIN parameters p
@@ -28,12 +38,28 @@ WITH parameters AS (
     AND a.adapter_type IN ('codex_local', 'claude_local')
     AND r.created_at < p.window_end
     AND r.status IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+), valid_samples AS (
+  -- A failed turn without usage is not a sample. The service skips it the same way (readLatestUsageSample).
+  SELECT *, count(valid_input) OVER (
+    PARTITION BY agent_id, session_id_after ORDER BY created_at, id
+  ) AS valid_count
+  FROM (
+    SELECT *, CASE WHEN sample_input > 0 OR sample_cached > 0 OR sample_output > 0
+                   THEN sample_input END AS valid_input
+    FROM history
+  ) sampled
+), latest_valid AS (
+  -- The latest valid sample at or before each run.
+  SELECT *, first_value(valid_input) OVER (
+    PARTITION BY agent_id, session_id_after, valid_count ORDER BY created_at, id
+  ) AS latest_valid_input
+  FROM valid_samples
 ), prior_totals AS (
   -- Include history before the window to measure its first resumed run.
-  SELECT *, lag(raw_input_tokens) OVER (
+  SELECT *, lag(latest_valid_input) OVER (
     PARTITION BY agent_id, session_id_after ORDER BY created_at, id
   ) AS previous_raw_input_tokens
-  FROM history
+  FROM latest_valid
 ), classified AS (
   SELECT h.adapter_type,
          CASE

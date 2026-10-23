@@ -153,10 +153,42 @@ suite("owner session baseline query", () => {
     const rows = await db.execute(sql.raw(query));
     const resumed = rows.find(row => row.adapter_type === "codex_local" && row.resume_state === "resumed")!;
     expect(Number(resumed.runs)).toBe(6);
-    expect(Number(resumed.token_samples)).toBe(3);
-    expect(Number(resumed.median_input_tokens)).toBe(380_000);
+    // 22M subtracts 20.5M, the latest valid total before the NULL-usage run.
+    expect(Number(resumed.token_samples)).toBe(4);
+    expect(Number(resumed.median_input_tokens)).toBe(400_000);
     const fresh = rows.find(row => row.adapter_type === "codex_local" && row.resume_state === "fresh")!;
     expect(Number(fresh.runs)).toBe(2);
     expect(Number(fresh.median_input_tokens)).toBe(150_000);
+  });
+
+  it("subtracts the latest valid Codex total, not a failed turn with zero or NULL usage", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Codex failed turn", issuePrefix: `B${companyId.replaceAll("-", "")}`,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Codex", role: "engineer", adapterType: "codex_local",
+    });
+    const run = (time: string, status: string, before: string | null, usageJson: Record<string, unknown> | null) => ({
+      companyId, agentId, status, createdAt: new Date(time),
+      sessionIdBefore: before, sessionIdAfter: "thread", resultJson: { stdout: "" }, usageJson,
+    });
+    await db.insert(heartbeatRuns).values([
+      run("2026-10-20T01:00:00Z", "succeeded", null, { inputTokens: 100_000, rawInputTokens: 100_000 }),
+      run("2026-10-20T02:00:00Z", "failed", "thread", { inputTokens: 0, rawInputTokens: 0 }),
+      run("2026-10-20T03:00:00Z", "failed", "thread", null),
+      run("2026-10-20T04:00:00Z", "succeeded", "thread", { inputTokens: 50_000, rawInputTokens: 150_000, usageSource: "session_delta" }),
+    ]);
+    const template = await readFile(new URL("../../scripts/owner-session-baseline.sql", import.meta.url), "utf8");
+    const query = template.replaceAll(":'company_id'", `'${companyId}'`)
+      .replaceAll(":'window_end'", "'2026-10-23T05:30:00Z'");
+    const rows = await db.execute(sql.raw(query));
+    const codex = (state: string) => rows.find(row => row.adapter_type === "codex_local" && row.resume_state === state)!;
+    expect(Number(codex("resumed").runs)).toBe(1);
+    expect(Number(codex("resumed").token_samples)).toBe(1);
+    expect(Number(codex("resumed").median_input_tokens)).toBe(50_000);
+    expect(Number(codex("fresh").median_input_tokens)).toBe(100_000);
+    expect(Number(codex("unknown").runs)).toBe(2);
   });
 });

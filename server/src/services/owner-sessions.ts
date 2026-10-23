@@ -1,6 +1,6 @@
 import path from "node:path";
-import { agentTaskSessions, heartbeatRuns, type Db } from "@paperclipai/db";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { agentTaskSessions, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 
 const OWNER_SESSION_KEY_PREFIX = "owner-project:";
 
@@ -40,6 +40,23 @@ export function resolveOwnerSession(input: {
 // An owner thread spans many issues. The task-session wake resets (issue_assigned, review recovery, approval
 // requested, unscoped timer) exist to give each ISSUE a clean start; applied to an owner thread they would start a
 // fresh thread on every new issue, which is the cost this mode removes. Only an explicit request resets it.
+/**
+ * An issue-scoped session reset must also clear the owner thread that serves the issue. Resolve its key from the
+ * company's issue row (UUID or identifier) with the same rules as resolveOwnerSession.
+ */
+export async function ownerSessionKeyForIssueReset(
+  db: Db,
+  input: { agent: { id: string; companyId: string; adapterType: string }; taskKey: string },
+): Promise<string | null> {
+  const taskKey = input.taskKey.trim();
+  if (!taskKey || isOwnerSessionKey(taskKey) || !ownerSessionsEnabled(input.agent)) return null;
+  const [issue] = await db.select({ projectId: issues.projectId }).from(issues)
+    .where(and(eq(issues.companyId, input.agent.companyId),
+      or(sql`${issues.id}::text = ${taskKey}`, eq(issues.identifier, taskKey.toUpperCase()))))
+    .limit(1);
+  return resolveOwnerSession({ agent: input.agent, issue: issue ?? null, agentHome: "/", eligible: true })?.key ?? null;
+}
+
 export function shouldResetOwnerSessionForWake(context: Record<string, unknown> | null | undefined): boolean {
   return context?.forceFreshSession === true;
 }

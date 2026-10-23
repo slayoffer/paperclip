@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentTaskSessions, agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { agentTaskSessions, agents, companies, createDb, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import {
   firstCallerTaskKey,
   isOwnerSessionKey,
+  ownerSessionKeyForIssueReset,
   readLatestUsageSample,
   readOwnerSessionInputTokens,
   resolveOwnerSession,
@@ -122,5 +123,36 @@ describeEmbeddedPostgres("owner session store", () => {
     // After a reset, a finalizer that read the old row does not bring it back.
     expect(await saveOwnerSessionState(db, { ...base, runId: third, expectedLastRunId: second, session })).toBe("stale");
     expect(await row()).toBeNull();
+  });
+
+  it("resolves the owner row that an issue-scoped reset must also clear", async () => {
+    const { companyId, agentId } = await fixture();
+    const other = await fixture();
+    const [project] = await db.insert(projects).values({ companyId, name: "Owner project" }).returning();
+    const issueId = randomUUID();
+    const identifier = `OWN-${issueId.slice(0, 6)}`.toUpperCase();
+    const looseIssueId = randomUUID();
+    await db.insert(issues).values([
+      { id: issueId, companyId, projectId: project.id, title: "Owned issue", identifier },
+      { id: looseIssueId, companyId, title: "Issue without a project" },
+    ]);
+    const agent = { id: agentId, companyId, adapterType: "codex_local" };
+    const key = `owner-project:${project.id}`;
+    vi.stubEnv("PAPERCLIP_OWNER_SESSIONS_ENABLED", "true");
+    try {
+      expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: issueId })).toBe(key);
+      expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: identifier.toLowerCase() })).toBe(key);
+      expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: looseIssueId })).toBeNull();
+      expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: key })).toBeNull();
+      // Company boundary: another company's agent cannot reach this issue's owner row.
+      const foreign = { id: other.agentId, companyId: other.companyId, adapterType: "codex_local" };
+      expect(await ownerSessionKeyForIssueReset(db, { agent: foreign, taskKey: issueId })).toBeNull();
+      vi.stubEnv("PAPERCLIP_OWNER_SESSION_AGENT_IDS", "another-agent");
+      expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: issueId })).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // Switch off: the reset keeps its previous scope.
+    expect(await ownerSessionKeyForIssueReset(db, { agent, taskKey: issueId })).toBeNull();
   });
 });

@@ -25,6 +25,7 @@ The owner project comes only from the current issue row. A wake's project or tas
 Task keys that start with `owner-project:` are reserved. Paperclip ignores them in wake data.
 A run saves the owner row before it leaves `running`, so the next run reads the current thread.
 A finalizer whose run already left `running`, or whose row moved to another run, writes nothing.
+An issue-scoped session reset also clears the owner row of that issue's project, so the next wake starts a fresh thread.
 
 The provider starts in a stable owner directory. Each turn names its issue worktree and branch.
 With `filesystemScope: "workspace"`, the sandbox mounts the owner directory and the issue workspace read-write.
@@ -55,6 +56,7 @@ The optional input limit above uses that same handoff path.
 Owner limits sum normalized input tokens across the thread. This also covers Claude per-run totals.
 Codex command output reports cumulative usage. Owner mode subtracts the latest valid session total for each wake.
 A failed turn without usage does not reset that total.
+The canary query in `server/scripts/owner-session-baseline.sql` skips such turns the same way.
 Claude retains its per-run usage accounting.
 
 Disable the switch to restore task-keyed sessions and the existing workspace behavior.
