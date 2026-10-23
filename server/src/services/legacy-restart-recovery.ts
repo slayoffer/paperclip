@@ -19,6 +19,17 @@ export type LegacyRestartCheckpoint = {
   sessionParams: Record<string, unknown> & { sessionId: string; cwd: string };
 };
 
+export function preserveLegacyRestartEvidence(
+  previous: Record<string, unknown> | null | undefined,
+  result: Record<string, unknown>,
+) {
+  return {
+    ...(previous?.restartCheckpoint ? { restartCheckpoint: previous.restartCheckpoint } : {}),
+    ...(previous?.restartRecovery ? { restartRecovery: previous.restartRecovery } : {}),
+    ...result,
+  };
+}
+
 export function readLegacyRestartCheckpoint(run: Run): LegacyRestartCheckpoint | null {
   const value = run.resultJson?.restartCheckpoint as LegacyRestartCheckpoint | undefined;
   if (!value || value.version !== 1 || value.companyId !== run.companyId || value.agentId !== run.agentId ||

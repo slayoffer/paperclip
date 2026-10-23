@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { runningProcesses } from "../adapters/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
@@ -11,6 +14,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
 import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { heartbeatService } from "./heartbeat.js";
+import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 
 const execute = vi.hoisted(() => vi.fn(async (_input: AdapterExecutionContext) => ({ exitCode: 0, signal: null, timedOut: false })));
@@ -47,7 +51,7 @@ const support = await getEmbeddedPostgresTestSupport();
       ...legacyControllerClaim("legacy"), contextSnapshot: { issueId, executionWorkspaceId } }).returning();
     await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
     if (save) await saveLegacyRestartCheckpoint(db, run, { adapterType: "codex_local", taskKey: "owner-project:test",
-      workspaceCwd: cwd, sessionParams: { sessionId: "saved-thread", cwd, ...params } });
+      workspaceCwd: cwd, sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", cwd, ...params } });
     return read(run.id);
   }
   async function read(id: string) { return (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)))[0]!; }
@@ -59,11 +63,11 @@ const support = await getEmbeddedPostgresTestSupport();
   it("reclaims the same run with the saved session and owner session key", async () => {
     const run = await expire((await seed()).id);
     expect(await claimLegacyRestartRecovery(db, run, "codex_local")).toMatchObject({
-      taskKey: "owner-project:test", sessionParams: { sessionId: "saved-thread", cwd },
+      taskKey: "owner-project:test", sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", cwd },
     });
     const saved = await read(run.id);
     expect(saved).toMatchObject({ id: run.id, status: "running", controllerBootId: legacyControllerBootId,
-      sessionIdAfter: "saved-thread", resultJson: { restartRecovery: { outcome: "resuming", attempt: 1 } } });
+      sessionIdAfter: "01234567-89ab-4cde-8f01-23456789abcd", resultJson: { restartRecovery: { outcome: "resuming", attempt: 1 } } });
     const [issue] = await db.select().from(issues).where(eq(issues.id, String(run.contextSnapshot?.issueId)));
     expect(issue).toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
   });
@@ -98,31 +102,46 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(readLegacyRestartCheckpoint(await read(run.id))).toMatchObject({ providerStopped: false, workspaceSettled: false });
   });
 
-  it("a graceful restart resumes a live Codex run in the same session", async () => {
+  it.each(["control", "process", "missing"] as const)("a graceful restart resumes a live Codex run through its %s owner", async ownership => {
     execute.mockClear();
     await db.update(heartbeatRuns).set({ status: "succeeded" });
     const seeded = await seed(false);
     await db.update(heartbeatRuns).set({ status: "queued", controllerBootId: null, controllerLeaseExpiresAt: null })
       .where(eq(heartbeatRuns.id, seeded.id));
+    execute.mockImplementation(async input => {
+      if (ownership === "missing") throw new Error("restart_session_missing");
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, String(input.context.issueId)));
+      return { exitCode: 0, signal: null, timedOut: false,
+        sessionId: "01234567-89ab-4cde-8f01-23456789abcd" };
+    });
     let markStarted!: () => void;
     const started = new Promise<void>(resolve => { markStarted = resolve; });
     execute.mockImplementationOnce(async input => {
-      await input.onCancellationReady?.();
+      const child = ownership === "process" ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }) : null;
+      const stopped = child ? once(child, "exit") : null;
+      if (child) {
+        runningProcesses.set(input.runId, { child, graceSec: 1, processGroupId: null });
+        await input.onSpawn?.({ pid: child.pid!, processGroupId: null, startedAt: new Date().toISOString() });
+      } else await input.onCancellationReady?.();
       await input.onEvent?.({ eventType: "session.checkpoint", payload: {
-        sessionParams: { sessionId: "saved-thread", cwd },
+        sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", cwd },
       } });
       markStarted();
-      await new Promise<void>(resolve => {
-        if (input.signal?.aborted) resolve();
-        else input.signal?.addEventListener("abort", () => resolve(), { once: true });
-      });
+      try {
+        if (stopped) await stopped;
+        else await new Promise<void>(resolve => {
+          if (input.signal?.aborted) resolve();
+          else input.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await input.onProviderStopped?.();
+      } finally { child?.kill(); runningProcesses.delete(input.runId); }
       return { exitCode: 0, signal: null, timedOut: false };
     });
     const oldController = heartbeatService(db);
     await oldController.resumeQueuedRuns();
     await started;
     expect(readLegacyRestartCheckpoint(await read(seeded.id))).not.toBeNull();
-    expect(await oldController.drainRunningRunsForShutdown("SIGTERM", new Date(), [seeded.id]))
+    expect(await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM", new Date(), [seeded.id]))
       .toMatchObject({ restartSuspendedRunIds: [seeded.id], interruptedRunIds: [] });
     await oldController.drainActiveRunExecutions();
     const suspended = await read(seeded.id);
@@ -131,20 +150,34 @@ const support = await getEmbeddedPostgresTestSupport();
     const newController = heartbeatService(db);
     await newController.reapOrphanedRuns({ staleThresholdMs: 0 });
     await newController.drainActiveRunExecutions();
-    expect(await read(seeded.id)).toMatchObject({ status: "succeeded", resultJson: { restartRecovery: { outcome: "resumed" } } });
+    if (ownership === "missing") {
+      expect(await read(seeded.id)).toMatchObject({ status: "failed", resultJson: {
+        restartRecovery: { outcome: "reconciliation", reason: "restart_session_missing" },
+      } });
+    } else {
+      expect(await read(seeded.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "01234567-89ab-4cde-8f01-23456789abcd", resultJson: { restartRecovery: { outcome: "resumed" } } });
+    }
     const calls = execute.mock.calls.filter(([input]) => input.runId === seeded.id);
     expect(calls).toHaveLength(2);
-    expect(calls[1]![0]).toMatchObject({ runId: seeded.id, runtime: { sessionId: "saved-thread" }, context: { paperclipRestartResume: true } });
-    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(seeded.contextSnapshot?.issueId)))).toEqual([]);
+    expect(calls[1]![0]).toMatchObject({ runId: seeded.id, runtime: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd" }, context: { paperclipRestartResume: true } });
+    const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(seeded.contextSnapshot?.issueId)));
+    expect(recoveryActions.filter(action => action.cause === "legacy_execution_requires_reconciliation"))
+      .toHaveLength(ownership === "missing" ? 1 : 0);
+    if (ownership === "missing") {
+      const obsolete = await db.select().from(issueRecoveryActions).where(conversationRecoveryActionPredicate());
+      expect(obsolete.some(action => action.sourceIssueId === seeded.contextSnapshot?.issueId)).toBe(false);
+    }
   }, 60_000);
 
-  it("a missing session retains reconciliation without dispatch", async () => {
+  it("a missing checkpoint retains reconciliation without dispatch", async () => {
     execute.mockClear();
     await db.update(heartbeatRuns).set({ status: "succeeded" });
     const run = await expire((await seed(false)).id);
     const heartbeat = heartbeatService(db);
     await heartbeat.reapOrphanedRuns({ staleThresholdMs: 0 });
-    expect((await read(run.id)).status).toBe("failed");
+    expect(await read(run.id)).toMatchObject({ status: "failed", resultJson: {
+      restartRecovery: { outcome: "reconciliation", reason: "restart_session_missing" },
+    } });
     expect(execute).not.toHaveBeenCalled();
     const holds = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(run.contextSnapshot?.issueId)));
     expect(holds).toEqual([expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" })]);

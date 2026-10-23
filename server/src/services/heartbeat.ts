@@ -1,4 +1,4 @@
-import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
+import { claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -1371,6 +1371,7 @@ const failedProcessRunCancellations = new Map<
 // that must guarantee no run write is still in flight (graceful shutdown, and
 // tests tearing down a shared database) can await drainActiveRunExecutions().
 const activeRunExecutionPromises = new Set<Promise<void>>();
+const restartSuspendedLegacyRuns = new Set<string>();
 // Routes dispatch a wakeup fire-and-forget (void heartbeat.wakeup(...)). The
 // wakeup promise stays pending through its asynchronous prologue, and it
 // resolves only after it inserts the queued run and registers the run
@@ -3529,6 +3530,8 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
       then ${heartbeatRuns.resultJson}
     else jsonb_strip_nulls(
       jsonb_build_object(
+        'restartCheckpoint', case when pg_column_size(${heartbeatRuns.resultJson}->'restartCheckpoint') <= 16384 then ${heartbeatRuns.resultJson}->'restartCheckpoint' end,
+        'restartRecovery', case when pg_column_size(${heartbeatRuns.resultJson}->'restartRecovery') <= 2048 then ${heartbeatRuns.resultJson}->'restartRecovery' end,
         'summary', left(${heartbeatRuns.resultJson} ->> 'summary', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'result', left(${heartbeatRuns.resultJson} ->> 'result', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'message', left(${heartbeatRuns.resultJson} ->> 'message', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
@@ -9585,7 +9588,6 @@ export function heartbeatService(
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
-  const restartSuspendedLegacyRuns = new Set<string>();
   const runtimeEnv = options.runtimeEnv ?? process.env;
   const inWorktreeRuntime = isTruthyRuntimeEnvValue(
     runtimeEnv.PAPERCLIP_IN_WORKTREE,
@@ -12989,6 +12991,10 @@ export function heartbeatService(
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
+
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
     }
@@ -13077,6 +13083,10 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
 
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
@@ -15380,9 +15390,16 @@ export function heartbeatService(
         continue;
       }
       const checkpoint = readLegacyRestartCheckpoint(run);
-      if (checkpoint && adapterExecutionControls.has(run.id)) {
+      const restartProcess = runningProcesses.get(run.id);
+      if (checkpoint && (adapterExecutionControls.has(run.id) || restartProcess)) {
         restartSuspendedLegacyRuns.add(run.id);
-        adapterExecutionControls.get(run.id)!.controller.abort(new Error("server_restart"));
+        adapterExecutionControls.get(run.id)?.controller.abort(new Error("server_restart"));
+        if (restartProcess) {
+          try {
+            await terminateHeartbeatRunProcess({ pid: restartProcess.child.pid,
+              processGroupId: restartProcess.processGroupId, graceMs: Math.max(1, restartProcess.graceSec) * 1000 });
+          } finally { runningProcesses.delete(run.id); }
+        }
         restartSuspendedRunIds.push(run.id);
         continue;
       }
@@ -19500,6 +19517,7 @@ export function heartbeatService(
       if (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType)) {
         const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType);
         if (checkpoint) {
+          restartSuspendedLegacyRuns.delete(run.id);
           const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {
             logger.error({ err, runId: run.id }, "Legacy restart resume failed");
           });
@@ -21347,26 +21365,28 @@ export function heartbeatService(
           : null;
       const persistedNativeExecutionWorkspaceId =
         persistedNativeExecutionInput?.binding.executionWorkspaceId ?? null;
+      const persistedRecoveryExecutionWorkspaceId = persistedNativeExecutionWorkspaceId ??
+        runOptions.legacyRestartRecovery?.executionWorkspaceId ?? null;
       const requestedExecutionWorkspaceId =
-        persistedNativeExecutionWorkspaceId ??
+        persistedRecoveryExecutionWorkspaceId ??
         readNonEmptyString(issueRef?.executionWorkspaceId);
       const existingExecutionWorkspace = requestedExecutionWorkspaceId
         ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId)
         : null;
-      const nativeRecoveryExecutionWorkspaceId =
+      const recoveryExecutionWorkspaceId =
         resolveNativeRecoveryExecutionWorkspaceBinding({
-          bindingId: persistedNativeExecutionWorkspaceId,
+          bindingId: persistedRecoveryExecutionWorkspaceId,
           persistedWorkspaceFound: existingExecutionWorkspace !== null,
         });
       const workspaceReuseRequest =
         resolveExecutionWorkspaceReuseRequestForIssue({
           issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-          issueExecutionWorkspacePreference: nativeRecoveryExecutionWorkspaceId
+          issueExecutionWorkspacePreference: recoveryExecutionWorkspaceId
             ? "reuse_existing"
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
-          requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+          requestedExistingBranch: recoveryExecutionWorkspaceId
             ? null
             : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
           existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
@@ -21510,7 +21530,7 @@ export function heartbeatService(
         reusableExistingExecutionWorkspace,
         selectedEnvironmentId,
       );
-      if (nativeRecoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+      if (recoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
         throw new ConfigurationIncompleteFailure(
           "The task environment changed during a suspended native run. Start a new execution.",
           { configurationIncomplete: { reason: "task_environment_changed", issueId } },
@@ -22351,7 +22371,7 @@ export function heartbeatService(
       const bindIssueToPersistedExecutionWorkspace = async (
         workspace: ExecutionWorkspace | null,
       ) => {
-        if (!issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+        if (!issueId || !workspace || recoveryExecutionWorkspaceId) {
           return;
         }
         const nextIssueWorkspaceMode =
@@ -26722,7 +26742,7 @@ export function heartbeatService(
         executionControl.finish();
         adapterExecutionControls.delete(run.id);
         // Retain the workspace and lease. The next controller reuses this run.
-        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date() })
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: sql`clock_timestamp()` })
           .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
         return;
       }

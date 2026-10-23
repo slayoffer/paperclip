@@ -19,6 +19,7 @@ A hard SSH failure without these receipts uses reconciliation.
 
 A missing session, missing workspace, changed account, changed adapter, or unverified provider stop uses the existing reconciliation path.
 The run records the reason in `resultJson.restartRecovery`.
+Conversation retry policy cannot remove this reconciliation hold after a failed restart resume.
 Recovery permits at most three controller claims per run.
 Normal budget, pause, issue ownership, workspace, and approval checks still apply.
 
