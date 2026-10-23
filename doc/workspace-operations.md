@@ -11,6 +11,8 @@ An explicit child branch or base ref takes precedence.
 Set `inheritExecutionWorkspaceFromIssueId` to request a source execution workspace.
 The internal child helper also supports explicit `executionWorkspaceInheritanceMode: "linkage"`.
 A direct execution workspace binding remains supported.
+The child endpoint does not accept a workspace inheritance source or mode.
+Its creation audit omits `inheritedExecutionWorkspaceFromIssueId`, including when a caller selects the parent’s workspace directly.
 A requested branch that differs from the saved workspace branch requires a separate realization.
 
 Before cross-issue reuse, the runtime checks staged, unstaged, and untracked Git changes.

@@ -11825,10 +11825,6 @@ export function issueRoutes(
           identifier: issue.identifier,
           title: issue.title,
           ...buildCreateIssueActivityStatusDetails(issue, res),
-          ...(issue.executionWorkspaceId &&
-          issue.executionWorkspaceId === parent.executionWorkspaceId
-            ? { inheritedExecutionWorkspaceFromIssueId: parent.id }
-            : {}),
           ...(Array.isArray(req.body.blockedByIssueIds)
             ? { blockedByIssueIds: req.body.blockedByIssueIds }
             : {}),
