@@ -85,19 +85,21 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     return { input, issue, project, workspace, recover };
   }
 
-  it("keeps the admitted workspace binding when the issue points at a newer workspace", async () => {
+  it.each(["native", "legacy"])("keeps the admitted %s workspace binding when the issue points at a newer workspace", async (mode) => {
     const { input, workspace, recover } = await fixture();
     const original = await workspace();
     const newer = await workspace();
     input.task.issueRef!.executionWorkspaceId = newer.id;
     input.task.issueRef!.executionWorkspacePreference = null;
-    recover(original.id);
+    if (mode === "native") recover(original.id);
+    else input.task.legacyRestartExecutionWorkspaceId = original.id;
     const result = await selectHeartbeatEnvironment(db, input);
-    expect(result.nativeRecoveryExecutionWorkspaceId).toBe(original.id);
+    expect(result.recoveryExecutionWorkspaceId).toBe(original.id);
+    expect(result.nativeRecoveryExecutionWorkspaceId).toBe(mode === "native" ? original.id : null);
     expect(result.reusableExistingExecutionWorkspace?.id).toBe(original.id);
     expect(result.requestedShouldReuseExisting).toBe(true);
     expect(input.task.issueRef!.executionWorkspaceId).toBe(newer.id);
-    expect(result.persistedNativeExecutionInput?.binding.executionWorkspaceId).toBe(original.id);
+    expect(result.persistedNativeExecutionInput?.binding.executionWorkspaceId).toBe(mode === "native" ? original.id : undefined);
   });
 
   it("selects the saved execution workspace without inspecting live Git delivery state", async () => {

@@ -1,3 +1,4 @@
+import { legacyControllerBootId } from "../../../services/legacy-controller-lease.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
@@ -60,6 +61,7 @@ import {
 import type {
   CancelStaleQueuedRunInput,
   DispatchResolvedInteractionInput,
+  LegacyRestartDispatchClaim,
   DispatchResolvedInteractionOutcome,
   DueRetryRun,
   EvaluateScheduledRetryGateInput,
@@ -1138,14 +1140,34 @@ export function createPostgresRunDispatchAdapter(
     );
   }
 
+  function legacyRestartGeneration(run: HeartbeatRun, claim: LegacyRestartDispatchClaim | undefined) {
+    if (!claim) return null;
+    const recovery = parseObject(run.resultJson?.restartRecovery);
+    const checkpoint = parseObject(run.resultJson?.restartCheckpoint);
+    if (run.runtimeMode !== "legacy" || run.status !== "running"
+      || claim.controllerBootId !== legacyControllerBootId || run.controllerBootId !== claim.controllerBootId
+      || !run.controllerLeaseExpiresAt || run.controllerLeaseExpiresAt.getTime() <= Date.now()
+      || !Number.isSafeInteger(claim.attempt) || claim.attempt < 1
+      || recovery.outcome !== "resuming" || recovery.attempt !== claim.attempt
+      || !claim.sessionId || recovery.sessionId !== claim.sessionId
+      || parseObject(checkpoint.sessionParams).sessionId !== claim.sessionId) return null;
+    return JSON.stringify([claim.controllerBootId, claim.attempt, claim.sessionId]);
+  }
+
   async function dispatchResolvedInteractionIfCurrent<T>(
     input: DispatchResolvedInteractionInput<T>,
   ): Promise<DispatchResolvedInteractionOutcome<T>> {
+    const ownershipInput = input.legacyRestartClaim
+      ? { ...input, enforceContinuationOwnership: true } : input;
     const dispatchLockedRun = async (tx: Db, run: HeartbeatRun, publications: ActivityPublication[]) => {
       if (run.status !== input.expectedStatus || run.resultJson?.cancellation || run.resultJson?.startupCancellation) {
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
       }
-      if (input.enforceContinuationOwnership !== false) {
+      const legacyGeneration = legacyRestartGeneration(run, input.legacyRestartClaim);
+      if (input.legacyRestartClaim && (!legacyGeneration || input.recoveryLeaseOwner))
+        return { dispatched: false as const, admissionBlockReason: "Legacy restart no longer owns provider dispatch" };
+
+      if (ownershipInput.enforceContinuationOwnership !== false) {
         const { issueId, decision: initialDecision } = await decideCurrentRunStaleness(
           tx,
           run,
@@ -1199,14 +1221,18 @@ export function createPostgresRunDispatchAdapter(
 
       const priorDispatch = parseObject(parseObject(run.usageJson).budgetDispatch);
       const recoveryLeaseOwner = input.recoveryLeaseOwner ?? null;
-      if (priorDispatch.reservationId === input.reservationId && (priorDispatch.recoveryLeaseOwner ?? null) === recoveryLeaseOwner)
+      if (priorDispatch.legacyRestartGeneration && !legacyGeneration)
+        return { dispatched: false as const, admissionBlockReason: "Legacy restart requires its current dispatch claim" };
+      if (priorDispatch.reservationId === input.reservationId && (priorDispatch.recoveryLeaseOwner ?? null) === recoveryLeaseOwner
+        && (priorDispatch.legacyRestartGeneration ?? null) === legacyGeneration)
         return { dispatched: false as const, admissionBlockReason: "Provider dispatch already admitted this reservation generation" };
       // The committed claim is the dispatch linearization point. A concurrent
       // charge wins before it, or targets already-admitted work afterwards.
       // Preserve usage/cancellation evidence and fence duplicate handoffs even
-      // for zero-valued holds. A newly proven native recovery owner has its own
-      // generation; its ordinary stopped-execution checks remain upstream.
-      const claim = { reservationId: input.reservationId, recoveryLeaseOwner, admittedAt: new Date().toISOString() };
+      // for zero-valued holds. A proven native recovery owner or persisted
+      // legacy restart attempt gets one generation; stopped-execution checks
+      // remain with the recovery owner.
+      const claim = { reservationId: input.reservationId, recoveryLeaseOwner, legacyRestartGeneration: legacyGeneration, admittedAt: new Date().toISOString() };
       await tx.update(heartbeatRuns).set({
         usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ budgetDispatch: claim })}::jsonb`,
       }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
@@ -1214,7 +1240,7 @@ export function createPostgresRunDispatchAdapter(
     };
 
     const admission = await withIssueThenRunLocks(
-      input,
+      ownershipInput,
       () => {
         throw new RunDispatchApplicationError(
           "run_not_found",
@@ -1227,11 +1253,12 @@ export function createPostgresRunDispatchAdapter(
     // Accounting has committed. Close the separate issue/run ownership race
     // under short row locks, without reacquiring company accounting or awaiting
     // provider work. Mutating budget evaluation never runs in this second phase.
-    return withRunOwnershipLocks<DispatchResolvedInteractionOutcome<T>>(input, () => ({ dispatched: false as const,
+    return withRunOwnershipLocks<DispatchResolvedInteractionOutcome<T>>(ownershipInput, () => ({ dispatched: false as const,
       cancellation: { outcome: "lost_race" as const } }), async (tx, run) => {
       const claim = parseObject(parseObject(run.usageJson).budgetDispatch);
       if (run.status !== input.expectedStatus || run.costAccountedAt || run.resultJson?.cancellation || run.resultJson?.startupCancellation
         || claim.reservationId !== admission.claim.reservationId || claim.recoveryLeaseOwner !== admission.claim.recoveryLeaseOwner
+        || claim.legacyRestartGeneration !== admission.claim.legacyRestartGeneration
         || claim.admittedAt !== admission.claim.admittedAt || claim.handedOffAt)
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
 
@@ -1251,7 +1278,7 @@ export function createPostgresRunDispatchAdapter(
         || ["paused", "terminated", "pending_approval"].includes(scope.agentStatus))
         return { dispatched: false as const, admissionBlockReason: "Execution scope is paused or no longer ready for work" };
 
-      if (input.enforceContinuationOwnership !== false) {
+      if (ownershipInput.enforceContinuationOwnership !== false) {
         const contextSnapshot = parseObject(run.contextSnapshot);
         const issueId = readNonEmptyString(contextSnapshot.issueId);
         if (issueId) {
@@ -1281,6 +1308,9 @@ export function createPostgresRunDispatchAdapter(
           eq(nativeRunFinalizations.leaseOwner, input.recoveryLeaseOwner), sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`)) : [];
         if (!owner) return { dispatched: false as const, admissionBlockReason: "Native recovery no longer owns provider dispatch" };
       }
+      if (input.legacyRestartClaim && legacyRestartGeneration(run, input.legacyRestartClaim) !== admission.claim.legacyRestartGeneration)
+        return { dispatched: false as const, admissionBlockReason: "Legacy restart no longer owns provider dispatch" };
+
       await tx.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb)
         || ${JSON.stringify({ budgetDispatch: { ...claim, handedOffAt: new Date().toISOString() } })}::jsonb` })
         .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));

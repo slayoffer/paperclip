@@ -56,6 +56,8 @@ export interface HeartbeatEnvironmentSelectionInput {
     hasSelectedWorkspaceSource: boolean;
     taskWorkspaceIntent: Issue["workspaceSelection"];
     responsibleUserId: string | null;
+    /** Synthiq legacy restart resume: the workspace the suspended run used. */
+    legacyRestartExecutionWorkspaceId?: string | null;
   };
   policy: {
     trustPreset: TrustPresetResolution;
@@ -112,9 +114,11 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const isDotRun = heartbeatExternalProvider({ run, agent }) !== null;
   const persistedNativeExecutionWorkspaceId =
     persistedNativeExecutionInput?.binding.executionWorkspaceId ?? null;
+  const persistedRecoveryExecutionWorkspaceId = persistedNativeExecutionWorkspaceId ??
+    input.task.legacyRestartExecutionWorkspaceId ?? null;
   const fresh = input.task.freshWorkspace?.mode === "fresh_isolated_workspace";
   const requestedExecutionWorkspaceId = isDotRun ? null :
-    persistedNativeExecutionWorkspaceId ??
+    persistedRecoveryExecutionWorkspaceId ??
     readNonEmptyString(issueRef?.executionWorkspaceId);
   let existingExecutionWorkspace = requestedExecutionWorkspaceId
     ? await executionWorkspacesSvc.getStoredById(agent.companyId, requestedExecutionWorkspaceId)
@@ -147,15 +151,21 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       bindingId: persistedNativeExecutionWorkspaceId,
       persistedWorkspaceFound: existingExecutionWorkspace !== null,
     });
+  // Native and legacy restart recovery both bind the run to its saved workspace.
+  const recoveryExecutionWorkspaceId =
+    resolveNativeRecoveryExecutionWorkspaceBinding({
+      bindingId: persistedRecoveryExecutionWorkspaceId,
+      persistedWorkspaceFound: existingExecutionWorkspace !== null,
+    });
   const workspaceReuseRequest =
     resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-      issueExecutionWorkspacePreference: isDotRun ? null : nativeRecoveryExecutionWorkspaceId
+      issueExecutionWorkspacePreference: isDotRun ? null : recoveryExecutionWorkspaceId
         ? "reuse_existing"
         : (issueRef?.executionWorkspacePreference ?? null),
       existingExecutionWorkspaceStatus:
         existingExecutionWorkspace?.status ?? null,
-      requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+      requestedExistingBranch: recoveryExecutionWorkspaceId
         ? null
         : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
       existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
@@ -168,7 +178,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       : null;
   const workspaceAuthorizationActor = { type: "agent" as const, agentId: agent.id, companyId: agent.companyId,
     source: "agent_jwt" as const, runId: run.id, onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
-  if (!isDotRun && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+  if (!isDotRun && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !recoveryExecutionWorkspaceId) {
     const workspaceRequiringAccess = reusableExistingExecutionWorkspace ?? boundSourceWorkspace;
     if (workspaceRequiringAccess && issueId) {
       await assertTaskWorkspaceExecutionAccess(db, workspaceAuthorizationActor, agent.companyId, { issueId, workspaceId: workspaceRequiringAccess.id });
@@ -312,7 +322,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     selectedEnvironmentId,
     localEnvironment.id,
   );
-  if (nativeRecoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+  if (recoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
     throw new ConfigurationIncompleteFailure(
       "The task environment changed during a suspended native run. Start a new execution.",
       { configurationIncomplete: { reason: "task_environment_changed", issueId } },
@@ -524,6 +534,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     isDotRun,
     existingExecutionWorkspace,
     nativeRecoveryExecutionWorkspaceId,
+    recoveryExecutionWorkspaceId,
     workspaceReuseRequest,
     requestedShouldReuseExisting,
     reusableExistingExecutionWorkspace,

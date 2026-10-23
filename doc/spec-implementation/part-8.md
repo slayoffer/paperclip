@@ -282,6 +282,10 @@ The attention feed returns server-computed `shelf`, `retentionDays`, `keep`, `ar
 
 ## 11. Heartbeat and Adapter Contract
 
+The fork supports [legacy CLI restart recovery](../restart-session-recovery.md).
+Recovery retains the run and provider session when termination and workspace evidence permit a safe resume.
+Missing or conflicting evidence retains the reconciliation path.
+
 ## 11.1 Adapter Interface
 
 ```ts

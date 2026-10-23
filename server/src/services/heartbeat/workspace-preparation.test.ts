@@ -94,7 +94,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       },
       environment: { selectedEnvironmentId: localEnvironment.id, localEnvironment, selectedEnvironmentForConfig: localEnvironment, environmentResolution: { environmentId: localEnvironment.id, source: "default" }, resolvedInstanceSettings: await instanceSettingsService(db).get() },
       config: { mergedConfig: isolated ? { workspaceStrategy: { type: "git_worktree", baseRef: "main", branchTemplate: "test-{{issue.identifier}}" } } : {}, configSnapshot: null, secretManifest: [] },
-      reuse: { requestedShouldReuseExisting: false, existingExecutionWorkspace: null, reusableExistingExecutionWorkspace: null, workspaceReuseRequest: resolveExecutionWorkspaceReuseRequestForIssue({ issueExecutionWorkspaceId: null, issueExecutionWorkspacePreference: null, existingExecutionWorkspaceStatus: null }), nativeRecoveryExecutionWorkspaceId: null, persistedNativeExecutionInput: null, isDotRun: false, runOptions: {} },
+      reuse: { requestedShouldReuseExisting: false, existingExecutionWorkspace: null, reusableExistingExecutionWorkspace: null, workspaceReuseRequest: resolveExecutionWorkspaceReuseRequestForIssue({ issueExecutionWorkspaceId: null, issueExecutionWorkspacePreference: null, existingExecutionWorkspaceStatus: null }), nativeRecoveryExecutionWorkspaceId: null, recoveryExecutionWorkspaceId: null, persistedNativeExecutionInput: null, isDotRun: false, runOptions: {} },
       services: { envOrchestrator, executionWorkspacesSvc: executionWorkspaceService(db), workspaceOperationsSvc: workspaceOperationService(db), ...resolver, appendRunEvent: vi.fn() },
       controllerLease: { assertOwned: vi.fn(async () => {}) }, nativeRunnerPreparationSpans: [],
     };
@@ -738,21 +738,25 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect(await readFile(join(next.executionWorkspace.cwd, "retained.txt"), "utf8")).toBe("keep this work");
   });
 
-  it("keeps the admitted recovery workspace when the issue now points elsewhere", async () => {
+  it.each(["native", "legacy"])("keeps the admitted %s recovery workspace when the issue now points elsewhere", async (mode) => {
     const { input, issue } = await fixture(true);
     const first = await prepareHeartbeatWorkspace(db, input);
     await reuse(input, first.persistedExecutionWorkspace!);
     await db.update(issues).set({ executionWorkspaceId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
     input.task.issueRef = { ...input.task.issueRef!, executionWorkspaceId: null, projectWorkspaceId: null };
-    input.reuse.nativeRecoveryExecutionWorkspaceId = first.persistedExecutionWorkspace!.id;
-    await persistRecoveryInput(input, first.persistedExecutionWorkspace!.id, first.executionWorkspace.cwd);
+    input.reuse.recoveryExecutionWorkspaceId = first.persistedExecutionWorkspace!.id;
+    if (mode === "native") {
+      input.reuse.nativeRecoveryExecutionWorkspaceId = first.persistedExecutionWorkspace!.id;
+      await persistRecoveryInput(input, first.persistedExecutionWorkspace!.id, first.executionWorkspace.cwd);
+    }
     const anchor = vi.spyOn(input.services, "resolveReusedGitWorkspaceAnchor");
     const prepareRepositories = vi.spyOn(input.services.executionWorkspacesSvc, "prepareTaskRepositoriesForAdmission");
     const reserveRoot = vi.spyOn(input.services.executionWorkspacesSvc, "assertTaskRepositoryRecoveryBinding");
     const next = await prepareHeartbeatWorkspace(db, input);
-    expect(reserveRoot).toHaveBeenCalledWith({ companyId: issue.companyId, issueId: issue.id,
+    if (mode === "native") expect(reserveRoot).toHaveBeenCalledWith({ companyId: issue.companyId, issueId: issue.id,
       workspaceId: first.persistedExecutionWorkspace!.id, cwd: first.executionWorkspace.cwd,
       agentId: input.agent.id, runId: input.run.id });
+    else expect(reserveRoot).not.toHaveBeenCalled();
     expect(prepareRepositories).not.toHaveBeenCalled();
     expect(next.persistedExecutionWorkspace!.id).toBe(first.persistedExecutionWorkspace!.id);
     expect(anchor).toHaveBeenCalledWith(expect.objectContaining({ immutableNativeBinding: true, explicitProjectWorkspaceId: first.persistedExecutionWorkspace!.projectWorkspaceId }));

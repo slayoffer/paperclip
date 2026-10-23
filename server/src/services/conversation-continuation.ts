@@ -18,8 +18,12 @@ export function isConversationAdapter(adapterType: string): boolean {
 
 export const CONVERSATION_CONTINUATION_POLICY = "continue_conversation_v1";
 
+export function requiresRestartReconciliation(result: Record<string, unknown> | null | undefined): boolean {
+  return (result?.restartRecovery as Record<string, unknown> | undefined)?.outcome === "reconciliation";
+}
+
 export function hasConversationContinuationPolicy(result: Record<string, unknown> | null | undefined): boolean {
-  return result?.workspaceRestoreFailure !== "restore_unsafe_archive" && !hasRequiredWorkspaceRecovery(result) && result?.conversationContinuation === CONVERSATION_CONTINUATION_POLICY;
+  return !requiresRestartReconciliation(result) && result?.workspaceRestoreFailure !== "restore_unsafe_archive" && !hasRequiredWorkspaceRecovery(result) && result?.conversationContinuation === CONVERSATION_CONTINUATION_POLICY;
 }
 
 /** Persisted by the server when it claims the run, before remote provisioning. */
@@ -55,6 +59,7 @@ export async function historicalAdapterType(db: Db, run: typeof heartbeatRuns.$i
 }
 
 export async function runUsedConversationAdapter(db: Db, run: typeof heartbeatRuns.$inferSelect): Promise<boolean> {
+  if (requiresRestartReconciliation(run.resultJson)) return false;
   if (run.resultJson?.workspaceRestoreFailure === "restore_unsafe_archive" || hasRequiredWorkspaceRecovery(run.resultJson)) return false;
   if (hasConversationContinuationPolicy(run.resultJson)) return true;
   const adapterType = await historicalAdapterType(db, run);
@@ -77,6 +82,7 @@ export function conversationRecoveryActionPredicate() {
           and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueRecoveryActions.sourceIssueId}::text`),
         )}
         and ${heartbeatRuns.runtimeMode} = 'legacy'
+        and coalesce(${heartbeatRuns.resultJson}->'restartRecovery'->>'outcome', '') <> 'reconciliation'
         and coalesce(${heartbeatRuns.resultJson}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'
         and coalesce(${heartbeatRuns.resultJson}->'workspaceRestoreRecovery'->>'schema', '') <> 'paperclip.workspace-restore-recovery.v1'
         and ${inArray(heartbeatRuns.status, ['failed', 'timed_out', 'interrupted', 'cancelled'])}

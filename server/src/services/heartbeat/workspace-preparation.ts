@@ -9,6 +9,7 @@ import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { nativeExecutionUsesTaskWorkspace } from "./external-provider.js";
 import { readGitCacheRestoration } from "../git-workspace-restoration.js";
 import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import {
   resolveWorkspaceAfterLowTrustPreflight,
   WorkspaceValidationFailure,
@@ -140,9 +141,11 @@ export interface HeartbeatWorkspacePreparationInput {
     reusableExistingExecutionWorkspace: ExecutionWorkspace | null;
     workspaceReuseRequest: ReturnType<typeof resolveExecutionWorkspaceReuseRequestForIssue>;
     nativeRecoveryExecutionWorkspaceId: string | null;
+    /** Native or legacy restart recovery binding. */
+    recoveryExecutionWorkspaceId: string | null;
     persistedNativeExecutionInput: NativeExecutionInput | null;
     isDotRun: boolean;
-    runOptions: { nativeRestartRecovery?: NativeRestartRecoveryClaim };
+    runOptions: { nativeRestartRecovery?: NativeRestartRecoveryClaim; legacyRestartRecovery?: LegacyRestartCheckpoint };
   };
   services: {
     workspaceWorkers?: WorkspaceWorkers;
@@ -208,6 +211,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     reusableExistingExecutionWorkspace,
     workspaceReuseRequest,
     nativeRecoveryExecutionWorkspaceId,
+    recoveryExecutionWorkspaceId,
     persistedNativeExecutionInput,
     isDotRun,
     runOptions,
@@ -348,11 +352,11 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
                 agent,
                 workspace: reusableExistingExecutionWorkspace,
                 responsibleUserId,
-                immutableNativeBinding: Boolean(nativeRecoveryExecutionWorkspaceId),
-                projectId: nativeRecoveryExecutionWorkspaceId
+                immutableNativeBinding: Boolean(recoveryExecutionWorkspaceId || nativeRecoveryExecutionWorkspaceId),
+                projectId: (recoveryExecutionWorkspaceId || nativeRecoveryExecutionWorkspaceId)
                   ? reusableExistingExecutionWorkspace.projectId
                   : issueRef?.projectId ?? readNonEmptyString(context.projectId),
-                explicitProjectWorkspaceId: nativeRecoveryExecutionWorkspaceId
+                explicitProjectWorkspaceId: (recoveryExecutionWorkspaceId || nativeRecoveryExecutionWorkspaceId)
                   ? reusableExistingExecutionWorkspace.projectWorkspaceId
                   : readNonEmptyString(context.projectWorkspaceId),
                 issueId,
@@ -769,7 +773,8 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const bindIssueToPersistedExecutionWorkspace = async (
     workspace: ExecutionWorkspace | null,
   ) => {
-    if (isDotRun || !issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+    // Restart recovery (fork) and native recovery (upstream) keep the issue binding unchanged.
+    if (isDotRun || !issueId || !workspace || recoveryExecutionWorkspaceId || nativeRecoveryExecutionWorkspaceId) {
       return;
     }
     const nextIssueWorkspaceMode =
@@ -1047,7 +1052,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   }
   await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
   const projectRepositoryPaths: string[] = [];
-  if (!pluginPrepared && !pluginTaskWorkspace && !isDotRun && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+  if (!pluginPrepared && !pluginTaskWorkspace && !isDotRun && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !recoveryExecutionWorkspaceId) {
     const taskRepositories = await timeWorkspace("workspace_repository_admission", () =>
       executionWorkspacesSvc.prepareTaskRepositoriesForAdmission({ companyId: agent.companyId,
         issueId, workspaceId: persistedExecutionWorkspace!.id, cwd: executionWorkspace.cwd,
@@ -1056,7 +1061,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   }
   if (!pluginPrepared && !pluginTaskWorkspace && executionWorkspace.projectId
     && (resolvedWorkspace.source === "project_primary" || Boolean(reusableExistingExecutionWorkspace?.projectWorkspaceId))
-    && !resolvedWorkspace.baseCwdFallback && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+    && !resolvedWorkspace.baseCwdFallback && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !recoveryExecutionWorkspaceId) {
     const repositoryRows = await db.select().from(projectWorkspaces).where(and(
       eq(projectWorkspaces.companyId, agent.companyId),
       eq(projectWorkspaces.projectId, executionWorkspace.projectId),

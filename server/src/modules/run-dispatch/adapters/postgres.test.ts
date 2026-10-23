@@ -1,3 +1,4 @@
+import { legacyControllerBootId } from "../../../services/legacy-controller-lease.js";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { eq, sql } from "drizzle-orm";
@@ -821,6 +822,105 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     if (!gate.dispatched) expect(gate).toMatchObject({ admissionBlockReason: "Available budget is reserved by unfinished runs" });
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
     expect(issue).toMatchObject({ assigneeAgentId: assigneeId, executionRunId: null });
+  });
+
+  async function seedLegacyRestartAdmission() {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await seedIssue({ companyId, issueId, assigneeAgentId: agentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, status: "running", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+    const reservation = await reserveRunBudget(db, companyId, runId, null);
+    const dispatch = vi.fn(async () => "provider entered");
+    const adapter = createPostgresRunDispatchAdapter(db);
+    const input = { companyId, runId, reservationId: reservation.id, expectedStatus: "running" as const,
+      now: new Date(), dispatch, enforceContinuationOwnership: false };
+    const initial = await adapter.dispatchResolvedInteractionIfCurrent(input);
+    expect(initial.dispatched).toBe(true);
+    if (initial.dispatched) await initial.resultPromise;
+    dispatch.mockClear();
+    const claim = { controllerBootId: legacyControllerBootId, attempt: 1, sessionId: "legacy-session" };
+    const resultJson = { restartRecovery: { outcome: "resuming", attempt: claim.attempt, sessionId: claim.sessionId },
+      restartCheckpoint: { sessionParams: { sessionId: claim.sessionId } } };
+    await db.update(heartbeatRuns).set({ controllerBootId: claim.controllerBootId,
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000), resultJson }).where(eq(heartbeatRuns.id, runId));
+    return { ...input, adapter, dispatch, claim, resultJson, issueId, agentId };
+  }
+
+  it("admits each persisted legacy restart attempt once and fences concurrent duplicate handoffs", async () => {
+    const f = await seedLegacyRestartAdmission();
+    const input = { ...f, legacyRestartClaim: f.claim };
+    const gates = await Promise.all([
+      f.adapter.dispatchResolvedInteractionIfCurrent(input),
+      f.adapter.dispatchResolvedInteractionIfCurrent(input),
+    ]);
+    expect(gates.filter(gate => gate.dispatched)).toHaveLength(1);
+    expect(f.dispatch).toHaveBeenCalledOnce();
+    for (const gate of gates) if (gate.dispatched) await gate.resultPromise;
+    expect(await f.adapter.dispatchResolvedInteractionIfCurrent(f)).toMatchObject({ dispatched: false });
+    const nextClaim = { ...f.claim, attempt: 2 };
+    await db.update(heartbeatRuns).set({ resultJson: { ...f.resultJson,
+      restartRecovery: { ...f.resultJson.restartRecovery, attempt: 2 } } }).where(eq(heartbeatRuns.id, f.runId));
+    expect(await f.adapter.dispatchResolvedInteractionIfCurrent(input)).toMatchObject({ dispatched: false });
+    const next = await f.adapter.dispatchResolvedInteractionIfCurrent({ ...f, legacyRestartClaim: nextClaim });
+    expect(next.dispatched).toBe(true);
+    if (next.dispatched) await next.resultPromise;
+    expect(f.dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["controller", "expired lease", "attempt", "session", "checkpoint", "outcome"] as const)(
+    "rejects a legacy restart with changed %s evidence", async changed => {
+      const f = await seedLegacyRestartAdmission();
+      const resultJson = structuredClone(f.resultJson);
+      if (changed === "attempt") resultJson.restartRecovery.attempt++;
+      if (changed === "session") resultJson.restartRecovery.sessionId = "other-session";
+      if (changed === "checkpoint") resultJson.restartCheckpoint.sessionParams.sessionId = "other-session";
+      if (changed === "outcome") resultJson.restartRecovery.outcome = "reconciliation";
+      await db.update(heartbeatRuns).set({ resultJson,
+        ...(changed === "controller" ? { controllerBootId: randomUUID() } : {}),
+        ...(changed === "expired lease" ? { controllerLeaseExpiresAt: new Date(Date.now() - 1) } : {}),
+      }).where(eq(heartbeatRuns.id, f.runId));
+      expect(await f.adapter.dispatchResolvedInteractionIfCurrent({ ...f, legacyRestartClaim: f.claim }))
+        .toMatchObject({ dispatched: false, admissionBlockReason: "Legacy restart no longer owns provider dispatch" });
+      expect(f.dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rechecks the legacy restart claim between accounting commit and provider handoff", async () => {
+    const f = await seedLegacyRestartAdmission();
+    const transaction = db.transaction.bind(db);
+    let phase = 0;
+    const race = vi.spyOn(db, "transaction").mockImplementation(async (callback, config) => {
+      if (++phase === 2) await db.update(heartbeatRuns).set({ controllerBootId: randomUUID() })
+        .where(eq(heartbeatRuns.id, f.runId));
+      return transaction(callback, config);
+    });
+    try {
+      expect(await f.adapter.dispatchResolvedInteractionIfCurrent({ ...f, legacyRestartClaim: f.claim }))
+        .toMatchObject({ dispatched: false, admissionBlockReason: "Legacy restart no longer owns provider dispatch" });
+      expect(f.dispatch).not.toHaveBeenCalled();
+    } finally { race.mockRestore(); }
+  });
+
+  it("keeps issue ownership gates for legacy restart claims", async () => {
+    const f = await seedLegacyRestartAdmission();
+    await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, f.issueId));
+    expect(await f.adapter.dispatchResolvedInteractionIfCurrent({ ...f, legacyRestartClaim: f.claim }))
+      .toMatchObject({ dispatched: false, cancellation: { outcome: "cancelled" } });
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("checks current budget before admitting a legacy restart generation", async () => {
+    const f = await seedLegacyRestartAdmission();
+    await budgetService(db).upsertPolicy(f.companyId, { scopeType: "company", scopeId: f.companyId,
+      metric: "billed_cents", windowKind: "lifetime", amount: 1, notifyEnabled: false }, null);
+    await costService(db).createEvent(f.companyId, { agentId: f.agentId, provider: "test",
+      model: "restart-budget", inputTokens: 1, outputTokens: 1, costCents: 2,
+      occurredAt: new Date() });
+    expect(await f.adapter.dispatchResolvedInteractionIfCurrent({ ...f, legacyRestartClaim: f.claim }))
+      .toMatchObject({ dispatched: false });
+    expect(f.dispatch).not.toHaveBeenCalled();
   });
 
   async function seedRecoveryAdmission() {

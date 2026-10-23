@@ -1,3 +1,6 @@
+import path from "node:path";
+import { copyLegacyRestartProviderState } from "../legacy-restart-provider-state.js";
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { describeOwnerSessionResetReason, shouldResetOwnerSessionForWake } from "../owner-sessions.js";
 import { and, desc, eq } from "drizzle-orm";
 import { agentConfigRevisions, type Db, type agents, type agentTaskSessions, type heartbeatRuns, type issues, type projects } from "@paperclipai/db";
@@ -223,6 +226,8 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
 }
 
 export interface HeartbeatAdapterSessionInput {
+  legacyRestartRecovery?: LegacyRestartCheckpoint;
+  restartSessionScope?: { sessionStorageKey: string | null; workspaceCwd: string };
   ownerSession?: boolean;
   agent: typeof agents.$inferSelect;
   task: {
@@ -333,6 +338,21 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
       delete executionContinuation?.resumeDelta;
     }
   }
+  if (input.legacyRestartRecovery) {
+    const saved = input.legacyRestartRecovery;
+    if (saved.workspaceCwd !== input.restartSessionScope?.workspaceCwd) throw new Error("restart_workspace_changed");
+    if (saved.executionWorkspaceId !== (persistedExecutionWorkspace?.id ?? null)) throw new Error("restart_workspace_binding_changed");
+    if (saved.taskKey !== input.restartSessionScope?.sessionStorageKey) throw new Error("restart_session_scope_changed");
+    if ((saved.aiSessionIdentity ?? null) !== (managedAiRuntime?.sessionIdentity ?? null)) throw new Error("restart_account_changed");
+    if (saved.providerSessionHome) {
+      if (!managedAiRuntime?.home) throw new Error("restart_account_changed");
+      await copyLegacyRestartProviderState(saved.providerSessionHome, path.join(managedAiRuntime.home, "provider"), saved.adapterType);
+    }
+    runtimeSessionIdForAdapter = saved.sessionParams.sessionId;
+    runtimeSessionParamsForAdapter = saved.sessionParams;
+    previousSessionDisplayId = saved.sessionParams.sessionId;
+  }
+  context.paperclipRestartResume = Boolean(input.legacyRestartRecovery);
   const runtimeForAdapter = {
     sessionId: runtimeSessionIdForAdapter,
     sessionParams: runtimeSessionParamsForAdapter,

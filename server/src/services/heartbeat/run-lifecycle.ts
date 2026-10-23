@@ -1,5 +1,6 @@
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import os from "node:os";
+import { preserveLegacyRestartEvidence } from "../legacy-restart-recovery.js";
 import {
   DEFERRED_WAKE_CONTEXT_KEY,
   EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
@@ -1021,6 +1022,10 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
+
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
     }
@@ -1107,6 +1112,10 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     const previousStatus = previous?.run ?? null;
+
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
 
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
