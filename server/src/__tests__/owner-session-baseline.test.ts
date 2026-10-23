@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { readOwnerSessionInputTokens } from "../services/owner-sessions.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
@@ -22,6 +23,26 @@ suite("owner session baseline query", () => {
   }, 90_000);
 
   afterAll(async () => { await database?.cleanup(); });
+
+  it("sums normalized owner inputs across issues and keeps agent and company boundaries", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const otherAgentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Owner usage", issuePrefix: `B${companyId.replaceAll("-", "")}` });
+    await db.insert(agents).values([
+      { id: agentId, companyId, name: "Owner", role: "engineer", adapterType: "claude_local" },
+      { id: otherAgentId, companyId, name: "Other", role: "engineer", adapterType: "claude_local" },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      { companyId, agentId, status: "succeeded", sessionIdAfter: "owner-thread", contextSnapshot: { issueId: "one" }, usageJson: { inputTokens: 100, rawInputTokens: 100 } },
+      { companyId, agentId, status: "succeeded", sessionIdAfter: "owner-thread", contextSnapshot: { issueId: "two" }, usageJson: { inputTokens: 200, rawInputTokens: 300 } },
+      { companyId, agentId, status: "failed", sessionIdAfter: "owner-thread", usageJson: null },
+      { companyId, agentId: otherAgentId, status: "succeeded", sessionIdAfter: "owner-thread", usageJson: { inputTokens: 9000 } },
+      { companyId, agentId, status: "succeeded", sessionIdAfter: "different-thread", usageJson: { inputTokens: 8000 } },
+    ]);
+    expect(await readOwnerSessionInputTokens(db, companyId, agentId, "owner-thread")).toBe(300);
+    expect(await readOwnerSessionInputTokens(db, randomUUID(), agentId, "owner-thread")).toBe(0);
+  });
 
   it("counts resume fallback, unknown usage, company scope, and the seven-day boundary", async () => {
     const companyId = randomUUID();

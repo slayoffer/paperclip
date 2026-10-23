@@ -1,3 +1,5 @@
+import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -5657,16 +5659,13 @@ function deriveNormalizedUsageDelta(
   };
 }
 
-function formatCount(value: number | null | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US");
-}
-
 export function parseSessionCompactionPolicy(
   agent: typeof agents.$inferSelect,
+  ownerSession = false,
 ): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig)
-    .policy;
+  const policy = resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
+  const limit = ownerSession && ownerSessionsEnabled(agent) ? ownerSessionInputLimit() : null;
+  return limit ? { ...policy, enabled: true, maxRawInputTokens: limit } : policy;
 }
 
 export function resolveRuntimeSessionParamsForWorkspace(input: {
@@ -12186,6 +12185,7 @@ export function heartbeatService(
   async function evaluateSessionCompaction(input: {
     agent: typeof agents.$inferSelect;
     sessionId: string | null;
+    ownerSession?: boolean;
     issueId: string | null;
     continuationSummaryBody?: string | null;
   }): Promise<SessionCompactionDecision> {
@@ -12199,7 +12199,7 @@ export function heartbeatService(
       };
     }
 
-    const policy = parseSessionCompactionPolicy(agent);
+    const policy = parseSessionCompactionPolicy(agent, input.ownerSession);
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
       return {
         rotate: false,
@@ -12259,23 +12259,13 @@ export function heartbeatService(
           )
         : 0;
 
-    let reason: string | null = null;
-    if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
-      reason = `session exceeded ${policy.maxSessionRuns} runs`;
-    } else if (
-      policy.maxRawInputTokens > 0 &&
-      latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
-    ) {
-      reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
-        `(threshold ${formatCount(policy.maxRawInputTokens)})`;
-    } else if (
-      policy.maxSessionAgeHours > 0 &&
-      sessionAgeHours >= policy.maxSessionAgeHours
-    ) {
-      reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
-    }
+    const reason = sessionCompactionReason({
+      policy, runs: runs.length,
+      inputTokens: input.ownerSession && policy.maxRawInputTokens > 0
+        ? await readOwnerSessionInputTokens(db, agent.companyId, agent.id, sessionId)
+        : latestRawUsage?.inputTokens ?? null,
+      ageHours: sessionAgeHours,
+    });
 
     if (!reason || !latestRun) {
       return {
@@ -12301,19 +12291,10 @@ export function heartbeatService(
       readNonEmptyString(latestSummary?.message) ??
       readNonEmptyString(summarizeRunErrorForModel(latestRun.error, latestRun.terminalFailureCategory));
 
-    const handoffMarkdown = [
-      "Paperclip session handoff:",
-      `- Previous session: ${sessionId}`,
-      issueId ? `- Issue: ${issueId}` : "",
-      `- Rotation reason: ${reason}`,
-      latestTextSummary ? `- Last run summary: ${latestTextSummary}` : "",
-      input.continuationSummaryBody
-        ? `- Issue continuation summary: ${input.continuationSummaryBody.slice(0, 1_500)}`
-        : "",
-      "Continue from the current task state. Rebuild only the minimum context you need.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const handoffMarkdown = buildSessionCompactionHandoff({
+      sessionId, issueId, reason, summary: latestTextSummary,
+      continuationSummary: input.continuationSummaryBody,
+    });
 
     return {
       rotate: true,
@@ -16883,7 +16864,7 @@ export function heartbeatService(
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(
+      maxConcurrentRuns: ownerSessionsEnabled(agent) ? 1 : normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
       ),
       skipTimerWhenNoActionableWork: asBoolean(
@@ -20893,12 +20874,23 @@ export function heartbeatService(
         context.executionPolicy = retainedTrust.executionPolicy;
       }
       let config = parseObject(agent.adapterConfig);
-      const taskSession = taskKey
+      // Never accept owner scope from wake data.
+      delete context.paperclipOwnerSession;
+      const ownerSession = resolveOwnerSession({
+        agent, projectId: projectContext?.id ?? null,
+        agentHome: resolveDefaultAgentWorkspaceDir(agent.id),
+        eligible: !!issueContext && !isConversation(issueContext) &&
+          issueContext.assigneeAgentId === agent.id && trustPreset.kind === "standard" &&
+          ownerSessionEngineEligible(config, issueAssigneeOverrides?.adapterConfig) &&
+          !context.resumeSessionParams && !context.resumeSessionDisplayId,
+      });
+      const sessionStorageKey = ownerSession?.key ?? taskKey;
+      const taskSession = sessionStorageKey
         ? await getTaskSession(
             agent.companyId,
             agent.id,
             agent.adapterType,
-            taskKey,
+            sessionStorageKey,
           )
         : null;
       const routerHasPersistedInput = Object.keys(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput)).length > 0;
@@ -23000,6 +22992,27 @@ export function heartbeatService(
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
+      if (ownerSession) {
+        if (!["local", "ssh"].includes(selectedEnvironment.driver)) {
+          throw new Error("Owner sessions require a local or SSH environment");
+        }
+        const previousOwnerRun = taskSession?.lastRunId
+          ? await db.select({ summary: sql<string | null>`left(coalesce(${heartbeatRuns.resultJson}->>'summary', ${heartbeatRuns.resultJson}->>'result'), 6000)`, issue: sql<string | null>`${heartbeatRuns.contextSnapshot}->>'issueId'` })
+              .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, taskSession.lastRunId),
+                eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agent.id)))
+              .then(rows => rows[0] ?? null)
+          : null;
+        context.paperclipOwnerSession = {
+          ...ownerSession,
+          sameIssue: taskSession?.sessionParamsJson?.ownerSessionIssueId === issueId,
+          handoffMarkdown: previousOwnerRun ? [
+            "Previous owner turn (context only):",
+            `Issue: ${previousOwnerRun.issue ?? "unknown"}`,
+            previousOwnerRun.summary ?? "",
+            "Read the current issue for its decisions and approval limits.",
+          ].join("\n") : "",
+        };
+      }
       const runtimeSessionResolution = resolveRuntimeSessionParamsForWorkspace({
         agentId: agent.id,
         previousSessionParams,
@@ -23146,6 +23159,7 @@ export function heartbeatService(
 
       const sessionCompaction = await evaluateSessionCompaction({
         agent,
+        ownerSession: ownerSession !== null,
         sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
         issueId,
         continuationSummaryBody: continuationSummary?.body ?? null,
@@ -24838,7 +24852,7 @@ export function heartbeatService(
                         companyId: agent.companyId,
                         agentId: agent.id,
                         adapterType: agent.adapterType,
-                        taskKey,
+                        taskKey: sessionStorageKey!,
                         sessionParamsJson: params,
                         sessionDisplayId: displayId,
                         lastRunId: run.id,
@@ -26009,7 +26023,7 @@ export function heartbeatService(
               (!nextSessionState.params && !nextSessionState.displayId)
             ) {
               await clearTaskSessions(agent.companyId, agent.id, {
-                taskKey,
+                taskKey: sessionStorageKey!,
                 adapterType: agent.adapterType,
                 expectedRunId: finalizedRun.id,
               });
@@ -26018,7 +26032,7 @@ export function heartbeatService(
                 companyId: agent.companyId,
                 agentId: agent.id,
                 adapterType: agent.adapterType,
-                taskKey,
+                taskKey: sessionStorageKey!,
                 sessionParamsJson:
                   attachPaperclipSessionMetadataToSessionParams(
                     nextSessionState.params,
@@ -26357,7 +26371,7 @@ export function heartbeatService(
               companyId: agent.companyId,
               agentId: agent.id,
               adapterType: agent.adapterType,
-              taskKey,
+              taskKey: sessionStorageKey!,
               sessionParamsJson:
                 goalCheckpointSession.current?.params ??
                 attachPaperclipSessionMetadataToSessionParams(

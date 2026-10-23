@@ -2221,7 +2221,12 @@ export function selectPaperclipPromptSections(
     nativeWakeReaderAvailable?: boolean;
   } = {},
 ): { taskContextNote: string; wakePrompt: string } {
-  const taskContextNote = selectPaperclipTaskMarkdown(context, options);
+  const ownerWake = normalizePaperclipWakePayload(context?.paperclipWake);
+  const ownerResume = options.resumedSession === true &&
+    parseObject(context?.paperclipOwnerSession).sameIssue === true &&
+    !(ownerWake && (isAssignmentShapedPaperclipWakeReason(ownerWake.reason) ||
+      isPaperclipRecoveryWakePayload(context?.paperclipWake)));
+  const taskContextNote = ownerResume ? "" : selectPaperclipTaskMarkdown(context, options);
   return {
     taskContextNote,
     wakePrompt: renderPaperclipWakePrompt(context?.paperclipWake, {
@@ -2229,7 +2234,7 @@ export function selectPaperclipPromptSections(
       includeExecutionContract: options.includeExecutionContract,
       nativeWakeReaderAvailable: options.nativeWakeReaderAvailable,
       conversationMode: context?.conversationMode === true,
-      suppressIssueDescription: taskContextNote.length > 0,
+      suppressIssueDescription: ownerResume || taskContextNote.length > 0,
     }),
   };
 }
