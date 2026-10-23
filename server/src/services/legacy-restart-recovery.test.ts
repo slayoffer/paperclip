@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, authUsers, companies, createDb, heartbeatRuns, issueRecoveryActions, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
+import { agents, authUsers, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueRecoveryActions, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
 import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
@@ -204,6 +204,35 @@ const support = await getEmbeddedPostgresTestSupport();
     const holds = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(run.contextSnapshot?.issueId)));
     expect(holds).toEqual([expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" })]);
   });
+
+  it.each(["dispatch", "checkpoint", "attempt", "process", "group", "session", "started"])(
+    "preserves execution evidence when bootstrap conflicts with %s", async scenario => {
+      const seeded = await seed(scenario === "checkpoint");
+      await db.update(heartbeatRuns).set({
+        resultJson: { ...seeded.resultJson,
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: scenario === "started" },
+          ...(scenario === "attempt" ? { restartRecovery: { outcome: "resuming", attempt: 1 } } : {}),
+        },
+        ...(scenario === "process" ? { processPid: 999_999_999 } : {}),
+        ...(scenario === "group" ? { processGroupId: 999_999_999 } : {}),
+        ...(scenario === "session" ? { sessionIdAfter: "saved-session" } : {}),
+      }).where(eq(heartbeatRuns.id, seeded.id));
+      if (scenario === "dispatch") await db.insert(heartbeatRunEvents).values({
+        companyId: seeded.companyId, agentId: seeded.agentId, runId: seeded.id,
+        seq: 1, eventType: "adapter.invoke", payload: { adapterType: "codex_local" },
+      });
+      const run = await expire(seeded.id);
+      const claimed = await claimLegacyRestartRecovery(db, run, "codex_local");
+      if (scenario === "checkpoint") {
+        expect(claimed).toMatchObject({ sessionParams: { sessionId: seeded.sessionIdAfter } });
+      } else {
+        expect(claimed).toBeNull();
+        expect((await read(run.id)).resultJson).toMatchObject({
+          restartRecovery: { outcome: "reconciliation", reason: "restart_session_missing" },
+        });
+      }
+    },
+  );
 
   it("retains the attempt-limit fallback over stale resuming and conversation metadata", async () => {
     execute.mockClear();

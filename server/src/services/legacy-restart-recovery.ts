@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
-import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { heartbeatRunEvents, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -96,6 +96,17 @@ export async function markLegacyRestartBoundary(db: Db, run: Run, boundary: "pro
  * A lease expiry alone never permits overlapping provider work. */
 export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: string) {
   const checkpoint = readLegacyRestartCheckpoint(run);
+  const preparation = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  // A provider that never started has no session to restore. Preserve its
+  // bootstrap retry only when no provider execution evidence contradicts it.
+  if (!run.resultJson?.restartCheckpoint && !run.resultJson?.restartRecovery &&
+      preparation?.kind === "bootstrap" && preparation.providerWorkStarted === false &&
+      !run.processPid && !run.processGroupId && !run.sessionIdAfter) {
+    const [invocation] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents)
+      .where(and(eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
+        eq(heartbeatRunEvents.eventType, "adapter.invoke"))).limit(1);
+    if (!invocation) return null;
+  }
   let reason: string | null = !checkpoint ? "restart_session_missing" : null;
   if (checkpoint && checkpoint.adapterType !== adapterType) reason = "restart_adapter_changed";
   const remote = checkpoint?.sessionParams.remoteExecution as Record<string, unknown> | undefined;
