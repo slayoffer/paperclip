@@ -150,3 +150,10 @@ The request now includes `expectedRevision` as its fourth argument.
 The tests check the saved revision and the absent revision.
 Both cases preserve the continuation message assertion.
 A separate fixture module keeps the large test file from growing.
+
+A later release run found a race in the callback diagnostic queue test.
+The response file can appear before the trace records the completed write.
+The test now waits for both the response and its complete trace.
+A controlled write completion reproduces the race on each run.
+The separate queue test module remains part of the 26-test diagnostic suite.
+The correction changes no runtime behavior.

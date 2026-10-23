@@ -4637,7 +4637,25 @@ export function issueRoutes(
     const sourceId = input.inheritExecutionWorkspaceFromIssueId ?? input.parentId;
     const source = sourceId ? await svc.getById(sourceId) : null;
     if (sourceId && (!source || source.companyId !== input.companyId)) throw notFound("Workspace inheritance issue not found");
-    return source?.projectId ?? null;
+    if (source?.projectId) return source.projectId;
+    const projectWorkspaceId = input.projectWorkspaceId ?? source?.projectWorkspaceId;
+    if (projectWorkspaceId) {
+      const [workspace] = await db.select({ projectId: projectWorkspaces.projectId }).from(projectWorkspaces)
+        .where(and(eq(projectWorkspaces.id, projectWorkspaceId), eq(projectWorkspaces.companyId, input.companyId)));
+      if (!workspace) throw notFound("Project workspace not found");
+      return workspace.projectId;
+    }
+    const hasExecutionOverride = input.executionWorkspaceId !== undefined ||
+      input.executionWorkspacePreference !== undefined || input.executionWorkspaceSettings !== undefined;
+    const executionWorkspaceId = input.executionWorkspaceId ??
+      (hasExecutionOverride || !input.inheritExecutionWorkspaceFromIssueId ? null : source?.executionWorkspaceId);
+    if (executionWorkspaceId && (await instanceSettings.getExperimental()).enableIsolatedWorkspaces) {
+      const [workspace] = await db.select({ projectId: executionWorkspaces.projectId }).from(executionWorkspaces)
+        .where(and(eq(executionWorkspaces.id, executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));
+      if (!workspace) throw notFound("Execution workspace not found");
+      return workspace.projectId;
+    }
+    return null;
   }
 
   async function assertCanAssignTasks(

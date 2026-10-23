@@ -639,6 +639,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
               base: executionWorkspaceBase,
               workspace: {
                 id: reusableExistingExecutionWorkspace.id,
+                sourceIssueId: reusableExistingExecutionWorkspace.sourceIssueId,
                 mode: reusableExistingExecutionWorkspace.mode,
                 strategyType:
                   reusableExistingExecutionWorkspace.strategyType,

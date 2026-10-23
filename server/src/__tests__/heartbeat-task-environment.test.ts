@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, createDb, environments, executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { agents, authUsers, companies, companyMemberships, createDb, environments, executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import * as orchestrator from "../services/environment-run-orchestrator.js";
@@ -32,12 +32,14 @@ suite("task environment routing", () => {
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase("task-environment-");
     db = createDb(temporary.connectionString);
+    await db.insert(authUsers).values({ id: "owner", name: "Fixture owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() });
     await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
   }, 60_000);
 
   afterEach(async () => {
     await heartbeat?.drainActiveRunExecutions();
     vi.restoreAllMocks();
+    await db.delete(executionWorkspaces);
     await clearCompanyFixtures(db);
     await db.delete(environments).where(eq(environments.id, macId));
     if (directory) await rm(directory, { recursive: true, force: true });
@@ -59,11 +61,15 @@ suite("task environment routing", () => {
       baseCwd = join(directory, "repository");
       workspaceCwd = join(directory, "parent-worktree");
       await mkdir(baseCwd);
-      await execFileAsync("git", ["init", "--initial-branch=main", baseCwd]);
-      await execFileAsync("git", ["-C", baseCwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial fixture"]);
+    }
+    // Cross-issue sharing requires a checkout with a readable, clean Git status.
+    await execFileAsync("git", ["init", "--initial-branch=main", baseCwd]);
+    await execFileAsync("git", ["-C", baseCwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial fixture"]);
+    if (isolated) {
       await execFileAsync("git", ["-C", baseCwd, "worktree", "add", "-b", "parent", workspaceCwd]);
     }
     await db.insert(companies).values({ id: companyId, name: "Routing", issuePrefix: "SYNA", defaultResponsibleUserId: "owner" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", status: "active", membershipRole: "owner" });
     // The suite uses a test transport. It never connects to the real Mac.
     await db.insert(environments).values({ id: macId, name: "mac-spike", driver: "ssh", config: {
       host: "mac.invalid", username: "test", port: 22, remoteWorkspacePath: "/test/workspace",

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import './callback-capture-runtime.test.mjs';
+import './callback-capture-queue.test.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -337,53 +338,3 @@ for (const readiness of [true, false]) {
     assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
   });
 }
-
-test('trace wrappers preserve the real command queue and worker interfaces', {timeout:15000}, async t => {
-  const root = await temporary(t);
-  const repository = fileURLToPath(new URL('../../../', import.meta.url));
-  const code = String.raw`
-    import {spawn} from 'node:child_process';
-    import {randomUUID} from 'node:crypto';
-    import {readFile, writeFile} from 'node:fs/promises';
-    import {pathToFileURL} from 'node:url';
-    const {createCommandManagedSandboxCallbackBridgeQueueClient, startSandboxCallbackBridgeWorker} =
-      await import(pathToFileURL(process.cwd() + '/packages/adapter-utils/src/sandbox-callback-bridge.ts'));
-    const {createCaptureTrace, tracedRunner, tracedQueue} =
-      await import(pathToFileURL(process.cwd() + '/scripts/callback-capture/callback-capture-trace.mjs'));
-    const root=process.argv[1], requestId=randomUUID();
-    const trace=createCaptureTrace(root+'/trace.jsonl', randomUUID());
-    const runner=tracedRunner({execute: input=>new Promise((resolve,reject)=>{
-      const child=spawn(input.command,input.args,{cwd:input.cwd,env:{PATH:process.env.PATH}});
-      let stdout='',stderr='';
-      child.stdout.on('data',c=>stdout+=c); child.stderr.on('data',c=>stderr+=c);
-      child.stdin.end(input.stdin);
-      const timer=setTimeout(()=>child.kill(),1000);
-      child.on('error',reject); child.on('close',code=>{
-        clearTimeout(timer); resolve({exitCode:code,stdout,stderr,timedOut:false});
-      });
-    })},trace);
-    const client=tracedQueue(createCommandManagedSandboxCallbackBridgeQueueClient({runner,remoteCwd:root}),trace);
-    const worker=await startSandboxCallbackBridgeWorker({client,queueDir:root+'/queue',
-      handleRequest:request=>trace.operation('host_handler','forward',async()=>({status:200,body:'fixture'}),{requestId:request.id})});
-    try {
-      await writeFile(root+'/queue/requests/'+requestId+'.json', JSON.stringify({id:requestId,
-        method:'GET',path:'/api/issues/'+randomUUID(),query:'',headers:{},body:'',createdAt:new Date().toISOString()}));
-      let response;
-      for (let i=0;i<100;i++) {
-        try {response=JSON.parse(await readFile(root+'/queue/responses/'+requestId+'.json','utf8')); break;} catch {}
-        await new Promise(r=>setTimeout(r,20));
-      }
-      if (response?.status!==200 || trace.requestIds[0]!==requestId) throw Error('Queue proof failed');
-      console.log('queue proof passed');
-    } finally {await worker.stop();}
-  `;
-  const child = spawn(process.execPath, ['--import', `${repository}/server/node_modules/tsx/dist/loader.mjs`,
-    '--input-type=module', '-e', code, root], {cwd:repository, env:{PATH:process.env.PATH}});
-  let stdout = '', stderr = '';
-  child.stdout.on('data', c => stdout += c);
-  child.stderr.on('data', c => stderr += c);
-  t.after(() => child.kill());
-  const codeResult = await new Promise(resolve => child.once('exit', resolve));
-  assert.equal(codeResult, 0, stderr);
-  assert.match(stdout, /queue proof passed/);
-});
