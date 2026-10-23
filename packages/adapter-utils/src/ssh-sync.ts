@@ -6,6 +6,7 @@ import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspac
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } from "./ssh-config.js";
 import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
@@ -109,6 +110,7 @@ export async function syncDirectoryToSsh(input: {
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
     });
+    const stopChildren = createSshTransferStopper([tar, ssh]);
 
     let tarStderr = "";
     let sshStderr = "";
@@ -139,11 +141,15 @@ export async function syncDirectoryToSsh(input: {
         return;
       }
       settled = true;
-      tar.kill("SIGTERM");
-      ssh.kill("SIGTERM");
-      reject(error);
+      tar.stdout?.destroy();
+      progress?.counter.destroy();
+      ssh.stdin?.destroy();
+      void stopChildren().then(() => reject(error), reject);
     };
 
+    // Child process errors do not include errors from their stdio streams.
+    tar.stdout?.on("error", fail);
+    ssh.stdin?.on("error", fail);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -224,6 +230,7 @@ export async function syncDirectoryFromSsh(input: {
         stdio: ["pipe", "ignore", "pipe"],
         env: tarSpawnEnv(),
       });
+      const stopChildren = createSshTransferStopper([ssh, tar]);
 
       let sshStderr = "";
       let tarStderr = "";
@@ -250,11 +257,14 @@ export async function syncDirectoryFromSsh(input: {
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
-        ssh.kill("SIGTERM");
-        tar.kill("SIGTERM");
-        reject(error);
+        ssh.stdout?.destroy();
+        progress?.counter.destroy();
+        tar.stdin?.destroy();
+        void stopChildren().then(() => reject(error), reject);
       };
 
+      ssh.stdout?.on("error", fail);
+      tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
