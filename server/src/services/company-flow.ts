@@ -42,7 +42,11 @@ export function companyFlowService(db: Db) {
           eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ["queued", "running"]), isNull(heartbeatRuns.finishedAt),
         )),
       ]);
-      const readiness = await issueSvc.listDependencyReadiness(companyId, issueRows.map((issue) => issue.id), tx);
+      // Closed and hidden dependents cannot appear in a queue or a blocked ghost.
+      // Keep their rows for exact WIP totals, but omit their historical readiness work.
+      const readiness = await issueSvc.listDependencyReadiness(companyId, issueRows
+        .filter((issue) => issue.executionVisible && issue.status !== "done" && issue.status !== "cancelled")
+        .map((issue) => issue.id), tx);
       return buildCompanyFlowReport(companyId, {
         issues: issueRows, agents: agentRows, relations, decisions: [...interactions, ...approvalRows], runs,
         pendingFinalizeBlockerIssueIds: [...new Set([...readiness.values()].flatMap((row) => row.pendingFinalizeBlockerIssueIds))],
