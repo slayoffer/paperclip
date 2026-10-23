@@ -1,3 +1,6 @@
+import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
+import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
+import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionEngineEligible, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason } from "./owner-sessions.js";
 import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
 import { taskDrainService } from "./task-drain.js";
@@ -1952,12 +1955,14 @@ export function heartbeatService(
     runOptions: {
       nativeLeaseOwner?: string;
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
+      legacyRestartRecovery?: LegacyRestartCheckpoint;
     } = {},
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if (await suppressRunAdmission(db, runId, runOptions, await getSchedulingSuppression())) return;
 
+    let settleLegacyRestartLog: (() => Promise<void>) | null = null;
     let legacyAdapterEntered = false;
     let persistUsageCaptureFailure: (() => Promise<void>) | undefined;
     let run = await getRun(runId);
@@ -3045,6 +3050,7 @@ export function heartbeatService(
         isDotRun,
         existingExecutionWorkspace,
         nativeRecoveryExecutionWorkspaceId,
+        recoveryExecutionWorkspaceId,
         workspaceReuseRequest,
         requestedShouldReuseExisting,
         reusableExistingExecutionWorkspace,
@@ -3062,7 +3068,8 @@ export function heartbeatService(
         separateTaskEnvironmentBinding,
       } = await selectHeartbeatEnvironment(db, {
         run, agent,
-        task: { issueRef, issueContext, issueId, context, executionProjectId, projectContext },
+        task: { issueRef, issueContext, issueId, context, executionProjectId, projectContext,
+          legacyRestartExecutionWorkspaceId: runOptions.legacyRestartRecovery?.executionWorkspaceId ?? null },
         policy: {
           trustPreset, requestedExecutionWorkspaceMode, isolatedWorkspacesEnabled,
           projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, environmentExecutionWorkspaceSettings,
@@ -3462,6 +3469,7 @@ export function heartbeatService(
           reusableExistingExecutionWorkspace,
           workspaceReuseRequest,
           nativeRecoveryExecutionWorkspaceId,
+          recoveryExecutionWorkspaceId,
           persistedNativeExecutionInput,
           isDotRun,
           runOptions,
@@ -3954,6 +3962,21 @@ export function heartbeatService(
           delete executionContinuation?.resumeDelta;
         }
       }
+      if (runOptions.legacyRestartRecovery) {
+        const saved = runOptions.legacyRestartRecovery;
+        if (saved.workspaceCwd !== executionWorkspace.cwd) throw new Error("restart_workspace_changed");
+        if (saved.executionWorkspaceId !== (persistedExecutionWorkspace?.id ?? null)) throw new Error("restart_workspace_binding_changed");
+        if (saved.taskKey !== sessionStorageKey) throw new Error("restart_session_scope_changed");
+        if ((saved.aiSessionIdentity ?? null) !== (managedAiRuntime?.sessionIdentity ?? null)) throw new Error("restart_account_changed");
+        if (saved.providerSessionHome) {
+          if (!managedAiRuntime?.home) throw new Error("restart_account_changed");
+          await copyLegacyRestartProviderState(saved.providerSessionHome, path.join(managedAiRuntime.home, "provider"), saved.adapterType);
+        }
+        runtimeSessionIdForAdapter = saved.sessionParams.sessionId;
+        runtimeSessionParamsForAdapter = saved.sessionParams;
+        previousSessionDisplayId = saved.sessionParams.sessionId;
+      }
+      context.paperclipRestartResume = Boolean(runOptions.legacyRestartRecovery);
       const runtimeForAdapter = {
         sessionId: runtimeSessionIdForAdapter,
         sessionParams: runtimeSessionParamsForAdapter,
@@ -4050,6 +4073,10 @@ export function heartbeatService(
           .where(eq(heartbeatRuns.id, run.id));
         lastOutputFlushAt = pendingOutputProgress.at;
         outputProgressState.pending = null;
+      };
+      settleLegacyRestartLog = async () => {
+        if (handle) await runLogStore.finalize(handle);
+        await flushOutputProgress({ force: true });
       };
       try {
         const startedAt = run.startedAt ?? new Date();
@@ -4345,6 +4372,17 @@ export function heartbeatService(
         };
 
         const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
+          // The restart checkpoint needs the raw session parameters; event log
+          // redaction below applies to the stored event only.
+          if (event.eventType === "session.checkpoint") {
+            await saveLegacyRestartCheckpoint(db, currentRun, {
+              adapterType: agent.adapterType, taskKey: sessionStorageKey, workspaceCwd: executionWorkspace.cwd,
+              aiSessionIdentity: managedAiRuntime?.sessionIdentity ?? null,
+              ...(managedAiRuntime?.home && !parseObject(event.payload?.sessionParams).remoteExecution
+                ? { providerSessionHome: path.join(managedAiRuntime.home, "provider") } : {}),
+              sessionParams: parseObject(event.payload?.sessionParams),
+            });
+          }
           event = identityRedactor.redact(event);
           const eventType = event.eventType.trim();
           if (!eventType) return;
@@ -4608,7 +4646,10 @@ export function heartbeatService(
           },
           instructions: {
             nativeInstructionWorkingCopy,
-            collectStoppedInstructions,
+            collectStoppedInstructions: async () => {
+              await collectStoppedInstructions();
+              await markLegacyRestartBoundary(db, run, "providerStopped");
+            },
             nativeInstructionReservation,
             releaseInstructionCopy,
             get instructionCopy() { return instructionCopy; },
@@ -4659,6 +4700,16 @@ export function heartbeatService(
         });
         if (!execution.dispatched) return;
         const { adapterResult } = execution;
+        if (restartSuspendedLegacyRuns.has(run.id)) {
+          const saved = readLegacyRestartCheckpoint((await getRun(run.id))!);
+          if (!saved?.sessionParams.remoteExecution) return;
+          if (saved.providerStopped && !hasWorkspaceRestoreFailure(adapterResult.resultJson)) {
+            await markLegacyRestartBoundary(db, run, "workspaceSettled");
+            return;
+          }
+          restartSuspendedLegacyRuns.delete(run.id);
+          await recordLegacyRestartFallback(db, run, "restart_remote_stop_unverified");
+        }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
         // sandbox during execution. The run-prep observability above counts such a project as synced,
@@ -4760,8 +4811,11 @@ export function heartbeatService(
           providerTraceCapture: providerTraceCapture !== null,
           onProviderTraceFinalized: () => { providerTraceFinalized = true; },
           issueContext, onLog,
+          legacyRestartRecovery: runOptions.legacyRestartRecovery,
         });
       } catch (err) {
+        if (restartSuspendedLegacyRuns.has(run.id)) return;
+        if (runOptions.legacyRestartRecovery) await recordLegacyRestartFallback(db, run, err instanceof Error ? err.message : "restart_resume_failed");
         await persistUsageCaptureFailure?.();
         if (err instanceof NativeControllerDetachedForRestartError) {
           nativeSessionResumeScheduled = true;
@@ -4896,6 +4950,8 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
+      if (restartSuspendedLegacyRuns.has(run.id)) return;
+      if (runOptions.legacyRestartRecovery) await recordLegacyRestartFallback(db, run, outerErr instanceof Error ? outerErr.message : "restart_resume_failed");
       if (
         nativeOwnershipHeld ||
         (!nativeDispatchStarted && isRunnerReattachment(runOptions.nativeRestartRecovery)) ||
@@ -4938,9 +4994,40 @@ export function heartbeatService(
         });
       }
     } finally {
+      if (restartSuspendedLegacyRuns.has(run.id)) {
+        await settleLegacyRestartLog?.().catch(err => logger.warn({ err, runId: run.id }, "Restart log finalization failed"));
+        if (managedAiRuntime?.home) {
+          const saved = readLegacyRestartCheckpoint(await getRun(run.id) ?? run);
+          if (saved?.providerSessionHome) {
+            try {
+              const durableHome = path.join(resolveDefaultAgentWorkspaceDir(run.agentId), ".restart-sessions", run.id);
+              await copyLegacyRestartProviderState(saved.providerSessionHome, durableHome, saved.adapterType);
+              await saveLegacyRestartProviderHome(db, run, durableHome);
+            } catch (err) {
+              await recordLegacyRestartFallback(db, run, err instanceof Error ? err.message : "restart_provider_state_missing");
+            }
+          }
+        }
+        await managedAiRuntime?.cleanup().catch(() => undefined);
+        controllerLease.stop();
+        activeRunExecutions.delete(run.id);
+        executionControl.finish();
+        adapterExecutionControls.delete(run.id);
+        // Retain the workspace and lease. The next controller reuses this run.
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: sql`clock_timestamp()` })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
+        return;
+      }
       await nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && latestRun.controllerBootId === legacyControllerBootId) {
+        await fs.rm(path.join(resolveDefaultAgentWorkspaceDir(run.agentId), ".restart-sessions", run.id), { recursive: true, force: true })
+          .catch(err => logger.warn({ err, runId: run.id }, "Restart transcript cleanup failed"));
+      }
+      if (runOptions.legacyRestartRecovery && latestRun && ["failed", "cancelled", "timed_out"].includes(latestRun.status)) {
+        await recordLegacyRestartFallback(db, latestRun, latestRun.error?.startsWith("restart_") ? latestRun.error : latestRun.errorCode ?? "restart_resume_failed");
+      }
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db

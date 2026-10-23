@@ -199,6 +199,8 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
       then ${heartbeatRuns.resultJson}
     else jsonb_strip_nulls(
       jsonb_build_object(
+        'restartCheckpoint', case when pg_column_size(${heartbeatRuns.resultJson}->'restartCheckpoint') <= 16384 then ${heartbeatRuns.resultJson}->'restartCheckpoint' end,
+        'restartRecovery', case when pg_column_size(${heartbeatRuns.resultJson}->'restartRecovery') <= 2048 then ${heartbeatRuns.resultJson}->'restartRecovery' end,
         'summary', left(${heartbeatRuns.resultJson} ->> 'summary', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'result', left(${heartbeatRuns.resultJson} ->> 'result', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'message', left(${heartbeatRuns.resultJson} ->> 'message', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
