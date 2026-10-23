@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { Transform } from "node:stream";
@@ -190,6 +191,7 @@ export async function streamLocalFileToSsh(input: {
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
     });
+    const stopChildren = createSshTransferStopper([ssh]);
 
     let sshStderr = "";
     let settled = false;
@@ -200,8 +202,7 @@ export async function streamLocalFileToSsh(input: {
       source.destroy();
       input.progress?.counter.destroy();
       ssh.stdin?.destroy();
-      ssh.kill("SIGTERM");
-      reject(error);
+      void stopChildren().then(() => reject(error), reject);
     };
 
     ssh.stderr?.on("data", (chunk) => {

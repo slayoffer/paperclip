@@ -57,6 +57,7 @@ baseline capture, and asset sync. Each step reports its start and its result.
 The queue does not change the agent run cap or execution leases.
 
 SSH transfer stream errors fail only the affected transfer. The transfer closes its streams and stops its child processes.
+It waits for child closure before cleanup. After five seconds, it sends `SIGKILL` to children that remain.
 The caller receives the error, and progress logs record a failure when progress reporting is enabled.
 
 SSH Git imports preserve the source repository's remote tracking references.

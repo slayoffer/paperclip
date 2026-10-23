@@ -6,6 +6,7 @@ import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspac
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } from "./ssh-config.js";
 import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
@@ -109,6 +110,7 @@ export async function syncDirectoryToSsh(input: {
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
     });
+    const stopChildren = createSshTransferStopper([tar, ssh]);
 
     let tarStderr = "";
     let sshStderr = "";
@@ -142,9 +144,7 @@ export async function syncDirectoryToSsh(input: {
       tar.stdout?.destroy();
       progress?.counter.destroy();
       ssh.stdin?.destroy();
-      tar.kill("SIGTERM");
-      ssh.kill("SIGTERM");
-      reject(error);
+      void stopChildren().then(() => reject(error), reject);
     };
 
     // Child process errors do not include errors from their stdio streams.
@@ -230,6 +230,7 @@ export async function syncDirectoryFromSsh(input: {
         stdio: ["pipe", "ignore", "pipe"],
         env: tarSpawnEnv(),
       });
+      const stopChildren = createSshTransferStopper([ssh, tar]);
 
       let sshStderr = "";
       let tarStderr = "";
@@ -259,9 +260,7 @@ export async function syncDirectoryFromSsh(input: {
         ssh.stdout?.destroy();
         progress?.counter.destroy();
         tar.stdin?.destroy();
-        ssh.kill("SIGTERM");
-        tar.kill("SIGTERM");
-        reject(error);
+        void stopChildren().then(() => reject(error), reject);
       };
 
       ssh.stdout?.on("error", fail);

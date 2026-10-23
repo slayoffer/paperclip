@@ -13,8 +13,8 @@ afterEach(async () => {
 
 // Real child pipes fail in a separate parent process. No uncaught-error handler masks a crash.
 it.each(["upload", "restore", "file"].flatMap((kind) =>
-  [false, true].map((progress) => ({ kind, progress }))),
-)("contains a broken $kind pipe and permits another transfer, progress=$progress", async ({ kind, progress }) => {
+  [false, true].flatMap((progress) => [false, true].map((ignoreTerm) => ({ kind, progress, ignoreTerm })))),
+)("contains a broken $kind pipe, progress=$progress, ignores termination=$ignoreTerm", async ({ kind, progress, ignoreTerm }) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-transfer-error-"));
   directories.push(root);
   const bin = path.join(root, "bin");
@@ -26,18 +26,20 @@ it.each(["upload", "restore", "file"].flatMap((kind) =>
   const realTar = (await exec("sh", ["-c", "command -v tar"])).stdout.trim();
   await writeFile(path.join(bin, "tar"), `#!/bin/sh
 if [ "$PIPE_PEER_CLOSE" = 1 ] && [ "$1" = -xf ]; then
+  if [ "$PIPE_IGNORE_TERM" = 1 ]; then trap '' TERM; fi
+  echo $$ > "$PIPE_PEER_PID"
   exec 0<&-
-  sleep 1
-  exit 0
+  exec sleep 120
 fi
 exec '${realTar}' "$@"
 `, { mode: 0o700 });
   await writeFile(path.join(bin, "ssh"), `#!/bin/sh
 for arg do command=$arg; done
-if [ "$PIPE_PEER_CLOSE" = 1 ] && [ "$TRANSFER_KIND" = file ]; then
+if [ "$PIPE_PEER_CLOSE" = 1 ] && [ "$TRANSFER_KIND" != restore ]; then
+  if [ "$PIPE_IGNORE_TERM" = 1 ]; then trap '' TERM; fi
+  echo $$ > "$PIPE_PEER_PID"
   exec 0<&-
-  sleep 1
-  exit 0
+  exec sleep 120
 fi
 exec /bin/sh -c "$command"
 `, { mode: 0o700 });
@@ -88,6 +90,9 @@ exec /bin/sh -c "$command"
       const failed = await fetch(url + '/transfer');
       if (failed.status !== 502) throw new Error('The broken transfer unexpectedly succeeded.');
       failure = await failed.json();
+      const peerPid = Number(await readFile(root + '/peer-pid', 'utf8'));
+      try { process.kill(peerPid, 0); throw new Error('The failed transfer returned before its peer stopped.'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
       health = await (await fetch(url + '/health')).text();
       process.env.PIPE_PEER_CLOSE = '0';
       const recovered = await fetch(url + '/transfer');
@@ -105,7 +110,8 @@ exec /bin/sh -c "$command"
     ["--import", loader, "--input-type=module", "-e", script], {
       timeout: 20_000,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root,
-        PIPE_PEER_CLOSE: "1", TRANSFER_KIND: kind },
+        PIPE_PEER_CLOSE: "1", TRANSFER_KIND: kind, PIPE_PEER_PID: path.join(root, "peer-pid"),
+        PIPE_IGNORE_TERM: ignoreTerm ? "1" : "0" },
     });
   const result = JSON.parse(stdout.trim());
   expect(result.failure.code).toBe("EPIPE");
