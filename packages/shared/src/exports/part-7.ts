@@ -122,3 +122,5 @@ export { isAppAggregator, aggregatorManagementUrl, aggregatorAppsSyncSchema, agg
 export * from "../connection-instructions.js";
 
 export * from "../publication-authority.js";
+
+export { pauseAgentSchema, type PauseAgent } from "../validators/agent-pause.js";
