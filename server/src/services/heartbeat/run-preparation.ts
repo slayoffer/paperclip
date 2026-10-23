@@ -2912,8 +2912,8 @@ export function createHeartbeatRunPreparation(db: Db) {
     return byCompany;
   }
 
-  async function getIssueExecutionContext(companyId: string, issueId: string) {
-    return db
+  async function getIssueExecutionContext(companyId: string, issueId: string, client: Pick<Db, "select"> = db) {
+    return client
       .select({
         chatCommunicationGuidance: chatConversations.communicationGuidance,
         chatAssignedAgentId: chatEndpoints.assignedAgentId,
@@ -3034,6 +3034,7 @@ export function createHeartbeatRunPreparation(db: Db) {
   async function getRoutineEnvForExecutionIssue(
     companyId: string,
     issueContext: { originKind: string | null; originId: string | null; originRunId: string | null } | null,
+    client: Pick<Db, "select"> = db,
   ) {
     if (
       !issueContext ||
@@ -3044,7 +3045,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     }
 
     const routineRun = issueContext.originRunId
-      ? await db
+      ? await client
           .select({
             routineRevisionId: routineRuns.routineRevisionId,
             responsibleUserId: routineRuns.responsibleUserId,
@@ -3061,7 +3062,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       : null;
 
     if (routineRun?.routineRevisionId) {
-      const revision = await db
+      const revision = await client
         .select({
           snapshot: routineRevisions.snapshot,
           responsibleUserId: routineRevisions.responsibleUserId,
@@ -3090,7 +3091,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       }
     }
 
-    const routine = await db
+    const routine = await client
       .select({
         env: routines.env,
         responsibleUserId: routines.responsibleUserId,
@@ -3111,8 +3112,8 @@ export function createHeartbeatRunPreparation(db: Db) {
     };
   }
 
-  async function resolveCompanyDefaultResponsibleUserId(companyId: string) {
-    const company = await db
+  async function resolveCompanyDefaultResponsibleUserId(companyId: string, client: Pick<Db, "select"> = db) {
+    const company = await client
       .select({ defaultResponsibleUserId: companies.defaultResponsibleUserId })
       .from(companies)
       .where(eq(companies.id, companyId))
@@ -3122,7 +3123,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     );
     if (explicitDefault) return explicitDefault;
 
-    const owner = await db
+    const owner = await client
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -3138,7 +3139,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (owner?.userId) return owner.userId;
 
-    const firstUser = await db
+    const firstUser = await client
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -3157,9 +3158,10 @@ export function createHeartbeatRunPreparation(db: Db) {
   async function resolveParentIssueResponsibleUserId(
     companyId: string,
     parentId: string | null | undefined,
+    client: Pick<Db, "select"> = db,
   ) {
     if (!parentId) return null;
-    const parent = await db
+    const parent = await client
       .select({
         responsibleUserId: issues.responsibleUserId,
         createdByUserId: issues.createdByUserId,
@@ -3195,7 +3197,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     source?: WakeupOptions["source"] | null;
     triggerDetail?: WakeupOptions["triggerDetail"] | null;
     existingRunResponsibleUserId?: string | null;
-  }) {
+  }, client: Pick<Db, "select"> = db) {
     const contextResponsibleUserId = readNonEmptyString(
       input.contextSnapshot.responsibleUserId,
     );
@@ -3215,7 +3217,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       messageIds.length &&
       !input.contextSnapshot.retryOfRunId
     ) {
-      const messages = await db
+      const messages = await client
         .select({
           id: issueComments.id,
           authorUserId: issueComments.authorUserId,
@@ -3240,7 +3242,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     }
     const retryOfRunId = readNonEmptyString(input.contextSnapshot.retryOfRunId);
     if (retryOfRunId) {
-      const [origin] = await db
+      const [origin] = await client
         .select({ responsibleUserId: heartbeatRuns.responsibleUserId })
         .from(heartbeatRuns)
         .where(
@@ -3262,11 +3264,12 @@ export function createHeartbeatRunPreparation(db: Db) {
     const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(
       input.companyId,
       input.issueContext?.parentId,
+      client,
     );
     if (parentResponsibleUserId) return parentResponsibleUserId;
     if (!input.issueContext && requestedUserId) return requestedUserId;
     input.contextSnapshot.executionIdentityCause = "company_default";
-    return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    return resolveCompanyDefaultResponsibleUserId(input.companyId, client);
   }
 
   async function resolveResponsibleUserIdForRun(input: {
