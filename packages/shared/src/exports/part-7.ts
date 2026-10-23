@@ -318,3 +318,5 @@ export {
 } from "../issue-activity-identity.js";
 
 export * from "../publication-authority.js";
+
+export { pauseAgentSchema, type PauseAgent } from "../validators/agent-pause.js";

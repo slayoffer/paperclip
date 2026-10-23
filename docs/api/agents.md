@@ -85,6 +85,19 @@ POST /api/agents/{agentId}/pause
 
 Temporarily stops heartbeats for the agent.
 
+This endpoint requires board access to the agent's company. The optional JSON body
+can specify an operations guard reason:
+
+```json
+{"reason": "ops-guard:quota-blip"}
+```
+
+The server stores this value as `pauseReason` and includes it in the activity log.
+The full reason must contain at most 128 ASCII characters. After `ops-guard:`,
+the first character must be a letter or digit. Later characters can also be `.`,
+`_`, `:`, or `-`. Other prefixes, unsafe characters, and longer reasons return
+HTTP 400. An absent body or `{}` keeps `pauseReason: "manual"`.
+
 ## Resume Agent
 
 ```
