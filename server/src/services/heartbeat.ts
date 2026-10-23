@@ -1,4 +1,6 @@
 import { claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
+import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -5661,16 +5663,13 @@ function deriveNormalizedUsageDelta(
   };
 }
 
-function formatCount(value: number | null | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US");
-}
-
 export function parseSessionCompactionPolicy(
   agent: typeof agents.$inferSelect,
+  ownerSession = false,
 ): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig)
-    .policy;
+  const policy = resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
+  const limit = ownerSession && ownerSessionsEnabled(agent) ? ownerSessionInputLimit() : null;
+  return limit ? { ...policy, enabled: true, maxRawInputTokens: limit } : policy;
 }
 
 export function resolveRuntimeSessionParamsForWorkspace(input: {
@@ -5778,15 +5777,11 @@ function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
 ) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
+  // A caller-supplied key never addresses a reserved owner-project:* row (SYNA-2912 r2 P2).
+  return firstCallerTaskKey([
+    contextSnapshot?.taskKey, contextSnapshot?.taskId, contextSnapshot?.issueId,
+    payload?.taskKey, payload?.taskId, payload?.issueId,
+  ].map((value) => readNonEmptyString(value)));
 }
 
 /**
@@ -7300,6 +7295,7 @@ function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  if (isOwnerSessionKey(contextSnapshot.taskKey)) delete contextSnapshot.taskKey;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);
@@ -12180,10 +12176,11 @@ export function heartbeatService(
       };
     }
 
-    const previousRun = await getLatestRunForSession(agentId, sessionId, {
-      excludeRunId: runId,
-    });
-    const previousRawUsage = readRawUsageTotals(previousRun?.usageJson);
+    const previousRawUsage = usageBasis === "session_cumulative"
+      ? await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals)
+      : readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+        excludeRunId: runId,
+      }))?.usageJson);
     return {
       normalizedUsage: deriveNormalizedUsageDelta(rawUsage, previousRawUsage),
       previousRawUsage,
@@ -12194,6 +12191,7 @@ export function heartbeatService(
   async function evaluateSessionCompaction(input: {
     agent: typeof agents.$inferSelect;
     sessionId: string | null;
+    ownerSession?: boolean;
     issueId: string | null;
     continuationSummaryBody?: string | null;
   }): Promise<SessionCompactionDecision> {
@@ -12207,7 +12205,7 @@ export function heartbeatService(
       };
     }
 
-    const policy = parseSessionCompactionPolicy(agent);
+    const policy = parseSessionCompactionPolicy(agent, input.ownerSession);
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
       return {
         rotate: false,
@@ -12267,23 +12265,13 @@ export function heartbeatService(
           )
         : 0;
 
-    let reason: string | null = null;
-    if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
-      reason = `session exceeded ${policy.maxSessionRuns} runs`;
-    } else if (
-      policy.maxRawInputTokens > 0 &&
-      latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
-    ) {
-      reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
-        `(threshold ${formatCount(policy.maxRawInputTokens)})`;
-    } else if (
-      policy.maxSessionAgeHours > 0 &&
-      sessionAgeHours >= policy.maxSessionAgeHours
-    ) {
-      reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
-    }
+    const reason = sessionCompactionReason({
+      policy, runs: runs.length,
+      inputTokens: input.ownerSession && policy.maxRawInputTokens > 0
+        ? await readOwnerSessionInputTokens(db, agent.companyId, agent.id, sessionId)
+        : latestRawUsage?.inputTokens ?? null,
+      ageHours: sessionAgeHours,
+    });
 
     if (!reason || !latestRun) {
       return {
@@ -12309,19 +12297,10 @@ export function heartbeatService(
       readNonEmptyString(latestSummary?.message) ??
       readNonEmptyString(summarizeRunErrorForModel(latestRun.error, latestRun.terminalFailureCategory));
 
-    const handoffMarkdown = [
-      "Paperclip session handoff:",
-      `- Previous session: ${sessionId}`,
-      issueId ? `- Issue: ${issueId}` : "",
-      `- Rotation reason: ${reason}`,
-      latestTextSummary ? `- Last run summary: ${latestTextSummary}` : "",
-      input.continuationSummaryBody
-        ? `- Issue continuation summary: ${input.continuationSummaryBody.slice(0, 1_500)}`
-        : "",
-      "Continue from the current task state. Rebuild only the minimum context you need.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const handoffMarkdown = buildSessionCompactionHandoff({
+      sessionId, issueId, reason, summary: latestTextSummary,
+      continuationSummary: input.continuationSummaryBody,
+    });
 
     return {
       rotate: true,
@@ -16914,7 +16893,7 @@ export function heartbeatService(
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(
+      maxConcurrentRuns: ownerSessionsEnabled(agent) ? 1 : normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
       ),
       skipTimerWhenNoActionableWork: asBoolean(
@@ -20938,12 +20917,23 @@ export function heartbeatService(
         context.executionPolicy = retainedTrust.executionPolicy;
       }
       let config = parseObject(agent.adapterConfig);
-      const taskSession = taskKey
+      // Never accept owner scope from wake data.
+      delete context.paperclipOwnerSession;
+      const ownerSession = resolveOwnerSession({
+        agent, issue: issueContext ?? null,
+        agentHome: resolveDefaultAgentWorkspaceDir(agent.id),
+        eligible: !!issueContext && !isConversation(issueContext) &&
+          issueContext.assigneeAgentId === agent.id && trustPreset.kind === "standard" &&
+          ownerSessionEngineEligible(config, issueAssigneeOverrides?.adapterConfig) &&
+          !context.resumeSessionParams && !context.resumeSessionDisplayId,
+      });
+      const sessionStorageKey = ownerSession?.key ?? taskKey;
+      const taskSession = sessionStorageKey
         ? await getTaskSession(
             agent.companyId,
             agent.id,
             agent.adapterType,
-            taskKey,
+            sessionStorageKey,
           )
         : null;
       const routerHasPersistedInput = Object.keys(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput)).length > 0;
@@ -20966,7 +20956,8 @@ export function heartbeatService(
             userId: responsibleUserId, adapterType: agent.adapterType, taskKey: String(context.aiRouterTaskKey),
             overrides: issueAssigneeOverrides?.adapterConfig ?? {},
             existingGrantId: typeof savedIdentity === "string" ? savedIdentity.split(":")[0] : undefined,
-            requireExisting: Boolean(taskSession?.sessionDisplayId) && !shouldResetTaskSessionForWake(context),
+            requireExisting: Boolean(taskSession?.sessionDisplayId) &&
+              !(ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)),
             persisted: routerHasPersistedInput ? context.aiRouterSelection as AiConnectionRouterSelection | undefined : undefined,
           });
           aiBinding = selection.binding;
@@ -21950,7 +21941,10 @@ export function heartbeatService(
         const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
         if (!canRefresh) context.forceFreshSession = true;
       }
-      const wakeSessionResetReason = describeSessionResetReason(context);
+      // Owner threads keep their session across issue_assigned and the other per-issue wake resets (SYNA-2912 r1 P1).
+      const wakeSessionResetReason = ownerSession
+        ? describeOwnerSessionResetReason(context)
+        : describeSessionResetReason(context);
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
         configuredModel,
@@ -21963,7 +21957,8 @@ export function heartbeatService(
           acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
       });
       const resetTaskSession =
-        shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
+        (ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)) ||
+        sessionConfigFreshness.reset;
       const sessionResetReason =
         sessionConfigFreshness.reasons.join("; ") || null;
       const taskSessionForRun = resetTaskSession ? null : taskSession;
@@ -23047,6 +23042,27 @@ export function heartbeatService(
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
+      if (ownerSession) {
+        if (!["local", "ssh"].includes(selectedEnvironment.driver)) {
+          throw new Error("Owner sessions require a local or SSH environment");
+        }
+        const previousOwnerRun = taskSession?.lastRunId
+          ? await db.select({ summary: sql<string | null>`left(coalesce(${heartbeatRuns.resultJson}->>'summary', ${heartbeatRuns.resultJson}->>'result'), 6000)`, issue: sql<string | null>`${heartbeatRuns.contextSnapshot}->>'issueId'` })
+              .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, taskSession.lastRunId),
+                eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agent.id)))
+              .then(rows => rows[0] ?? null)
+          : null;
+        context.paperclipOwnerSession = {
+          ...ownerSession,
+          sameIssue: taskSession?.sessionParamsJson?.ownerSessionIssueId === issueId,
+          handoffMarkdown: previousOwnerRun ? [
+            "Previous owner turn (context only):",
+            `Issue: ${previousOwnerRun.issue ?? "unknown"}`,
+            previousOwnerRun.summary ?? "",
+            "Read the current issue for its decisions and approval limits.",
+          ].join("\n") : "",
+        };
+      }
       const runtimeSessionResolution = resolveRuntimeSessionParamsForWorkspace({
         agentId: agent.id,
         previousSessionParams,
@@ -23193,6 +23209,7 @@ export function heartbeatService(
 
       const sessionCompaction = await evaluateSessionCompaction({
         agent,
+        ownerSession: ownerSession !== null,
         sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
         issueId,
         continuationSummaryBody: continuationSummary?.body ?? null,
@@ -24907,7 +24924,7 @@ export function heartbeatService(
                         companyId: agent.companyId,
                         agentId: agent.id,
                         adapterType: agent.adapterType,
-                        taskKey,
+                        taskKey: sessionStorageKey!,
                         sessionParamsJson: params,
                         sessionDisplayId: displayId,
                         lastRunId: run.id,
@@ -25737,6 +25754,18 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
+        if (ownerSession) {
+          // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+          const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
+          await saveOwnerSessionState(db, {
+            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+            runId: run.id, expectedLastRunId: taskSession?.lastRunId ?? null, lastError: runErrorMessage,
+            session: clear ? null : {
+              params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
+              displayId: nextSessionState.displayId,
+            },
+          });
+        }
         const persistedRunWrite = await setRunStatusIfRunning(
           run.id,
           status,
@@ -26097,13 +26126,13 @@ export function heartbeatService(
             },
             normalizedUsage,
           );
-          if (taskKey) {
+          if (taskKey && !ownerSession) {
             if (
               adapterResult.clearSession ||
               (!nextSessionState.params && !nextSessionState.displayId)
             ) {
               await clearTaskSessions(agent.companyId, agent.id, {
-                taskKey,
+                taskKey: sessionStorageKey!,
                 adapterType: agent.adapterType,
                 expectedRunId: finalizedRun.id,
               });
@@ -26112,7 +26141,7 @@ export function heartbeatService(
                 companyId: agent.companyId,
                 agentId: agent.id,
                 adapterType: agent.adapterType,
-                taskKey,
+                taskKey: sessionStorageKey!,
                 sessionParamsJson:
                   attachPaperclipSessionMetadataToSessionParams(
                     nextSessionState.params,
@@ -26443,7 +26472,7 @@ export function heartbeatService(
           );
 
           if (
-            taskKey &&
+            taskKey && !ownerSession &&
             (goalCheckpointSession.current ||
               previousSessionParams ||
               previousSessionDisplayId ||
@@ -26453,7 +26482,7 @@ export function heartbeatService(
               companyId: agent.companyId,
               agentId: agent.id,
               adapterType: agent.adapterType,
-              taskKey,
+              taskKey: sessionStorageKey!,
               sessionParamsJson:
                 goalCheckpointSession.current?.params ??
                 attachPaperclipSessionMetadataToSessionParams(
@@ -30339,6 +30368,11 @@ export function heartbeatService(
             }
           : undefined,
       );
+      // An owner run keeps its thread under owner-project:<projectId>; reset that row for the issue too.
+      const ownerKey = taskKey ? await ownerSessionKeyForIssueReset(db, { agent, taskKey }) : null;
+      const clearedOwnerSessions = ownerKey
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey: ownerKey, adapterType: agent.adapterType })
+        : 0;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,
@@ -30360,7 +30394,7 @@ export function heartbeatService(
         ...updated,
         sessionDisplayId: null,
         sessionParamsJson: null,
-        clearedTaskSessions,
+        clearedTaskSessions: clearedTaskSessions + clearedOwnerSessions,
       };
     },
 

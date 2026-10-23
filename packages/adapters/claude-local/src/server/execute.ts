@@ -1,3 +1,4 @@
+import { prepareOwnerSessionLaunch } from "@paperclipai/adapter-utils/owner-session";
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -616,6 +617,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // so the run skips the workspace copy (same contract as codex-local).
   const targetWorkspaceRealization = executionTarget?.workspaceRealization ?? null;
   const workspaceInPlace = targetWorkspaceRealization?.mode === "in_place";
+  const ownerSession = await prepareOwnerSessionLaunch({ context, companyId: agent.companyId, agentId: agent.id, target: executionTarget });
+  if (ownerSession && localProcessSandbox) localProcessSandbox.launchDir = ownerSession.cwd;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
@@ -633,6 +636,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           syncWorkspace: !workspaceInPlace,
           // Temporary assets stay outside the worktree. Transcripts persist separately.
           runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "claude"),
+            providerSessionRoot: ownerSession?.providerSessionRoot,
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           onProgress: (line) => onLog("stdout", line),
@@ -662,6 +666,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
+  const issueExecutionCwd = effectiveExecutionCwd;
+  if (ownerSession) effectiveExecutionCwd = ownerSession.cwd;
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
   refreshPaperclipWorkspaceEnvForExecution({
     env,
@@ -677,7 +683,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     workspaceHints,
     agentHome,
     executionTargetIsRemote,
-    executionCwd: effectiveExecutionCwd,
+    executionCwd: issueExecutionCwd,
   });
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
@@ -894,6 +900,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
+    if (ownerSession) args.push("--add-dir", issueExecutionCwd);
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
@@ -933,6 +940,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       renderedBootstrapPrompt,
       selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
       wakePrompt,
+      ownerSession?.workspacePrompt(issueExecutionCwd, Boolean(resumeSessionId)) ?? "",
       sessionHandoffNote,
       taskContextNote,
       renderedPrompt,
@@ -984,7 +992,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(executionTargetIsRemote ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget) } : {}), }, onLog, onEvent });
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       onProcessStopped: providerStop.beginInvocation(),
-      cwd,
+      cwd: ownerSession?.cwd ?? cwd,
       env,
       stdin: prompt,
       timeoutSec,
@@ -1161,7 +1169,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const resolvedSessionParams = resolvedSessionId
       ? ({
         sessionId: resolvedSessionId,
-        cwd,
+          ...(ownerSession ? { ownerSession: true, ownerSessionIssueId: context.issueId } : {}),
+        cwd: ownerSession ? effectiveExecutionCwd : cwd,
         promptBundleKey: promptBundle.bundleKey,
         mcpServerIdentity: runtimeMcpIdentity,
         ...(executionTargetIsRemote
@@ -1378,7 +1387,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
     }
 
-    return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
+    return toAdapterResult(initial, { fallbackSessionId: ownerSession && !canResumeSession ? null : runtimeSessionId || runtime.sessionId });
   } finally {
     try {
       await providerStop.collectBeforeRestore();
