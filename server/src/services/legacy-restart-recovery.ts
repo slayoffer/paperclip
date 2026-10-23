@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { heartbeatRunEvents, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { runningProcesses } from "../adapters/index.js";
+import { adapterExecutionControls } from "./adapter-execution-control.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -76,6 +78,30 @@ export async function recordLegacyRestartFallback(db: Db, run: Run, reason: stri
     run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId)));
 }
 
+/** Refresh the checkpoint because provider output can follow the drain snapshot. */
+export async function suspendLegacyRunForRestart(
+  db: Db, run: Run, suspended: Set<string>,
+  terminate: (input: { pid: number | undefined; processGroupId: number | null; graceMs: number }) => Promise<void>,
+) {
+  if (run.runtimeMode !== "legacy") return false;
+  const [current] = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
+  if (!current || current.status !== "running" || current.controllerBootId !== legacyControllerBootId ||
+      !readLegacyRestartCheckpoint(current)) return false;
+  const process = runningProcesses.get(run.id);
+  const control = adapterExecutionControls.get(run.id);
+  if (!process && !control) return false;
+  suspended.add(run.id);
+  control?.controller.abort(new Error("server_restart"));
+  if (process) {
+    try {
+      await terminate({ pid: process.child.pid, processGroupId: process.processGroupId,
+        graceMs: Math.max(1, process.graceSec) * 1000 });
+    } finally { runningProcesses.delete(run.id); }
+  }
+  return true;
+}
+
 export async function saveLegacyRestartProviderHome(db: Db, run: Run, home: string) {
   await db.update(heartbeatRuns).set({
     resultJson: sql`jsonb_set(${heartbeatRuns.resultJson}, '{restartCheckpoint,providerSessionHome}', ${JSON.stringify(home)}::jsonb)`,
@@ -114,6 +140,8 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
   // An SSH wrapper PID cannot prove that its remote provider stopped.
   if (checkpoint?.sessionParams.remoteExecution &&
       (!checkpoint.providerStopped || !checkpoint.workspaceSettled) && !reason) reason = "restart_remote_stop_unverified";
+  if (checkpoint && !remote && !checkpoint.providerStopped &&
+      !run.processPid && !run.processGroupId && !reason) reason = "restart_local_stop_unverified";
   const attempts = Number((run.resultJson?.restartRecovery as Record<string, unknown>)?.attempt ?? 0);
   if (attempts >= 3) reason = "restart_attempt_limit";
   if (checkpoint && !reason) {

@@ -12,10 +12,13 @@ The adapter cannot replace a missing restart session with a fresh session.
 Managed local sessions retain their transcript directories before temporary home cleanup.
 Recovery restores these transcripts into the replacement provider home. Authentication and configuration files stay excluded.
 
-Recovery preserves the existing task key. This includes owner session keys from the optional owner session mode.
+Recovery preserves the session storage key. This includes owner session keys from the optional owner session mode.
+If the configured session scope changes before recovery, the saved run requires reconciliation.
 Recovery does not create a second session registry.
 
 The reaper must first find no live provider PID or process group.
+A local run without saved process identifiers requires an explicit provider-stop receipt.
+Missing process metadata alone cannot prove that a detached provider stopped.
 For SSH runs, a local wrapper PID cannot prove remote termination.
 Automatic SSH resume therefore requires a confirmed provider stop and completed workspace restore before shutdown.
 A hard SSH failure without these receipts uses reconciliation.
@@ -27,6 +30,7 @@ Conversation retry policy cannot remove this reconciliation hold after a failed 
 Recovery permits at most three controller claims per run.
 Fallback writes require the expected controller and a running row. They preserve the attempt count.
 Normal budget, pause, issue ownership, workspace, and approval checks still apply.
+Verified bootstrap failures retain their existing retry path when no provider execution evidence exists.
 
 Operators must verify a deployed release with a controlled restart and record the affected run IDs.
 Tests do not replace this live deployment check.

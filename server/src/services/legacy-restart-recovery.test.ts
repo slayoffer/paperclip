@@ -8,11 +8,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueRecoveryActions, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
-import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
+import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint, suspendLegacyRunForRestart } from "./legacy-restart-recovery.js";
+import { adapterExecutionControls, createAdapterExecutionControl } from "./adapter-execution-control.js";
 import { heartbeatService } from "./heartbeat.js";
 import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -37,6 +38,7 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.insert(authUsers).values({ id: "restart-user", name: "Test", email: "restart@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
   }, 60_000);
   afterAll(async () => { await database?.cleanup(); if (cwd) await fs.rm(cwd, { recursive: true, force: true }); });
+  afterEach(() => vi.unstubAllEnvs());
   async function seed(save = true, params: Record<string, unknown> = {}) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Restart", issuePrefix: `R${companyId.slice(0, 7)}`, defaultResponsibleUserId: "restart-user" });
@@ -48,7 +50,8 @@ const support = await getEmbeddedPostgresTestSupport();
       mode: "shared_workspace", strategyType: "project_primary", name: "Checkout", cwd });
     await db.insert(issues).values({ projectId, projectWorkspaceId, executionWorkspaceId, id: issueId, companyId, title: "Continue work", assigneeAgentId: agentId, status: "in_progress", responsibleUserId: "restart-user" });
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running",
-      ...legacyControllerClaim("legacy"), contextSnapshot: { issueId, executionWorkspaceId } }).returning();
+      ...legacyControllerClaim("legacy"), processPid: save ? 999_999_999 : null,
+      contextSnapshot: { issueId, executionWorkspaceId } }).returning();
     await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
     if (save) await saveLegacyRestartCheckpoint(db, run, { adapterType: "codex_local", taskKey: "owner-project:test",
       workspaceCwd: cwd, sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", cwd, ...params } });
@@ -124,10 +127,14 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(readLegacyRestartCheckpoint(await read(run.id))).toMatchObject({ providerStopped: false, workspaceSettled: false });
   });
 
-  it.each(["control", "process", "missing"] as const)("a graceful restart resumes a live Codex run through its %s owner", async ownership => {
+  it.each(["control", "process", "missing", "owner", "scope_changed"] as const)("a graceful restart preserves the session through its %s owner", async ownership => {
     execute.mockClear();
     await db.update(heartbeatRuns).set({ status: "succeeded" });
     const seeded = await seed(false);
+    if (ownership === "owner" || ownership === "scope_changed") {
+      vi.stubEnv("PAPERCLIP_OWNER_SESSIONS_ENABLED", "true");
+      vi.stubEnv("PAPERCLIP_OWNER_SESSION_AGENT_IDS", seeded.agentId);
+    }
     await db.update(heartbeatRuns).set({ status: "queued", controllerBootId: null, controllerLeaseExpiresAt: null })
       .where(eq(heartbeatRuns.id, seeded.id));
     execute.mockImplementation(async input => {
@@ -162,34 +169,73 @@ const support = await getEmbeddedPostgresTestSupport();
     const oldController = heartbeatService(db);
     await oldController.resumeQueuedRuns();
     await started;
-    expect(readLegacyRestartCheckpoint(await read(seeded.id))).not.toBeNull();
+    const checkpoint = readLegacyRestartCheckpoint(await read(seeded.id));
+    expect(checkpoint).not.toBeNull();
+    if (ownership === "owner" || ownership === "scope_changed") {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, String(seeded.contextSnapshot?.issueId)));
+      expect(checkpoint?.taskKey).toBe(`owner-project:${issue.projectId}`);
+    }
     expect(await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM", new Date(), [seeded.id]))
       .toMatchObject({ restartSuspendedRunIds: [seeded.id], interruptedRunIds: [] });
     await oldController.drainActiveRunExecutions();
     const suspended = await read(seeded.id);
     expect(suspended.status).toBe("running");
+    if (ownership === "scope_changed") vi.stubEnv("PAPERCLIP_OWNER_SESSIONS_ENABLED", "false");
     await expire(seeded.id);
     const newController = heartbeatService(db);
     await newController.reapOrphanedRuns({ staleThresholdMs: 0 });
     await newController.drainActiveRunExecutions();
-    if (ownership === "missing") {
+    if (ownership === "missing" || ownership === "scope_changed") {
       expect(await read(seeded.id)).toMatchObject({ status: "failed", resultJson: {
-        restartRecovery: { outcome: "reconciliation", reason: "restart_session_missing" },
+        restartRecovery: { outcome: "reconciliation", reason: ownership === "missing"
+          ? "restart_session_missing" : "restart_session_scope_changed" },
       } });
     } else {
       expect(await read(seeded.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "01234567-89ab-4cde-8f01-23456789abcd", resultJson: { restartRecovery: { outcome: "resumed" } } });
     }
     const calls = execute.mock.calls.filter(([input]) => input.runId === seeded.id);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]![0]).toMatchObject({ runId: seeded.id, runtime: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd" }, context: { paperclipRestartResume: true } });
+    expect(calls).toHaveLength(ownership === "scope_changed" ? 1 : 2);
+    if (ownership !== "scope_changed") expect(calls[1]![0]).toMatchObject({ runId: seeded.id, runtime: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd" }, context: { paperclipRestartResume: true } });
     const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(seeded.contextSnapshot?.issueId)));
     expect(recoveryActions.filter(action => action.cause === "legacy_execution_requires_reconciliation"))
-      .toHaveLength(ownership === "missing" ? 1 : 0);
-    if (ownership === "missing") {
+      .toHaveLength(ownership === "missing" || ownership === "scope_changed" ? 1 : 0);
+    if (ownership === "missing" || ownership === "scope_changed") {
       const obsolete = await db.select().from(issueRecoveryActions).where(conversationRecoveryActionPredicate());
       expect(obsolete.some(action => action.sourceIssueId === seeded.contextSnapshot?.issueId)).toBe(false);
     }
   }, 60_000);
+
+  it.each([false, true])("requires local stop evidence without process identifiers: %s", async stopped => {
+    const seeded = await seed();
+    await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, seeded.id));
+    if (stopped) await markLegacyRestartBoundary(db, seeded, "providerStopped");
+    const run = await expire(seeded.id);
+    const claimed = await claimLegacyRestartRecovery(db, run, "codex_local");
+    if (stopped) expect(claimed).not.toBeNull();
+    else {
+      expect(claimed).toBeNull();
+      expect((await read(run.id)).resultJson?.restartRecovery).toMatchObject({
+        outcome: "reconciliation", reason: "restart_local_stop_unverified",
+      });
+    }
+  });
+
+  it("suspends a checkpoint saved after the shutdown snapshot", async () => {
+    const snapshot = await seed(false);
+    await saveLegacyRestartCheckpoint(db, snapshot, { adapterType: "codex_local", taskKey: null,
+      workspaceCwd: cwd, sessionParams: { cwd, sessionId: "saved-session" } });
+    const control = createAdapterExecutionControl();
+    adapterExecutionControls.set(snapshot.id, control);
+    const suspended = new Set<string>(), terminate = vi.fn(async () => {});
+    try {
+      expect(await suspendLegacyRunForRestart(db, snapshot, suspended, terminate)).toBe(true);
+      expect(suspended.has(snapshot.id)).toBe(true);
+      expect(control.controller.signal.aborted).toBe(true);
+      expect((control.controller.signal.reason as Error).message).toBe("server_restart");
+      expect((await read(snapshot.id)).status).toBe("running");
+      expect(terminate).not.toHaveBeenCalled();
+    } finally { adapterExecutionControls.delete(snapshot.id); control.finish(); }
+  });
 
   it("a missing checkpoint retains reconciliation without dispatch", async () => {
     execute.mockClear();

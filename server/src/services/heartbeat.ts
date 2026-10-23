@@ -1,5 +1,5 @@
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
-import { claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
+import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
 import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
@@ -15369,17 +15369,7 @@ export function heartbeatService(
         restartSuspendedRunIds.push(run.id);
         continue;
       }
-      const checkpoint = readLegacyRestartCheckpoint(run);
-      const restartProcess = runningProcesses.get(run.id);
-      if (checkpoint && (adapterExecutionControls.has(run.id) || restartProcess)) {
-        restartSuspendedLegacyRuns.add(run.id);
-        adapterExecutionControls.get(run.id)?.controller.abort(new Error("server_restart"));
-        if (restartProcess) {
-          try {
-            await terminateHeartbeatRunProcess({ pid: restartProcess.child.pid,
-              processGroupId: restartProcess.processGroupId, graceMs: Math.max(1, restartProcess.graceSec) * 1000 });
-          } finally { runningProcesses.delete(run.id); }
-        }
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
         restartSuspendedRunIds.push(run.id);
         continue;
       }
@@ -23253,7 +23243,7 @@ export function heartbeatService(
         const saved = runOptions.legacyRestartRecovery;
         if (saved.workspaceCwd !== executionWorkspace.cwd) throw new Error("restart_workspace_changed");
         if (saved.executionWorkspaceId !== (persistedExecutionWorkspace?.id ?? null)) throw new Error("restart_workspace_binding_changed");
-        if (saved.taskKey !== taskKey) throw new Error("restart_session_scope_changed");
+        if (saved.taskKey !== sessionStorageKey) throw new Error("restart_session_scope_changed");
         if ((saved.aiSessionIdentity ?? null) !== (managedAiRuntime?.sessionIdentity ?? null)) throw new Error("restart_account_changed");
         if (saved.providerSessionHome) {
           if (!managedAiRuntime?.home) throw new Error("restart_account_changed");
@@ -23657,7 +23647,7 @@ export function heartbeatService(
         const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
           if (event.eventType === "session.checkpoint") {
             await saveLegacyRestartCheckpoint(db, currentRun, {
-              adapterType: agent.adapterType, taskKey, workspaceCwd: executionWorkspace.cwd,
+              adapterType: agent.adapterType, taskKey: sessionStorageKey, workspaceCwd: executionWorkspace.cwd,
               aiSessionIdentity: managedAiRuntime?.sessionIdentity ?? null,
               ...(managedAiRuntime?.home && !parseObject(event.payload?.sessionParams).remoteExecution
                 ? { providerSessionHome: path.join(managedAiRuntime.home, "provider") } : {}),
