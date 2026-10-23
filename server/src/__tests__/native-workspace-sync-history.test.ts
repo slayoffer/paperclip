@@ -44,6 +44,16 @@ describe("native warm workspace Git history", () => {
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
   });
 
+  it.each([0, 7])("preserves exit code %s when the child does not read stdin", async (exitCode) => {
+    const result = await runner.execute({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write('probe'); process.exit(${exitCode})`],
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 5_000,
+    });
+    expect(result).toMatchObject({ exitCode, stdout: "probe", stderr: "", timedOut: false });
+  });
+
   it.each(["unchanged", "host_commit", "host_branch", "remote_commit", "nested_commit"] as const)(
     "checks Git identity before reusing a warm sandbox: %s", async (change) => {
       const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-warm-history-"));

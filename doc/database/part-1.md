@@ -201,6 +201,17 @@ completed lookups and the separate liveness backfill are not replayed. Projectio
 callers that use a transaction retain single-attempt reads. The opt-in is only
 for a pooled database handle outside a transaction.
 
+## Wake admission transactions
+
+Wake admission reserves one database connection and locks the issue row.
+Session workspace checks and responsible-user lookups use that same connection.
+Their routine, parent, company, and membership lookups also use it.
+A transaction must not wait for another connection from its own pool.
+Concurrent admissions can occupy every connection and prevent either lookup from completing.
+
+The `heartbeat-admission-pool.test.ts` suite admits N+1 candidates with N connections.
+It checks isolated workspaces and both issue-scoped and unscoped wake admission.
+
 ## Execution identity row locks
 
 The offline publication authority also locks current issue, run, agent, company,

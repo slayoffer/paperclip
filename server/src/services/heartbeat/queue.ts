@@ -2306,8 +2306,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const sessionBefore =
       explicitResumeSession?.sessionDisplayId ??
       (await resolveSessionBeforeForWakeup(agent, effectiveTaskKey));
+    // Admission lookups must use the reserved connection, even when the pool is full.
     let hasResolvablePriorSessionWorkspace: boolean | null = null;
-    const resolveHasResolvablePriorSessionWorkspace = async () => {
+    const resolveHasResolvablePriorSessionWorkspace = async (client: Pick<Db, "select">) => {
       if (hasResolvablePriorSessionWorkspace !== null)
         return hasResolvablePriorSessionWorkspace;
       hasResolvablePriorSessionWorkspace = issueId
@@ -2316,7 +2317,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             contextSnapshot: enrichedContextSnapshot,
             taskKey: effectiveTaskKey,
             explicitResumeSession,
-          })
+          }, client)
         : false;
       return hasResolvablePriorSessionWorkspace;
     };
@@ -2384,15 +2385,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : false;
     let operatorResponsibleUserId: string | null = opts.manualUserWake ? opts.requestedByActorId! : null;
     let queuedResponsibleUserIdPromise: Promise<string> | null = null;
-    const resolveQueuedResponsibleUserId = () => {
+    const resolveQueuedResponsibleUserId = (client: Pick<Db, "select">) => {
       if (operatorResponsibleUserId) return Promise.resolve(operatorResponsibleUserId);
       queuedResponsibleUserIdPromise ??= (async () => {
         const queuedIssueContext = issueId
-          ? await getIssueExecutionContext(agent.companyId, issueId)
+          ? await getIssueExecutionContext(agent.companyId, issueId, client)
           : null;
         const queuedRoutineEnvContext = await getRoutineEnvForExecutionIssue(
           agent.companyId,
           queuedIssueContext,
+          client,
         );
         const queuedResponsibleUserId =
           await resolveResponsibleUserIdForRunSeed({
@@ -2404,7 +2406,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             requestedByActorId: opts.requestedByActorId ?? null,
             source,
             triggerDetail,
-          });
+          }, client);
         if (!queuedResponsibleUserId) {
           throw new HttpError(
             422,
@@ -3428,7 +3430,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               existingExecutionWorkspaceStatus,
             });
             const hasResolvablePriorSessionWorkspace =
-              await resolveHasResolvablePriorSessionWorkspace();
+              await resolveHasResolvablePriorSessionWorkspace(tx);
 
             if (
               isUnrunnableWorktreeCombo({
@@ -3912,7 +3914,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               invocationSource: source,
               triggerDetail,
               status: "queued",
-              responsibleUserId: await resolveQueuedResponsibleUserId(),
+              responsibleUserId: await resolveQueuedResponsibleUserId(tx),
               wakeupRequestId: wakeupRequest.id,
               retryOfRunId: failedChatRetry
                 ? durableRequest!.failedRunRetry!.failedRunId
@@ -4186,7 +4188,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           invocationSource: source,
           triggerDetail,
           status: "queued",
-          responsibleUserId: await resolveQueuedResponsibleUserId(),
+          responsibleUserId: await resolveQueuedResponsibleUserId(tx),
           wakeupRequestId: wakeupRequest.id,
           contextSnapshot: enrichedContextSnapshot,
           sessionIdBefore: sessionBefore,
