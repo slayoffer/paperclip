@@ -74,8 +74,11 @@ Do not replace a failed request with zero or change the existing weekly work cou
 
 ## Consistency and verification
 
-The service uses at most nine company-scoped queries in one repeatable-read, read-only transaction.
+The service uses at most ten company-scoped queries in one repeatable-read, read-only transaction.
 It does not read comments, decision contents, logs, or agent configuration.
+Dependency readiness checks include only visible open dependents. Closed rows still supply exact work counts.
+Workspace history checks group operations by blocker and workspace. Repeated dependency links share one check.
+The query excludes unrelated operations, but retains successful finalization from other issues on a shared workspace.
 The response still contains board-visible issue titles and owner IDs.
 Use the existing board session or board key access rules.
 
@@ -87,5 +90,7 @@ pnpm exec vitest run server/src/__tests__/company-flow-model.test.ts server/src/
 
 The HTTP test includes JSON transfer and decoding for 2,000 linked issues.
 It requires a complete report in less than two seconds.
+Another fixture includes 2,251 issues, 2,000 links, and 8,251 operations on one shared workspace.
+It checks five complete responses and requires a median below two seconds.
 This fixture verifies a representative company size. Larger companies need separate capacity measurements.
 The fork pull request workflow runs these checks on the exact candidate commit.

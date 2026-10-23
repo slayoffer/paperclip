@@ -1,3 +1,4 @@
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { activityLog, approvals, heartbeatRuns, issueApprovals, issueRecoveryActions, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { listIssueDependencyReadinessMap } from "./issue-dependency-readiness.js";
@@ -54,7 +55,7 @@ export async function releaseReadyDependencyWait(db: Db, companyId: string, issu
         sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`))).limit(1);
     const [run] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
-      or(eq(heartbeatRuns.nativeIssueId, issueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`))).limit(1);
+      eq(boundRunIssueIdSql(), issueId))).limit(1);
     if (interaction || approval || recovery || run) return null;
     await tx.update(issues).set({ status: "todo", updatedAt: new Date(),
       statusVersion: sql`${issues.statusVersion} + 1`, unblockDescriptor: null,

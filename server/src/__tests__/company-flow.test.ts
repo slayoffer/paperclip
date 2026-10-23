@@ -102,12 +102,18 @@ if (!support.supported) console.warn(`Company flow database tests skipped: ${sup
   });
 
   it("enforces board access and company membership before queries", async () => {
-    for (const actor of ["agent", "anonymous", "outsider"]) {
+    for (const actor of ["anonymous", "outsider"]) {
       const response = await fetch(`${baseUrl}/${companyId}/flow`, { headers: { "x-test-actor": actor } });
       expect(response.status).toBe(403);
     }
     expect((await fetch(`${baseUrl}/${otherCompanyId}/flow`)).status).toBe(403);
     expect((await fetch(`${baseUrl}/${randomUUID()}/flow`, { headers: { "x-test-actor": "local" } })).status).toBe(404);
+  });
+
+  it("refuses an agent principal with HTTP 403", async () => {
+    const response = await fetch(`${baseUrl}/${companyId}/flow`, { headers: { "x-test-actor": "agent" } });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Board access required" });
   });
 
   it("uses scoped database rows, pending decisions, exact WIP, and live runs", async () => {
@@ -214,4 +220,65 @@ if (!support.supported) console.warn(`Company flow database tests skipped: ${sup
     expect(elapsed).toBeLessThan(2_000);
     console.info(`Company flow HTTP report: 2,011 company issues, 2,003 relations, ${Math.round(elapsed)} ms`);
   }, 15_000);
+
+  it("keeps shared workspace history below two seconds for five complete reads", async () => {
+    const historyCompanyId = randomUUID();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const unrelatedId = randomUUID();
+    const blockers = Array.from({ length: 250 }, () => randomUUID());
+    const dependents = blockers.flatMap((blockerId) => Array.from({ length: 8 }, (_, index) => ({
+      id: randomUUID(), blockerId, status: index < 4 ? "blocked" : "done",
+    })));
+    await db.insert(companies).values({ id: historyCompanyId, name: "History", issuePrefix: "HISTORY" });
+    await db.insert(projects).values({ id: projectId, companyId: historyCompanyId, name: "History" });
+    await db.insert(executionWorkspaces).values({
+      id: workspaceId, companyId: historyCompanyId, projectId, name: "Shared history",
+      mode: "isolated", strategyType: "git_worktree",
+    });
+    const rows = [
+      ...blockers.map((id) => ({ id, status: "done", executionWorkspaceId: workspaceId })),
+      ...dependents.map(({ id, status }) => ({ id, status, executionWorkspaceId: null })),
+      { id: unrelatedId, status: "done", executionWorkspaceId: workspaceId },
+    ];
+    for (let start = 0; start < rows.length; start += 250) {
+      await db.insert(issues).values(rows.slice(start, start + 250).map((row) => ({
+        ...row, companyId: historyCompanyId, title: "History fixture",
+      })));
+    }
+    await db.insert(issueRelations).values(dependents.map(({ id, blockerId }) => ({
+      companyId: historyCompanyId, issueId: blockerId, relatedIssueId: id, type: "blocks" as const,
+    })));
+    const operations = [
+      ...blockers.map((issueId) => ({ issueId, phase: "worktree_prepare", status: "succeeded" })),
+      ...Array.from({ length: 8_000 }, () => ({ issueId: unrelatedId, phase: "worktree_prepare", status: "succeeded" })),
+    ];
+    for (let start = 0; start < operations.length; start += 250) {
+      await db.insert(workspaceOperations).values(operations.slice(start, start + 250).map((operation) => ({
+        ...operation, companyId: historyCompanyId, executionWorkspaceId: workspaceId,
+        startedAt: new Date("2026-10-20T00:00:00Z"),
+      })));
+    }
+    // A later shared success must release every blocker, including those with duplicate links.
+    await db.insert(workspaceOperations).values({
+      companyId: historyCompanyId, executionWorkspaceId: workspaceId, issueId: unrelatedId,
+      phase: "workspace_finalize", status: "succeeded", startedAt: new Date("2026-10-21T00:00:00Z"),
+    });
+    const timings: number[] = [];
+    for (let index = 0; index < 5; index++) {
+      const start = performance.now();
+      const response = await fetch(`${baseUrl}/${historyCompanyId}/flow`, { headers: { "x-test-actor": "local" } });
+      const report = await response.json() as CompanyFlowReport;
+      timings.push(performance.now() - start);
+      expect(response.status).toBe(200);
+      expect(Object.keys(report).sort()).toEqual([
+        "agents", "chainRoots", "collectedAt", "companyId", "counts", "ghosts", "readyQueues", "scorecard", "unassigned",
+      ]);
+      expect(report.ghosts.blockedWithClosedLinks).toHaveLength(1_000);
+      expect(report.counts.wip).toBe(1_000);
+    }
+    const median = [...timings].sort((a, b) => a - b)[2]!;
+    expect(median).toBeLessThan(2_000);
+    console.info(`Company flow shared history HTTP reads (ms): ${timings.map(Math.round).join(", ")}. Median: ${Math.round(median)}`);
+  }, 30_000);
 });

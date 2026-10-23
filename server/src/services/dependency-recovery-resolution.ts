@@ -1,3 +1,4 @@
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { heartbeatRuns, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { persistActivity } from "./activity-log.js";
@@ -10,7 +11,7 @@ export async function resolveSuppressedDependencyRecoveries(db: Db, companyId: s
       .from(issueRecoveryActions).innerJoin(heartbeatRuns, and(
         eq(heartbeatRuns.companyId, issueRecoveryActions.companyId),
         sql`${heartbeatRuns.id}::text = ${issueRecoveryActions.evidence}->>'runId'`,
-        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueRecoveryActions.sourceIssueId}::text`,
+        sql`${boundRunIssueIdSql()} = ${issueRecoveryActions.sourceIssueId}::text`,
       )).where(and(
         eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
         eq(issueRecoveryActions.kind, "active_run_watchdog"),
