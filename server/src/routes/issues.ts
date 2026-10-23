@@ -4679,7 +4679,8 @@ export function issueRoutes(
     }
     const hasExecutionOverride = input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined || input.executionWorkspaceSettings !== undefined;
-    const executionWorkspaceId = input.executionWorkspaceId ?? (hasExecutionOverride ? null : source?.executionWorkspaceId);
+    const executionWorkspaceId = input.executionWorkspaceId ??
+      (hasExecutionOverride || !input.inheritExecutionWorkspaceFromIssueId ? null : source?.executionWorkspaceId);
     if (executionWorkspaceId && (await instanceSettings.getExperimental()).enableIsolatedWorkspaces) {
       const [workspace] = await db.select({ projectId: executionWorkspaces.projectId }).from(executionWorkspaces)
         .where(and(eq(executionWorkspaces.id, executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));

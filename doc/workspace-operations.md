@@ -1,5 +1,26 @@
 # Workspace operations
 
+## Child execution contexts
+
+A child inherits its parent’s project and project workspace by default.
+It does not inherit the parent’s execution workspace binding.
+The child realizes its own branch from its selected base ref.
+The child helper preserves unresolved strategy settings, but removes the parent’s exact branch pin.
+An explicit child branch or base ref takes precedence.
+
+Set `inheritExecutionWorkspaceFromIssueId` to request a source execution workspace.
+The internal child helper also supports explicit `executionWorkspaceInheritanceMode: "linkage"`.
+A direct execution workspace binding remains supported.
+A requested branch that differs from the saved workspace branch requires a separate realization.
+
+Before cross-issue reuse, the runtime checks staged, unstaged, and untracked Git changes.
+A dirty workspace or failed status check causes `workspace_validation_failed`.
+The runtime does not repair or provision that workspace for the other issue.
+The source issue can resume its own dirty workspace.
+The check covers persisted bindings and registered worktrees selected by branch.
+Owner selection compares canonical paths within the company, including saved and candidate symbolic-link paths.
+Company and project access checks still apply.
+
 ## Task environment selection
 
 `executionWorkspaceSettings.environmentId` selects an environment for one task.

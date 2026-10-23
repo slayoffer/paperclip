@@ -59,8 +59,11 @@ suite("task environment routing", () => {
       baseCwd = join(directory, "repository");
       workspaceCwd = join(directory, "parent-worktree");
       await mkdir(baseCwd);
-      await execFileAsync("git", ["init", "--initial-branch=main", baseCwd]);
-      await execFileAsync("git", ["-C", baseCwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial fixture"]);
+    }
+    // Cross-issue sharing requires a checkout with a readable, clean Git status.
+    await execFileAsync("git", ["init", "--initial-branch=main", baseCwd]);
+    await execFileAsync("git", ["-C", baseCwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial fixture"]);
+    if (isolated) {
       await execFileAsync("git", ["-C", baseCwd, "worktree", "add", "-b", "parent", workspaceCwd]);
     }
     await db.insert(companies).values({ id: companyId, name: "Routing", issuePrefix: "SYNA", defaultResponsibleUserId: "owner" });
