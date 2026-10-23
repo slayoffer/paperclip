@@ -1,3 +1,4 @@
+import { ownerSessionState } from "@paperclipai/adapter-utils/owner-session-state";
 export { execute, ensureCodexSkillsInjected } from "./execute.js";
 export {
   resolveCodexAuthPrecedence,
@@ -85,6 +86,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
     return {
       sessionId,
+      ...ownerSessionState(record),
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
@@ -104,6 +106,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
     return {
       sessionId,
+      ...ownerSessionState(params),
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),

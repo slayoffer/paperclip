@@ -22,9 +22,11 @@ afterEach(async () => {
 });
 
 it.each([
-  { adapterKey: "codex", assetKey: "home", sessionDirectory: "sessions" },
-  { adapterKey: "claude", assetKey: "config-seed", sessionDirectory: "projects" },
-])("preserves $adapterKey transcripts across two runs and isolates companies", async ({ adapterKey, assetKey, sessionDirectory }) => {
+  { adapterKey: "codex", assetKey: "home", sessionDirectory: "sessions", ownerMode: false },
+  { adapterKey: "codex", assetKey: "home", sessionDirectory: "sessions", ownerMode: true },
+  { adapterKey: "claude", assetKey: "config-seed", sessionDirectory: "projects", ownerMode: false },
+  { adapterKey: "claude", assetKey: "config-seed", sessionDirectory: "projects", ownerMode: true },
+])("preserves $adapterKey transcripts across two runs and isolates companies (owner=$ownerMode)", async ({ adapterKey, assetKey, sessionDirectory, ownerMode }) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "ssh-sessions-")));
   roots.push(root);
   const workspace = path.join(root, "worktree");
@@ -42,11 +44,14 @@ it.each([
     });
   });
   async function prepare(runId: string, companyId = "company-a") {
+    const issueWorkspace = ownerMode ? path.join(root, `worktree-${runId}`) : workspace;
+    await mkdir(issueWorkspace, { recursive: true });
     return prepareRemoteManagedRuntime({
       spec: { host: "fixture", port: 22, username: "fixture", remoteCwd: root,
         remoteWorkspacePath: root, privateKey: null, knownHosts: null, strictHostKeyChecking: true },
-      runId, companyId, adapterKey, workspaceLocalDir: workspace, workspaceRemoteDir: workspace,
+      runId, companyId, adapterKey, workspaceLocalDir: issueWorkspace, workspaceRemoteDir: issueWorkspace,
       syncWorkspace: false,
+      providerSessionRoot: ownerMode ? path.join(root, "owner-sessions", companyId, "agent-a", "project-a", "provider-sessions") : undefined,
       runtimeRootDir: path.join(root, ".paperclip-runtime", "runs", runId, adapterKey),
       assets: [{ key: assetKey, localDir: seed }],
     });
@@ -57,7 +62,7 @@ it.each([
   const transcript = path.join(first.assetDirs[assetKey]!, sessionDirectory, "session-1.jsonl");
   await writeFile(transcript, '{"sessionId":"session-1","turn":1}\n');
   const durableTranscript = await realpath(transcript);
-  expect(durableTranscript).toContain("/provider-sessions/company-a/");
+  expect(durableTranscript).toContain(ownerMode ? "/owner-sessions/company-a/agent-a/project-a/" : "/provider-sessions/company-a/");
   expect(durableTranscript.startsWith(`${workspace}/`)).toBe(false);
   await first.restoreWorkspace();
   await expect(readFile(first.runtimeRootDir)).rejects.toMatchObject({ code: "ENOENT" });
