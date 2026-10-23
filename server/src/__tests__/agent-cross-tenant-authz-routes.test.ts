@@ -348,6 +348,63 @@ describe("agent cross-tenant route authorization", () => {
     resetMockDefaults();
   });
 
+  it.each([
+    { body: undefined, reason: "manual" },
+    { body: {}, reason: "manual" },
+    { body: { reason: "ops-guard:quota-blip" }, reason: "ops-guard:quota-blip" },
+    { body: { reason: `ops-guard:${"a".repeat(118)}` }, reason: `ops-guard:${"a".repeat(118)}` },
+    { body: { reason: "ops-guard:Quota_1.2:retry-3" }, reason: "ops-guard:Quota_1.2:retry-3" },
+  ])("passes the board pause reason $reason to storage", async ({ body, reason }) => {
+    currentAccessCanUser = true;
+    mockAgentService.pause.mockResolvedValue({ ...baseAgent, status: "paused", pauseReason: reason });
+    const app = await createApp({
+      type: "board", userId: "board-user", companyIds: [companyId], source: "session",
+    });
+    const res = await requestApp(app, (baseUrl) => {
+      const req = request(baseUrl).post(`/api/agents/${agentId}/pause`);
+      return body === undefined ? req : req.send(body);
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.pauseReason).toBe(reason);
+    expect(mockAgentService.pause).toHaveBeenCalledWith(agentId, reason);
+    expect(mockHeartbeatService.cancelActiveForAgent).toHaveBeenCalledWith(agentId);
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId, actorType: "user", actorId: "board-user", action: "agent.paused",
+      entityType: "agent", entityId: agentId, details: { reason },
+    }));
+  });
+
+  it.each([
+    "manual", "budget", "system", "other:quota", "ops-guard:",
+    `ops-guard:${"a".repeat(119)}`, "ops-guard:quota blip", "ops-guard:quota\nblip",
+    "ops-guard:quota\n", "ops-guard:quota\r", "ops-guard:quota\u0000", "ops-guard:quóta",
+    "ops-guard:<quota>", "ops-guard:/quota", "ops-guard:quota?", 42, null,
+  ])("rejects invalid board pause reason %j before mutation", async (reason) => {
+    currentAccessCanUser = true;
+    const app = await createApp({
+      type: "board", userId: "board-user", companyIds: [companyId], source: "session",
+    });
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/pause`).send({ reason }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockAgentService.pause).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.cancelActiveForAgent).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent pause request with an operations guard reason", async () => {
+    const app = await createApp({ type: "agent", agentId, companyId, runId: "run-1" });
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/pause`).send({ reason: "ops-guard:quota" }),
+    );
+    expect(res.status).toBe(403);
+    expect(mockAgentService.pause).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.cancelActiveForAgent).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
   it("enforces company boundaries before mutating or reading agent keys", async () => {
     const crossTenantActor = {
       type: "board",
