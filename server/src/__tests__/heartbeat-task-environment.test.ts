@@ -170,7 +170,7 @@ suite("task environment routing", () => {
     const file = join(directory, "source.txt");
     await writeFile(file, "parent checkout");
     const result = await cleanupExecutionWorkspaceArtifacts({ workspace: {
-      id: randomUUID(), cwd: directory, providerType, providerRef: null, branchName: null,
+      id: randomUUID(), companyId: randomUUID(), cwd: directory, providerType, providerRef: null, branchName: null,
       repoUrl: null, baseRef: null, projectId: null, projectWorkspaceId: null, sourceIssueId: null,
       metadata: { taskEnvironmentSourceWorkspaceId: sharedWorkspaceId, createdByRuntime: true },
     }, cleanupCommand: "exit 1", teardownCommand: "exit 1" });

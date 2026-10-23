@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { publicationAuthorityClocks, publicationBrokers, publicationRequests, issues } from "@paperclipai/db";
 import { publicationDispatchWithinDeadline } from "@paperclipai/shared";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
-import { barrier, startAuthorityDatabase, waitForDatabaseWait } from "../__tests__/helpers/publication-authority.js";
+import { barrier, startAuthorityDatabase, waitForDatabaseWait } from "./publication-authority.test-fixture.js";
 import { certificateFingerprint } from "./publication-authority-trust.js";
 import { syntheticCertificates, transportFixture } from "./publication-authority-tls.test-fixture.js";
 

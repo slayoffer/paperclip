@@ -39,12 +39,12 @@ async function probe(worktree: string) {
 }
 async function persisted(f: Awaited<ReturnType<typeof fixture>>) {
   return ensurePersistedExecutionWorkspaceAvailable({
-    base: { cwd: f.repo, baseCwd: f.repo, source: "project", repoRef: "main", warnings: [] },
-    workspace: { id: "workspace", cwd: f.worktree, providerRef: f.worktree, providerType: "git_worktree",
+    base: { baseCwd: f.repo, source: "project_primary", projectId: null, workspaceId: null, repoUrl: null, repoRef: "main" },
+    workspace: { id: "workspace", mode: "isolated_workspace", cwd: f.worktree, providerRef: f.worktree, projectId: null, projectWorkspaceId: null, repoUrl: null,
       strategyType: "git_worktree", branchName: "issue", baseRef: "main", config: {},
       metadata: { createdByRuntime: true, gitBranchOwnershipVersion: 1 } },
     issue: null, agent: { id: "agent", name: "Fixture", companyId: "company" },
-  } as Parameters<typeof ensurePersistedExecutionWorkspaceAvailable>[0]);
+  });
 }
 afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }); });
 
@@ -147,6 +147,7 @@ describe("managed worktree Git identity", () => {
         const result = await cleanupExecutionWorkspaceArtifacts({
           workspace: { id: "workspace", companyId: "company", providerType: "git_worktree",
             cwd: f.worktree, providerRef: f.worktree, branchName: "issue",
+            repoUrl: null, baseRef: "main", projectId: null, projectWorkspaceId: null, sourceIssueId: null,
             metadata: { createdByRuntime: true, gitBranchOwnershipVersion: 1 } },
           projectWorkspace: { cwd: f.repo, cleanupCommand: null }, runCleanupCommands: false,
         });

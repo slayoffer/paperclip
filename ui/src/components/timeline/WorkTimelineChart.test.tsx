@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushSync } from "react-dom";
-import type { ComponentProps } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { WorkTimelineResult } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -118,12 +118,11 @@ describe("WorkTimelineChart", () => {
     expect(timeAxis.style.height).toBe("32px");
     expect(axisSvg.style.transform).toBe("translateX(0px)");
 
-    flushSync(() => {
+    await act(async () => {
       Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 400 });
       Object.defineProperty(scroller, "scrollLeft", { configurable: true, value: 240 });
       scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(timeAxis.textContent).toContain("Jul 2");
     expect(axisSvg.style.transform).toBe("translateX(-240px)");

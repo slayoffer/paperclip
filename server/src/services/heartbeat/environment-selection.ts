@@ -59,6 +59,8 @@ export interface HeartbeatEnvironmentSelectionInput {
     hasSelectedWorkspaceSource: boolean;
     taskWorkspaceIntent: Issue["workspaceSelection"];
     responsibleUserId: string | null;
+    /** Synthiq legacy restart resume: the workspace the suspended run used. */
+    legacyRestartExecutionWorkspaceId?: string | null;
   };
   policy: {
     trustPreset: TrustPresetResolution;
@@ -117,13 +119,23 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const controllerOnly = isDotRun || providerApiPlacement !== null;
   const persistedNativeExecutionWorkspaceId =
     providerApiPlacement ? null : persistedNativeExecutionInput?.binding.executionWorkspaceId ?? null;
+  const legacyRestartExecutionWorkspaceId = run.runtimeMode === "legacy" && !controllerOnly
+    ? input.task.legacyRestartExecutionWorkspaceId ?? null
+    : null;
+  const persistedRecoveryExecutionWorkspaceId = persistedNativeExecutionWorkspaceId ?? legacyRestartExecutionWorkspaceId;
   const fresh = input.task.freshWorkspace?.mode === "fresh_isolated_workspace";
   const requestedExecutionWorkspaceId = controllerOnly ? null :
-    persistedNativeExecutionWorkspaceId ??
+    persistedRecoveryExecutionWorkspaceId ??
     readNonEmptyString(issueRef?.executionWorkspaceId);
   let existingExecutionWorkspace = requestedExecutionWorkspaceId
     ? await executionWorkspacesSvc.getStoredById(agent.companyId, requestedExecutionWorkspaceId)
     : null;
+  if (legacyRestartExecutionWorkspaceId && (fresh || !existingExecutionWorkspace ||
+      existingExecutionWorkspace.status === "archived" || existingExecutionWorkspace.status === "cleanup_failed")) {
+    throw new WorkspaceValidationFailure("The saved restart workspace is unavailable.", {
+      workspaceValidation: { reason: "restart_workspace_unavailable", issueId },
+    });
+  }
   if (existingExecutionWorkspace && issueId && !controllerOnly && !fresh
     && existingExecutionWorkspace.id === readNonEmptyString(issueRef?.executionWorkspaceId)
     && (existingExecutionWorkspace.status === "archived" || existingExecutionWorkspace.status === "cleanup_failed")
@@ -165,10 +177,11 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       bindingId: persistedNativeExecutionWorkspaceId,
       persistedWorkspaceFound: existingExecutionWorkspace !== null,
     });
+  const recoveryExecutionWorkspaceId = nativeRecoveryExecutionWorkspaceId ?? legacyRestartExecutionWorkspaceId;
   const workspaceReuseRequest =
     resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-      issueExecutionWorkspacePreference: controllerOnly ? null : nativeRecoveryExecutionWorkspaceId || retainedWorkspace
+      issueExecutionWorkspacePreference: controllerOnly ? null : recoveryExecutionWorkspaceId || retainedWorkspace
         ? "reuse_existing"
         : (issueRef?.executionWorkspacePreference ?? null),
       existingExecutionWorkspaceStatus:
@@ -185,7 +198,16 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   if (!controllerOnly && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
     const workspaceRequiringAccess = reusableExistingExecutionWorkspace ?? boundSourceWorkspace;
     if (workspaceRequiringAccess && issueId) {
-      await assertTaskWorkspaceExecutionAccess(db, workspaceAuthorizationActor, agent.companyId, { issueId, workspaceId: workspaceRequiringAccess.id });
+      // The saved run may keep its task-owned workspace after the task's
+      // current binding moves. Inherited workspaces need the current binding.
+      const ownsRestartWorkspace = legacyRestartExecutionWorkspaceId === workspaceRequiringAccess.id &&
+        workspaceRequiringAccess.sourceIssueId === issueId;
+      await assertTaskWorkspaceExecutionAccess(db, workspaceAuthorizationActor, agent.companyId, {
+        issueId, workspaceId: ownsRestartWorkspace ? undefined : workspaceRequiringAccess.id,
+      });
+      if (ownsRestartWorkspace && workspaceRequiringAccess.projectId) {
+        await assertTaskWorkspaceSourceProjectAccess(db, workspaceAuthorizationActor, agent.companyId, workspaceRequiringAccess.projectId);
+      }
     } else if (!controllerOnly && executionProjectId && (hasSelectedWorkspaceSource || workspaceProjectContext?.hasWorkspace)) {
       await assertTaskWorkspaceSourceProjectAccess(db, workspaceAuthorizationActor, agent.companyId, executionProjectId);
     }
@@ -318,20 +340,24 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       { allowedDrivers: ["local", "ssh", "sandbox"] },
     );
     // Validate availability before any workspace or shared binding changes.
-    await envOrchestrator?.resolveEnvironment({
-      companyId: agent.companyId,
-      selectedEnvironmentId,
-      localEnvironmentId: localEnvironment.id,
-    });
+    if (selectedEnvironmentId !== null) {
+      await envOrchestrator?.resolveEnvironment({
+        companyId: agent.companyId,
+        selectedEnvironmentId,
+        localEnvironmentId: localEnvironment.id,
+      });
+    }
   }
   const separateTaskEnvironmentBinding = requiresTaskEnvironmentBinding(
     reusableExistingExecutionWorkspace,
     selectedEnvironmentId,
     localEnvironment.id,
   );
-  if (nativeRecoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+  if (recoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
     throw new ConfigurationIncompleteFailure(
-      "The task environment changed during a suspended native run. Start a new execution.",
+      nativeRecoveryExecutionWorkspaceId
+        ? "The task environment changed during a suspended native run. Start a new execution."
+        : "The task environment changed during a suspended legacy run. Start a new execution.",
       { configurationIncomplete: { reason: "task_environment_changed", issueId } },
     );
   }
@@ -570,6 +596,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     providerApiPlacement,
     existingExecutionWorkspace,
     nativeRecoveryExecutionWorkspaceId,
+    recoveryExecutionWorkspaceId,
     workspaceReuseRequest,
     requestedShouldReuseExisting,
     reusableExistingExecutionWorkspace,

@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { activityLog, publicationRequests } from "@paperclipai/db";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { createPublicationAuthorityListener } from "./publication-authority-listener.js";
-import { startAuthorityDatabase } from "../__tests__/helpers/publication-authority.js";
+import { startAuthorityDatabase } from "./publication-authority.test-fixture.js";
 import { syntheticCertificates, transportFixture } from "./publication-authority-tls.test-fixture.js";
 
 const path = (operation: string) => `/v1/publication/${operation}`;

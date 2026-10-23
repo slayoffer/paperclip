@@ -5,7 +5,7 @@ import {
   publicationAuthorityClocks, publicationBrokers, startEmbeddedPostgresTestDatabase, type Db,
 } from "@paperclipai/db";
 import type { PublicationBindings, PublicationIdentity } from "@paperclipai/shared";
-import { publicationAuthorityService } from "../../services/publication-authority.js";
+import { publicationAuthorityService } from "./publication-authority.js";
 
 export async function startAuthorityDatabase() {
   const database = await startEmbeddedPostgresTestDatabase("paperclip-publication-authority-");

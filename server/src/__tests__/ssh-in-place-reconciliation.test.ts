@@ -77,7 +77,7 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
     const cwd = path.join(root, randomUUID()); await mkdir(cwd);
     const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId: project.id,
       mode: "isolated_workspace", strategyType: "git_worktree", name: "Writer", cwd }).returning();
-    const [environment] = await db.insert(environments).values({ name: randomUUID(), driver: "ssh", config }).returning();
+    const [environment] = await db.insert(environments).values({ name: randomUUID(), driver: "ssh", config: { ...config } }).returning();
     environmentIds.push(environment.id);
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: agent.id,
       invocationSource: "on_demand", status: input.status ?? "succeeded" }).returning();

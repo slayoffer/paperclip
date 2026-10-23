@@ -8,6 +8,7 @@ import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js"
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { PROJECT_ACCESS_DENIED, ProjectAccessDeniedError } from "../project-access-denial.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { saveOwnerSessionState } from "../owner-sessions.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
@@ -145,6 +146,8 @@ export interface CompleteHeartbeatRunInput extends RunCompletionInput {
   onProviderTraceFinalized: () => void;
   issueContext: IssueContext;
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  /** Synthiq legacy restart resume: the checkpoint this run resumed from. */
+  legacyRestartRecovery?: LegacyRestartCheckpoint;
 }
 
 export interface FailHeartbeatRunInput extends RunCompletionInput {
@@ -425,7 +428,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   async function completeRun(input: CompleteHeartbeatRunInput) {
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
-      providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
+      providerTraceCapture, onProviderTraceFinalized, issueContext, onLog, legacyRestartRecovery } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const ownerSession = session.ownerSession ?? null;
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
@@ -656,6 +659,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               ? parseObject(latestRun?.resultJson)
               : {}),
             ...parseObject(adapterResult.resultJson),
+            ...(latestRun?.resultJson?.restartRecovery ? { restartRecovery: latestRun.resultJson.restartRecovery } : {}),
+            ...(legacyRestartRecovery ? { restartRecovery: {
+              outcome: outcome === "succeeded" ? "resumed" : "reconciliation",
+              sessionId: legacyRestartRecovery.sessionParams.sessionId,
+              ...(outcome === "succeeded" ? {} : { reason: runErrorCode ?? "restart_resume_failed" }),
+            } } : {}),
             ...(adapterResult.executionRecovery
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),

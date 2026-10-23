@@ -79,7 +79,7 @@ describe("binding recovery with PostgreSQL", () => {
       return null;
     });
     vi.spyOn(heartbeats, "heartbeatService").mockReturnValue({ wakeup } as never);
-    const actor: Request["actor"] = {
+    const actor: Request["actor"] & { ignoreInstanceAdmin?: boolean } = {
       type: "board", source: options.source ?? "session", userId, companyIds: [companyId],
       isInstanceAdmin: false, ignoreInstanceAdmin: options.ignoreInstanceAdmin,
       memberships: options.source === "local_implicit" ? [] : [

@@ -49,7 +49,8 @@ it.skipIf(!support.supported || !containmentSupported)("realizes consecutive run
   await mkdir(worktree);
   const fixture = await startSshEnvLabFixture({ statePath: path.join(root, "ssh", "state.json") });
   const config = await buildSshEnvLabFixtureConfig(fixture);
-  const environment = { id: randomUUID(), companyId: randomUUID(), driver: "ssh", config } as unknown as Environment;
+  const companyId = randomUUID();
+  const environment = { id: randomUUID(), driver: "ssh", config } as unknown as Environment;
   vi.stubEnv(SSH_IN_PLACE_ENVIRONMENTS_ENV, environment.id);
   vi.stubEnv(SSH_IN_PLACE_LOCK_WAIT_MS_ENV, "0");
   const info = vi.spyOn(logger, "info");
@@ -72,12 +73,15 @@ it.skipIf(!support.supported || !containmentSupported)("realizes consecutive run
   });
   const driver = createSshEnvironmentDriver(db);
   const lease = () => {
-    const row = { id: randomUUID(), companyId: environment.companyId, environmentId: environment.id,
+    const now = new Date();
+    const row: EnvironmentLease = { id: randomUUID(), companyId, environmentId: environment.id,
+      executionWorkspaceId: null, issueId: null, leasePolicy: "ephemeral",
+      acquiredAt: now, lastUsedAt: now, expiresAt: null, failureReason: null, createdAt: now, updatedAt: now,
       heartbeatRunId: randomUUID(), provider: "ssh",
       providerLeaseId: `ssh://${config.username}@${config.host}:${config.port}${config.remoteWorkspacePath}`,
       status: "active", releasedAt: null, cleanupStatus: null,
       metadata: { remoteCwd: config.remoteWorkspacePath, remoteWorkspacePath: config.remoteWorkspacePath },
-    } as EnvironmentLease;
+    };
     leases.push(row.id);
     stored.set(row.id, row);
     return row;

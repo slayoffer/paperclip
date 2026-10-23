@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { eq } from "drizzle-orm";
 import { activityLog, agentWakeupRequests, agents, executionWorkspaces, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults, statusDecisionEffects, statusDecisions, workAssessments } from "@paperclipai/db";
 import { type NativeExecutionInput, type NativeSession, type NativeSessionBackend } from "@paperclipai/paperclip-runner";
@@ -9,7 +9,7 @@ import { heartbeatService } from "../services/heartbeat.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { createPersistedRecoveryFixture } from "./native-session-resumption-persisted-fixture.js";
 
-export function registerPersistedRecoveryCases(legacyAdapterExecute: ReturnType<typeof vi.fn>) {
+export function registerPersistedRecoveryCases(legacyAdapterExecute: Mock<() => Promise<unknown>>) {
   describe.each(["unchanged", "newer_active", "stale_idle"] as const)(
     "P6-25 persisted reaper-to-finalization recovery (%s)",
     (variant) => {

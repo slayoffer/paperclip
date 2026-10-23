@@ -27,6 +27,7 @@ import { startNativeSessionExecutionLeaseRenewal, type NativeExecutionLeaseRenew
 import type { WorkspaceWorkers } from "../plugin-workspaces.js";
 import { listExpiredNativeRunnerAuthorities } from "../native-runtime/native-runner-checkpoint.js";
 import { createHeartbeatAgentStatus } from "./agent-status.js";
+import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { preserveCancelledNativeWorkspaces, preserveOrphanedNativeWorkspace } from "../native-runtime/native-failed-workspace-recovery.js";
 import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
@@ -153,6 +154,7 @@ export interface HeartbeatRecoveryDependencies extends Pick<HeartbeatRetryDepend
     nativeLeaseOwner?: string;
     nativeRestartRecovery?: NativeRestartRecoveryClaim;
     onNativeExecutionLeaseAcquired?: () => Promise<void>;
+    legacyRestartRecovery?: LegacyRestartCheckpoint;
   }) => Promise<void>;
   scheduleNativeSessionResumeDispatch: (runId: string, nextAttemptAt: Date, mode?: "restart") => void;
   cancelHeartbeatNativeRun: (input: {
@@ -1257,6 +1259,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
             retryRunCreated: false,
           },
         });
+        restartSuspendedRunIds.push(run.id);
+        return;
+      }
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
         restartSuspendedRunIds.push(run.id);
         return;
       }
@@ -2619,6 +2625,18 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         continue;
       }
 
+      if (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType)) {
+        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType);
+        if (checkpoint) {
+          restartSuspendedLegacyRuns.delete(run.id);
+          const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {
+            logger.error({ err, runId: run.id }, "Legacy restart resume failed");
+          });
+          activeRunExecutionPromises.add(execution);
+          void execution.finally(() => activeRunExecutionPromises.delete(execution));
+          continue;
+        }
+      }
       const runContext = parseObject(run.contextSnapshot);
       const monitorIssueId = readNonEmptyString(runContext.issueId);
       const monitorNextCheckAt = monitorIssueId

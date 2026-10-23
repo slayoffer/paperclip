@@ -9,7 +9,7 @@ import { once } from "node:events";
 import type { Db } from "@paperclipai/db";
 import type { PublicationDecision } from "@paperclipai/shared";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
-import { authorityFixture } from "../__tests__/helpers/publication-authority.js";
+import { authorityFixture } from "./publication-authority.test-fixture.js";
 import { createPublicationAuthorityListener } from "./publication-authority-listener.js";
 import { certificateFingerprint, type PublicationRegistration, type PublicationTrustSnapshot } from "./publication-authority-trust.js";
 

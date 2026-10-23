@@ -15,6 +15,7 @@ import { writeExecutionControl } from "../execution-control-notifications.js";
 import { inspectPluginWorkspaceForFinalization } from "../native-runtime/native-plugin-workspace-finalization.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { drainRunPreparationPhases, measureRunPhase } from "../execution-preparation-timing.js";
+import { readLegacyRestartCheckpoint, recordLegacyRestartFallback, restartSuspendedLegacyRuns } from "../legacy-restart-recovery.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import {
@@ -1066,6 +1067,14 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       await completeWorkspace();
     }
   } catch (adapterErr) {
+    if (nativeRuntimeResolution.kind === "legacy" && restartSuspendedLegacyRuns.has(run.id)) {
+      const current = await getRun(run.id);
+      const saved = current && readLegacyRestartCheckpoint(current);
+      // A local suspended run stays suspended; the executor returns without settling it.
+      if (!saved?.sessionParams.remoteExecution) throw adapterErr;
+      restartSuspendedLegacyRuns.delete(run.id);
+      await recordLegacyRestartFallback(db, run, "restart_workspace_unsettled");
+    }
     if (adapterErr instanceof NativeCancellationPendingRecoveryError) {
       // Durable cancellation is settled by the outer recovery handler;
       // it does not imply a failed workspace or a persisted run result.
