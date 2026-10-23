@@ -271,3 +271,5 @@ export * from "../workspace-provider.js";
 export * from "../workflows.js";
 
 export * from "../publication-authority.js";
+
+export { pauseAgentSchema, type PauseAgent } from "../validators/agent-pause.js";

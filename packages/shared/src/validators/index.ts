@@ -1,3 +1,5 @@
+export { pauseAgentSchema, type PauseAgent } from "./agent-pause.js";
+
 export {
   connectionsSearchInputSchema,
   connectionRequestInputSchema,
