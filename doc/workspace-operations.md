@@ -1,5 +1,9 @@
 # Workspace operations
 
+## Child creation audit
+
+Child creation omits the inherited-workspace audit field, including when the caller explicitly selects a workspace.
+
 ## Task environment selection
 
 `executionWorkspaceSettings.environmentId` selects an environment for one task.
