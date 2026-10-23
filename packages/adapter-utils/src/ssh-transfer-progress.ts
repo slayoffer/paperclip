@@ -198,6 +198,8 @@ export async function streamLocalFileToSsh(input: {
       if (settled) return;
       settled = true;
       source.destroy();
+      input.progress?.counter.destroy();
+      ssh.stdin?.destroy();
       ssh.kill("SIGTERM");
       reject(error);
     };
@@ -207,6 +209,7 @@ export async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
+    ssh.stdin?.on("error", fail);
     if (input.progress) {
       input.progress.counter.on("error", fail);
       source.pipe(input.progress.counter).pipe(ssh.stdin ?? null);

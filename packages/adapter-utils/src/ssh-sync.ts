@@ -139,11 +139,17 @@ export async function syncDirectoryToSsh(input: {
         return;
       }
       settled = true;
+      tar.stdout?.destroy();
+      progress?.counter.destroy();
+      ssh.stdin?.destroy();
       tar.kill("SIGTERM");
       ssh.kill("SIGTERM");
       reject(error);
     };
 
+    // Child process errors do not include errors from their stdio streams.
+    tar.stdout?.on("error", fail);
+    ssh.stdin?.on("error", fail);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -250,11 +256,16 @@ export async function syncDirectoryFromSsh(input: {
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
+        ssh.stdout?.destroy();
+        progress?.counter.destroy();
+        tar.stdin?.destroy();
         ssh.kill("SIGTERM");
         tar.kill("SIGTERM");
         reject(error);
       };
 
+      ssh.stdout?.on("error", fail);
+      tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
