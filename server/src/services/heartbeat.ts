@@ -1,7 +1,7 @@
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset, sessionParamsForWorkspaceResolution } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -21973,6 +21973,8 @@ export function heartbeatService(
             ),
           ),
         );
+      // An owner thread's cwd is its launch directory. It must not pick the issue workspace (SYNA-2912).
+      const workspaceSessionParams = sessionParamsForWorkspaceResolution(previousSessionParams, ownerSession !== null);
       // Legacy plugins can consume the existing context field on a known-fresh
       // dispatch. Built-ins also load lazily if their resume attempt fails.
       if (agent.adapterType !== "paperclip_runner" && !previousSessionParams && getFreshSessionHandoff) {
@@ -22022,7 +22024,7 @@ export function heartbeatService(
                 workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: issueRef.id },
               });
             }
-            return resolveWorkspaceForRun(agent, context, previousSessionParams, {
+            return resolveWorkspaceForRun(agent, context, workspaceSessionParams, {
               executionEnvironmentDriver: selectedEnvironmentForConfig?.driver ?? null,
               anchorWorkspace: {
                 cwd,
@@ -22060,7 +22062,7 @@ export function heartbeatService(
           const workspace = await resolveWorkspaceForRun(
             agent,
             context,
-            previousSessionParams,
+            workspaceSessionParams,
             {
               useProjectWorkspace:
                 requestedExecutionWorkspaceMode !== "agent_default",

@@ -1,4 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { assertWorkspaceReuseIsSafe } from "../services/workspace-reuse-safety.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agentTaskSessions, agents, companies, createDb, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
@@ -10,6 +15,7 @@ import {
   readOwnerSessionInputTokens,
   resolveOwnerSession,
   saveOwnerSessionState,
+  sessionParamsForWorkspaceResolution,
 } from "../services/owner-sessions.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -37,6 +43,44 @@ describe("owner session scope guards", () => {
       expect(resolveOwnerSession({ ...input, issue: null })).toBeNull();
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("owner session workspace binding (SYNA-2912)", () => {
+  const saved = { sessionId: "thread-1", ownerSession: true, ownerSessionIssueId: "issue-a", cwd: "/owner/dir", workspaceId: "pw-1", repoUrl: "u", repoRef: "main" };
+
+  it("hides the owner launch directory from workspace resolution", () => {
+    const params = sessionParamsForWorkspaceResolution(saved, true);
+    expect(params).toEqual({ sessionId: "thread-1", ownerSession: true, ownerSessionIssueId: "issue-a" });
+    // The thread itself stays resumable: the saved params are not changed.
+    expect(saved.cwd).toBe("/owner/dir");
+  });
+
+  it("keeps task session params whole, so a same-issue resume reuses its workspace", () => {
+    expect(sessionParamsForWorkspaceResolution(saved, false)).toBe(saved);
+    expect(sessionParamsForWorkspaceResolution(null, true)).toBeNull();
+  });
+
+  it("does not hand issue B the dirty directory that the owner thread last used for issue A", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "owner-ws-"));
+    try {
+      execFileSync("git", ["init", "-q", dir]);
+      fs.writeFileSync(path.join(dir, "dirty.txt"), "x");
+      const params = { ...saved, cwd: dir };
+      const guard = (cwd: string) => assertWorkspaceReuseIsSafe({
+        companyId: "company-a", cwd, sourceIssueId: "issue-a", issueId: "issue-b",
+      });
+      // Before the fix B resolved this cwd from the session and the guard refused it.
+      await expect(guard(String(params.cwd))).rejects.toMatchObject({ code: "workspace_validation_failed" });
+      // After the fix workspace resolution sees no session cwd, so nothing carries over.
+      expect(sessionParamsForWorkspaceResolution(params, true)?.cwd).toBeUndefined();
+      // The same issue still resumes its own dirty workspace.
+      await expect(assertWorkspaceReuseIsSafe({
+        companyId: "company-a", cwd: dir, sourceIssueId: "issue-a", issueId: "issue-a",
+      })).resolves.toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

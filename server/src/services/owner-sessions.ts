@@ -57,6 +57,20 @@ export async function ownerSessionKeyForIssueReset(
   return resolveOwnerSession({ agent: input.agent, issue: issue ?? null, agentHome: "/", eligible: true })?.key ?? null;
 }
 
+/**
+ * The saved cwd of an owner thread is its stable launch directory, not an issue workspace. Workspace resolution
+ * must not read it as a "task_session" workspace: that bound the next issue to the owner directory, and the
+ * cross-issue guard then refused it (SYNA-2912). The adapter still resumes the thread in its own directory.
+ */
+export function sessionParamsForWorkspaceResolution(
+  params: Record<string, unknown> | null,
+  ownerSession: boolean,
+): Record<string, unknown> | null {
+  if (!ownerSession || !params) return params;
+  const { cwd: _cwd, workspaceId: _workspaceId, repoUrl: _repoUrl, repoRef: _repoRef, ...rest } = params;
+  return rest;
+}
+
 export function shouldResetOwnerSessionForWake(context: Record<string, unknown> | null | undefined): boolean {
   return context?.forceFreshSession === true;
 }
