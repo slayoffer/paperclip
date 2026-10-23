@@ -21339,6 +21339,10 @@ export function heartbeatService(
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
+          requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+            ? null
+            : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
+          existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
         });
       const requestedShouldReuseExisting =
         workspaceReuseRequest.requestedShouldReuseExisting;
@@ -22209,6 +22213,7 @@ export function heartbeatService(
                   base: executionWorkspaceBase,
                   workspace: {
                     id: reusableExistingExecutionWorkspace.id,
+                    sourceIssueId: reusableExistingExecutionWorkspace.sourceIssueId,
                     mode: reusableExistingExecutionWorkspace.mode,
                     strategyType:
                       reusableExistingExecutionWorkspace.strategyType,
