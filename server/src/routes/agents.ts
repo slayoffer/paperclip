@@ -54,6 +54,7 @@ import {
   deriveAgentUrlKey,
   isUuidLike,
   normalizeIssueIdentifier,
+  pauseAgentSchema,
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentDesiredSkillEntry,
@@ -5404,7 +5405,8 @@ export function agentRoutes(
     if (!(await getAccessibleAgent(req, res, id))) {
       return;
     }
-    const agent = await svcLifecycle.pauseAgent(id);
+    const { reason = "manual" } = pauseAgentSchema.parse(req.body);
+    const agent = await svcLifecycle.pauseAgent(id, reason);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
@@ -5419,6 +5421,7 @@ export function agentRoutes(
       action: "agent.paused",
       entityType: "agent",
       entityId: agent.id,
+      details: { reason },
     });
 
     res.json(redactAgentRowForResponse(agent));
