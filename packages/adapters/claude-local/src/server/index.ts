@@ -1,3 +1,4 @@
+import { ownerSessionState } from "@paperclipai/adapter-utils/owner-session-state";
 export { claudeSessionCwdMatchesExecutionTarget, execute, runClaudeLogin } from "./execute.js";
 export * from "./acp.js";
 export { getConfigSchema } from "./config-schema.js";
@@ -89,6 +90,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
     return {
       sessionId,
+      ...ownerSessionState(record),
       ...(cwd ? { cwd } : {}),
       ...(promptBundleKey ? { promptBundleKey } : {}),
       ...(mcpServerIdentity ? { mcpServerIdentity } : {}),
@@ -114,6 +116,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
     return {
       sessionId,
+      ...ownerSessionState(params),
       ...(cwd ? { cwd } : {}),
       ...(promptBundleKey ? { promptBundleKey } : {}),
       ...(mcpServerIdentity ? { mcpServerIdentity } : {}),

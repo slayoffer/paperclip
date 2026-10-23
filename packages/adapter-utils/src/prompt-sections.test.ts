@@ -46,6 +46,19 @@ describe("task and event section ownership", () => {
     expect(context.executionContinuation.messages).toHaveLength(3);
   });
 
+  it("gives a resumed owner thread the full assignment when it moves to another issue", () => {
+    const context = createPromptContextFixture();
+    const options = { resumedSession: true, includeCommunicationGuidance: false };
+    const switched = selectSections({ ...context, paperclipOwnerSession: { sameIssue: false } }, options);
+    expect(switched.taskContextNote).toContain(context.paperclipTaskMarkdownAssignment);
+    expect(switched.taskContextNote).toContain(context.paperclipWake.issue.description);
+    // The provider thread stays resumed: the wake keeps its delta shape.
+    expect(switched.wakePrompt).toContain("Paperclip Resume Delta");
+    expect(switched.wakePrompt).not.toContain('"id":"comment-first"');
+    expect(selectSections({ ...context, paperclipOwnerSession: { sameIssue: true } }, options).taskContextNote).toBe("");
+    expect(selectSections(context, options).taskContextNote).toBe(context.paperclipTaskMarkdownAssignmentCompact);
+  });
+
   it("retains old input fields and the wake description when no assignment was provided", () => {
     const context = createPromptContextFixture();
     expect(selectSections({ paperclipTaskMarkdown: "Legacy assignment" }).taskContextNote).toBe("Legacy assignment");

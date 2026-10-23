@@ -4,6 +4,7 @@ import { shellQuote } from "./ssh-config.js";
 
 export function sshProviderSessionDirectories(input: {
   runtimeRoot: string;
+  providerSessionRoot?: string;
   adapterKey: string;
   companyId?: string;
   workspace: string;
@@ -16,7 +17,7 @@ export function sshProviderSessionDirectories(input: {
     throw new Error("SSH provider sessions require a company identity");
   }
   const workspaceKey = createHash("sha256").update(input.workspace).digest("hex");
-  const root = path.posix.join(input.runtimeRoot, "..", "..", "..", "provider-sessions",
+  const root = input.providerSessionRoot ? path.posix.join(input.providerSessionRoot, input.adapterKey) : path.posix.join(input.runtimeRoot, "..", "..", "..", "provider-sessions",
     input.companyId, workspaceKey, input.adapterKey);
   const names = input.adapterKey === "codex" ? ["sessions", "archived_sessions"] : ["projects"];
   return names.map((name) => ({ assetKey, name, directory: path.posix.join(root, name) }));

@@ -1,3 +1,4 @@
+import { describeOwnerSessionResetReason, shouldResetOwnerSessionForWake } from "../owner-sessions.js";
 import { and, desc, eq } from "drizzle-orm";
 import { agentConfigRevisions, type Db, type agents, type agentTaskSessions, type heartbeatRuns, type issues, type projects } from "@paperclipai/db";
 import type { AiConnectionBinding, AiRuntimeConnectionBinding } from "@paperclipai/shared";
@@ -29,6 +30,7 @@ type TaskSession = typeof agentTaskSessions.$inferSelect | null;
 type SessionCodec = ReturnType<typeof getAdapterSessionCodec>;
 
 export interface HeartbeatSessionPreparationInput {
+  ownerSession?: boolean;
   run: Pick<typeof heartbeatRuns.$inferSelect, "createdAt">;
   agent: typeof agents.$inferSelect;
   task: {
@@ -187,7 +189,7 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
     const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
     if (!canRefresh) context.forceFreshSession = true;
   }
-  const wakeSessionResetReason = describeSessionResetReason(context);
+  const wakeSessionResetReason = input.ownerSession ? describeOwnerSessionResetReason(context) : describeSessionResetReason(context);
   const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
     hasTaskSession: taskSession != null,
     configuredModel,
@@ -200,7 +202,8 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
       acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision && !agentIdentity,
   });
   const resetTaskSession =
-    context.workspaceSelectionChanged === true || shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
+    context.workspaceSelectionChanged === true ||
+    (input.ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)) || sessionConfigFreshness.reset;
   const sessionResetReason =
     sessionConfigFreshness.reasons.join("; ") || null;
   const taskSessionForRun = resetTaskSession ? null : taskSession;
@@ -234,6 +237,7 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
 }
 
 export interface HeartbeatAdapterSessionInput {
+  ownerSession?: boolean;
   agent: typeof agents.$inferSelect;
   task: {
     context: Record<string, unknown>;
@@ -304,6 +308,7 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
 
   const sessionCompaction = await evaluateSessionCompaction({
     agent,
+    ownerSession: input.ownerSession === true,
     sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
     issueId,
     continuationSummaryBody: continuationSummary?.body ?? null,

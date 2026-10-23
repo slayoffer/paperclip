@@ -19,6 +19,8 @@ export interface LocalProcessSandboxPathAlias {
 
 export interface LocalProcessSandboxOptions {
   workspaceDir: string;
+  /** Owner cwd root outside workspaceDir (rw). */
+  launchDir?: string | null;
   filesystemScope?: "workspace" | null;
   managedPaths?: LocalProcessSandboxPath[];
   extraPaths?: LocalProcessSandboxPath[];
@@ -354,7 +356,7 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
   const workspaceDir = normalizeAbsolutePath(input.options.workspaceDir, "Sandbox workspaceDir");
   const cwd = normalizeAbsolutePath(input.cwd, "Sandbox cwd");
   if (filesystemScope === "workspace") {
-    const relativeCwd = path.relative(workspaceDir, cwd);
+    const relativeCwd = path.relative(input.options.launchDir || workspaceDir, cwd);
     if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) {
       throw new Error(`Sandbox cwd "${cwd}" must be inside workspaceDir "${workspaceDir}".`);
     }
@@ -410,6 +412,7 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
     for (const managedPath of input.options.managedPaths ?? []) await mount(managedPath.path, managedPath.access);
     for (const extraPath of input.options.extraPaths ?? []) await mount(extraPath.path, extraPath.access);
     await mount(workspaceDir, "rw");
+    if (input.options.launchDir) await mount(input.options.launchDir, "rw");
     for (const [index, alias] of (input.options.pathAliases ?? []).entries()) {
       const aliasPath = normalizeAbsolutePath(alias.path, `Sandbox pathAliases[${index}].path`);
       const aliasTarget = normalizeAbsolutePath(alias.target, `Sandbox pathAliases[${index}].target`);

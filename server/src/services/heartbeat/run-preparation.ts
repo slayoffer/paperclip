@@ -1,3 +1,4 @@
+import { isOwnerSessionKey, firstCallerTaskKey } from "../owner-sessions.js";
 import { skillPackageStore, skillVersionMetadataColumns } from "../skill-package-store.js";
 import { skillAccessService } from "../skill-access.js";
 import { buildReviewPathRecoveryDisposition } from "../recovery/review-path-recovery.js";
@@ -1557,15 +1558,11 @@ export function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
 ) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
+  // A caller-supplied key never addresses a reserved owner-project:* row (SYNA-2912 r2 P2).
+  return firstCallerTaskKey([
+    contextSnapshot?.taskKey, contextSnapshot?.taskId, contextSnapshot?.issueId,
+    payload?.taskKey, payload?.taskId, payload?.issueId,
+  ].map((value) => readNonEmptyString(value)));
 }
 
 function mergeWakeCommentIds(...values: Array<unknown>): string[] {
@@ -1672,6 +1669,7 @@ export function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  if (isOwnerSessionKey(contextSnapshot.taskKey)) delete contextSnapshot.taskKey;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);

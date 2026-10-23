@@ -3,6 +3,7 @@ import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, compareCents } from "@paperclipai/sh
 import { and, eq, gte, lt, notInArray, sql, isNull, inArray, type SQL } from "drizzle-orm";
 import { asBoolean, asNumber, parseObject } from "../../adapters/utils.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { ownerSessionsEnabled } from "../owner-sessions.js";
 import { nonIdleSlackIssueCondition } from "../slack-conversation-state.js";
 
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
@@ -47,8 +48,9 @@ export function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
     enabled: asBoolean(heartbeat.enabled, false),
     intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
     wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
-    maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
-      ["openai_dot", "grok_bot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
+    // Owner sessions share a provider thread, so their runs must serialize.
+    maxConcurrentRuns: ownerSessionsEnabled(agent) || (agent.adapterType === "paperclip_runner" &&
+      ["openai_dot", "grok_bot", "muse"].includes(String(parseObject(agent.adapterConfig).provider)))
       ? 1 : normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
     skipTimerWhenNoActionableWork: asBoolean(
       heartbeat.skipTimerWhenNoActionableWork ??

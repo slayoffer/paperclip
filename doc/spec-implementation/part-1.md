@@ -11,6 +11,10 @@ Task-only [environment selection](../workspace-operations.md#task-environment-se
 The fork also supports [saved review waits](../review-waits.md).
 An agent can record a board-owned wait for its latest saved review handoff.
 
+The fork supports optional [owner sessions](../owner-sessions.md) for the local command engines.
+The default is off. A selected owner resumes one thread per project across issue worktrees.
+Company, credential, workspace, and host boundaries remain mandatory.
+
 ## 2. V1 Outcomes
 
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
