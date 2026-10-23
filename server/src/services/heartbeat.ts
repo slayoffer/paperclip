@@ -1,5 +1,5 @@
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -20918,7 +20918,8 @@ export function heartbeatService(
             userId: responsibleUserId, adapterType: agent.adapterType, taskKey: String(context.aiRouterTaskKey),
             overrides: issueAssigneeOverrides?.adapterConfig ?? {},
             existingGrantId: typeof savedIdentity === "string" ? savedIdentity.split(":")[0] : undefined,
-            requireExisting: Boolean(taskSession?.sessionDisplayId) && !shouldResetTaskSessionForWake(context),
+            requireExisting: Boolean(taskSession?.sessionDisplayId) &&
+              !(ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)),
             persisted: routerHasPersistedInput ? context.aiRouterSelection as AiConnectionRouterSelection | undefined : undefined,
           });
           aiBinding = selection.binding;
@@ -21900,7 +21901,10 @@ export function heartbeatService(
         const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
         if (!canRefresh) context.forceFreshSession = true;
       }
-      const wakeSessionResetReason = describeSessionResetReason(context);
+      // Owner threads keep their session across issue_assigned and the other per-issue wake resets (SYNA-2912 r1 P1).
+      const wakeSessionResetReason = ownerSession
+        ? describeOwnerSessionResetReason(context)
+        : describeSessionResetReason(context);
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
         configuredModel,
@@ -21913,7 +21917,8 @@ export function heartbeatService(
           acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
       });
       const resetTaskSession =
-        shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
+        (ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)) ||
+        sessionConfigFreshness.reset;
       const sessionResetReason =
         sessionConfigFreshness.reasons.join("; ") || null;
       const taskSessionForRun = resetTaskSession ? null : taskSession;

@@ -23,6 +23,17 @@ export function resolveOwnerSession(input: {
   };
 }
 
+// An owner thread spans many issues. The task-session wake resets (issue_assigned, review recovery, approval
+// requested, unscoped timer) exist to give each ISSUE a clean start; applied to an owner thread they would start a
+// fresh thread on every new issue, which is the cost this mode removes. Only an explicit request resets it.
+export function shouldResetOwnerSessionForWake(context: Record<string, unknown> | null | undefined): boolean {
+  return context?.forceFreshSession === true;
+}
+
+export function describeOwnerSessionResetReason(context: Record<string, unknown> | null | undefined): string | null {
+  return shouldResetOwnerSessionForWake(context) ? "forceFreshSession was requested" : null;
+}
+
 export function ownerSessionInputLimit(env = process.env): number | null {
   const limit = Number(env.PAPERCLIP_OWNER_SESSION_MAX_INPUT_TOKENS);
   return Number.isSafeInteger(limit) && limit > 0 ? limit : null;

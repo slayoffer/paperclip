@@ -8,7 +8,7 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { prepareOwnerSessionLaunch } from "@paperclipai/adapter-utils/owner-session";
 import { selectPaperclipPromptSections } from "@paperclipai/adapter-utils/server-utils";
 import { sshProviderSessionDirectories } from "@paperclipai/adapter-utils/ssh-provider-sessions";
-import { ownerSessionInputLimit, ownerSessionsEnabled, resolveOwnerSession, ownerSessionEngineEligible } from "../services/owner-sessions.js";
+import { ownerSessionInputLimit, ownerSessionsEnabled, resolveOwnerSession, ownerSessionEngineEligible, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason } from "../services/owner-sessions.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "../services/session-compaction-decision.js";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -33,6 +33,16 @@ describe("owner session policy", () => {
     expect(resolveOwnerSession({ ...input, projectId: "project-b" })?.key).not.toBe(resolveOwnerSession(input)?.key);
     expect(resolveOwnerSession({ ...input, eligible: false })).toBeNull();
     expect(resolveOwnerSession({ ...input, projectId: null })).toBeNull();
+  });
+
+  it("keeps the owner thread across the wakes that reset a task session", () => {
+    for (const wakeReason of ["issue_assigned", "execution_approval_requested", "heartbeat_timer"]) {
+      const context = { wakeReason };
+      expect(shouldResetOwnerSessionForWake(context)).toBe(false);
+      expect(describeOwnerSessionResetReason(context)).toBeNull();
+    }
+    expect(shouldResetOwnerSessionForWake({ wakeReason: "issue_assigned", forceFreshSession: true })).toBe(true);
+    expect(describeOwnerSessionResetReason({ forceFreshSession: true })).toBe("forceFreshSession was requested");
   });
 
   it("uses the effective engine after issue overrides", () => {
