@@ -118,6 +118,10 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
         : (issueRef?.executionWorkspacePreference ?? null),
       existingExecutionWorkspaceStatus:
         existingExecutionWorkspace?.status ?? null,
+      requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+        ? null
+        : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
+      existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
     });
   const requestedShouldReuseExisting =
     workspaceReuseRequest.requestedShouldReuseExisting;

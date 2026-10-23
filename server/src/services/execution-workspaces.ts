@@ -3058,6 +3058,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             },
             workspace: {
               id: row.id,
+              sourceIssueId: row.sourceIssueId,
               mode: row.mode,
               strategyType: row.strategyType,
               cwd: row.cwd,

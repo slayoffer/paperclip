@@ -491,6 +491,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
               base: executionWorkspaceBase,
               workspace: {
                 id: reusableExistingExecutionWorkspace.id,
+                sourceIssueId: reusableExistingExecutionWorkspace.sourceIssueId,
                 mode: reusableExistingExecutionWorkspace.mode,
                 strategyType:
                   reusableExistingExecutionWorkspace.strategyType,
