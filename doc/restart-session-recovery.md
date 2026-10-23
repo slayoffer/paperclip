@@ -9,6 +9,9 @@ After startup, the orphan reaper claims an expired controller and resumes the sa
 The adapter receives the saved session and a short restart prompt.
 The adapter cannot replace a missing restart session with a fresh session.
 
+Managed local sessions retain their transcript directories before temporary home cleanup.
+Recovery restores these transcripts into the replacement provider home. Authentication and configuration files stay excluded.
+
 Recovery preserves the existing task key. This includes owner session keys from the optional owner session mode.
 Recovery does not create a second session registry.
 
@@ -16,11 +19,13 @@ The reaper must first find no live provider PID or process group.
 For SSH runs, a local wrapper PID cannot prove remote termination.
 Automatic SSH resume therefore requires a confirmed provider stop and completed workspace restore before shutdown.
 A hard SSH failure without these receipts uses reconciliation.
+Sandbox checkpoints use reconciliation because sandbox preparation replaces the provider store.
 
 A missing session, missing workspace, changed account, changed adapter, or unverified provider stop uses the existing reconciliation path.
 The run records the reason in `resultJson.restartRecovery`.
 Conversation retry policy cannot remove this reconciliation hold after a failed restart resume.
 Recovery permits at most three controller claims per run.
+Fallback writes require the expected controller and a running row. They preserve the attempt count.
 Normal budget, pause, issue ownership, workspace, and approval checks still apply.
 
 Operators must verify a deployed release with a controlled restart and record the affected run IDs.

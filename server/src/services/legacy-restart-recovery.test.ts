@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companies, createDb, heartbeatRuns, issueRecoveryActions, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
-import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
+import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { heartbeatService } from "./heartbeat.js";
 import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -81,7 +81,7 @@ const support = await getEmbeddedPostgresTestSupport();
   it.each([
     [false, {}, "restart_session_missing"],
     [true, { cwd: "/missing/restart-workspace" }, "restart_workspace_missing"],
-    [true, { remoteExecution: { host: "remote" } }, "restart_remote_stop_unverified"],
+    [true, { remoteExecution: { transport: "ssh", host: "remote" } }, "restart_remote_stop_unverified"],
   ])("records a reconciliation reason when recovery lacks evidence", async (save, params, reason) => {
     const run = await expire((await seed(save as boolean, params as Record<string, unknown>)).id);
     expect(await claimLegacyRestartRecovery(db, run, "codex_local")).toBeNull();
@@ -91,6 +91,28 @@ const support = await getEmbeddedPostgresTestSupport();
     const run = await seed();
     expect(readLegacyRestartCheckpoint({ ...run, companyId: randomUUID() })).toBeNull();
     expect(readLegacyRestartCheckpoint({ ...run, contextSnapshot: { ...run.contextSnapshot, executionWorkspaceId: randomUUID() } })).toBeNull();
+  });
+
+  it("rejects sandbox recovery even after stop and workspace receipts", async () => {
+    const run = await seed(true, { remoteExecution: { transport: "sandbox", sandboxId: "sandbox-a" } });
+    await markLegacyRestartBoundary(db, run, "providerStopped");
+    await markLegacyRestartBoundary(db, run, "workspaceSettled");
+    const expired = await expire(run.id);
+    expect(await claimLegacyRestartRecovery(db, expired, "codex_local")).toBeNull();
+    expect((await read(run.id)).resultJson?.restartRecovery).toMatchObject({ reason: "restart_sandbox_session_unsupported" });
+  });
+
+  it("preserves newer controller and terminal recovery evidence", async () => {
+    const stale = await expire((await seed()).id);
+    await claimLegacyRestartRecovery(db, stale, "codex_local");
+    await recordLegacyRestartFallback(db, stale, "stale_controller");
+    const owned = await read(stale.id);
+    expect(owned.resultJson?.restartRecovery).toMatchObject({ outcome: "resuming", attempt: 1 });
+    await recordLegacyRestartFallback(db, owned, "current_controller");
+    expect((await read(stale.id)).resultJson?.restartRecovery).toMatchObject({ outcome: "reconciliation", attempt: 1 });
+    await db.update(heartbeatRuns).set({ status: "succeeded", resultJson: { restartRecovery: { outcome: "resumed", attempt: 1 } } }).where(eq(heartbeatRuns.id, stale.id));
+    await recordLegacyRestartFallback(db, owned, "late_controller");
+    expect((await read(stale.id)).resultJson?.restartRecovery).toMatchObject({ outcome: "resumed", attempt: 1 });
   });
 
   it("requires both remote stop and workspace settlement for SSH recovery", async () => {

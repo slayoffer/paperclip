@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
@@ -12,6 +13,7 @@ export type LegacyRestartCheckpoint = {
   issueId: string;
   taskKey: string | null;
   aiSessionIdentity?: string | null;
+  providerSessionHome?: string;
   executionWorkspaceId: string | null;
   workspaceCwd: string;
   providerStopped?: boolean;
@@ -40,6 +42,7 @@ export function readLegacyRestartCheckpoint(run: Run): LegacyRestartCheckpoint |
       !["codex_local", "claude_local"].includes(value.adapterType) ||
       typeof value.workspaceCwd !== "string" || !value.workspaceCwd.startsWith("/") ||
       typeof value.sessionParams?.cwd !== "string" || !value.sessionParams.cwd.startsWith("/") ||
+      (value.providerSessionHome !== undefined && (typeof value.providerSessionHome !== "string" || !isAbsolute(value.providerSessionHome))) ||
       typeof value.sessionParams?.sessionId !== "string" || !value.sessionParams.sessionId) return null;
   return value;
 }
@@ -49,6 +52,7 @@ export async function saveLegacyRestartCheckpoint(db: Db, run: Run, input: {
   adapterType: string;
   taskKey: string | null;
   aiSessionIdentity?: string | null;
+  providerSessionHome?: string;
   workspaceCwd: string;
   sessionParams: Record<string, unknown>;
 }) {
@@ -66,8 +70,18 @@ export async function saveLegacyRestartCheckpoint(db: Db, run: Run, input: {
 
 export async function recordLegacyRestartFallback(db: Db, run: Run, reason: string) {
   await db.update(heartbeatRuns).set({
-    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ restartRecovery: { outcome: "reconciliation", reason } })}::jsonb`,
-  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
+    resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb), '{restartRecovery}', coalesce(${heartbeatRuns.resultJson}->'restartRecovery', '{}'::jsonb) || ${JSON.stringify({ outcome: "reconciliation", reason })}::jsonb)`,
+  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.status, "running"),
+    run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId)));
+}
+
+export async function saveLegacyRestartProviderHome(db: Db, run: Run, home: string) {
+  await db.update(heartbeatRuns).set({
+    resultJson: sql`jsonb_set(${heartbeatRuns.resultJson}, '{restartCheckpoint,providerSessionHome}', ${JSON.stringify(home)}::jsonb)`,
+  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+    sql`${heartbeatRuns.resultJson}->'restartCheckpoint' is not null`));
 }
 
 export async function markLegacyRestartBoundary(db: Db, run: Run, boundary: "providerStopped" | "workspaceSettled") {
@@ -84,9 +98,11 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
   const checkpoint = readLegacyRestartCheckpoint(run);
   let reason: string | null = !checkpoint ? "restart_session_missing" : null;
   if (checkpoint && checkpoint.adapterType !== adapterType) reason = "restart_adapter_changed";
+  const remote = checkpoint?.sessionParams.remoteExecution as Record<string, unknown> | undefined;
+  if (remote && remote.transport !== "ssh") reason = "restart_sandbox_session_unsupported";
   // An SSH wrapper PID cannot prove that its remote provider stopped.
   if (checkpoint?.sessionParams.remoteExecution &&
-      (!checkpoint.providerStopped || !checkpoint.workspaceSettled)) reason = "restart_remote_stop_unverified";
+      (!checkpoint.providerStopped || !checkpoint.workspaceSettled) && !reason) reason = "restart_remote_stop_unverified";
   const attempts = Number((run.resultJson?.restartRecovery as Record<string, unknown>)?.attempt ?? 0);
   if (attempts >= 3) reason = "restart_attempt_limit";
   if (checkpoint && !reason) {
@@ -95,6 +111,9 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
     for (const directory of directories) {
       if (!(await fs.stat(directory).catch(() => null))?.isDirectory()) reason = "restart_workspace_missing";
     }
+    if (checkpoint.providerSessionHome &&
+        (!isAbsolute(checkpoint.providerSessionHome) ||
+          !(await fs.stat(checkpoint.providerSessionHome).catch(() => null))?.isDirectory())) reason = "restart_provider_state_missing";
   }
   if (reason || !checkpoint) {
     await recordLegacyRestartFallback(db, run, reason ?? "restart_session_missing");
