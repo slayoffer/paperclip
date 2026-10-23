@@ -41,6 +41,7 @@ suite("owner session baseline query", () => {
       createdAt: new Date("2026-10-20T00:00:00Z"),
       sessionIdBefore: "thread-a", sessionIdAfter: "thread-a",
       usageJson: { inputTokens: 100, rawInputTokens: 999_999 },
+      resultJson: { stopReason: "end_turn" },
       ...overrides,
     });
     await db.insert(heartbeatRuns).values([
@@ -98,5 +99,43 @@ suite("owner session baseline query", () => {
     expect(Number(row.token_samples)).toBe(2);
     expect(Number(row.median_input_tokens)).toBe(150);
     expect(Number(row.percent_of_terminal_runs)).toBe(100);
+  });
+
+  it("subtracts Codex thread totals across the window boundary and preserves unknown prior usage", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Codex totals", issuePrefix: `B${companyId.replaceAll("-", "")}`,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Codex", role: "engineer", adapterType: "codex_local",
+    });
+    const run = (time: string, session: string, before: string | null, raw: number | null) => ({
+      companyId, agentId, status: "succeeded", createdAt: new Date(time),
+      sessionIdBefore: before, sessionIdAfter: session, resultJson: { stdout: "" },
+      usageJson: raw === null ? null : { inputTokens: raw, rawInputTokens: raw, usageSource: "per_run" },
+    });
+    await db.insert(heartbeatRuns).values([
+      run("2026-10-16T05:29:00Z", "thread", null, 19_700_000),
+      run("2026-10-16T05:30:00Z", "thread", "thread", 20_080_000),
+      run("2026-10-16T06:00:00Z", "thread", "thread", 20_500_000),
+      run("2026-10-17T06:00:00Z", "unobserved", "unobserved", 50_000_000),
+      run("2026-10-18T06:00:00Z", "fresh", "missing-thread", 100_000),
+      run("2026-10-19T06:00:00Z", "reset", null, 200_000),
+      run("2026-10-20T06:00:00Z", "reset", "reset", 50_000),
+      run("2026-10-21T06:00:00Z", "thread", "thread", null),
+      run("2026-10-22T06:00:00Z", "thread", "thread", 22_000_000),
+    ]);
+    const template = await readFile(new URL("../../scripts/owner-session-baseline.sql", import.meta.url), "utf8");
+    const query = template.replaceAll(":'company_id'", `'${companyId}'`)
+      .replaceAll(":'window_end'", "'2026-10-23T05:30:00Z'");
+    const rows = await db.execute(sql.raw(query));
+    const resumed = rows.find(row => row.adapter_type === "codex_local" && row.resume_state === "resumed")!;
+    expect(Number(resumed.runs)).toBe(6);
+    expect(Number(resumed.token_samples)).toBe(3);
+    expect(Number(resumed.median_input_tokens)).toBe(380_000);
+    const fresh = rows.find(row => row.adapter_type === "codex_local" && row.resume_state === "fresh")!;
+    expect(Number(fresh.runs)).toBe(2);
+    expect(Number(fresh.median_input_tokens)).toBe(150_000);
   });
 });
