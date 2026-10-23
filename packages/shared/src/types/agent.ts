@@ -98,7 +98,7 @@ export interface Agent {
   defaultEnvironmentId?: string | null;
   budgetMonthlyCents: number;
   spentMonthlyCents: number;
-  pauseReason: PauseReason | `ops-guard:${string}` | null;
+  pauseReason: PauseReason | null;
   pausedAt: Date | null;
   errorReason?: string | null;
   permissions: AgentPermissions;
