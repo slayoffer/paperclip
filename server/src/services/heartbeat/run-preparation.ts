@@ -1,3 +1,4 @@
+import { isOwnerSessionKey, firstCallerTaskKey } from "../owner-sessions.js";
 import type { DurableBridgeWakeupRequest } from "../durable-bridge-wakeup.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
 import { githubConfiguredInstructionSources } from "../chat-github-review-policy.js";
@@ -1564,15 +1565,11 @@ export function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
 ) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
+  // A caller-supplied key never addresses a reserved owner-project:* row (SYNA-2912 r2 P2).
+  return firstCallerTaskKey([
+    contextSnapshot?.taskKey, contextSnapshot?.taskId, contextSnapshot?.issueId,
+    payload?.taskKey, payload?.taskId, payload?.issueId,
+  ].map((value) => readNonEmptyString(value)));
 }
 
 function mergeWakeCommentIds(...values: Array<unknown>): string[] {
@@ -1679,6 +1676,7 @@ export function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  if (isOwnerSessionKey(contextSnapshot.taskKey)) delete contextSnapshot.taskKey;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);
