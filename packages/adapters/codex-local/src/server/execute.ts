@@ -1356,6 +1356,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           settleRunDisposition: paperclipBridge?.settleRunDisposition,
           localProcessSandbox,
         });
+        checkpointLog.assertValid();
         const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
         return {
           proc: {

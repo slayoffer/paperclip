@@ -7,7 +7,7 @@ import { RESTART_RESUME_PROMPT } from "@paperclipai/adapter-utils/server-utils";
 
 afterEach(() => vi.unstubAllEnvs());
 
-it.each([false, true])("resumes the checkpoint session without a fresh fallback (missing=%s)", async missing => {
+it.each(["resume", "missing", "changed"])("keeps the restart session or stops recovery (%s)", async mode => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "codex-restart-resume-"));
   try {
     const command = path.join(cwd, "codex");
@@ -19,11 +19,12 @@ it.each([false, true])("resumes the checkpoint session without a fresh fallback 
     await fs.writeFile(command, `#!/usr/bin/env node
 const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ args: process.argv.slice(2), prompt: fs.readFileSync(0, "utf8") }) + "\\n");
-if (${missing}) {
+if (${mode === "missing"}) {
   console.error("state db missing rollout path for thread restart-thread");
   process.exit(1);
 }
-console.log(JSON.stringify({ type: "thread.started", thread_id: "restart-thread" }));
+console.log(JSON.stringify({ type: "thread.started", thread_id: ${JSON.stringify(mode === "changed" ? "replacement-thread" : "restart-thread")} }));
+if (${mode === "changed"}) { setInterval(() => {}, 1000); }
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
 `, { mode: 0o755 });
     const onEvent = vi.fn();
@@ -35,7 +36,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
       config: { engine: "cli", command, cwd, promptTemplate: "Full task context must not repeat." },
       context: { paperclipRestartResume: true }, onLog: async () => {}, onEvent,
     });
-    if (missing) await expect(result).rejects.toThrow("restart_session_missing");
+    if (mode !== "resume") await expect(result).rejects.toThrow(mode === "missing" ? "restart_session_missing" : "restart_session_changed");
     else {
       expect(await result).toMatchObject({ exitCode: 0, sessionId: "restart-thread" });
       expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: "session.checkpoint",

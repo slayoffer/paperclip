@@ -183,6 +183,23 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(holds).toEqual([expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" })]);
   });
 
+  it("retains the attempt-limit fallback over stale resuming and conversation metadata", async () => {
+    execute.mockClear();
+    await db.update(heartbeatRuns).set({ status: "succeeded" });
+    const run = await seed();
+    await db.update(heartbeatRuns).set({ resultJson: { ...run.resultJson,
+      restartRecovery: { outcome: "resuming", attempt: 3 }, conversationContinuation: "continue_conversation_v1",
+    } }).where(eq(heartbeatRuns.id, run.id));
+    await expire(run.id);
+    await heartbeatService(db).reapOrphanedRuns({ staleThresholdMs: 0 });
+    expect(await read(run.id)).toMatchObject({ status: "failed", resultJson: {
+      restartRecovery: { outcome: "reconciliation", reason: "restart_attempt_limit" },
+    } });
+    expect(execute).not.toHaveBeenCalled();
+    const holds = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, String(run.contextSnapshot?.issueId)));
+    expect(holds).toEqual([expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" })]);
+  });
+
   it("does nothing when no live runs exist", async () => {
     execute.mockClear();
     await db.update(heartbeatRuns).set({ status: "succeeded" });

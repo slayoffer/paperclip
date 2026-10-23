@@ -27,6 +27,9 @@ export function preserveLegacyRestartEvidence(
     ...(previous?.restartCheckpoint ? { restartCheckpoint: previous.restartCheckpoint } : {}),
     ...(previous?.restartRecovery ? { restartRecovery: previous.restartRecovery } : {}),
     ...result,
+    // A reaper snapshot can predate its own persisted fallback decision.
+    ...((previous?.restartRecovery as Record<string, unknown> | undefined)?.outcome === "reconciliation"
+      ? { restartRecovery: previous!.restartRecovery } : {}),
   };
 }
 
