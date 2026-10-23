@@ -8,7 +8,10 @@ const mockRetainBacklogAssignment = vi.hoisted(() => vi.fn(async () => undefined
 vi.mock("../services/human-directed-work.js", () => ({ retainBacklogHumanAssignment: mockRetainBacklogAssignment }));
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
-const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockLogActivity = vi.hoisted(() => vi.fn(async (
+  _db: unknown,
+  _entry: { action: string; details: Record<string, unknown> },
+) => undefined));
 const mockIssueService = vi.hoisted(() => ({
   create: vi.fn(),
   createChild: vi.fn(),
@@ -310,6 +313,42 @@ describe("assigned backlog creation contract", () => {
         payload: expect.objectContaining({ mutation: "create" }),
       }),
     );
+  });
+
+  it.each([
+    { name: "an isolated child", parentWorkspaceId: "workspace-1", childWorkspaceId: null, inherited: false },
+    { name: "a shared workspace", parentWorkspaceId: "workspace-1", childWorkspaceId: "workspace-1", inherited: true },
+    { name: "a different workspace", parentWorkspaceId: "workspace-1", childWorkspaceId: "workspace-2", inherited: false },
+    { name: "no workspace", parentWorkspaceId: null, childWorkspaceId: null, inherited: false },
+  ])("records the saved workspace source for $name", async ({ parentWorkspaceId, childWorkspaceId, inherited }) => {
+    mockIssueService.getById.mockResolvedValue({
+      ...makeIssue({ id: "parent-1", title: "Parent issue" }),
+      projectId: "project-1",
+      executionWorkspaceId: parentWorkspaceId,
+    });
+    mockIssueService.createChild.mockResolvedValue({
+      issue: {
+        ...makeIssue({ id: "child-1", title: "Child issue", parentId: "parent-1", status: "backlog" }),
+        executionWorkspaceId: childWorkspaceId,
+      },
+      parentBlockerAdded: false,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/issues/parent-1/children")
+      .send({ title: "Child issue", status: "backlog" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.executionWorkspaceId).toBe(childWorkspaceId);
+    const activity = mockLogActivity.mock.calls.find(([, entry]) => entry.action === "issue.child_created");
+    expect(activity).toBeDefined();
+    const details = activity![1].details;
+    expect(details).toMatchObject({ parentId: "parent-1", title: "Child issue" });
+    if (inherited) {
+      expect(details).toHaveProperty("inheritedExecutionWorkspaceFromIssueId", "parent-1");
+    } else {
+      expect(details).not.toHaveProperty("inheritedExecutionWorkspaceFromIssueId");
+    }
   });
 
   it("preserves deliberate assigned backlog as parked work without assignment wakeup", async () => {
