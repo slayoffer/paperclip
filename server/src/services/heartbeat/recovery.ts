@@ -1,3 +1,4 @@
+import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { CHAT_COMPLETION_WAKE_REASON } from "../chat-completion-delivery.js";
@@ -105,6 +106,7 @@ export interface HeartbeatRecoveryDependencies extends Pick<HeartbeatRetryDepend
   executeRun: (runId: string, options?: {
     nativeLeaseOwner?: string;
     nativeRestartRecovery?: NativeRestartRecoveryClaim;
+    legacyRestartRecovery?: LegacyRestartCheckpoint;
   }) => Promise<void>;
   scheduleNativeSessionResumeDispatch: (runId: string, nextAttemptAt: Date) => void;
   cancelHeartbeatNativeRun: (input: {
@@ -1154,6 +1156,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
             retryRunCreated: false,
           },
         });
+        restartSuspendedRunIds.push(run.id);
+        return;
+      }
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
         restartSuspendedRunIds.push(run.id);
         return;
       }
@@ -2305,6 +2311,18 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         continue;
       }
 
+      if (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType)) {
+        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType);
+        if (checkpoint) {
+          restartSuspendedLegacyRuns.delete(run.id);
+          const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {
+            logger.error({ err, runId: run.id }, "Legacy restart resume failed");
+          });
+          activeRunExecutionPromises.add(execution);
+          void execution.finally(() => activeRunExecutionPromises.delete(execution));
+          continue;
+        }
+      }
       const runContext = parseObject(run.contextSnapshot);
       const monitorIssueId = readNonEmptyString(runContext.issueId);
       const monitorNextCheckAt = monitorIssueId

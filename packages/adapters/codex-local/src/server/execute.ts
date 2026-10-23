@@ -55,6 +55,8 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
   joinPromptSections,
+  checkpointSessionOutput,
+  RESTART_RESUME_PROMPT,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseLocalProcessFilesystemScope,
@@ -586,6 +588,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     };
   }
+  if (ctx.context.paperclipRestartResume === true && engineSelection.engine !== "cli") {
+    throw new Error("restart_engine_changed");
+  }
   if (engineSelection.engine === "acp") {
     return executeCodexAcp(ctx);
   }
@@ -1087,6 +1092,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const forceSaferInvocation = fallbackModeUsesSaferInvocation(codexTransientFallbackMode);
     const forceFreshSession = fallbackModeUsesFreshSession(codexTransientFallbackMode);
     const sessionId = canResumeSession && !forceFreshSession ? runtimeSessionId : null;
+    if (context.paperclipRestartResume === true && !sessionId) {
+      throw new Error("restart_session_identity_changed");
+    }
     if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
       await onLog(
         "stdout",
@@ -1213,7 +1221,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? ""
         : renderTemplate(promptTemplate, templateData);
       const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-      const prompt = joinPromptSections([
+      const prompt = context.paperclipRestartResume === true ? RESTART_RESUME_PROMPT : joinPromptSections([
         promptInstructionsPrefix,
         renderedBootstrapPrompt,
         selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
@@ -1351,6 +1359,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const parsed = consumeAccounting(stdout);
         return { usage: parsed.usageReported ? parsed.usage : undefined, costStatus: parsed.usageComplete ? undefined : "unpriced", usageBasis: "per_run", provider: "openai", biller, billingType, model, pricingContext, costUsd: null, complete: parsed.usageComplete };
       });
+      const checkpointLog = checkpointSessionOutput({ expectedSessionId: context.paperclipRestartResume === true ? sessionId ?? undefined : undefined, adapterType: "codex_local", params: { cwd: effectiveExecutionCwd,
+          ...(executionTargetIsRemote ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget) } : {}), }, onLog: accountingLog, onEvent });
       try {
         const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
           onProcessStopped: providerStop.beginInvocation(),
@@ -1364,7 +1374,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           onLog: async (stream, chunk) => {
             monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {
-              await accountingLog(stream, chunk);
+              await checkpointLog(stream, chunk);
               return;
             }
             const cleaned = stripCodexRolloutNoise(chunk);
@@ -1376,6 +1386,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           localProcessSandbox,
         });
         await accountingLog.flush();
+        checkpointLog.assertValid();
         const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
         return {
           proc: {
@@ -1612,6 +1623,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (initial.proc.exitCode ?? 0) !== 0 &&
         isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
       ) {
+        if (context.paperclipRestartResume === true) throw new Error("restart_session_missing");
         await onLog(
           "stdout",
           `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,

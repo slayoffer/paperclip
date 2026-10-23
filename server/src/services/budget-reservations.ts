@@ -3,12 +3,13 @@ import { agents, budgetPolicies, budgetReservations, heartbeatRuns, nativeRunFin
 import { centsToUnits, unitsToCents } from "@paperclipai/shared";
 import { conflict, notFound } from "../errors.js";
 import { withAccountingTransaction } from "./accounting-transaction.js";
+import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { budgetServiceInTransaction, budgetPoliciesForRun, computeObservedSpend } from "./budgets.js";
 
 /** Reserve before dispatch, under the same company lock as charges and policy
  * changes. Estimates constrain admission; they cannot cap a provider's bill.
  * A reservation survives timeouts and restarts until accounting proves closure. */
-export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string) {
+export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string, legacyRestartSessionId?: string | null) {
   return withAccountingTransaction(db, companyId, async (tx, publications) => {
     const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId))).for("update");
     if (!run) throw notFound("Run not found");
@@ -23,7 +24,15 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
           .from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.companyId, companyId),
             eq(nativeRunFinalizations.runId, runId), eq(nativeRunFinalizations.leaseOwner, recoveryLeaseOwner),
             sql`${nativeRunFinalizations.leaseExpiresAt} > now()`)).for("update") : [];
-      if (owner) {
+      // Synthiq fork: a legacy restart resume of THIS run reuses the hold that its
+      // first dispatch took. The current controller must hold the restart claim
+      // that claimLegacyRestartRecovery wrote for the same session. Never reserve twice.
+      const restart = run.resultJson?.restartRecovery as Record<string, unknown> | undefined;
+      const legacyRestartOwner = Boolean(legacyRestartSessionId) && run.runtimeMode === "legacy"
+        && run.status === "running" && existing.state === "held" && existing.projectId === projectId
+        && run.controllerBootId === legacyControllerBootId
+        && restart?.outcome === "resuming" && restart.sessionId === legacyRestartSessionId;
+      if (owner || legacyRestartOwner) {
         // Recovery has already made this run queued/running, so its own pending
         // accounting is excluded. Current overruns, other unfinished runs and
         // scope pauses still apply before any more paid work starts.

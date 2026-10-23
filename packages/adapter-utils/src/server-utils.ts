@@ -1,3 +1,5 @@
+export { checkpointSessionOutput, RESTART_RESUME_PROMPT } from "./restart-session.js";
+import { RestartSessionCheckpointError } from "./restart-session.js";
 import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -4797,6 +4799,21 @@ export async function runChildProcess(
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
+        let checkpointFailure: RestartSessionCheckpointError | null = null;
+        let checkpointKillTimer: NodeJS.Timeout | null = null;
+        const handleLogError = (error: unknown, message: string) => {
+          if (!(error instanceof RestartSessionCheckpointError)) {
+            onLogError(error, runId, message);
+            return;
+          }
+          checkpointFailure ??= error;
+          if (child.exitCode === null && child.signalCode === null && !checkpointKillTimer) {
+            signalRunningProcess({ child, processGroupId }, "SIGTERM");
+            checkpointKillTimer = setTimeout(() => {
+              signalRunningProcess({ child, processGroupId }, "SIGKILL");
+            }, Math.max(1, opts.graceSec) * 1000);
+          }
+        };
         let terminalResultSeen = false;
         let terminalCleanupStarted = false;
         let terminalCleanupSignal: NodeJS.Signals | null = null;
@@ -4896,7 +4913,7 @@ export async function runChildProcess(
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
             .catch((err) =>
-              onLogError(err, runId, "failed to append stdout log chunk"),
+              handleLogError(err, "failed to append stdout log chunk"),
             )
             .finally(() => {
               maybeArmTerminalResultCleanup();
@@ -4914,7 +4931,7 @@ export async function runChildProcess(
           logChain = logChain
             .then(() => opts.onLog("stderr", text))
             .catch((err) =>
-              onLogError(err, runId, "failed to append stderr log chunk"),
+              handleLogError(err, "failed to append stderr log chunk"),
             )
             .finally(() => {
               maybeArmTerminalResultCleanup();
@@ -4932,6 +4949,7 @@ export async function runChildProcess(
         }
 
         child.on("error", (err: Error) => {
+          if (checkpointKillTimer) clearTimeout(checkpointKillTimer);
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
@@ -4952,6 +4970,7 @@ export async function runChildProcess(
         child.on(
           "close",
           (code: number | null, signal: NodeJS.Signals | null) => {
+            if (checkpointKillTimer) clearTimeout(checkpointKillTimer);
             if (timeout) clearTimeout(timeout);
             clearTerminalCleanupTimers();
             runningProcesses.delete(runId);
@@ -4959,6 +4978,7 @@ export async function runChildProcess(
               void Promise.resolve()
                 .then(() => target.cleanup?.())
                 .finally(() => {
+                  if (checkpointFailure) { reject(checkpointFailure); return; }
                   resolve({
                     exitCode: code,
                     signal,

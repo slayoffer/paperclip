@@ -1,3 +1,4 @@
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import {
   resolveWorkspaceAfterLowTrustPreflight,
   WorkspaceValidationFailure,
@@ -126,9 +127,11 @@ export interface HeartbeatWorkspacePreparationInput {
     reusableExistingExecutionWorkspace: ExecutionWorkspace | null;
     workspaceReuseRequest: ReturnType<typeof resolveExecutionWorkspaceReuseRequestForIssue>;
     nativeRecoveryExecutionWorkspaceId: string | null;
+    /** Native or legacy restart recovery binding. */
+    recoveryExecutionWorkspaceId: string | null;
     persistedNativeExecutionInput: NativeExecutionInput | null;
     isDotRun: boolean;
-    runOptions: { nativeRestartRecovery?: NativeRestartRecoveryClaim };
+    runOptions: { nativeRestartRecovery?: NativeRestartRecoveryClaim; legacyRestartRecovery?: LegacyRestartCheckpoint };
   };
   services: {
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "resolveEnvironment" | "acquireForRun" | "realizeForRun">;
@@ -185,6 +188,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     reusableExistingExecutionWorkspace,
     workspaceReuseRequest,
     nativeRecoveryExecutionWorkspaceId,
+    recoveryExecutionWorkspaceId,
     persistedNativeExecutionInput,
     isDotRun,
     runOptions,
@@ -604,7 +608,8 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   const bindIssueToPersistedExecutionWorkspace = async (
     workspace: ExecutionWorkspace | null,
   ) => {
-    if (!issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+    // Restart recovery (fork) and native recovery (upstream) keep the issue binding unchanged.
+    if (!issueId || !workspace || recoveryExecutionWorkspaceId || nativeRecoveryExecutionWorkspaceId) {
       return;
     }
     const nextIssueWorkspaceMode =
