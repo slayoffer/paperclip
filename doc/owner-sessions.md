@@ -21,8 +21,13 @@ Homelab owns the server deployment and canary. This feature requires no database
 The session row uses `owner-project:<project-id>` in `agent_task_sessions`.
 The existing company, agent, and adapter columns remain part of its unique key.
 Selected agents admit at most one active run. This serializes their provider threads.
+The owner project comes only from the current issue row. A wake's project or task key never selects an owner row.
+Task keys that start with `owner-project:` are reserved. Paperclip ignores them in wake data.
+A run saves the owner row before it leaves `running`, so the next run reads the current thread.
+A finalizer whose run already left `running`, or whose row moved to another run, writes nothing.
 
 The provider starts in a stable owner directory. Each turn names its issue worktree and branch.
+With `filesystemScope: "workspace"`, the sandbox mounts the owner directory and the issue workspace read-write.
 The agent executes repository commands in that worktree inside the resumed thread.
 Paperclip retains the existing issue checkout and workspace controls.
 It does not switch branches in a shared repository checkout.
@@ -33,7 +38,7 @@ Provider transcripts persist there. Each turn still receives fresh runtime asset
 Temporary runtime cleanup preserves the transcripts.
 
 Resumed owner turns receive the current wake and workspace instructions.
-The first turn for a different issue includes its assignment.
+The first turn for a different issue includes its full assignment, also on a comment or timer wake.
 Later turns omit the repeated assignment. Resumed turns omit repeated agent instructions.
 The agent can read the current issue when it needs more context.
 Issue comments and answered cards use the existing wake delivery rules.
@@ -48,7 +53,8 @@ Context from another issue grants no approval for the current issue.
 The existing compaction policy controls run count, input tokens, and age.
 The optional input limit above uses that same handoff path.
 Owner limits sum normalized input tokens across the thread. This also covers Claude per-run totals.
-Codex command output reports cumulative usage. Owner mode subtracts the previous session total for each wake.
+Codex command output reports cumulative usage. Owner mode subtracts the latest valid session total for each wake.
+A failed turn without usage does not reset that total.
 Claude retains its per-run usage accounting.
 
 Disable the switch to restore task-keyed sessions and the existing workspace behavior.
@@ -66,5 +72,5 @@ The canary must show resumed runs and a lower median than that fresh baseline.
 Run the focused tests with:
 
 ```sh
-pnpm exec vitest run server/src/__tests__/owner-sessions.test.ts packages/adapter-utils/src/remote-managed-runtime.sessions.test.ts --no-file-parallelism
+pnpm exec vitest run server/src/__tests__/owner-sessions.test.ts server/src/__tests__/owner-session-guards.test.ts packages/adapter-utils/src/remote-managed-runtime.sessions.test.ts packages/adapter-utils/src/prompt-sections.test.ts packages/adapter-utils/src/local-process-sandbox-launch-dir.test.ts --no-file-parallelism
 ```

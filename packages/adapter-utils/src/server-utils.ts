@@ -2222,11 +2222,18 @@ export function selectPaperclipPromptSections(
   } = {},
 ): { taskContextNote: string; wakePrompt: string } {
   const ownerWake = normalizePaperclipWakePayload(context?.paperclipWake);
+  const ownerScope = parseObject(context?.paperclipOwnerSession);
   const ownerResume = options.resumedSession === true &&
-    parseObject(context?.paperclipOwnerSession).sameIssue === true &&
+    ownerScope.sameIssue === true &&
     !(ownerWake && (isAssignmentShapedPaperclipWakeReason(ownerWake.reason) ||
       isPaperclipRecoveryWakePayload(context?.paperclipWake)));
-  const taskContextNote = ownerResume ? "" : selectPaperclipTaskMarkdown(context, options);
+  // A resumed owner thread that moves to another issue has never seen that issue's full assignment.
+  const ownerIssueSwitch = options.resumedSession === true &&
+    Object.keys(ownerScope).length > 0 && ownerScope.sameIssue !== true;
+  const taskContextNote = ownerResume ? "" : selectPaperclipTaskMarkdown(
+    context,
+    ownerIssueSwitch ? { ...options, resumedSession: false } : options,
+  );
   return {
     taskContextNote,
     wakePrompt: renderPaperclipWakePrompt(context?.paperclipWake, {

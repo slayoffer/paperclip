@@ -1010,7 +1010,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? {
             workspaceDir: issueExecutionCwd,
             filesystemScope,
-            managedPaths: [{ path: effectiveCodexHome, access: "rw" }, ...(ownerSession ? [{ path: ownerSession.cwd, access: "rw" as const }] : [])],
+            launchDir: ownerSession?.cwd ?? null,
+            managedPaths: [{ path: effectiveCodexHome, access: "rw" }],
             extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
             pathAliases: targetWorkspaceRealization?.mode === "copy"
               ? targetWorkspaceRealization.pathAliases

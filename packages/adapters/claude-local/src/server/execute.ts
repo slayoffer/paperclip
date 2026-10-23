@@ -613,6 +613,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const targetWorkspaceRealization = executionTarget?.workspaceRealization ?? null;
   const workspaceInPlace = targetWorkspaceRealization?.mode === "in_place";
   const ownerSession = await prepareOwnerSessionLaunch({ context, companyId: agent.companyId, agentId: agent.id, target: executionTarget });
+  if (ownerSession && localProcessSandbox) localProcessSandbox.launchDir = ownerSession.cwd;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(

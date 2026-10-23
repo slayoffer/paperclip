@@ -27,12 +27,12 @@ describe("owner session policy", () => {
   it("uses one key per owner project and excludes ineligible execution", () => {
     vi.stubEnv("PAPERCLIP_OWNER_SESSIONS_ENABLED", "true");
     vi.stubEnv("PAPERCLIP_OWNER_SESSION_AGENT_IDS", "");
-    const input = { agent, projectId: "project-a", agentHome: "/owner-a", eligible: true };
+    const input = { agent, issue: { projectId: "project-a" }, agentHome: "/owner-a", eligible: true };
     expect(resolveOwnerSession(input)?.key).toBe("owner-project:project-a");
     expect(resolveOwnerSession(input)).toEqual(resolveOwnerSession({ ...input }));
-    expect(resolveOwnerSession({ ...input, projectId: "project-b" })?.key).not.toBe(resolveOwnerSession(input)?.key);
+    expect(resolveOwnerSession({ ...input, issue: { projectId: "project-b" } })?.key).not.toBe(resolveOwnerSession(input)?.key);
     expect(resolveOwnerSession({ ...input, eligible: false })).toBeNull();
-    expect(resolveOwnerSession({ ...input, projectId: null })).toBeNull();
+    expect(resolveOwnerSession({ ...input, issue: { projectId: null } })).toBeNull();
   });
 
   it("keeps the owner thread across the wakes that reset a task session", () => {

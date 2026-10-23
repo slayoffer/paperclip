@@ -1,5 +1,5 @@
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -5773,15 +5773,11 @@ function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
 ) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
+  // A caller-supplied key never addresses a reserved owner-project:* row (SYNA-2912 r2 P2).
+  return firstCallerTaskKey([
+    contextSnapshot?.taskKey, contextSnapshot?.taskId, contextSnapshot?.issueId,
+    payload?.taskKey, payload?.taskId, payload?.issueId,
+  ].map((value) => readNonEmptyString(value)));
 }
 
 /**
@@ -7295,6 +7291,7 @@ function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  if (isOwnerSessionKey(contextSnapshot.taskKey)) delete contextSnapshot.taskKey;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);
@@ -12175,10 +12172,11 @@ export function heartbeatService(
       };
     }
 
-    const previousRun = await getLatestRunForSession(agentId, sessionId, {
-      excludeRunId: runId,
-    });
-    const previousRawUsage = readRawUsageTotals(previousRun?.usageJson);
+    const previousRawUsage = usageBasis === "session_cumulative"
+      ? await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals)
+      : readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+        excludeRunId: runId,
+      }))?.usageJson);
     return {
       normalizedUsage: deriveNormalizedUsageDelta(rawUsage, previousRawUsage),
       previousRawUsage,
@@ -20882,7 +20880,7 @@ export function heartbeatService(
       // Never accept owner scope from wake data.
       delete context.paperclipOwnerSession;
       const ownerSession = resolveOwnerSession({
-        agent, projectId: projectContext?.id ?? null,
+        agent, issue: issueContext ?? null,
         agentHome: resolveDefaultAgentWorkspaceDir(agent.id),
         eligible: !!issueContext && !isConversation(issueContext) &&
           issueContext.assigneeAgentId === agent.id && trustPreset.kind === "standard" &&
@@ -25667,6 +25665,18 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
+        if (ownerSession) {
+          // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+          const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
+          await saveOwnerSessionState(db, {
+            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+            runId: run.id, expectedLastRunId: taskSession?.lastRunId ?? null, lastError: runErrorMessage,
+            session: clear ? null : {
+              params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
+              displayId: nextSessionState.displayId,
+            },
+          });
+        }
         const persistedRunWrite = await setRunStatusIfRunning(
           run.id,
           status,
@@ -26027,7 +26037,7 @@ export function heartbeatService(
             },
             normalizedUsage,
           );
-          if (taskKey) {
+          if (taskKey && !ownerSession) {
             if (
               adapterResult.clearSession ||
               (!nextSessionState.params && !nextSessionState.displayId)
@@ -26371,7 +26381,7 @@ export function heartbeatService(
           );
 
           if (
-            taskKey &&
+            taskKey && !ownerSession &&
             (goalCheckpointSession.current ||
               previousSessionParams ||
               previousSessionDisplayId ||
