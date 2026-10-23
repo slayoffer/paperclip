@@ -141,3 +141,5 @@ export type { AgentLifecycleRequest, AgentLifecycleResult } from "../types/agent
 export * from "../fast-response.js";
 
 export * from "../publication-authority.js";
+
+export { pauseAgentSchema, type PauseAgent } from "../validators/agent-pause.js";
