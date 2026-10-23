@@ -325,6 +325,10 @@ See [details](spec-implementation/part-8.md#1011-current-implementation-api-adde
 
 See [details](spec-implementation/part-8.md#11-heartbeat-and-adapter-contract).
 
+The fork supports [legacy CLI restart recovery](restart-session-recovery.md).
+Recovery retains the run and provider session when termination and workspace evidence permit a safe resume.
+Missing or conflicting evidence retains the reconciliation path.
+
 ## 11.1 Adapter Interface
 
 See [details](spec-implementation/part-8.md#111-adapter-interface).

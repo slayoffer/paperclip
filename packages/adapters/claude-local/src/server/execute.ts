@@ -39,6 +39,8 @@ import {
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
   joinPromptSections,
+  checkpointSessionOutput,
+  RESTART_RESUME_PROMPT,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
@@ -415,11 +417,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     };
   }
+  if (ctx.context.paperclipRestartResume === true && engineSelection.engine !== "cli") {
+    throw new Error("restart_engine_changed");
+  }
   if (engineSelection.engine === "acp") {
     return executeClaudeAcp(ctx);
   }
 
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
@@ -803,6 +808,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }) &&
     adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
   const sessionId = canResumeSession ? runtimeSessionId : null;
+  if (context.paperclipRestartResume === true && !sessionId) {
+    throw new Error("restart_session_identity_changed");
+  }
   if (runtimeSessionId && !isValidUuid) {
     await onLog(
       "stdout",
@@ -928,7 +936,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? ""
       : renderTemplate(promptTemplate, templateData);
     const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-    const prompt = joinPromptSections([
+    const prompt = context.paperclipRestartResume === true ? RESTART_RESUME_PROMPT : joinPromptSections([
       renderedBootstrapPrompt,
       selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
       wakePrompt,
@@ -980,6 +988,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    const checkpointLog = checkpointSessionOutput({ expectedSessionId: context.paperclipRestartResume === true ? sessionId ?? undefined : undefined, adapterType: "claude_local", params: { cwd: effectiveExecutionCwd, promptBundleKey: promptBundle.bundleKey, mcpServerIdentity: runtimeMcpIdentity,
+        ...(executionTargetIsRemote ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget) } : {}), }, onLog, onEvent });
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       onProcessStopped: providerStop.beginInvocation(),
       cwd: ownerSession?.cwd ?? cwd,
@@ -989,7 +999,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onRuntimeProgress: ctx.onRuntimeProgress,
-      onLog,
+      onLog: checkpointLog,
       runLogTail: paperclipBridge?.runLogTail,
       settleRunDisposition: paperclipBridge?.settleRunDisposition,
       terminalResultCleanup: {
@@ -999,6 +1009,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       localProcessSandbox,
     });
 
+    checkpointLog.assertValid();
     const parsedStream = parseClaudeStreamJson(proc.stdout);
     const parsed = parsedStream.resultJson ?? parseJson(proc.stdout);
     return { proc, parsedStream, parsed };
@@ -1341,6 +1352,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : null;
 
     if (sessionErrorKind !== null) {
+      if (context.paperclipRestartResume === true) throw new Error("restart_session_missing");
       const reason =
         sessionErrorKind === "poisoned"
           ? "returned a poisoned message-id"

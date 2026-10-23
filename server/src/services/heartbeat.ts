@@ -1,3 +1,5 @@
+import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
+import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
 import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
@@ -1372,6 +1374,7 @@ const failedProcessRunCancellations = new Map<
 // that must guarantee no run write is still in flight (graceful shutdown, and
 // tests tearing down a shared database) can await drainActiveRunExecutions().
 const activeRunExecutionPromises = new Set<Promise<void>>();
+const restartSuspendedLegacyRuns = new Set<string>();
 // Routes dispatch a wakeup fire-and-forget (void heartbeat.wakeup(...)). The
 // wakeup promise stays pending through its asynchronous prologue, and it
 // resolves only after it inserts the queued run and registers the run
@@ -3530,6 +3533,8 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
       then ${heartbeatRuns.resultJson}
     else jsonb_strip_nulls(
       jsonb_build_object(
+        'restartCheckpoint', case when pg_column_size(${heartbeatRuns.resultJson}->'restartCheckpoint') <= 16384 then ${heartbeatRuns.resultJson}->'restartCheckpoint' end,
+        'restartRecovery', case when pg_column_size(${heartbeatRuns.resultJson}->'restartRecovery') <= 2048 then ${heartbeatRuns.resultJson}->'restartRecovery' end,
         'summary', left(${heartbeatRuns.resultJson} ->> 'summary', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'result', left(${heartbeatRuns.resultJson} ->> 'result', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'message', left(${heartbeatRuns.resultJson} ->> 'message', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
@@ -12966,6 +12971,10 @@ export function heartbeatService(
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
+
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
     }
@@ -13054,6 +13063,10 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
 
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
@@ -15353,6 +15366,10 @@ export function heartbeatService(
             retryRunCreated: false,
           },
         });
+        restartSuspendedRunIds.push(run.id);
+        continue;
+      }
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
         restartSuspendedRunIds.push(run.id);
         continue;
       }
@@ -19467,6 +19484,18 @@ export function heartbeatService(
         continue;
       }
 
+      if (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType)) {
+        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType);
+        if (checkpoint) {
+          restartSuspendedLegacyRuns.delete(run.id);
+          const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {
+            logger.error({ err, runId: run.id }, "Legacy restart resume failed");
+          });
+          activeRunExecutionPromises.add(execution);
+          void execution.finally(() => activeRunExecutionPromises.delete(execution));
+          continue;
+        }
+      }
       const runContext = parseObject(run.contextSnapshot);
       const monitorIssueId = readNonEmptyString(runContext.issueId);
       const monitorNextCheckAt = monitorIssueId
@@ -20250,12 +20279,14 @@ export function heartbeatService(
     runOptions: {
       nativeLeaseOwner?: string;
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
+      legacyRestartRecovery?: LegacyRestartCheckpoint;
     } = {},
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if (await suppressRunAdmission(db, runId, runOptions, await getSchedulingSuppression())) return;
 
+    let settleLegacyRestartLog: (() => Promise<void>) | null = null;
     let legacyAdapterEntered = false;
     let run = await getRun(runId);
     if (!run) return;
@@ -21316,26 +21347,28 @@ export function heartbeatService(
           : null;
       const persistedNativeExecutionWorkspaceId =
         persistedNativeExecutionInput?.binding.executionWorkspaceId ?? null;
+      const persistedRecoveryExecutionWorkspaceId = persistedNativeExecutionWorkspaceId ??
+        runOptions.legacyRestartRecovery?.executionWorkspaceId ?? null;
       const requestedExecutionWorkspaceId =
-        persistedNativeExecutionWorkspaceId ??
+        persistedRecoveryExecutionWorkspaceId ??
         readNonEmptyString(issueRef?.executionWorkspaceId);
       const existingExecutionWorkspace = requestedExecutionWorkspaceId
         ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId)
         : null;
-      const nativeRecoveryExecutionWorkspaceId =
+      const recoveryExecutionWorkspaceId =
         resolveNativeRecoveryExecutionWorkspaceBinding({
-          bindingId: persistedNativeExecutionWorkspaceId,
+          bindingId: persistedRecoveryExecutionWorkspaceId,
           persistedWorkspaceFound: existingExecutionWorkspace !== null,
         });
       const workspaceReuseRequest =
         resolveExecutionWorkspaceReuseRequestForIssue({
           issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-          issueExecutionWorkspacePreference: nativeRecoveryExecutionWorkspaceId
+          issueExecutionWorkspacePreference: recoveryExecutionWorkspaceId
             ? "reuse_existing"
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
-          requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+          requestedExistingBranch: recoveryExecutionWorkspaceId
             ? null
             : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
           existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
@@ -21479,7 +21512,7 @@ export function heartbeatService(
         reusableExistingExecutionWorkspace,
         selectedEnvironmentId,
       );
-      if (nativeRecoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+      if (recoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
         throw new ConfigurationIncompleteFailure(
           "The task environment changed during a suspended native run. Start a new execution.",
           { configurationIncomplete: { reason: "task_environment_changed", issueId } },
@@ -22324,7 +22357,7 @@ export function heartbeatService(
       const bindIssueToPersistedExecutionWorkspace = async (
         workspace: ExecutionWorkspace | null,
       ) => {
-        if (!issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+        if (!issueId || !workspace || recoveryExecutionWorkspaceId) {
           return;
         }
         const nextIssueWorkspaceMode =
@@ -23206,6 +23239,21 @@ export function heartbeatService(
           delete executionContinuation?.resumeDelta;
         }
       }
+      if (runOptions.legacyRestartRecovery) {
+        const saved = runOptions.legacyRestartRecovery;
+        if (saved.workspaceCwd !== executionWorkspace.cwd) throw new Error("restart_workspace_changed");
+        if (saved.executionWorkspaceId !== (persistedExecutionWorkspace?.id ?? null)) throw new Error("restart_workspace_binding_changed");
+        if (saved.taskKey !== sessionStorageKey) throw new Error("restart_session_scope_changed");
+        if ((saved.aiSessionIdentity ?? null) !== (managedAiRuntime?.sessionIdentity ?? null)) throw new Error("restart_account_changed");
+        if (saved.providerSessionHome) {
+          if (!managedAiRuntime?.home) throw new Error("restart_account_changed");
+          await copyLegacyRestartProviderState(saved.providerSessionHome, path.join(managedAiRuntime.home, "provider"), saved.adapterType);
+        }
+        runtimeSessionIdForAdapter = saved.sessionParams.sessionId;
+        runtimeSessionParamsForAdapter = saved.sessionParams;
+        previousSessionDisplayId = saved.sessionParams.sessionId;
+      }
+      context.paperclipRestartResume = Boolean(runOptions.legacyRestartRecovery);
       const runtimeForAdapter = {
         sessionId: runtimeSessionIdForAdapter,
         sessionParams: runtimeSessionParamsForAdapter,
@@ -23302,6 +23350,10 @@ export function heartbeatService(
           .where(eq(heartbeatRuns.id, run.id));
         lastOutputFlushAt = pendingOutputProgress.at;
         outputProgressState.pending = null;
+      };
+      settleLegacyRestartLog = async () => {
+        if (handle) await runLogStore.finalize(handle);
+        await flushOutputProgress({ force: true });
       };
       try {
         const startedAt = run.startedAt ?? new Date();
@@ -23593,6 +23645,15 @@ export function heartbeatService(
         };
 
         const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
+          if (event.eventType === "session.checkpoint") {
+            await saveLegacyRestartCheckpoint(db, currentRun, {
+              adapterType: agent.adapterType, taskKey: sessionStorageKey, workspaceCwd: executionWorkspace.cwd,
+              aiSessionIdentity: managedAiRuntime?.sessionIdentity ?? null,
+              ...(managedAiRuntime?.home && !parseObject(event.payload?.sessionParams).remoteExecution
+                ? { providerSessionHome: path.join(managedAiRuntime.home, "provider") } : {}),
+              sessionParams: parseObject(event.payload?.sessionParams),
+            });
+          }
           const eventType = event.eventType.trim();
           if (!eventType) return;
           await appendRunEvent(currentRun, {
@@ -25081,7 +25142,10 @@ export function heartbeatService(
                         issueId,
                       );
                     },
-                    onProviderStopped: collectStoppedInstructions,
+                    onProviderStopped: async () => {
+                      await collectStoppedInstructions();
+                      await markLegacyRestartBoundary(db, run, "providerStopped");
+                    },
                     onDispatch: markDispatchStarted,
                     signal: executionControl.controller.signal,
                     ...(executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? {
@@ -25204,6 +25268,12 @@ export function heartbeatService(
             await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (restartSuspendedLegacyRuns.has(run.id)) {
+            const saved = readLegacyRestartCheckpoint((await getRun(run.id))!);
+            if (!saved?.sessionParams.remoteExecution) return;
+            restartSuspendedLegacyRuns.delete(run.id);
+            await recordLegacyRestartFallback(db, run, "restart_workspace_unsettled");
+          }
           if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
             || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
             nativeWorkspaceFinalizeScheduled = true;
@@ -25404,6 +25474,16 @@ export function heartbeatService(
             },
             "run referenced-project remote staging",
           );
+        }
+        if (restartSuspendedLegacyRuns.has(run.id)) {
+          const saved = readLegacyRestartCheckpoint((await getRun(run.id))!);
+          if (!saved?.sessionParams.remoteExecution) return;
+          if (saved.providerStopped && !hasWorkspaceRestoreFailure(adapterResult.resultJson)) {
+            await markLegacyRestartBoundary(db, run, "workspaceSettled");
+            return;
+          }
+          restartSuspendedLegacyRuns.delete(run.id);
+          await recordLegacyRestartFallback(db, run, "restart_remote_stop_unverified");
         }
         const adapterManagedRuntimeServices = adapterResult.runtimeServices
           ? await persistAdapterManagedRuntimeServices({
@@ -25635,6 +25715,12 @@ export function heartbeatService(
                   ? parseObject(latestRun?.resultJson)
                   : {}),
                 ...parseObject(adapterResult.resultJson),
+                ...(latestRun?.resultJson?.restartRecovery ? { restartRecovery: latestRun.resultJson.restartRecovery } : {}),
+                ...(runOptions.legacyRestartRecovery ? { restartRecovery: {
+                  outcome: outcome === "succeeded" ? "resumed" : "reconciliation",
+                  sessionId: runOptions.legacyRestartRecovery.sessionParams.sessionId,
+                  ...(outcome === "succeeded" ? {} : { reason: runErrorCode ?? "restart_resume_failed" }),
+                } } : {}),
                 ...(adapterResult.executionRecovery
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
@@ -26076,6 +26162,8 @@ export function heartbeatService(
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
       } catch (err) {
+        if (restartSuspendedLegacyRuns.has(run.id)) return;
+        if (runOptions.legacyRestartRecovery) await recordLegacyRestartFallback(db, run, err instanceof Error ? err.message : "restart_resume_failed");
         if (err instanceof NativeControllerDetachedForRestartError) {
           nativeSessionResumeScheduled = true;
           return;
@@ -26416,6 +26504,8 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
+      if (restartSuspendedLegacyRuns.has(run.id)) return;
+      if (runOptions.legacyRestartRecovery) await recordLegacyRestartFallback(db, run, outerErr instanceof Error ? outerErr.message : "restart_resume_failed");
       if (
         nativeOwnershipHeld ||
         (!nativeDispatchStarted && isRunnerReattachment(runOptions.nativeRestartRecovery)) ||
@@ -26670,9 +26760,40 @@ export function heartbeatService(
         }
       }
     } finally {
+      if (restartSuspendedLegacyRuns.has(run.id)) {
+        await settleLegacyRestartLog?.().catch(err => logger.warn({ err, runId: run.id }, "Restart log finalization failed"));
+        if (managedAiRuntime?.home) {
+          const saved = readLegacyRestartCheckpoint(await getRun(run.id) ?? run);
+          if (saved?.providerSessionHome) {
+            try {
+              const durableHome = path.join(resolveDefaultAgentWorkspaceDir(run.agentId), ".restart-sessions", run.id);
+              await copyLegacyRestartProviderState(saved.providerSessionHome, durableHome, saved.adapterType);
+              await saveLegacyRestartProviderHome(db, run, durableHome);
+            } catch (err) {
+              await recordLegacyRestartFallback(db, run, err instanceof Error ? err.message : "restart_provider_state_missing");
+            }
+          }
+        }
+        await managedAiRuntime?.cleanup().catch(() => undefined);
+        controllerLease.stop();
+        activeRunExecutions.delete(run.id);
+        executionControl.finish();
+        adapterExecutionControls.delete(run.id);
+        // Retain the workspace and lease. The next controller reuses this run.
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: sql`clock_timestamp()` })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
+        return;
+      }
       await nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && latestRun.controllerBootId === legacyControllerBootId) {
+        await fs.rm(path.join(resolveDefaultAgentWorkspaceDir(run.agentId), ".restart-sessions", run.id), { recursive: true, force: true })
+          .catch(err => logger.warn({ err, runId: run.id }, "Restart transcript cleanup failed"));
+      }
+      if (runOptions.legacyRestartRecovery && latestRun && ["failed", "cancelled", "timed_out"].includes(latestRun.status)) {
+        await recordLegacyRestartFallback(db, latestRun, latestRun.error?.startsWith("restart_") ? latestRun.error : latestRun.errorCode ?? "restart_resume_failed");
+      }
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
