@@ -1,5 +1,6 @@
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
+import { saveOwnerSessionState } from "../owner-sessions.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
 import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspaceGitScanCode } from "./retries.js";
@@ -96,6 +97,11 @@ interface RunCompletionSession {
   taskKey: string | null;
   configuredModel: string | null;
   sessionConfigMetadata: EffectiveRunSessionConfigMetadata;
+  /** Synthiq owner sessions: the row key that stores this run's thread. */
+  sessionStorageKey?: string | null;
+  ownerSession?: { key: string } | null;
+  /** The owner row's lastRunId when this run started; guards the shared row. */
+  ownerSessionExpectedLastRunId?: string | null;
 }
 
 interface RunCompletionInput {
@@ -389,6 +395,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
       providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
+    const ownerSession = session.ownerSession ?? null;
+    const sessionStorageKey = session.sessionStorageKey ?? taskKey;
     const { handle, outputProgressState, flushOutputProgress } = output;
     const processCancellation =
       processRunCancellationSettlements.get(run.id) ??
@@ -474,13 +482,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         { legacySessionId: nextSessionState.legacySessionId },
         normalizedUsage,
       );
-      if (!taskKey) return;
+      if (!taskKey || ownerSession) return;
       if (
         adapterResult.clearSession ||
         (!nextSessionState.params && !nextSessionState.displayId)
       ) {
         await clearTaskSessions(agent.companyId, agent.id, {
-          taskKey,
+          taskKey: sessionStorageKey!,
           adapterType: agent.adapterType,
           expectedRunId: finalizedRun.id,
         });
@@ -489,7 +497,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           companyId: agent.companyId,
           agentId: agent.id,
           adapterType: agent.adapterType,
-          taskKey,
+          taskKey: sessionStorageKey!,
           sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
             nextSessionState.params,
             configuredModel,
@@ -644,6 +652,18 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       logSha256: logSummary?.sha256,
       logCompressed: logSummary?.compressed ?? false,
     };
+    if (ownerSession) {
+      // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+      const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
+      await saveOwnerSessionState(db, {
+        companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+        runId: run.id, expectedLastRunId: session.ownerSessionExpectedLastRunId ?? null, lastError: runErrorMessage,
+        session: clear ? null : {
+          params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
+          displayId: nextSessionState.displayId,
+        },
+      });
+    }
     const persistedRunWrite = await measureRunPhase("completion.terminal_write", () => setRunStatusIfRunning(
       run.id,
       status,
@@ -1035,6 +1055,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
       legacyAdapterEntered, goalCheckpointSession, previousSessionDisplayId, taskSession } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
+    const ownerSession = session.ownerSession ?? null;
+    const sessionStorageKey = session.sessionStorageKey ?? taskKey;
     const { handle, outputProgressState, flushOutputProgress } = output;
     // A process adapter may throw while its owned Stop is joining the
     // child. Let the cancellation write settle before attempting failure.
@@ -1236,7 +1258,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       );
 
       if (
-        taskKey &&
+        taskKey && !ownerSession &&
         (goalCheckpointSession.current ||
           previousSessionParams ||
           previousSessionDisplayId ||
@@ -1246,7 +1268,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           companyId: agent.companyId,
           agentId: agent.id,
           adapterType: agent.adapterType,
-          taskKey,
+          taskKey: sessionStorageKey!,
           sessionParamsJson:
             goalCheckpointSession.current?.params ??
             attachPaperclipSessionMetadataToSessionParams(

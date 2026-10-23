@@ -2,6 +2,7 @@ import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
+import { ownerSessionsEnabled } from "../owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "../deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "../review-bridge-wakes.js";
 import { recoverQueuedRuns } from "../queued-run-recovery.js";
@@ -424,8 +425,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
       // A Dot binding has one external turn. Competing assignments must retain
       // their queue position instead of claiming a second run that cannot bind.
-      maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
-        ["openai_dot", "grok_bot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
+      // Synthiq owner sessions share one thread per project, so they run one at a time.
+      maxConcurrentRuns: ownerSessionsEnabled(agent) || (agent.adapterType === "paperclip_runner" &&
+        ["openai_dot", "grok_bot", "muse"].includes(String(parseObject(agent.adapterConfig).provider)))
         ? 1 : normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
       skipTimerWhenNoActionableWork: asBoolean(
         heartbeat.skipTimerWhenNoActionableWork ??
