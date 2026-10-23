@@ -1417,6 +1417,8 @@ during provider execution. Keep policy changes separate from this extraction.
 
 ## Wake Context Delivery
 
+See [Owner sessions](owner-sessions.md) for the optional Synthiq session mode and canary variables.
+
 Built-in adapters deliver wake context through the run prompt, including structured
 execution-continuation data. They do not export `PAPERCLIP_WAKE_PAYLOAD_JSON`. A
 large JSON environment entry can prevent the agent process from starting with

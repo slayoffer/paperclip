@@ -1,3 +1,5 @@
+import { sessionCompactionReason, buildSessionCompactionHandoff } from "../session-compaction-decision.js";
+import { ownerSessionsEnabled, ownerSessionInputLimit, readOwnerSessionInputTokens, readLatestUsageSample, ownerSessionKeyForIssueReset } from "../owner-sessions.js";
 import { deriveTaskKey } from "./run-preparation.js";
 import { retryIdempotentDatabaseOperation } from "../../database-retry.js";
 import { isConversation } from "../agent-conversations.js";
@@ -722,16 +724,13 @@ export function normalizeAdapterRunUsage(
   };
 }
 
-function formatCount(value: number | null | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US");
-}
-
 export function parseSessionCompactionPolicy(
   agent: typeof agents.$inferSelect,
+  ownerSession = false,
 ): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig)
-    .policy;
+  const policy = resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
+  const limit = ownerSession && ownerSessionsEnabled(agent) ? ownerSessionInputLimit() : null;
+  return limit ? { ...policy, enabled: true, maxRawInputTokens: limit } : policy;
 }
 
 /**
@@ -1228,10 +1227,9 @@ export function createHeartbeatRunState(db: Db) {
       };
     }
 
-    const previousRun = await getLatestRunForSession(agentId, sessionId, {
-      excludeRunId: runId,
-    });
-    const previousRawUsage = readRawUsageTotals(previousRun?.usageJson);
+    // Synthiq owner sessions: an owner thread spans issues, so read the
+    // newest usage sample of the session itself.
+    const previousRawUsage = await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals);
     return {
       normalizedUsage: normalizeAdapterRunUsage(rawUsage, previousRawUsage, usageBasis),
       previousRawUsage,
@@ -1242,6 +1240,7 @@ export function createHeartbeatRunState(db: Db) {
   async function evaluateSessionCompaction(input: {
     agent: typeof agents.$inferSelect;
     sessionId: string | null;
+    ownerSession?: boolean;
     issueId: string | null;
     continuationSummaryBody?: string | null;
   }): Promise<SessionCompactionDecision> {
@@ -1255,7 +1254,7 @@ export function createHeartbeatRunState(db: Db) {
       };
     }
 
-    const policy = parseSessionCompactionPolicy(agent);
+    const policy = parseSessionCompactionPolicy(agent, input.ownerSession);
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
       return {
         rotate: false,
@@ -1319,23 +1318,13 @@ export function createHeartbeatRunState(db: Db) {
           )
         : 0;
 
-    let reason: string | null = null;
-    if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
-      reason = `session exceeded ${policy.maxSessionRuns} runs`;
-    } else if (
-      policy.maxRawInputTokens > 0 &&
-      latestRawUsage &&
-      latestRawInputTokens >= policy.maxRawInputTokens
-    ) {
-      reason =
-        `session raw input reached ${formatCount(latestRawInputTokens)} tokens ` +
-        `(threshold ${formatCount(policy.maxRawInputTokens)})`;
-    } else if (
-      policy.maxSessionAgeHours > 0 &&
-      sessionAgeHours >= policy.maxSessionAgeHours
-    ) {
-      reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
-    }
+    const reason = sessionCompactionReason({
+      policy, runs: runs.length,
+      inputTokens: input.ownerSession && policy.maxRawInputTokens > 0
+        ? await readOwnerSessionInputTokens(db, agent.companyId, agent.id, sessionId)
+        : latestRawUsage ? latestRawInputTokens : null,
+      ageHours: sessionAgeHours,
+    });
 
     if (!reason || !latestRun) {
       return {
@@ -1361,19 +1350,10 @@ export function createHeartbeatRunState(db: Db) {
       readNonEmptyString(latestSummary?.message) ??
       readNonEmptyString(summarizeRunErrorForModel(latestRun.error, latestRun.terminalFailureCategory));
 
-    const handoffMarkdown = [
-      "Paperclip session handoff:",
-      `- Previous session: ${sessionId}`,
-      issueId ? `- Issue: ${issueId}` : "",
-      `- Rotation reason: ${reason}`,
-      latestTextSummary ? `- Last run summary: ${latestTextSummary}` : "",
-      input.continuationSummaryBody
-        ? `- Issue continuation summary: ${input.continuationSummaryBody.slice(0, 1_500)}`
-        : "",
-      "Continue from the current task state. Rebuild only the minimum context you need.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const handoffMarkdown = buildSessionCompactionHandoff({
+      sessionId, issueId, reason, summary: latestTextSummary,
+      continuationSummary: input.continuationSummaryBody,
+    });
 
     return {
       rotate: true,
@@ -1826,6 +1806,11 @@ export function createHeartbeatRunState(db: Db) {
             }
           : undefined,
       );
+      // An owner run keeps its thread under owner-project:<projectId>; reset that row for the issue too.
+      const ownerKey = taskKey ? await ownerSessionKeyForIssueReset(db, { agent, taskKey }) : null;
+      const clearedOwnerSessions = ownerKey
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey: ownerKey, adapterType: agent.adapterType })
+        : 0;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,
@@ -1847,7 +1832,7 @@ export function createHeartbeatRunState(db: Db) {
         ...updated,
         sessionDisplayId: null,
         sessionParamsJson: null,
-        clearedTaskSessions,
+        clearedTaskSessions: clearedTaskSessions + clearedOwnerSessions,
       };
     },
 

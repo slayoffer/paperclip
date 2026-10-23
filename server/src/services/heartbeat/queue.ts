@@ -1,3 +1,4 @@
+import { ownerSessionsEnabled } from "../owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "../deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "../review-bridge-wakes.js";
 import { recoverQueuedRuns } from "../queued-run-recovery.js";
@@ -416,8 +417,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
       // A Dot binding has one external turn. Competing assignments must retain
       // their queue position instead of claiming a second run that cannot bind.
-      maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
-        parseObject(agent.adapterConfig).provider === "openai_dot"
+      // Synthiq owner sessions share one thread per project, so they run one at a time.
+      maxConcurrentRuns: ownerSessionsEnabled(agent) || (agent.adapterType === "paperclip_runner" &&
+        parseObject(agent.adapterConfig).provider === "openai_dot")
         ? 1 : normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
       skipTimerWhenNoActionableWork: asBoolean(
         heartbeat.skipTimerWhenNoActionableWork ??

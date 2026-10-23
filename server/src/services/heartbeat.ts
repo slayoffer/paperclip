@@ -1,3 +1,4 @@
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionEngineEligible, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason } from "./owner-sessions.js";
 import { isRunnerReattachment, suppressRunAdmission } from "./heartbeat-task-drain-admission.js";
 import { taskDrainService } from "./task-drain.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
@@ -2582,12 +2583,23 @@ export function heartbeatService(
         context.executionPolicy = retainedTrust.executionPolicy;
       }
       let config = parseObject(agent.adapterConfig);
-      const taskSession = taskKey
+      // Never accept owner scope from wake data.
+      delete context.paperclipOwnerSession;
+      const ownerSession = resolveOwnerSession({
+        agent, issue: issueContext ?? null,
+        agentHome: resolveDefaultAgentWorkspaceDir(agent.id),
+        eligible: !!issueContext && !isConversation(issueContext) &&
+          issueContext.assigneeAgentId === agent.id && trustPreset.kind === "standard" &&
+          ownerSessionEngineEligible(config, issueAssigneeOverrides?.adapterConfig) &&
+          !context.resumeSessionParams && !context.resumeSessionDisplayId,
+      });
+      const sessionStorageKey = ownerSession?.key ?? taskKey;
+      const taskSession = sessionStorageKey
         ? await getTaskSession(
             agent.companyId,
             agent.id,
             agent.adapterType,
-            taskKey,
+            sessionStorageKey,
           )
         : null;
       const routerHasPersistedInput = Object.keys(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput)).length > 0;
@@ -2610,7 +2622,8 @@ export function heartbeatService(
             userId: responsibleUserId, adapterType: agent.adapterType, taskKey: String(context.aiRouterTaskKey),
             overrides: issueAssigneeOverrides?.adapterConfig ?? {},
             existingGrantId: typeof savedIdentity === "string" ? savedIdentity.split(":")[0] : undefined,
-            requireExisting: Boolean(taskSession?.sessionDisplayId) && !shouldResetTaskSessionForWake(context),
+            requireExisting: Boolean(taskSession?.sessionDisplayId) &&
+              !(ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)),
             persisted: routerHasPersistedInput ? context.aiRouterSelection as AiConnectionRouterSelection | undefined : undefined,
           });
           aiBinding = selection.binding;
@@ -3341,7 +3354,10 @@ export function heartbeatService(
         const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
         if (!canRefresh) context.forceFreshSession = true;
       }
-      const wakeSessionResetReason = describeSessionResetReason(context);
+      // Owner threads keep their session across issue_assigned and the other per-issue wake resets (SYNA-2912 r1 P1).
+      const wakeSessionResetReason = ownerSession
+        ? describeOwnerSessionResetReason(context)
+        : describeSessionResetReason(context);
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
         configuredModel,
@@ -3354,7 +3370,8 @@ export function heartbeatService(
           acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision && !agentIdentity,
       });
       const resetTaskSession =
-        shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
+        (ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)) ||
+        sessionConfigFreshness.reset;
       const sessionResetReason =
         sessionConfigFreshness.reasons.join("; ") || null;
       const taskSessionForRun = resetTaskSession ? null : taskSession;
@@ -3731,6 +3748,27 @@ export function heartbeatService(
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
+      if (ownerSession) {
+        if (!["local", "ssh"].includes(selectedEnvironment.driver)) {
+          throw new Error("Owner sessions require a local or SSH environment");
+        }
+        const previousOwnerRun = taskSession?.lastRunId
+          ? await db.select({ summary: sql<string | null>`left(coalesce(${heartbeatRuns.resultJson}->>'summary', ${heartbeatRuns.resultJson}->>'result'), 6000)`, issue: sql<string | null>`${heartbeatRuns.contextSnapshot}->>'issueId'` })
+              .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, taskSession.lastRunId),
+                eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agent.id)))
+              .then(rows => rows[0] ?? null)
+          : null;
+        context.paperclipOwnerSession = {
+          ...ownerSession,
+          sameIssue: taskSession?.sessionParamsJson?.ownerSessionIssueId === issueId,
+          handoffMarkdown: previousOwnerRun ? [
+            "Previous owner turn (context only):",
+            `Issue: ${previousOwnerRun.issue ?? "unknown"}`,
+            previousOwnerRun.summary ?? "",
+            "Read the current issue for its decisions and approval limits.",
+          ].join("\n") : "",
+        };
+      }
       const runtimeSessionResolution = resolveRuntimeSessionParamsForWorkspace({
         agentId: agent.id,
         previousSessionParams,
@@ -3877,6 +3915,7 @@ export function heartbeatService(
 
       const sessionCompaction = await evaluateSessionCompaction({
         agent,
+        ownerSession: ownerSession !== null,
         sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
         issueId,
         continuationSummaryBody: continuationSummary?.body ?? null,
@@ -4527,6 +4566,7 @@ export function heartbeatService(
             context,
             issueId,
             taskKey,
+            sessionStorageKey,
             executionContinuation,
           },
           runtime: {
@@ -4712,7 +4752,8 @@ export function heartbeatService(
             get stdoutExcerpt() { return stdoutExcerpt; },
             get stderrExcerpt() { return stderrExcerpt; },
           },
-          session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
+          session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata,
+            sessionStorageKey, ownerSession, ownerSessionExpectedLastRunId: taskSession?.lastRunId ?? null },
           readFailureReportSecrets,
           adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
           configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
@@ -4847,7 +4888,8 @@ export function heartbeatService(
             get stdoutExcerpt() { return stdoutExcerpt; },
             get stderrExcerpt() { return stderrExcerpt; },
           },
-          session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
+          session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata,
+            sessionStorageKey, ownerSession, ownerSessionExpectedLastRunId: taskSession?.lastRunId ?? null },
           readFailureReportSecrets,
           runId, err, identityRedactor, requiredWorkspaceRestoreEvidence, legacyAdapterEntered,
           goalCheckpointSession, previousSessionDisplayId, taskSession,

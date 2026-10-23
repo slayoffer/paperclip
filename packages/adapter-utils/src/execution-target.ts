@@ -1471,6 +1471,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
    */
   runtimeRootDir?: string | null;
   syncWorkspace?: boolean;
+  providerSessionRoot?: string;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
   workspaceBaseline?: DirectorySnapshot;
@@ -1526,6 +1527,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,
       runtimeRootDir: input.runtimeRootDir,
+      providerSessionRoot: input.providerSessionRoot,
       workspaceFileMode: input.workspaceFileMode,
       workspaceExclude: input.workspaceExclude,
       assets: input.assets,

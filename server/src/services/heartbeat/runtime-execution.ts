@@ -109,6 +109,8 @@ export interface HeartbeatRuntimeExecutionInput {
     issueRef: (NonNullable<Selection["task"]["issueRef"]> & { projectId: string | null }) | null;
     issueId: string | null;
     taskKey: string | null;
+    /** Synthiq owner sessions store the thread under owner-project:<projectId>. */
+    sessionStorageKey?: string | null;
   };
   runtime: Pick<Selected, "nativeExecution" | "nativeRunnerInstanceId" | "getNativeFreshSessionHandoff"> & {
     nativeRuntimeResolution: Selection["nativeRuntimeResolution"];
@@ -222,7 +224,7 @@ function readNonEmptyString(value: unknown): string | null {
 
 export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExecutionInput): Promise<HeartbeatRuntimeExecutionResult> {
   const { run, agent, options } = input;
-  const { issueRef, issueContext, context, issueId, taskKey, executionContinuation } = input.task;
+  const { issueRef, issueContext, context, issueId, taskKey, sessionStorageKey, executionContinuation } = input.task;
   const { nativeRuntimeResolution, nativeExecution, nativeRunnerInstanceId, adapter, runtimeForAdapter, getNativeFreshSessionHandoff, getFreshSessionHandoff, runOptions } = input.runtime;
   const { persistedExecutionWorkspace, executionWorkspace, executionTarget, workspaceOperationRecorder, nativeWorkspaceSync, workspaceRestoreSource, remoteExecution } = input.workspace;
   const { runtimeConfig, resolvedConfig, resolvedInstanceSettings, configuredTaskEnvironment, adapterEnv, agentIdentity, managedAiRuntime, runtimeEnv, useHostGitHub, githubSelection } = input.config;
@@ -605,7 +607,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                   companyId: agent.companyId,
                   agentId: agent.id,
                   adapterType: agent.adapterType,
-                  taskKey,
+                  taskKey: (sessionStorageKey ?? taskKey)!,
                   sessionParamsJson: params,
                   sessionDisplayId: displayId,
                   lastRunId: run.id,
