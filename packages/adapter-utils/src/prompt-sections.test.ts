@@ -52,7 +52,8 @@ describe("task and event section ownership", () => {
     const switched = selectSections({ ...context, paperclipOwnerSession: { sameIssue: false } }, options);
     expect(switched.taskContextNote).toContain(context.paperclipTaskMarkdownAssignment);
     expect(switched.taskContextNote).toContain(context.paperclipWake.issue.description);
-    expect(switched.wakePrompt).not.toContain(context.paperclipWake.issue.description);
+    // The provider thread stays resumed: the wake keeps its delta shape.
+    expect(switched.wakePrompt).toContain("Paperclip Resume Delta");
     expect(switched.wakePrompt).not.toContain('"id":"comment-first"');
     expect(selectSections({ ...context, paperclipOwnerSession: { sameIssue: true } }, options).taskContextNote).toBe("");
     expect(selectSections(context, options).taskContextNote).toBe(context.paperclipTaskMarkdownAssignmentCompact);
