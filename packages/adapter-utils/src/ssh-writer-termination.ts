@@ -46,15 +46,23 @@ export function trackSshWriterCommand(command: string, remoteWorkspacePath: stri
 }
 
 /** A cgroup includes descendants in new sessions and process groups. Its
- * populated counter includes nested cgroups. Missing or legacy records fail
- * closed. Only a verified scope can authorize a receipt after its removal. */
-export function sshWriterTerminationScript(remoteWorkspacePath: string, runId: string): string {
+ * populated counter includes nested cgroups. Existing incomplete or legacy records fail closed.
+ * An absent directory proves no tracked writer started only for a confirmed terminal run. */
+export function sshWriterTerminationScript(
+  remoteWorkspacePath: string, runId: string, options: { allowMissingDirectory?: boolean } = {},
+): string {
   const directory = sshWriterDirectory(remoteWorkspacePath, runId);
   const source = `
     const fs = require('node:fs');
     const path = require('node:path');
     const directory = process.argv[1];
     try {
+      try { fs.lstatSync(directory); }
+      catch (error) {
+        if (process.argv[3] !== '1' || error.code !== 'ENOENT' || !fs.statSync(process.argv[2]).isDirectory()) throw error;
+        process.stdout.write('stopped\\n');
+        process.exit(0);
+      }
       const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
       if (fs.statfsSync('/sys/fs/cgroup').type !== 0x63677270) process.exit(1);
       const names = fs.readdirSync(directory);
@@ -88,5 +96,5 @@ export function sshWriterTerminationScript(remoteWorkspacePath: string, runId: s
       process.stdout.write('stopped\\n');
     } catch { process.exit(1); }
   `;
-  return `node -e ${shellQuote(source)} ${shellQuote(directory)}`;
+  return `node -e ${shellQuote(source)} ${shellQuote(directory)} ${shellQuote(remoteWorkspacePath)} ${options.allowMissingDirectory === true ? "1" : "0"}`;
 }

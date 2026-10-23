@@ -5,9 +5,9 @@ import { canonicalSshInPlaceLockKey } from "./ssh-in-place-workspace.js";
 import { readSshInPlaceWorktreeLockHolder, releaseConfirmedSshInPlaceWorktreeLock } from "./ssh-in-place-lock.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { confirmSshInPlaceTermination } from "./ssh-in-place-termination.js";
+import { SSH_IN_PLACE_TERMINAL_RUN_STATUSES } from "./ssh-in-place-run-status.js";
 import { logger } from "../middleware/logger.js";
 
-const terminalStatuses = ["succeeded", "failed", "cancelled", "timed_out"];
 const batchSize = 20;
 
 /** Each invocation advances a bounded page. Busy and uncertain older rows must
@@ -23,7 +23,7 @@ export function createSshInPlaceOwnershipReconciler(db: Db) {
       .leftJoin(executionWorkspaces, and(eq(executionWorkspaces.id, environmentLeases.executionWorkspaceId),
         eq(executionWorkspaces.companyId, environmentLeases.companyId)))
       .where(and(eq(environmentLeases.provider, "ssh"), eq(environments.driver, "ssh"),
-        inArray(heartbeatRuns.status, terminalStatuses), cursor ? gt(environmentLeases.id, cursor) : undefined))
+        inArray(heartbeatRuns.status, SSH_IN_PLACE_TERMINAL_RUN_STATUSES), cursor ? gt(environmentLeases.id, cursor) : undefined))
       .orderBy(asc(environmentLeases.id)).limit(batchSize);
     let released = 0;
     for (const row of rows) {
