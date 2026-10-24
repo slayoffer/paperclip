@@ -48,7 +48,7 @@ import {
 import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
+import { dependencyCompletionWakeKey } from "./dependency-completion-wake.js";
 import {
   persistActivity,
   publishActivity,
@@ -2079,7 +2079,7 @@ export async function commitNativeStatusDecision(input: {
         ? await issueService(tx as unknown as Db).getWakeableParentAfterChildCompletion(issue.parentId, {
             issueId: input.issueId,
             summary: completedResultSummary,
-          })
+          }, true)
         : null;
       const parentIsDependent = parent
         ? dependents.some((dependent) => dependent.id === parent.id)
@@ -2095,15 +2095,12 @@ export async function commitNativeStatusDecision(input: {
         ? { nativeChildCompletionDecisionId: childCompletionDecisionId }
         : {};
       for (const dependent of dependents) {
-        const isCompletedChildParent = parent?.id === dependent.id;
-        const idempotencyKey = isCompletedChildParent
-          ? `issue_children_completed:${dependent.id}:${input.issueId}${childCompletionRevision}`
-          : buildIssueBlockersResolvedWakeIdempotencyKey({
-              dependentIssueId: dependent.id,
-              resolvedBlockerIssueId: input.issueId,
-            });
+        const isParent = parent?.id === dependent.id;
+        const idempotencyKey = dependencyCompletionWakeKey(
+          dependent, input.issueId, isParent, childCompletionRevision,
+        );
         const childCompletionContext =
-          isCompletedChildParent && parent
+          isParent && parent
             ? {
                 completedChildIssueId: input.issueId,
                 ...childCompletionDelivery,
@@ -2118,7 +2115,7 @@ export async function commitNativeStatusDecision(input: {
           companyId: input.companyId,
           issueId: dependent.id,
           agentId: dependent.assigneeAgentId,
-          reason: isCompletedChildParent
+          reason: isParent
             ? "issue_children_completed"
             : "issue_blockers_resolved",
           idempotencyKey,
@@ -2130,7 +2127,7 @@ export async function commitNativeStatusDecision(input: {
           contextSnapshot: childCompletionContext ?? undefined,
         });
         materialized.push({
-          effectKind: isCompletedChildParent
+          effectKind: isParent
             ? "parent_dependency_wake"
             : "dependency_wake",
           targetType: "agent_wakeup_request",
