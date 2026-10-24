@@ -9,7 +9,9 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   agents,
+  authUsers,
   companies,
+  companyMemberships,
   companySkills,
   createDb,
   documentRevisions,
@@ -41,7 +43,7 @@ import {
   SSH_IN_PLACE_LOCK_WAIT_MS_ENV,
 } from "../services/ssh-in-place-workspace.ts";
 import { environmentRuntimeService } from "../services/environment-runtime.ts";
-import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
+import { hasRemoteTerminationReceipt, remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import {
   createGitRepo,
   deleteHeartbeatRowsAfterActivityLogDrains,
@@ -156,6 +158,8 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-ssh-in-place-");
     db = createDb(tempDb.connectionString);
+    await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture user",
+      email: "ssh-in-place@example.test", createdAt: new Date(), updatedAt: new Date() });
   }, 20_000);
 
   afterEach(async () => {
@@ -193,14 +197,15 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     await deleteHeartbeatRowsAfterActivityLogDrains(db);
     await db.delete(issueComments);
     await db.delete(issues);
+    await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(agents);
-    await db.delete(executionWorkspaces);
     await db.delete(environments);
     await db.delete(companySkills);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
@@ -215,9 +220,19 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     const remoteBase = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-in-place-remote-"));
     tempRoots.push(repoRoot, remoteBase);
     const seeded = await seedRunTarget(db, { repoRoot, remoteBase });
+    await db.insert(companyMemberships).values({ companyId: seeded.companyId, principalType: "user",
+      principalId: "responsible-user", status: "active", membershipRole: "member" });
     if (flagOn) process.env[SSH_IN_PLACE_ENVIRONMENTS_ENV] = seeded.environmentId;
     else delete process.env[SSH_IN_PLACE_ENVIRONMENTS_ENV];
     return { ...seeded, repoRoot, remoteBase };
+  }
+
+  async function expectStoppedRunLockReleased(worktree: string, runId: string) {
+    const leases = await db.select().from(environmentLeases)
+      .where(eq(environmentLeases.heartbeatRunId, runId));
+    expect(leases.length).toBeGreaterThan(0);
+    expect(leases.every(hasRemoteTerminationReceipt)).toBe(true);
+    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))).toBeNull();
   }
 
   it("keeps the copy realization when the flag is off", async () => {
@@ -274,9 +289,9 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
 
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["succeeded"]);
-    // Successful bookkeeping does not prove that a remote writer stopped.
+    // The terminal run starts no writer. The remote probe must save a stop receipt.
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))?.runId).toBe(wake!.id);
+    await expectStoppedRunLockReleased(worktree, wake!.id);
   }, 20_000);
 
   it("records workspace_finalize=failed when the in_place run fails", async () => {
@@ -297,7 +312,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["failed"]);
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree!))?.runId).toBe(wake!.id);
+    await expectStoppedRunLockReleased(worktree!, wake!.id);
   }, 20_000);
 
   it("stages managed GitHub launchers outside the repository during heartbeat preparation", async () => {
