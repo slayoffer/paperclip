@@ -368,6 +368,7 @@ See [details](spec-implementation/part-8.md#114-context-delivery).
 ## 11.5 Recovery Work Classes
 
 See [details](spec-implementation/part-8.md#115-recovery-work-classes).
+The fork also defines the [owner recovery continuation contract](owner-recovery-resume.md).
 
 ## 11.6 Scheduler Rules
 
