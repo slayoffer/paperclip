@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,17 +46,18 @@ function installStubs(ids: { uid: number; gid: number; nodeUid?: number; nodeGid
   for (const cmd of ["usermod", "groupmod", "chown"]) {
     writeStub(cmd, `echo "${cmd} $*" >> "${logFile}"`);
   }
-  // The entrypoint's ownership probe is a first-mismatch find over the app
-  // home. An empty result models a fully node-owned tree (image-baked dir,
-  // healthy volume); a path models any uid OR gid mismatch anywhere in the
-  // tree (fresh root-owned mount, root-owned descendant, stale group after
-  // a GID-only remap).
+  // An empty probe result models correct ownership within the bounded scan.
+  // A path models a UID or GID mismatch within the same scan.
   writeStub("find", ids.homeMismatch ? `echo "$1/mismatched-entry"` : `true`);
   writeStub("gosu", `echo "gosu $*" >> "${logFile}"\nshift\nexec "$@"`);
 }
 
-async function runEntrypoint(env: Record<string, string> = {}) {
-  const result = await execFileAsync("sh", [ENTRYPOINT, "echo", "ENTRYPOINT-CMD-RAN"], {
+async function runEntrypoint(
+  env: Record<string, string> = {},
+  command = ["echo", "ENTRYPOINT-CMD-RAN"],
+) {
+  const result = await execFileAsync("sh", [ENTRYPOINT, ...command], {
+    timeout: 60_000,
     env: { PATH: `${stubDir}:${process.env.PATH}`, ...env },
   });
   const calls = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
@@ -73,6 +74,70 @@ afterEach(() => {
 });
 
 describe("docker-entrypoint.sh", () => {
+  it.each(["USER_UID", "USER_GID"])(
+    "repairs deep ownership after an identity change even when the shallow probe matches: %j",
+    async (identity) => {
+      installStubs({ uid: 0, gid: 0, homeMismatch: false });
+      const { calls } = await runEntrypoint({ [identity]: "1001", PAPERCLIP_HOME: stubDir });
+      expect(calls).toContain(`chown -R node:node ${stubDir}`);
+      expect(calls.indexOf("chown")).toBeLessThan(calls.indexOf("gosu"));
+    },
+  );
+
+  it("supports explicit deep ownership repair after a restore", async () => {
+    installStubs({ uid: 0, gid: 0, homeMismatch: false });
+    const { calls } = await runEntrypoint({ PAPERCLIP_HOME: stubDir, PAPERCLIP_REPAIR_OWNERSHIP: "1" });
+    expect(calls).toContain(`chown -R node:node ${stubDir}`);
+  });
+
+  it("stops before the command when recursive ownership repair fails", async () => {
+    installStubs({ uid: 0, gid: 0, homeMismatch: true });
+    writeStub("chown", "exit 77");
+    await expect(runEntrypoint({ PAPERCLIP_HOME: stubDir })).rejects.toMatchObject({ code: 77 });
+    expect(existsSync(logFile)).toBe(false);
+  });
+
+  it("starts a health fixture within 60 seconds without visiting deep volume contents", async () => {
+    installStubs({ uid: 0, gid: 0 });
+    const home = join(stubDir, "volume with spaces");
+    const shallow = join(home, "instances", "default");
+    const deep = join(shallow, "workspaces", "agent", "runs");
+    mkdirSync(deep, { recursive: true });
+    for (let i = 0; i < 2_000; i++) writeFileSync(join(deep, `run-${i}`), "");
+    const visits = join(stubDir, "visited.txt");
+    const realFind = execFileSync("sh", ["-c", "command -v find"], { encoding: "utf8" }).trim();
+    const probe = join(stubDir, "probe.mjs");
+    writeFileSync(probe, `
+      import { spawnSync } from "node:child_process";
+      const args = process.argv.slice(2);
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "node") args[i] = String(args[i - 1] === "-user" ? process.getuid() : process.getgid());
+      }
+      args.splice(args.indexOf("("), 0, "-fprint", ${JSON.stringify(visits)});
+      const result = spawnSync(${JSON.stringify(realFind)}, args, { stdio: "inherit" });
+      process.exit(result.status ?? 1);
+    `);
+    writeStub("find", `exec "${process.execPath}" "${probe}" "$@"`);
+    const start = performance.now();
+    const { stdout, calls } = await runEntrypoint({ PAPERCLIP_HOME: home }, [
+      process.execPath, "-e", `
+        const http = require("node:http");
+        const server = http.createServer((req, res) => { res.end("ok"); });
+        server.listen(0, "127.0.0.1", async () => {
+          const response = await fetch("http://127.0.0.1:" + server.address().port + "/api/health");
+          console.log("HEALTH " + response.status);
+          server.close();
+        });
+      `,
+    ]);
+    expect(stdout).toContain("HEALTH 200");
+    const elapsedMs = performance.now() - start;
+    console.info(`Entrypoint health fixture: HTTP 200 after ${elapsedMs.toFixed(1)} ms`);
+    expect(elapsedMs).toBeLessThan(60_000);
+    expect(calls).not.toContain("chown");
+    expect(readFileSync(visits, "utf8").trim().split("\n").sort()).toEqual([home, join(home, "instances"), shallow].sort());
+  });
+
   it("keeps the root-start gosu flow with default UID/GID (Docker Compose)", async () => {
     installStubs({ uid: 0, gid: 0 });
 
