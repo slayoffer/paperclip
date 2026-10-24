@@ -137,3 +137,7 @@ The watchdog also uses completed stages as progress.
 The combined duration of healthy stages does not cause recovery for the next queued request.
 A stalled stage still starts recovery.
 Existing mutation guards prevent a competing retryable response after handler ownership.
+The worker also enforces a total request limit of 20 seconds, including queue age after parsing.
+Completed stages cannot extend this limit beyond the gateway's default 30-second response deadline.
+Expiration immediately fences unclaimed requests and aborts owned handlers before asynchronous recovery.
+Late stage results cannot continue toward handler ownership.

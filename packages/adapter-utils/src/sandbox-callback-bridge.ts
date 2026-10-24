@@ -71,6 +71,9 @@ const DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS = 10_000;
 // also renew the watchdog. It is larger than one iteration timeout, so a slow stage
 // never trips it, and it stays under the in-sandbox 30s response deadline.
 const DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS = 20_000;
+// Keep an absolute request limit below the gateway's 30-second response deadline.
+// Stage progress cannot extend this limit. Queue age counts after envelope parsing.
+const MAX_BRIDGE_REQUEST_TIMEOUT_MS = 20_000;
 // Grace period the recovery path gives an aborted in-flight handler to finalize
 // its own response. The recovery path aborts the handler, then waits this long.
 // A cooperating handler threads the abort signal into its work, rejects, and
@@ -733,6 +736,8 @@ export async function startSandboxCallbackBridgeWorker(input: {
   // request stage renews the deadline. On timeout the loop `catch` runs
   // `failPendingRequests`. Defaults to DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS.
   iterationTimeoutMs?: number | null;
+  // Absolute request limit, capped at MAX_BRIDGE_REQUEST_TIMEOUT_MS.
+  requestTimeoutMs?: number | null;
   // Watchdog threshold. When the loop makes no successful stage within this
   // time, the watchdog runs `failPendingRequests` and surfaces a run-level error
   // through `runtimeSpan`. Defaults to DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS.
@@ -773,6 +778,10 @@ export async function startSandboxCallbackBridgeWorker(input: {
 }): Promise<SandboxCallbackBridgeWorkerHandle> {
   const pollIntervalMs = normalizeTimeoutMs(input.pollIntervalMs, DEFAULT_BRIDGE_POLL_INTERVAL_MS);
   const iterationTimeoutMs = normalizeTimeoutMs(input.iterationTimeoutMs, DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS);
+  const requestTimeoutMs = Math.min(
+    normalizeTimeoutMs(input.requestTimeoutMs, MAX_BRIDGE_REQUEST_TIMEOUT_MS),
+    MAX_BRIDGE_REQUEST_TIMEOUT_MS,
+  );
   const watchdogTimeoutMs = normalizeTimeoutMs(input.watchdogTimeoutMs, DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS);
   const abortedHandlerGraceMs = normalizeTimeoutMs(
     input.abortedHandlerGraceMs,
@@ -872,6 +881,8 @@ export async function startSandboxCallbackBridgeWorker(input: {
   const processRequestFile = async (
     fileName: string,
     completeStage: <T>(stage: Promise<T>) => Promise<T>,
+    limitDeadline: (deadline: number) => void,
+    completeOwnedStage: <T>(stage: Promise<T>) => Promise<T>,
   ) => {
     // Skip a request that already has an active attempt. The guard map holds only
     // in-flight attempts; the attempt's finally removes its guard when it ends. A
@@ -932,12 +943,12 @@ export async function startSandboxCallbackBridgeWorker(input: {
       let lastWriteError = "Sandbox callback bridge could not write the handler response.";
       for (let attempt = 1; attempt <= MAX_BACKSTOP_WRITE_ATTEMPTS; attempt += 1) {
         try {
-          await completeStage(withTimeout(
+          await completeOwnedStage(withTimeout(
             writeBridgeResponse(input.client, requestPath, responsePath, response),
             iterationTimeoutMs,
             `Sandbox callback bridge write response for ${response.id}`,
           ));
-          await completeStage(input.client.remove(requestPath)).catch(() => undefined);
+          await completeOwnedStage(input.client.remove(requestPath)).catch(() => undefined);
           return;
         } catch (error) {
           lastWriteError = error instanceof Error ? error.message : String(error);
@@ -1017,6 +1028,10 @@ export async function startSandboxCallbackBridgeWorker(input: {
         return;
       }
 
+      // Include queue age in the absolute limit. Invalid legacy timestamps keep
+      // the attempt's finite cap. A future timestamp cannot extend that cap.
+      limitDeadline(Date.parse(request.createdAt) + requestTimeoutMs);
+
       // Keep only the actual request allocation reserved while forwarding;
       // an abandoned small request must not retain a maximum-sized reservation.
       envelopeReadReservation.release();
@@ -1054,7 +1069,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       let handlerReturned = false;
       try {
         const { bodyEncoding, ...forwardRequest } = request;
-        const result = await completeStage(input.handleRequest({ ...forwardRequest,
+        const result = await completeOwnedStage(input.handleRequest({ ...forwardRequest,
           body: bodyEncoding === "base64" ? decodeSandboxBridgeBody(request, maxBodyBytes) : request.body,
         }, { signal: guard.controller.signal, reservation }));
         handlerReturned = true;
@@ -1491,17 +1506,25 @@ export async function startSandboxCallbackBridgeWorker(input: {
             // Renew the request deadline after each completed stage. A stalled
             // stage still rejects and reaches the existing recovery guards.
             await withBridgeProgressTimeout(
-              (completeStage) => input.runtimeSpan
+              (completeStage, limitDeadline, completeOwnedStage) => input.runtimeSpan
                 ? input.runtimeSpan(CALLBACK_BRIDGE_RELAY_REQUEST_SPAN, () =>
-                    processRequestFile(fileName, completeStage),
+                    processRequestFile(fileName, completeStage, limitDeadline, completeOwnedStage),
                   )
                 : runWithRuntimeParent(input.getRuntimeParentContext?.(), () =>
-                    processRequestFile(fileName, completeStage),
+                    processRequestFile(fileName, completeStage, limitDeadline, completeOwnedStage),
                   ),
               iterationTimeoutMs,
               `Sandbox callback bridge process request ${fileName}`,
               () => {
                 lastProgressAt = Date.now();
+              },
+              requestTimeoutMs,
+              (error) => {
+                const guard = inFlightRequestGuards.get(fileName);
+                if (!guard) return;
+                if (guard.claim === "unclaimed") guard.claim = "abandon";
+                guard.controller.abort(error);
+                if (guard.claim === "handler") scheduleAbortedHandlerBackstop(fileName, guard, error.message);
               },
             );
             lastProgressAt = Date.now();
