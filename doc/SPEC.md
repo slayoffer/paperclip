@@ -6,7 +6,7 @@ The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
 Tasks support validated [environment selection](workspace-operations.md#task-environment-selection) without changing inherited workspace bindings or agent defaults.
 The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
 The fork permits [saved review waits](review-waits.md) with a board owner and an exact saved head.
-The fork supports [legacy CLI restart recovery](restart-session-recovery.md) with the saved run and provider session.
+Fork recovery: [CLI restart](restart-session-recovery.md) and [normal owner work](owner-recovery-resume.md).
 
 ---
 
