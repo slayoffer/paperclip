@@ -127,6 +127,9 @@ describe("paperclip MCP tools", () => {
       priority: "medium",
       assigneeAgentId: "22222222-2222-2222-2222-222222222222",
       requestDepth: 0,
+      allowDuplicate: false,
+      // The upstream create schema defaults visibility. Upstream v2026.1023.0 omits it here and fails too.
+      visibility: "open",
     });
   });
 

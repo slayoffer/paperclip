@@ -17,16 +17,15 @@ import {
   upsertIssueDocumentSchema,
   linkIssueApprovalSchema,
 } from "@paperclipai/shared";
-import { PaperclipApiClient } from "./client.js";
-import { formatErrorResponse, formatTextResponse } from "./format.js";
+import { PaperclipApiClient, PaperclipApiError } from "./client.js";
+import { readResponseText } from "./api-error.js";
+import { formatErrorResponse, formatTextResponse, type McpTextResponse } from "./format.js";
 
 export interface ToolDefinition {
   name: string;
   description: string;
   schema: z.ZodObject;
-  execute: (input: Record<string, unknown>) => Promise<{
-    content: Array<{ type: "text"; text: string }>;
-  }>;
+  execute: (input: Record<string, unknown>) => Promise<McpTextResponse>;
 }
 
 function makeTool<TSchema extends z.ZodRawShape>(
@@ -73,15 +72,14 @@ async function callRuntimeConnectionTool(
     },
     body: JSON.stringify(body),
   });
-  const text = await response.text();
-  const parsed = text ? JSON.parse(text) as unknown : null;
+  const text = await readResponseText(response);
   if (!response.ok) {
-    const message = parsed && typeof parsed === "object" && "error" in parsed
-      ? String((parsed as { error: unknown }).error)
-      : `Runtime connection tool failed with ${response.status}`;
-    throw new Error(message);
+    throw new PaperclipApiError({
+      status: response.status, method: "POST", path: new URL(endpoint).pathname,
+      body: text, secrets: [token],
+    });
   }
-  return parsed;
+  return text ? JSON.parse(text) as unknown : null;
 }
 
 const companyIdOptional = z.string().guid().optional().nullable();
