@@ -184,7 +184,7 @@ function maskShortValue(text: string, value: string): string {
 function redactKnownValues<T>(input: T, values: string[]): T {
   const long = values.filter((value) => value.length >= SHORT_VALUE_LENGTH);
   const short = values.filter((value) => value.length > 0 && value.length < SHORT_VALUE_LENGTH);
-  let result = long.length > 0 ? redactRegisteredSecretValues(input, long) : input;
+  let result = long.length > 0 ? redactRegisteredSecretValues(input, long, null, "persistence") : input;
   if (short.length === 0) return result;
   const walk = (value: unknown): unknown => {
     if (typeof value === "string") return short.reduce((text, item) => maskShortValue(text, item), value);

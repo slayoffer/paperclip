@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED_EVENT_VALUE } from "../redaction.js";
-import { redactRunResultSecrets } from "../services/run-result-redaction.js";
+import { redactRunPersistencePatch, redactRunResultSecrets } from "../services/run-result-redaction.js";
 
 // Synthetic, well-formed but fake credential shapes.
 const GH = `gho_${"A1b2C3d4E5".repeat(4)}`;
@@ -173,5 +173,20 @@ describe("redactRunResultSecrets", () => {
     expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(true);
     expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
     expect(out.stdout).not.toContain(GH);
+  });
+});
+
+
+it("keeps credential disclosure routing metadata while masking registered values", () => {
+  const registered = "known-opaque-fixture";
+  const resultJson = { configurationIncomplete: { credentialAccess: {
+    grantId: "grant-123",
+    connectionName: `Fixture ${registered}`,
+  } } };
+  const persisted = redactRunPersistencePatch({ resultJson }, [registered]);
+
+  expect(persisted.resultJson.configurationIncomplete.credentialAccess).toEqual({
+    grantId: "grant-123",
+    connectionName: `Fixture ${REDACTED_EVENT_VALUE}`,
   });
 });

@@ -102,6 +102,7 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
 
 interface RunCompletionOutput {
   handle: RunLogHandle | null;
+  flushRunLog?: () => Promise<void>;
   outputProgressState: { pending: { bytes: number } | null };
   flushOutputProgress: (options?: { force?: boolean }) => Promise<void>;
   // Getters in the executor retain output that arrives while finalization awaits I/O.
@@ -432,7 +433,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const ownerSession = session.ownerSession ?? null;
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
-    const { handle, outputProgressState, flushOutputProgress } = output;
+    const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
     const processCancellation =
       processRunCancellationSettlements.get(run.id) ??
       failedProcessRunCancellations.get(run.id);
@@ -558,6 +559,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       compressed: boolean;
     } | null = null;
     if (handle) {
+      await flushRunLog?.();
       logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
     }
     const finalLogBytes = logSummary?.bytes;
@@ -1129,7 +1131,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const ownerSession = session.ownerSession ?? null;
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
-    const { handle, outputProgressState, flushOutputProgress } = output;
+    const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
     // A process adapter may throw while its owned Stop is joining the
     // child. Let the cancellation write settle before attempting failure.
     await processRunCancellationSettlements.get(run.id)?.settled;
@@ -1194,7 +1196,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       recordedResponsibleUserDenialCode ??
       nativeTerminalFailureCode ??
       "adapter_failed";
-    logger.error({ err: identityRedactor.redact({ message: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }), runId }, "heartbeat execution failed");
+    const safeError = await redactRunPatchForPersistence(run, {
+      resultJson: identityRedactor.redact(err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : { message: String(err) }),
+    });
+    logger.error({ err: safeError?.resultJson, runId }, "heartbeat execution failed");
 
     let logSummary: {
       bytes: number | null;
@@ -1203,6 +1210,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     } | null = null;
     if (handle) {
       try {
+        await flushRunLog?.();
         logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
       } catch (finalizeErr) {
         logger.warn(

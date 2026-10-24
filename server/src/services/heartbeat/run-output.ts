@@ -1,3 +1,4 @@
+import { createRunLogRedactor } from "../run-log-redactor.js";
 import { notifyActiveRunSilence } from "../live-run-recovery-notifications.js";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
@@ -67,6 +68,7 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
     getCurrentUserRedactionOptions,
   } = input;
   let handle: RunLogHandle | null = null;
+  let flushRunLog = () => Promise.resolve();
   let stdoutExcerpt = "";
   let stderrExcerpt = "";
   let outputSeq = Number(run.lastOutputSeq ?? 0);
@@ -158,37 +160,32 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         payload: { reason: "object_log_persistence_failed" },
       }).catch(() => undefined);
     };
-    // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
-    // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
+    // Generated values must be registered before exposure. Refresh the cache
+    // after registration and let lookup failures stop output before it is stored.
     let logRegistryValues: string[] = [];
     let logRegistryVersion = -1;
     const logRegisteredValues = async () => {
       const version = runSecretRegistryVersion(run.id);
       if (version !== logRegistryVersion) {
-        try {
-          logRegistryValues = await createRunSecretRedactionRegistry(db).redactionValuesForRun(run.companyId, run.id);
-          logRegistryVersion = version;
-        } catch {
-          // Keep the previous values; the run row is scanned again when it is written.
-        }
+        logRegistryValues = await createRunSecretRedactionRegistry(db).redactionValuesForRun(run.companyId, run.id);
+        logRegistryVersion = version;
       }
       return [...(input.readRunPersistSecrets?.() ?? []), ...logRegistryValues];
     };
-    const appendIdentityRedactedLog = async (
+    const external = handle.store === "s3_segments";
+    const persistLog = async (
       stream: "stdout" | "stderr",
       chunk: string,
-      waitForCommit = true,
       source?: CanonicalNativeLog,
     ) => {
       const sourceCursor = source?.sourceCursor;
-      const registeredValues = await logRegisteredValues();
       const sanitizedChunk = source?.kind === "canonical_native"
         ? redactCanonicalNativeRunLogChunk(chunk, {
             redactIdentity: identityRedactor.redact,
             currentUser: currentUserRedactionOptions,
-            registeredValues,
+            registeredValues: await logRegisteredValues(),
           })
-        : compactRunLogChunk(redactCurrentUserText(chunk, currentUserRedactionOptions), undefined, registeredValues);
+        : compactRunLogChunk(redactCurrentUserText(chunk, currentUserRedactionOptions));
       if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
       if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
       const ts = new Date().toISOString();
@@ -265,18 +262,24 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
           },
         });
       });
-      if (waitForCommit) await recorded;
-      else void recorded.catch(reportRecordingFailure);
+      if (external) void recorded.catch(reportRecordingFailure);
+      else await recorded;
     };
-    const onLog = (stream: "stdout" | "stderr", chunk: string) => {
-      const external = handle?.store === "s3_segments";
-      const recorded = appendIdentityRedactedLog(
-        stream,
-        identityRedactor.chunk(stream, chunk),
-        !external,
-      );
+
+    // Only raw streams can arrive in fragments. Keep every canonical native
+    // envelope paired with its source cursor through the durable writer.
+    let bufferedLog: ReturnType<typeof createRunLogRedactor> | undefined;
+    const appendIdentityRedactedLog = (stream: "stdout" | "stderr", chunk: string) => {
+      bufferedLog ??= createRunLogRedactor({ values: logRegisteredValues, write: persistLog });
+      const recorded = bufferedLog.append(stream, chunk);
       return external ? recorded.catch(reportRecordingFailure) : recorded;
     };
+    flushRunLog = () => {
+      const drained = bufferedLog?.flush() ?? Promise.resolve();
+      return external ? drained.catch(reportRecordingFailure) : drained;
+    };
+    const onLog = (stream: "stdout" | "stderr", chunk: string) =>
+      appendIdentityRedactedLog(stream, identityRedactor.chunk(stream, chunk));
     let nativeExporter: Promise<ReturnType<typeof createNativeRunLogExporter>> | undefined;
     const getNativeExporter = () => nativeExporter ??= (async () => {
       if (input.runtimeLogSecretValues?.length) {
@@ -299,12 +302,7 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         runId,
         afterCursor,
         enqueue: (cursor, chunk) =>
-          appendIdentityRedactedLog(
-            "stdout",
-            chunk,
-            false,
-            { kind: "canonical_native", sourceCursor: cursor },
-          ),
+          persistLog("stdout", chunk, { kind: "canonical_native", sourceCursor: cursor }),
         flush: () => runLogStore.flush!(handle!),
       });
     })();
@@ -366,6 +364,7 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
     },
     outputProgressState,
     flushOutputProgress,
+    flushRunLog: () => flushRunLog(),
     // Finalization awaits I/O and can receive more output before persisting excerpts.
     get stdoutExcerpt() {
       return stdoutExcerpt;

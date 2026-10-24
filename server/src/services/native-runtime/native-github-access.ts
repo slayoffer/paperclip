@@ -24,10 +24,12 @@ export async function createNativeGitHubAccess(input: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   resolveCredentials: (binding: Binding) => Promise<unknown>;
+  registerSecretValue?: (value: string) => Promise<void>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }, startBridge = startAdapterExecutionTargetPaperclipBridge) {
   const duplexRequested = adapterExecutionTargetEnablesSandboxDuplexBridge(input.target);
   const token = randomBytes(32).toString("hex");
+  await input.registerSecretValue?.(token);
   const location = { runId: `native-session-${randomUUID()}`, target: input.target };
   let active: Binding | null = null;
   let stopped = false;
@@ -109,6 +111,7 @@ export async function createNativeGitHubAccess(input: {
         hostApiUrl: url,
         enableSandboxDuplexBridge: duplexRequested,
         duplexObservabilityRecorder: adapterExecutionTargetDuplexObservabilityRecorder(input.target),
+        registerSecretValue: input.registerSecretValue,
         onLog: input.onLog,
       });
       if (input.target?.kind === "remote" && !bridge) {

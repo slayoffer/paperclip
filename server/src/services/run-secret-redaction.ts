@@ -11,6 +11,14 @@ const REGISTRY_KEY = "paperclipSecretRedactions";
 // Project only the registry: run contexts can contain megabytes of prompt data.
 const registrySnapshot = sql`jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')`;
 
+/** Preserve concurrent registrations when the execution replaces its context snapshot. */
+export function preserveRunSecretRegistry(context: Record<string, unknown>) {
+  return sql`(${JSON.stringify(context)}::jsonb - 'paperclipSecretRedactions') ||
+    (case when ${heartbeatRuns.contextSnapshot} ? 'paperclipSecretRedactions'
+      then jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')
+      else '{}'::jsonb end)`;
+}
+
 type RegistryEntry = {
   fingerprintSha256: string;
   material: StoredSecretVersionMaterial;
@@ -42,9 +50,14 @@ function redactText(input: string, values: string[]) {
   );
 }
 
-export function redactRegisteredSecretValues<T>(input: T, values: string[], credentialConnectionName: string | null = null): T {
+export function redactRegisteredSecretValues<T>(
+  input: T,
+  values: string[],
+  credentialConnectionName: string | null = null,
+  purpose: "disclosure" | "persistence" = "disclosure",
+): T {
   if (typeof input === "string") return redactText(input, values) as T;
-  if (Array.isArray(input)) return input.map((value) => redactRegisteredSecretValues(value, values, credentialConnectionName)) as T;
+  if (Array.isArray(input)) return input.map((value) => redactRegisteredSecretValues(value, values, credentialConnectionName, purpose)) as T;
   // Dates carry no redactable text; rebuilding them via Object.entries would
   // collapse them to `{}` and break every timestamp in redacted responses.
   if (input instanceof Date) return input;
@@ -53,9 +66,10 @@ export function redactRegisteredSecretValues<T>(input: T, values: string[], cred
   return Object.fromEntries(
     Object.entries(record)
       .filter(([key]) => key !== REGISTRY_KEY && key !== "nativeControllerRecovery" && key !== "nativeTaskSessionPublication" && key !== "legacyProcessSettlement")
-      .map(([key, value]) => [key, key === "credentialAccess"
+      // Writes keep the routing IDs. Read responses only get their authorized label.
+      .map(([key, value]) => [key, key === "credentialAccess" && purpose === "disclosure"
         ? (credentialConnectionName ? { connectionName: redactText(credentialConnectionName, values) } : {})
-        : redactRegisteredSecretValues(value, values, credentialConnectionName)]),
+        : redactRegisteredSecretValues(value, values, credentialConnectionName, purpose)]),
   ) as T;
 }
 

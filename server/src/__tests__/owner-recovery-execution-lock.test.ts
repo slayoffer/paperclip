@@ -71,7 +71,7 @@ describeDb("source-scoped owner execution lock", () => {
         expect(task.checkoutRunId).toBe(ctx.runId);
         expect(ctx.context.paperclipWake).toMatchObject({ recovery: { executionMode: "owner_resume" } });
         await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
-        return { exitCode: 0, summary: "Owner work completed with the issue lock.", provider: "test", model: "test" };
+        return { exitCode: 0, signal: null, timedOut: false, summary: "Owner work completed with the issue lock.", provider: "test", model: "test" };
       },
       testEnvironment: async () => ({ adapterType, status: "pass", checks: [], testedAt: new Date().toISOString() }),
     });

@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import type { Db, heartbeatRuns } from "@paperclipai/db";
+import { heartbeatRuns, type Db } from "@paperclipai/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDurableRunLogStore } from "../run-log-store.js";
 import type { StorageProvider } from "../../storage/types.js";
@@ -44,11 +44,15 @@ function createMemoryProvider() {
   return { provider, objects, calls };
 }
 
-// The recorder persists the handle with update().set().where(); capture it the
-// way the run row would carry it into a later attempt.
+function emptySelection() {
+  return { where: () => Object.assign(Promise.resolve([]), { orderBy: () => ({ limit: async () => [] }) }) };
+}
+
+// Capture the log handle as the persisted run row would carry it into a later attempt.
 function createRunRowDb(row: Partial<Run>) {
   return {
     async transaction<T>(write: (tx: Db) => Promise<T>): Promise<T> { return write(this as unknown as Db); },
+    select: () => ({ from: emptySelection }),
     update: () => ({
       set: (values: Partial<Run>) => ({
         where: async () => {
@@ -108,6 +112,7 @@ describe("heartbeat run output log recovery", () => {
     const text = "diagnostic SYNTHETIC_PRIVATE_KEY /home/synthetic-user/data synthetic-user\n";
     channel.record(text);
     lease.retire();
+    await output.flushRunLog();
     const summary = await store.finalize(output.handle!);
     const before = await store.read(output.handle!, { limitBytes: 65536 });
     expect(summary.bytes).toBe(Buffer.byteLength(before.content));
@@ -121,35 +126,46 @@ describe("heartbeat run output log recovery", () => {
     expect(events).not.toHaveBeenCalled();
   });
 
-  it.each(["enqueue", "progress", "export"] as const)("still warns for a genuine %s failure", async phase => {
+  it.each(["enqueue", "progress", "export", "registry"] as const)("still warns for a genuine %s failure", async phase => {
     const row = { ...newRunRow }, events = vi.fn(async () => undefined);
     const base = createRunRowDb(row);
+    const fail = vi.fn(() => { throw new Error(`synthetic ${phase} failure`); });
+    const enqueue = vi.fn(async () => {
+      if (phase === "enqueue") fail();
+      return { committed: Promise.resolve(10) };
+    });
     const db = { ...base,
-      select: () => { throw new Error("synthetic canonical-source read failure"); },
+      select: () => ({ from: (table: unknown) => {
+        if ((phase === "registry" && table === heartbeatRuns) || (phase === "export" && table !== heartbeatRuns)) fail();
+        return emptySelection();
+      } }),
       update: () => ({ set: (values: Partial<Run>) => ({ where: async () => {
-        if (phase === "progress" && values.lastOutputSeq !== undefined) throw new Error("synthetic progress write failure");
+        if (phase === "progress" && values.lastOutputSeq !== undefined) fail();
         Object.assign(row, values);
       } }) }),
     } as unknown as Db;
     const output = createHeartbeatRunOutput(db, { run: row as Run, runId: row.id!, issueId: null,
       runLogStore: { begin: async () => ({ store: "s3_segments", logRef: "synthetic-company/agent/run" }),
-        append: async () => 10, enqueue: async () => {
-          if (phase === "enqueue") throw new Error("synthetic object admission failure");
-          return { committed: Promise.resolve(10) };
-        }, flush: async () => undefined },
+        append: async () => 10, enqueue, flush: async () => undefined },
       identityRedactor: { chunk: (_stream, chunk) => chunk, redact: value => value }, secretKeys: new Set(),
       appendRunEvent: events, getCurrentUserRedactionOptions: async () => ({ enabled: false }) });
     const handlers = await output.begin(row as Run);
-    if (phase === "export") await handlers.onPersistedNativeLog!(1, "synthetic canonical source");
+    if (phase === "export") await handlers.onPersistedNativeLog!(2, "synthetic canonical source");
     else {
       const owner = { companyId: row.companyId!, runId: row.id!, sessionScope: "synthetic-session" };
       const channel = new NativeSessionDiagnostics(owner, owner, vi.fn(), vi.fn());
       const lease = channel.activate(owner, handlers.onLog);
-      channel.record("accepted active diagnostic");
+      channel.record("accepted active diagnostic\n");
       lease.retire();
     }
     await vi.waitFor(() => expect(events).toHaveBeenCalledWith(expect.objectContaining({ id: row.id, companyId: row.companyId }),
       expect.objectContaining({ level: "warn", payload: { reason: "object_log_persistence_failed" } })));
+    expect(fail).toHaveBeenCalledOnce();
+    if (phase === "registry") {
+      await output.flushRunLog();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(output.stderrExcerpt).toBe("");
+    }
   });
 
   it("treats only a run row with no recorded log or output as new", () => {
@@ -220,10 +236,7 @@ describe("object-backed diagnostic recording", () => {
       .privateKey.export({ type: "pkcs8", format: "pem" })
       .toString();
     const row = { ...newRunRow, runtimeMode } as Run;
-    const db = createRunRowDb(row) as Db & { select: () => unknown };
-    db.select = (() => ({
-      from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
-    })) as typeof db.select;
+    const db = createRunRowDb(row);
     const chunks: string[] = [];
     const output = createHeartbeatRunOutput(db, {
       run: row,
@@ -275,7 +288,7 @@ describe("object-backed diagnostic recording", () => {
     const row = { ...newRunRow };
     const writes: Array<Partial<Run>> = [];
     const db = {
-      async transaction<T>(write: (tx: Db) => Promise<T>): Promise<T> { return write(this as unknown as Db); },
+      ...createRunRowDb(row),
       update: () => ({
         set: (values: Partial<Run>) => ({
           where: async () => {

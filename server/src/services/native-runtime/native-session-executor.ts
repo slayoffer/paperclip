@@ -84,6 +84,7 @@ import { readNativePlanWait } from "./native-plan-wait.js";
 import { nativeProviderLifecycle } from "./provider-lifecycle.js";
 import { NativePermissionDeclinedError, readCompletedNativePermissionDecline } from "./native-permission-decline.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 import { resolveAcpxQualification, resolveAntigravityCandidateAdmission, resolveKimiCandidateAdmission } from "./acpx-qualification.js";
 import { readLocalAiCredentialFile } from "../local-ai-credential-file.js";
 import { prepareGrokRunnerCredentials } from "./grok-runner-credentials.js";
@@ -10968,14 +10969,24 @@ async function executePaperclipNativeSessionAttempt(
     const prepareRunnerEnvironment = async () => {
       if (needsCoreGitHubAccess(input) && input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v8") {
         if (!input.execution.workspace.cwd) throw new Error("native_workspace_required");
+        const registry = createRunSecretRedactionRegistry(input.db);
+        const { companyId, runId } = input.execution.binding;
+        const registerSecretValue = (value: string) => registry.register(companyId, runId, value);
         githubAccess ??= await timeController("github_access", () => createNativeGitHubAccess({
           scope: input.execution.binding,
           target: input.runnerExecutionTarget,
           cwd: input.execution.workspace.cwd!,
           env: resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment),
           resolveCredentials: (binding) => resolveGitHubOperationCredentials(input.db, binding),
+          registerSecretValue,
           onLog: input.onLog,
         }));
+        executionContext?.assertOpen();
+        // A warm provider keeps its transport. Register its values for each new run before activation.
+        for (const key of ["PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN"]) {
+          const value = githubAccess.env[key];
+          if (value) await registerSecretValue(value);
+        }
         executionContext?.assertOpen();
         releaseGitHubRun = githubAccess.activate(input.execution.binding);
         input = { ...input, runnerEnvironment: { ...input.runnerEnvironment, ...githubAccess.env } };

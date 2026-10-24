@@ -131,7 +131,7 @@ describeDb("owner recovery prompt contract", () => {
         if (prompt.includes(restriction)) throw new Error("The repair contract forbids the required source change.");
         // The adapter can now perform the source work and record its disposition.
         await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issueId));
-        return { exitCode: 0, summary: "The source change and task disposition are complete.", provider: "test", model: "test" };
+        return { exitCode: 0, signal: null, timedOut: false, summary: "The source change and task disposition are complete.", provider: "test", model: "test" };
       },
       testEnvironment: async () => ({ adapterType, status: "pass", checks: [], testedAt: new Date().toISOString() }),
     });
@@ -172,7 +172,7 @@ describeDb("owner recovery prompt contract", () => {
           payload: { version: 1, prompt: "Approve the required host restart." },
         });
         await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
-        return { exitCode: 0, summary: "A host restart needs a board decision.", provider: "test", model: "test" };
+        return { exitCode: 0, signal: null, timedOut: false, summary: "A host restart needs a board decision.", provider: "test", model: "test" };
       },
       testEnvironment: async () => ({ adapterType, status: "pass", checks: [], testedAt: new Date().toISOString() }),
     });
@@ -218,7 +218,7 @@ describeDb("owner recovery prompt contract", () => {
   it("retains a board-owned credential decision instead of treating it as owner continuation", async () => {
     const f = await fixture("configuration_incomplete");
     const action = await issueRecoveryActionService(db).upsertSourceScoped({ companyId: f.companyId, sourceIssueId: f.issueId,
-      kind: "configuration_incomplete", ownerType: "board", returnOwnerAgentId: f.agentId, cause: "configuration_incomplete",
+      kind: "configuration_validation", ownerType: "board", returnOwnerAgentId: f.agentId, cause: "configuration_incomplete",
       fingerprint: f.runId, evidence: {}, nextAction: "Board operator: select the required credential.", maxAttempts: null });
     f.input.contextSnapshot.recoveryActionId = action.id;
     const wake = await buildPaperclipWakePayload(f.input);
