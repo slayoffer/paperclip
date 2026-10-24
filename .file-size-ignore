@@ -1,0 +1,2 @@
+# The callback gateway generator retains the merged progress policy and shrinks from the release base.
+packages/adapter-utils/src/sandbox-callback-bridge.ts
