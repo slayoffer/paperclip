@@ -41,7 +41,7 @@ import {
   SSH_IN_PLACE_LOCK_WAIT_MS_ENV,
 } from "../services/ssh-in-place-workspace.ts";
 import { environmentRuntimeService } from "../services/environment-runtime.ts";
-import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
+import { hasRemoteTerminationReceipt, remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import {
   createGitRepo,
   deleteHeartbeatRowsAfterActivityLogDrains,
@@ -220,6 +220,14 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     return { ...seeded, repoRoot, remoteBase };
   }
 
+  async function expectStoppedRunLockReleased(worktree: string, runId: string) {
+    const leases = await db.select().from(environmentLeases)
+      .where(eq(environmentLeases.heartbeatRunId, runId));
+    expect(leases.length).toBeGreaterThan(0);
+    expect(leases.every(hasRemoteTerminationReceipt)).toBe(true);
+    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))).toBeNull();
+  }
+
   it("keeps the copy realization when the flag is off", async () => {
     const { agentId, issueId, remoteBase } = await setup(false);
     let seen: ReturnType<typeof readTarget> | null = null;
@@ -274,9 +282,9 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
 
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["succeeded"]);
-    // Successful bookkeeping does not prove that a remote writer stopped.
+    // The terminal run starts no writer. The remote probe must save a stop receipt.
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree))?.runId).toBe(wake!.id);
+    await expectStoppedRunLockReleased(worktree, wake!.id);
   }, 20_000);
 
   it("records workspace_finalize=failed when the in_place run fails", async () => {
@@ -297,7 +305,7 @@ describeEmbeddedPostgres("heartbeat SSH same-host in_place", () => {
     const finalize = await listFinalizeOperations(db, wake!.id);
     expect(finalize.map((operation) => operation.status)).toEqual(["failed"]);
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
-    expect(readSshInPlaceWorktreeLockHolder(await canonicalSshInPlaceLockKey(worktree!))?.runId).toBe(wake!.id);
+    await expectStoppedRunLockReleased(worktree!, wake!.id);
   }, 20_000);
 
   it("stages managed GitHub launchers outside the repository during heartbeat preparation", async () => {
