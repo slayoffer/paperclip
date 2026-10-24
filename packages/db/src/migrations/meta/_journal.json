@@ -2647,6 +2647,13 @@
       "when": 1792619441764,
       "tag": "0379_panoramic_blink",
       "breakpoints": true
+    },
+    {
+      "idx": 380,
+      "version": "7",
+      "when": 1792858999084,
+      "tag": "0380_shocking_ultron",
+      "breakpoints": true
     }
   ]
 }
