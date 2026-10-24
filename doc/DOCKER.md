@@ -365,8 +365,15 @@ Notes:
 ## General Notes
 
 - The `docker-entrypoint.sh` adjusts the container `node` user UID/GID at startup to match the values passed via `USER_UID`/`USER_GID`, avoiding permission issues on bind-mounted volumes.
-- Before it drops privileges, the entrypoint makes sure `PAPERCLIP_HOME` is owned by the `node` user. Each boot checks only the home directory and its first three levels. The first boot (and any boot after a UID/GID change) also checks the full tree, and then writes `PAPERCLIP_HOME/.paperclip-ownership-verified`. While that marker is current, later boots skip the full-tree walk, which can take minutes on homes with many files. A mismatch triggers a recursive `chown`. If files deep in the tree get the wrong owner (for example, after a restore as root), delete the marker and restart to force a full check. If a check fails (for example, with an I/O error), the entrypoint does not write the marker, so the next boot checks again.
-- The entrypoint writes timestamped lines when it starts, around the full ownership check or any repair (with the duration), and just before it starts the server, so you can measure the pre-start time from the container log.
+- During root startup, the ownership probe checks `PAPERCLIP_HOME` (default `/paperclip`) through depth two.
+  It does not inspect deeper workspace or run contents during normal startup.
+  A detected user or group mismatch triggers recursive ownership repair before the command starts.
+  A change to `USER_UID` or `USER_GID` also triggers recursive repair, even when shallow ownership matches.
+- After a restore that changes only deeper ownership, set `PAPERCLIP_REPAIR_OWNERSHIP=1` for one startup.
+  This setting forces recursive repair. Remove it before later restarts to retain bounded startup work.
+  Recursive repair can take minutes on large volumes. A failed probe or repair prevents command execution.
+  Non-root startup cannot repair ownership and executes the command directly, as before.
+- The entrypoint writes timestamped lines when it starts, around any ownership repair (with the duration), and just before it starts the server, so you can measure the pre-start time from the container log.
 - Paperclip data persists via Docker volumes/bind mounts (compose) or at `~/.local/share/paperclip` (quadlet).
 
 ## Native Runner build cache
