@@ -3381,6 +3381,7 @@ export async function realizeExecutionWorkspace(input: {
       companyId: input.agent.companyId,
       issueId: input.issue?.id,
       cwd: input.base.baseCwd,
+      allowNonGitDirectory: input.base.source === "agent_home" && input.base.projectId === null,
     });
     return {
       ...input.base,
@@ -3853,6 +3854,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       issueId: input.issue?.id,
       cwd,
       executionWorkspaceId: input.workspace.id,
+      allowNonGitDirectory: input.base.source === "agent_home" && input.base.projectId === null,
     });
   }
 
