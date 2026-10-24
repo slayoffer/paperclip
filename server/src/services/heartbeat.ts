@@ -1,3 +1,4 @@
+import { isolatedWorkspaceReuseConfig, shouldKeepWorkspaceReuseIsolation } from "./workspace-reuse-fallback.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
@@ -2695,7 +2696,7 @@ export function heartbeatService(
         legacyUseProjectWorkspace:
           issueAssigneeOverrides?.useProjectWorkspace ?? null,
       });
-      const requestedExecutionWorkspaceMode =
+      let requestedExecutionWorkspaceMode =
         trustPreset.kind === "low_trust_review" &&
         resolvedExecutionWorkspaceMode === "shared_workspace"
           ? "isolated_workspace"
@@ -3045,6 +3046,9 @@ export function heartbeatService(
         delete context.paperclipTurnContext;
       }
       const {
+        requestedExecutionWorkspaceMode: selectedExecutionWorkspaceMode,
+        workspaceReuseFallback,
+        requestedReuseBranch,
         persistedRunnerProfile,
         persistedNativeExecutionInput,
         isDotRun,
@@ -3077,6 +3081,7 @@ export function heartbeatService(
         config: { config, issueAssigneeOverrides },
         services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, envOrchestrator },
       });
+      requestedExecutionWorkspaceMode = selectedExecutionWorkspaceMode;
       const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
         agentConfig: config,
         projectPolicy: projectExecutionWorkspacePolicy,
@@ -3093,6 +3098,16 @@ export function heartbeatService(
         // preserving isolated mode and the mandatory sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
       };
+      if (issueRef && !useIsolatedTaskDirectory && (workspaceReuseFallback || shouldKeepWorkspaceReuseIsolation({
+        issueId: issueRef.id,
+        workspace: reusableExistingExecutionWorkspace,
+        requestedExistingBranch: requestedReuseBranch,
+        operatorBranch: requestedExecutionWorkspaceMode === "operator_branch",
+      }))) {
+        Object.assign(mergedConfig, isolatedWorkspaceReuseConfig({
+          config: mergedConfig, issueId: issueRef.id, issueIdentifier: issueRef.identifier,
+        }));
+      }
       const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
         mergedConfig,
         selectedEnvironmentId,
@@ -3290,7 +3305,10 @@ export function heartbeatService(
                 ? projectContext.updatedAt.toISOString()
                 : (projectContext?.updatedAt ?? null),
             projectPolicy: projectExecutionWorkspacePolicy,
-            issueSettings: issueExecutionWorkspaceSettings,
+            issueSettings: workspaceReuseFallback
+              ? { ...issueExecutionWorkspaceSettings, mode: "isolated_workspace",
+                  workspaceStrategy: parseObject(mergedConfig.workspaceStrategy) }
+              : issueExecutionWorkspaceSettings,
             reusableExecutionWorkspaceConfig:
               requestedReusableExecutionWorkspaceConfig,
             existingExecutionWorkspace: reusableExistingExecutionWorkspace
@@ -3449,6 +3467,7 @@ export function heartbeatService(
           environmentExecutionWorkspaceSettings,
           parsedIssueExecutionWorkspaceSettings,
           separateTaskEnvironmentBinding,
+          workspaceReuseFallback,
           executionPolicy,
         },
         environment: {
@@ -3789,6 +3808,7 @@ export function heartbeatService(
       const runtimeWorkspaceWarnings = [
         ...resolvedWorkspace.warnings,
         ...executionWorkspace.warnings,
+        ...(workspaceReuseFallback ? [workspaceReuseFallback.warning] : []),
         ...(runtimeSessionResolution.warning
           ? [runtimeSessionResolution.warning]
           : []),
