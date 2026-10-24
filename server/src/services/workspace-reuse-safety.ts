@@ -1,7 +1,23 @@
 import fs from "node:fs/promises";
-import { and, eq, ne } from "drizzle-orm";
+import path from "node:path";
+import { and, eq, isNull, ne, notInArray } from "drizzle-orm";
 import { executionWorkspaces, issues, type Db } from "@paperclipai/db";
-import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
+import { isWorkspaceGitScanError, workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
+
+async function hasNoGitMarker(cwd: string): Promise<boolean> {
+  let directory = await fs.realpath(cwd);
+  for (;;) {
+    try {
+      await fs.lstat(path.join(directory, ".git"));
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return true;
+    directory = parent;
+  }
+}
 
 /** Inspect foreign workspace contents before restore can change Git state. */
 export async function assertWorkspaceReuseIsSafe(input: {
@@ -11,9 +27,19 @@ export async function assertWorkspaceReuseIsSafe(input: {
   executionWorkspaceId?: string | null;
   sourceIssueId?: string | null;
   issueId?: string | null;
+  allowNonGitDirectory?: boolean;
 }): Promise<void> {
-  if (!input.issueId || input.sourceIssueId === input.issueId) return;
+  if (!input.issueId) return;
   let sourceIssueId = input.sourceIssueId;
+  if (sourceIssueId && input.executionWorkspaceId && input.db) {
+    const [workspace] = await input.db.select({ status: executionWorkspaces.status, closedAt: executionWorkspaces.closedAt })
+      .from(executionWorkspaces).where(and(
+        eq(executionWorkspaces.companyId, input.companyId),
+        eq(executionWorkspaces.id, input.executionWorkspaceId),
+      ));
+    if (workspace && (workspace.closedAt || ["closed", "archived"].includes(workspace.status))) sourceIssueId = null;
+  }
+  if (sourceIssueId === input.issueId) return;
   if (!sourceIssueId && input.db) {
     const candidates = await input.db.select({
       sourceIssueId: executionWorkspaces.sourceIssueId,
@@ -24,7 +50,11 @@ export async function assertWorkspaceReuseIsSafe(input: {
       eq(issues.companyId, input.companyId),
       eq(issues.executionWorkspaceId, executionWorkspaces.id),
       ne(issues.id, input.issueId),
-    )).where(eq(executionWorkspaces.companyId, input.companyId));
+    )).where(and(
+      eq(executionWorkspaces.companyId, input.companyId),
+      isNull(executionWorkspaces.closedAt),
+      notInArray(executionWorkspaces.status, ["closed", "archived"]),
+    ));
     // Git can return a canonical path while the saved path contains a symlink.
     // Resolve both paths before selecting owners. Cache only within this check.
     const identities = new Map<string, Promise<string>>();
@@ -60,10 +90,19 @@ export async function assertWorkspaceReuseIsSafe(input: {
       operation: "workspace_runtime.cross_issue_reuse_guard",
       fairnessKeys: [`issue:${input.issueId}`, `issue:${sourceIssueId}`],
       cacheTtlMs: 0,
+      env: { ...process.env, LC_ALL: "C" },
     });
     if (!stdout.trim()) return;
     cleanliness = "dirty";
-  } catch {
+  } catch (error) {
+    // Only the project-less agent-home path permits a directory outside Git.
+    // Timeouts, access failures, and damaged repositories still fail closed.
+    if (input.allowNonGitDirectory && isWorkspaceGitScanError(error)
+      && error.code === "workspace_git_scan_failed") {
+      const details = error.details as { exitCode?: number; stderr?: string } | undefined;
+      if (details?.exitCode === 128 && /^fatal: not a git repository[ (]/.test(details.stderr ?? "")
+        && await hasNoGitMarker(input.cwd).catch(() => false)) return;
+    }
     // A failed inspection cannot establish that another issue's files are safe.
   }
   const error = new Error(

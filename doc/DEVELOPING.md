@@ -2955,6 +2955,14 @@ eligibility is an earliest allowed cleanup time; passive retained directories ca
 wait for the next wake, when startup restores their rows. Existing idle-sleep
 blockers and cleanup admission holds remain authoritative.
 
+Cross-issue ownership checks exclude closed and archived execution workspaces.
+They also exclude records with a closure timestamp. Records with failed cleanup
+and no closure timestamp retain ownership checks.
+A project-less agent-home folder can be outside a Git repository. This exception
+requires Git's explicit non-repository result and no `.git` entry in the folder
+or its ancestors. Dirty Git folders, damaged repositories, and other inspection
+failures retain the reuse guard.
+
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their
 tools run in plugin workers and do not have remote MCP endpoints. These rows
