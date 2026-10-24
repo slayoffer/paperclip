@@ -10,10 +10,11 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
 import { buildSshEnvLabFixtureConfig, buildSshSpawnTarget, getSshEnvLabSupport,
   startSshEnvLabFixture, stopSshEnvLabFixture } from "@paperclipai/adapter-utils/ssh";
+import { confirmSshInPlaceTermination } from "../services/ssh-in-place-termination.js";
 import { createSshEnvironmentDriver } from "../services/environment-ssh-driver.js";
 import { hasRemoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import { logger } from "../middleware/logger.js";
-import { readSshInPlaceWorktreeLockHolder, releaseSshInPlaceWorktreeLocksForLease,
+import { acquireSshInPlaceWorktreeLock, readSshInPlaceWorktreeLockHolder, releaseSshInPlaceWorktreeLocksForLease,
   SSH_IN_PLACE_ENVIRONMENTS_ENV, SSH_IN_PLACE_LOCK_WAIT_MS_ENV } from "../services/ssh-in-place-workspace.js";
 
 const { releaseLease, updateLeaseMetadata } = vi.hoisted(() => ({ releaseLease: vi.fn(), updateLeaseMetadata: vi.fn() }));
@@ -171,3 +172,36 @@ it.skipIf(!support.supported || !containmentSupported)("realizes consecutive run
     await stopSshEnvLabFixture(fixture);
   }
 }, 60_000);
+
+
+it.skipIf(!support.supported).each([
+  ["queued", false], ["running", false], [null, false],
+  ["succeeded", true], ["failed", true], ["cancelled", true], ["timed_out", true], ["interrupted", true],
+])("handles absent writer records for run status %s", async (status, expected) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "ssh-no-writer-")));
+  roots.push(root);
+  const fixture = await startSshEnvLabFixture({ statePath: path.join(root, "ssh", "state.json") });
+  try {
+    const config = await buildSshEnvLabFixtureConfig(fixture);
+    const environment = { id: randomUUID(), driver: "ssh", config } as unknown as Environment;
+    const lease = { id: randomUUID(), companyId: randomUUID(), environmentId: environment.id,
+      heartbeatRunId: randomUUID(), provider: "ssh", status: "active", releasedAt: null, cleanupStatus: null,
+      providerLeaseId: `ssh://${config.username}@${config.host}:${config.port}${config.remoteWorkspacePath}`,
+      metadata: { remoteWorkspacePath: config.remoteWorkspacePath,
+        sshInPlaceWriter: { key: root, remoteCwd: config.remoteWorkspacePath } },
+    } as unknown as EnvironmentLease;
+    leases.push(lease.id);
+    await acquireSshInPlaceWorktreeLock({ key: root, leaseId: lease.id, runId: lease.heartbeatRunId!,
+      waitMs: 0, isHolderActive: async () => true });
+    const db = { select: () => ({ from: () => ({ where: () => ({ limit: async () => status ? [{ status }] : [] }) }) }) } as unknown as Db;
+    releaseLease.mockImplementation(async (_id, releasedStatus, options) => ({ ...lease, status: releasedStatus,
+      releasedAt: new Date(), cleanupStatus: options.cleanupStatus,
+      metadata: { ...lease.metadata, remoteExecutionTermination: options.remoteExecutionTermination },
+    }));
+    const released = await confirmSshInPlaceTermination(db, environment, lease, "released");
+    expect(released !== null).toBe(expected);
+    expect(hasRemoteTerminationReceipt(released ?? lease)).toBe(expected);
+    expect(readSshInPlaceWorktreeLockHolder(root)?.leaseId ?? null).toBe(expected ? null : lease.id);
+    expect(releaseLease).toHaveBeenCalledTimes(expected ? 1 : 0);
+  } finally { await stopSshEnvLabFixture(fixture); }
+});
