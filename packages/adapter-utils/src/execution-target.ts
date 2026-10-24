@@ -4360,6 +4360,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   timeoutSec?: number | null;
   hostApiToken: string | null | undefined;
   hostApiUrl?: string | null;
+  registerSecretValue?: (value: string) => Promise<void>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   maxBodyBytes?: number | null;
   // The deadline for one forward call, in milliseconds. This is the inner budget
@@ -4421,6 +4422,8 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
   const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
   const bridgeToken = createSandboxCallbackBridgeToken();
+  // Registration must finish before transport setup can expose the opaque value.
+  await input.registerSecretValue?.(bridgeToken);
   const configuredAttachmentBytes = Number(process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES);
   // A larger upload limit needs multipart headroom. A smaller attachment limit
   // remains enforced by the API and must not shrink unrelated JSON responses.

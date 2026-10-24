@@ -1,3 +1,4 @@
+import { preserveRunSecretRegistry } from "../run-secret-redaction.js";
 import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import {
   resolveWorkspaceAfterLowTrustPreflight,
@@ -915,7 +916,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     await db
       .update(heartbeatRuns)
       .set({
-        contextSnapshot: context,
+        contextSnapshot: preserveRunSecretRegistry(context),
         updatedAt: new Date(),
       })
       .where(eq(heartbeatRuns.id, run.id));
