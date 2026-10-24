@@ -244,6 +244,18 @@ When authoring migrations or one-time backfills:
 - Split schema changes, index creation, and data backfill into separate phases so each step has clear locking and rollback behavior.
 - Treat the `check:migrations` CI gate as the enforcement backstop for these rules. If it flags a migration, rewrite the migration or add a suppression comment with the indexed predicate, batch bound, and reason the remaining scan is safe.
 
+## Wake lookup index
+
+`agent_wakeup_requests_company_idempotency_idx` covers company-scoped wake lookups
+with one idempotency key or several keys. The index has no predicate and permits
+duplicate keys. The existing partial unique indexes still enforce delivery rules.
+
+The startup migration creates the index inside a transaction. Index creation
+blocks writes to this table until the transaction commits. Operators must account
+for this lock during deployment. Rollback can retain the index safely.
+After deployment, check both query shapes with `EXPLAIN (ANALYZE, BUFFERS)`.
+Confirm that each lookup uses the index and takes less than 50 ms.
+
 ## Migration snapshots
 
 `drizzle-kit generate` diffs `packages/db/src/schema/` against the newest snapshot in `packages/db/src/migrations/meta/`. That snapshot must describe the schema that every migration produces when they run in order. A snapshot that drifts from the schema makes the *next* migration wrong, because `generate` folds the drift into it. The drift can add a column that an earlier migration already created, which makes that migration fail on a fresh database. It can also drop a column that the schema still uses.
