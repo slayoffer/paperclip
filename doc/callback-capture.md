@@ -128,3 +128,16 @@ Exact execution approval must include the archive hash, manifest hash, host, env
 It must include temporary diagnostic authentication and cleanup.
 The CTO must use `credentialOperation: true` when its card includes the generated bridge token or existing secret resolution.
 Repository review and a merge approval do not grant capture execution authority.
+
+## Queue worker deadlines
+
+The queue worker bounds time without a completed request stage.
+Each completed size check, read, authorization, handler, publication, or removal stage renews that deadline.
+The watchdog also uses completed stages as progress.
+The combined duration of healthy stages does not cause recovery for the next queued request.
+A stalled stage still starts recovery.
+Existing mutation guards prevent a competing retryable response after handler ownership.
+The worker also enforces a total request limit of 20 seconds, including queue age after parsing.
+Completed stages cannot extend this limit beyond the gateway's default 30-second response deadline.
+Expiration immediately fences unclaimed requests and aborts owned handlers before asynchronous recovery.
+Late stage results cannot continue toward handler ownership.

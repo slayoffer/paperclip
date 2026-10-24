@@ -121,63 +121,15 @@ describe("callback queue lifecycle", () => {
 });
 
 describe("callback queue deadlines", () => {
-  it("uses nested default deadlines and forwards the rollback switch to the sandbox", () => {
+  it("keeps the gateway deadline when the queue lifecycle switch changes", () => {
     expect(sandboxCallbackQueuePolicy({}).enabled).toBe(true);
-    vi.stubEnv(SANDBOX_CALLBACK_QUEUE_V2_ENV, "true");
-    expect(sandboxCallbackQueuePolicy()).toMatchObject({
-      enabled: true, controlTimeoutMs: 30_000, requestTimeoutMs: 90_000,
-      watchdogTimeoutMs: 100_000, responseTimeoutMs: 120_000,
-    });
-    expect(buildSandboxCallbackBridgeEnv({ queueDir: "/queue", bridgeToken: "test" }))
-      .toMatchObject({ PAPERCLIP_SANDBOX_CALLBACK_QUEUE_V2_ENABLED: "true", PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS: "120000" });
-    vi.stubEnv(SANDBOX_CALLBACK_QUEUE_V2_ENV, "false");
-    expect(sandboxCallbackQueuePolicy()).toMatchObject({
-      enabled: false, controlTimeoutMs: 10_000, requestTimeoutMs: 10_000,
-      watchdogTimeoutMs: 20_000, responseTimeoutMs: 30_000,
-    });
-    expect(buildSandboxCallbackBridgeEnv({ queueDir: "/queue", bridgeToken: "test" }))
-      .toMatchObject({ PAPERCLIP_SANDBOX_CALLBACK_QUEUE_V2_ENABLED: "false", PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS: "30000" });
-  });
-
-  it.each(["handler", "list"])("does not abandon a live %s after 10 seconds", async stage => {
-    vi.stubEnv(SANDBOX_CALLBACK_QUEUE_V2_ENV, "true");
-    const waiting = deferred();
-    const release = deferred();
-    const received = deferred<number>();
-    let exists = true;
-    let calls = 0;
-    let signal: AbortSignal | undefined;
-    const client: SandboxCallbackBridgeQueueClient = {
-      makeDir: async () => {}, makeDirs: async () => {},
-      listJsonFiles: async () => {
-        if (stage === "list" && calls === 0) {
-          calls++;
-          waiting.resolve();
-          await release.promise;
-        }
-        return exists ? ["slow.json"] : [];
-      },
-      readTextFile: async () => JSON.stringify({ id: "slow", method: "GET", path: "/api/agents/me", body: "" }),
-      writeTextFile: async () => {}, rename: async () => {},
-      writeResponseFile: async (_file, body) => { received.resolve(JSON.parse(body).status); return { wrote: true }; },
-      remove: async () => { exists = false; },
-    };
-    vi.useFakeTimers();
-    const worker = await startSandboxCallbackBridgeWorker({
-      client, queueDir: "/virtual-queue", authorizeRequest: () => null,
-      handleRequest: async (_request, options) => {
-        signal = options?.signal;
-        if (stage === "handler") { waiting.resolve(); await release.promise; }
-        return { status: 200, body: "complete" };
-      },
-    });
-    cleanups.push(() => worker.stop({ drainTimeoutMs: 50 }));
-    await waiting.promise;
-    await vi.advanceTimersByTimeAsync(11_000);
-    expect(signal?.aborted ?? false).toBe(false);
-    release.resolve();
-    vi.useRealTimers();
-    await expect(received.promise).resolves.toBe(200);
+    for (const enabled of [true, false]) {
+      vi.stubEnv(SANDBOX_CALLBACK_QUEUE_V2_ENV, String(enabled));
+      expect(sandboxCallbackQueuePolicy()).toEqual({ enabled });
+      expect(buildSandboxCallbackBridgeEnv({ queueDir: "/queue", bridgeToken: "test" }))
+        .toMatchObject({ PAPERCLIP_SANDBOX_CALLBACK_QUEUE_V2_ENABLED: String(enabled),
+          PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS: "30000" });
+    }
   });
 
   it("does not dispatch an expired request to the API handler", async () => {
@@ -263,12 +215,13 @@ describe("generated callback gateway", () => {
     const allowRead = deferred();
     const baseClient = createFileSystemSandboxCallbackBridgeQueueClient();
     const handleRequest = vi.fn(async () => ({ status: 200, body: "complete" }));
+    const remove = vi.fn(async () => {});
     const worker = await startSandboxCallbackBridgeWorker({
       client: { ...baseClient, readTextFile: async (...args) => {
         readStarted.resolve();
         await allowRead.promise;
         return baseClient.readTextFile(...args);
-      }, remove: async () => {} }, // Force the gateway to perform acknowledgement cleanup.
+      }, remove }, // Force the gateway to perform acknowledgement cleanup.
       queueDir: fixture.queueDir, handleRequest,
     });
     cleanups.push(() => worker.stop({ drainTimeoutMs: 50 }));
@@ -281,6 +234,7 @@ describe("generated callback gateway", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("complete");
     expect(handleRequest).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
     expect(await fs.readdir(fixture.dirs.requestsDir)).toEqual([]);
     expect(await fs.readdir(fixture.dirs.responsesDir)).toEqual([]);
   });

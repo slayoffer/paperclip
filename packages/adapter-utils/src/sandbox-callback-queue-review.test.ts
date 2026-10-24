@@ -28,16 +28,16 @@ async function runVirtualRequest(options: { method: string; slowStages?: boolean
   let firstList = true;
   let aborted = false;
   const raw = JSON.stringify({
-    id: "request", method: options.method, path: "/api/agents/me", body: "", expiresAt: Date.now() + 120_000,
+    id: "request", method: options.method, path: "/api/agents/me", body: "", expiresAt: Date.now() + 30_000,
   });
   const client: SandboxCallbackBridgeQueueClient = {
     makeDir: async () => {}, makeDirs: async () => {},
     listJsonFiles: async () => {
-      if (options.slowStages && firstList) { firstList = false; await sleep(29_000); }
+      if (options.slowStages && firstList) { firstList = false; await sleep(4_000); }
       return pending ? ["request.json"] : [];
     },
-    fileSize: async () => { if (options.slowStages) await sleep(29_000); return Buffer.byteLength(raw); },
-    readTextFile: async () => { if (options.slowStages) await sleep(29_000); return raw; },
+    fileSize: async () => { if (options.slowStages) await sleep(4_000); return Buffer.byteLength(raw); },
+    readTextFile: async () => { if (options.slowStages) await sleep(4_000); return raw; },
     writeTextFile: async () => {}, rename: async () => {}, remove: async () => { pending = false; },
     writeResponseFile: async (_target, body) => {
       receipt.resolve(JSON.parse(body));
@@ -50,15 +50,15 @@ async function runVirtualRequest(options: { method: string; slowStages?: boolean
     handleRequest: async (_request, context) => {
       context?.signal.addEventListener("abort", () => { aborted = true; });
       if (options.forwardTimeout) {
-        await sleep(30_000);
+        await sleep(5_000);
         throw new DOMException("The API forward timed out before response headers.", "TimeoutError");
       }
-      await sleep(21_000);
+      await sleep(4_000);
       return { status: 200, body: "complete" };
     },
   });
   cleanups.push(() => worker.stop({ drainTimeoutMs: 10 }));
-  await vi.advanceTimersByTimeAsync(options.slowStages ? 108_100 : 31_000);
+  await vi.advanceTimersByTimeAsync(options.slowStages ? 16_100 : 6_000);
   const response = await receipt.promise;
   const stopping = worker.stop({ drainTimeoutMs: 10 });
   await vi.advanceTimersByTimeAsync(20);
@@ -74,7 +74,7 @@ describe("callback review regressions", () => {
     expect(response.headers["x-paperclip-bridge-outcome"]).toBe(method === "POST" ? "indeterminate" : undefined);
   });
 
-  it("counts a completed slow listing as progress before the transaction watchdog starts", async () => {
+  it("finishes a live request after 10 seconds when every stage makes progress", async () => {
     const { response, aborted } = await runVirtualRequest({ method: "POST", slowStages: true });
     expect(aborted).toBe(false);
     expect(response.status).toBe(200);
@@ -127,7 +127,7 @@ describe("callback review regressions", () => {
     let secondReads = 0;
     const pending = new Set(["first.json", "second.json"]);
     const raw = (id: string) => JSON.stringify({
-      id, method: "POST", path: "/api/issues/one/comments", body: "{}", expiresAt: Date.now() + 120_000,
+      id, method: "POST", path: "/api/issues/one/comments", body: "{}", expiresAt: Date.now() + 30_000,
     });
     const client: SandboxCallbackBridgeQueueClient = {
       makeDir: async () => {}, makeDirs: async () => {}, listJsonFiles: async () => [...pending],
