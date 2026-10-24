@@ -1,3 +1,4 @@
+import { normalizePaperclipWakeRecovery, type PaperclipWakeRecovery } from "./wake-recovery.js";
 export { checkpointSessionOutput, RESTART_RESUME_PROMPT } from "./restart-session.js";
 import { RestartSessionCheckpointError } from "./restart-session.js";
 import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
@@ -765,16 +766,6 @@ type PaperclipWakeAgentMessage = {
   sessionId: string | null;
 };
 
-type PaperclipWakeRecovery = {
-  cause: string | null;
-  failureSummary: string | null;
-  originalAssignee: { id: string | null; name: string | null } | null;
-  attemptCount: number | null;
-  maxAttempts: number | null;
-  nextAction: string | null;
-  routingFallbackReason: string | null;
-};
-
 export type PaperclipExternalChatProvider =
   "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon";
 
@@ -824,33 +815,6 @@ type PaperclipWakePayload = {
   truncated: boolean;
   fallbackFetchNeeded: boolean;
 };
-
-function normalizePaperclipWakeRecovery(
-  value: unknown,
-): PaperclipWakeRecovery | null {
-  const recovery = parseObject(value);
-  const cause = asString(recovery.cause, "").trim() || null;
-  if (!cause) return null;
-  const originalAssignee = parseObject(recovery.originalAssignee);
-  const originalAssigneeId = asString(originalAssignee.id, "").trim() || null;
-  const originalAssigneeName =
-    asString(originalAssignee.name, "").trim() || null;
-  return {
-    cause,
-    failureSummary: asString(recovery.failureSummary, "").trim() || null,
-    originalAssignee:
-      originalAssigneeId || originalAssigneeName
-        ? { id: originalAssigneeId, name: originalAssigneeName }
-        : null,
-    attemptCount:
-      typeof recovery.attemptCount === "number" ? recovery.attemptCount : null,
-    maxAttempts:
-      typeof recovery.maxAttempts === "number" ? recovery.maxAttempts : null,
-    nextAction: asString(recovery.nextAction, "").trim() || null,
-    routingFallbackReason:
-      asString(recovery.routingFallbackReason, "").trim() || null,
-  };
-}
 
 function normalizePaperclipWakeAgentMessage(
   value: unknown,
@@ -2416,7 +2380,17 @@ function renderPaperclipWakePromptBody(
         "Keep the final response concise and provider-facing. Do not narrate Paperclip workflow, checkout, status, or completion bookkeeping. Keep wait and review dispositions in the semantic control fields rather than appending status boilerplate to the answer. Mention task state only when the user asks about it or must act on a real blocker.",
         "",
       ]
-    : recoveryScoped
+    : recovery?.executionMode === "owner_resume"
+      ? [
+          "Owner continuation: resume normal task work from durable progress.",
+          "Inspect saved work before each change. Do not repeat completed actions.",
+          "Record completion, a real blocker, or a supported next execution path.",
+          "Request a board decision only for a conflict, missing credential, host operation, or another required approval.",
+          "A lost run does not require permission to restore normal owner execution.",
+          "Existing stop, pause, budget, workspace, and approval gates still apply.",
+          "",
+        ]
+      : recoveryScoped
       ? [
           "Recovery contract: your job is to RECOVER this task, not to do the work. Do not produce the deliverable yourself.",
           `Cause-specific instruction: ${recoveryInstruction}`,

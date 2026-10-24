@@ -1,3 +1,4 @@
+import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
   provisionExecutionWorkspaceForFreshnessDecision,
   resolveExecutionWorkspaceReuseRequestForIssue,
@@ -6952,6 +6953,7 @@ export function shouldAutoCheckoutIssueForWake(input: {
   issueExecutionState?: unknown;
   isDependencyReady: boolean;
   agentId: string;
+  ownerRecoveryResume?: boolean;
 }) {
   if (input.issueAssigneeAgentId !== input.agentId) return false;
   if (!input.isDependencyReady) return false;
@@ -6971,7 +6973,7 @@ export function shouldAutoCheckoutIssueForWake(input: {
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
   if (!wakeReason) return false;
   if (wakeReason === "issue_comment_mentioned") return false;
-  if (wakeReason === "source_scoped_recovery_action") return false;
+  if (wakeReason === "source_scoped_recovery_action" && !input.ownerRecoveryResume) return false;
   if (wakeReason.startsWith("execution_")) return false;
 
   return true;
@@ -8018,42 +8020,7 @@ export async function buildPaperclipWakePayload(input: {
     issueDescriptionTruncated ||
     planReviewContext?.truncated === true ||
     documentReviewContext?.truncated === true;
-  const recoveryActionId = readNonEmptyString(
-    input.contextSnapshot.recoveryActionId,
-  );
-  const recoveryCause = readNonEmptyString(input.contextSnapshot.recoveryCause);
-  const recoveryAction = recoveryActionId
-    ? await input.db
-        .select()
-        .from(issueRecoveryActions)
-        .where(
-          and(
-            eq(issueRecoveryActions.id, recoveryActionId),
-            eq(issueRecoveryActions.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const recoveryEvidence = parseObject(recoveryAction?.evidence);
-  const executionAlreadyReconciled =
-    recoveryAction?.status === "resolved" &&
-    Boolean(recoveryEvidence.executionReconciliation);
-  const originalAssigneeId =
-    recoveryAction?.returnOwnerAgentId ??
-    recoveryAction?.previousOwnerAgentId ??
-    null;
-  const originalAssignee = originalAssigneeId
-    ? await input.db
-        .select({ id: agents.id, name: agents.name })
-        .from(agents)
-        .where(
-          and(
-            eq(agents.id, originalAssigneeId),
-            eq(agents.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
+  const recovery = await buildOwnerRecoveryWake(input.db, input);
 
   const externalChatProvider = await resolveExternalChatWakeProvider({
     db: input.db,
@@ -8080,24 +8047,7 @@ export async function buildPaperclipWakePayload(input: {
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
     externalChatProvider,
-    recovery:
-      !executionAlreadyReconciled && (recoveryAction || recoveryCause)
-        ? {
-            cause: recoveryAction?.cause ?? recoveryCause,
-            failureSummary: readNonEmptyString(recoveryEvidence.failureSummary),
-            originalAssignee: originalAssignee
-              ? { id: originalAssignee.id, name: originalAssignee.name }
-              : originalAssigneeId
-                ? { id: originalAssigneeId, name: null }
-                : null,
-            attemptCount: recoveryAction?.attemptCount ?? null,
-            maxAttempts: recoveryAction?.maxAttempts ?? null,
-            nextAction: recoveryAction?.nextAction ?? null,
-            routingFallbackReason: readNonEmptyString(
-              recoveryEvidence.routingFallbackReason,
-            ),
-          }
-        : null,
+    recovery,
     issue: issueSummary
       ? {
           id: issueSummary.id,
@@ -17458,7 +17408,7 @@ export function heartbeatService(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
       )).for("update") : [];
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
-        context.wakeReason !== "source_scoped_recovery_action";
+        (context.wakeReason !== "source_scoped_recovery_action" || ownerRecoveryResumeEnabled());
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
           owner.checkoutRunId && owner.checkoutRunId !== run.id) {
         return { ownsIssue, blocked: true };
@@ -20434,6 +20384,9 @@ export function heartbeatService(
         !isResolvedInteractionContinuationWakeContext(context) &&
         shouldAutoCheckoutIssueForWake({
           contextSnapshot: context,
+          ownerRecoveryResume: context.wakeReason === "source_scoped_recovery_action" &&
+            (await buildOwnerRecoveryWake(db, { companyId: run.companyId, agentId: agent.id,
+              runId: run.id, contextSnapshot: context }))?.executionMode === "owner_resume",
           issueStatus: issueContext.status,
           issueAssigneeAgentId: issueContext.assigneeAgentId,
           issueExecutionState: issueContext.executionState,
