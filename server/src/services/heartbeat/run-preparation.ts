@@ -1,5 +1,6 @@
 import { skillAccessService } from "../skill-access.js";
 import type { AuthorizationActor } from "../authorization.js";
+import { buildOwnerRecoveryWake } from "../recovery/owner-resume.js";
 import { isOwnerSessionKey, firstCallerTaskKey } from "../owner-sessions.js";
 import type { DurableBridgeWakeupRequest } from "../durable-bridge-wakeup.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
@@ -2603,44 +2604,7 @@ export async function buildPaperclipWakePayload(input: {
     issueDescriptionTruncated ||
     planReviewContext?.truncated === true ||
     documentReviewContext?.truncated === true;
-  const recoveryActionId = readNonEmptyString(
-    input.contextSnapshot.recoveryActionId,
-  );
-  const recoveryCause = readNonEmptyString(input.contextSnapshot.recoveryCause);
-  const recoveryAction = recoveryActionId
-    ? await input.db
-        .select()
-        .from(issueRecoveryActions)
-        .where(
-          and(
-            eq(issueRecoveryActions.id, recoveryActionId),
-            eq(issueRecoveryActions.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const recoveryEvidence = parseObject(recoveryAction?.evidence);
-  // A restored task resumes its deliverable, not the completed repair. A
-  // referenced settled/missing action must not fall back to a stale cause.
-  const recoveryStillActive = recoveryAction
-    ? ["active", "escalated"].includes(recoveryAction.status)
-    : !recoveryActionId && Boolean(recoveryCause);
-  const originalAssigneeId =
-    recoveryAction?.returnOwnerAgentId ??
-    recoveryAction?.previousOwnerAgentId ??
-    null;
-  const originalAssignee = originalAssigneeId
-    ? await input.db
-        .select({ id: agents.id, name: agents.name })
-        .from(agents)
-        .where(
-          and(
-            eq(agents.id, originalAssigneeId),
-            eq(agents.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
+  const recovery = await buildOwnerRecoveryWake(input.db, input);
 
   const externalChatProvider = await resolveExternalChatWakeProvider({
     db: input.db,
@@ -2671,24 +2635,7 @@ export async function buildPaperclipWakePayload(input: {
       ? await resolveGitHubReviewInstructions({ db: input.db, companyId: input.companyId, agentId: input.agentId, issueId,
           commentIds: externalChatProvider === "github" ? commentIds : [] })
       : [],
-    recovery:
-      recoveryStillActive
-        ? {
-            cause: recoveryAction?.cause ?? recoveryCause,
-            failureSummary: readNonEmptyString(recoveryEvidence.failureSummary),
-            originalAssignee: originalAssignee
-              ? { id: originalAssignee.id, name: originalAssignee.name }
-              : originalAssigneeId
-                ? { id: originalAssigneeId, name: null }
-                : null,
-            attemptCount: recoveryAction?.attemptCount ?? null,
-            maxAttempts: recoveryAction?.maxAttempts ?? null,
-            nextAction: recoveryAction?.nextAction ?? null,
-            routingFallbackReason: readNonEmptyString(
-              recoveryEvidence.routingFallbackReason,
-            ),
-          }
-        : null,
+    recovery,
     issue: issueSummary
       ? {
           id: issueSummary.id,

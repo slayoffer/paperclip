@@ -2,6 +2,7 @@ import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
+import { ownerRecoveryResumeEnabled } from "../recovery/owner-resume.js";
 import { ownerSessionsEnabled } from "../owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "../deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "../review-bridge-wakes.js";
@@ -1203,7 +1204,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
       )).for("update") : [];
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
-        context.wakeReason !== "source_scoped_recovery_action";
+        (context.wakeReason !== "source_scoped_recovery_action" || ownerRecoveryResumeEnabled());
       const [handoff] = issueId ? await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, run.companyId), eq(caseHandoffs.issueId, issueId),
         inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1) : [];
       if (handoff && (handoff.wakeupRequestId !== run.wakeupRequestId || handoff.state === "awaiting_release"))
