@@ -1,3 +1,4 @@
+import { buildOwnerRecoveryWake } from "./recovery/owner-resume.js";
 import { resolveOwnerSession, ownerSessionEngineEligible, shouldResetOwnerSessionForWake } from "./owner-sessions.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
@@ -730,6 +731,7 @@ export function shouldAutoCheckoutIssueForWake(input: {
   issueExecutionState?: unknown;
   isDependencyReady: boolean;
   agentId: string;
+  ownerRecoveryResume?: boolean;
 }) {
   if (input.issueAssigneeAgentId !== input.agentId) return false;
   if (!input.isDependencyReady) return false;
@@ -751,7 +753,7 @@ export function shouldAutoCheckoutIssueForWake(input: {
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
   if (!wakeReason) return false;
   if (wakeReason === "issue_comment_mentioned") return false;
-  if (wakeReason === "source_scoped_recovery_action") return false;
+  if (wakeReason === "source_scoped_recovery_action" && !input.ownerRecoveryResume) return false;
   if (wakeReason.startsWith("execution_")) return false;
 
   return true;
@@ -2283,6 +2285,9 @@ export function heartbeatService(
         !isResolvedInteractionContinuationWakeContext(context) &&
         shouldAutoCheckoutIssueForWake({
           contextSnapshot: context,
+          ownerRecoveryResume: context.wakeReason === "source_scoped_recovery_action" &&
+            (await buildOwnerRecoveryWake(db, { companyId: run.companyId, agentId: agent.id,
+              runId: run.id, contextSnapshot: context }))?.executionMode === "owner_resume",
           issueStatus: issueContext.status,
           issueAssigneeAgentId: issueContext.assigneeAgentId,
           issueExecutionState: issueContext.executionState,
