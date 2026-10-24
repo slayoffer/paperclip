@@ -1,3 +1,5 @@
+import { sandboxCallbackFileGatewaySource } from "./sandbox-callback-file-gateway.js";
+import { sandboxCallbackQueuePolicy, SANDBOX_CALLBACK_QUEUE_V2_ENV } from "./sandbox-callback-queue-policy.js";
 import {
   DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST,
   type SandboxCallbackBridgeRouteRule,
@@ -56,21 +58,6 @@ const DEFAULT_BRIDGE_MAX_QUEUE_DEPTH = 64;
 // never fails at the bridge before the server ever sees it.
 const BRIDGE_MULTIPART_FRAMING_HEADROOM_BYTES = 64 * 1024;
 const DEFAULT_BRIDGE_MAX_BODY_BYTES = 10 * 1024 * 1024 + BRIDGE_MULTIPART_FRAMING_HEADROOM_BYTES;
-// Per-iteration timeout for one poll-loop client call. A healthy control-plane
-// round trip finishes in well under one second, so 10s is far above a normal
-// iteration and never false-fires on a slow-but-live call. It is also well
-// under the in-sandbox 30s response deadline
-// (PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS), so the host loop fails fast and writes
-// 503 responses before the in-sandbox client gives up. A silently unresponsive
-// sandbox channel makes a client call hang with no reject; this timeout turns
-// that hang into a caught error, so the poll loop can back off and retry while
-// the watchdog below decides when to fail the queued requests.
-const DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS = 10_000;
-// Watchdog backstop for a hang that the per-iteration timeout does not catch
-// (for example many slow-but-under-timeout calls, or a stall outside the awaited
-// calls). It is larger than one iteration timeout, so a single slow iteration
-// never trips it, and it stays under the in-sandbox 30s response deadline.
-const DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS = 20_000;
 // Grace period the recovery path gives an aborted in-flight handler to finalize
 // its own response. The recovery path aborts the handler, then waits this long.
 // A cooperating handler threads the abort signal into its work, rejects, and
@@ -137,6 +124,7 @@ export interface SandboxCallbackBridgeRequest extends SandboxCallbackBridgeBody 
   query: string;
   headers: Record<string, string>;
   createdAt: string;
+  expiresAt?: number;
 }
 
 export interface SandboxCallbackBridgeResponse extends SandboxCallbackBridgeBody {
@@ -386,7 +374,9 @@ export function buildSandboxCallbackBridgeEnv(input: {
   maxQueueDepth?: number | null;
   maxBodyBytes?: number | null;
 }): Record<string, string> {
+  const policy = sandboxCallbackQueuePolicy();
   return {
+    [SANDBOX_CALLBACK_QUEUE_V2_ENV]: String(policy.enabled),
     PAPERCLIP_API_BRIDGE_MODE: SANDBOX_CALLBACK_BRIDGE_FILE_MODE,
     PAPERCLIP_BRIDGE_QUEUE_DIR: input.queueDir,
     PAPERCLIP_BRIDGE_TOKEN: input.bridgeToken,
@@ -396,7 +386,7 @@ export function buildSandboxCallbackBridgeEnv(input: {
       normalizeTimeoutMs(input.pollIntervalMs, DEFAULT_BRIDGE_POLL_INTERVAL_MS),
     ),
     PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS: String(
-      normalizeTimeoutMs(input.responseTimeoutMs, DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS),
+      normalizeTimeoutMs(input.responseTimeoutMs, policy.responseTimeoutMs),
     ),
     PAPERCLIP_BRIDGE_MAX_QUEUE_DEPTH: String(
       normalizeTimeoutMs(input.maxQueueDepth, DEFAULT_BRIDGE_MAX_QUEUE_DEPTH),
@@ -729,13 +719,12 @@ export async function startSandboxCallbackBridgeWorker(input: {
   client: SandboxCallbackBridgeQueueClient;
   queueDir: string;
   pollIntervalMs?: number | null;
-  // Per-iteration timeout for one poll-loop client call (the `listJsonFiles`
-  // poll and one `processRequestFile`). On timeout the loop `catch` runs
-  // `failPendingRequests`. Defaults to DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS.
+  // Control-call budget. An explicit value also sets the request budget unless overridden.
   iterationTimeoutMs?: number | null;
+  requestTimeoutMs?: number | null;
   // Watchdog threshold. When the loop makes no successful iteration within this
   // time, the watchdog runs `failPendingRequests` and surfaces a run-level error
-  // through `runtimeSpan`. Defaults to DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS.
+  // through `runtimeSpan`.
   watchdogTimeoutMs?: number | null;
   // Grace the recovery path gives an aborted in-flight handler to finalize its
   // own response before the recovery path writes a non-retryable 504 backstop.
@@ -772,8 +761,11 @@ export async function startSandboxCallbackBridgeWorker(input: {
   runtimeSpan?: RuntimeSpanRunner;
 }): Promise<SandboxCallbackBridgeWorkerHandle> {
   const pollIntervalMs = normalizeTimeoutMs(input.pollIntervalMs, DEFAULT_BRIDGE_POLL_INTERVAL_MS);
-  const iterationTimeoutMs = normalizeTimeoutMs(input.iterationTimeoutMs, DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS);
-  const watchdogTimeoutMs = normalizeTimeoutMs(input.watchdogTimeoutMs, DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS);
+  const policy = sandboxCallbackQueuePolicy();
+  const iterationTimeoutMs = normalizeTimeoutMs(input.iterationTimeoutMs, policy.controlTimeoutMs);
+  const requestTimeoutMs = normalizeTimeoutMs(input.requestTimeoutMs,
+    normalizeTimeoutMs(input.iterationTimeoutMs, policy.requestTimeoutMs));
+  const watchdogTimeoutMs = normalizeTimeoutMs(input.watchdogTimeoutMs, policy.watchdogTimeoutMs);
   const abortedHandlerGraceMs = normalizeTimeoutMs(
     input.abortedHandlerGraceMs,
     DEFAULT_BRIDGE_ABORTED_HANDLER_GRACE_MS,
@@ -865,6 +857,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
     claim: "unclaimed" | "handler" | "abandon";
     controller: AbortController;
     finalized: boolean;
+    awaitingAcknowledgement?: boolean;
     backstopTimer?: ReturnType<typeof setTimeout>;
   };
   const inFlightRequestGuards = new Map<string, RequestFinalizeGuard>();
@@ -934,7 +927,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
             iterationTimeoutMs,
             `Sandbox callback bridge write response for ${response.id}`,
           );
-          await input.client.remove(requestPath).catch(() => undefined);
+          if (!guard.awaitingAcknowledgement) await input.client.remove(requestPath).catch(() => undefined);
           return;
         } catch (error) {
           lastWriteError = error instanceof Error ? error.message : String(error);
@@ -1014,6 +1007,14 @@ export async function startSandboxCallbackBridgeWorker(input: {
         return;
       }
 
+      if (policy.enabled && typeof request.expiresAt === "number" && request.expiresAt <= Date.now()) {
+        await finalize({ id: request.id, status: 503, headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: "Bridge request expired before dispatch." }),
+          completedAt: new Date().toISOString() });
+        return;
+      }
+      guard.awaitingAcknowledgement = policy.enabled && typeof request.expiresAt === "number";
+
       // Keep only the actual request allocation reserved while forwarding;
       // an abandoned small request must not retain a maximum-sized reservation.
       envelopeReadReservation.release();
@@ -1033,6 +1034,12 @@ export async function startSandboxCallbackBridgeWorker(input: {
           body: JSON.stringify({ error: denialReason }),
           completedAt: new Date().toISOString(),
         });
+        return;
+      }
+      if (policy.enabled && typeof request.expiresAt === "number" && request.expiresAt <= Date.now()) {
+        await finalize({ id: request.id, status: 503, headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: "Bridge request expired before dispatch." }),
+          completedAt: new Date().toISOString() });
         return;
       }
 
@@ -1120,7 +1127,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       // so the guard must stay in the map. The poll loop then skips the file and
       // does not re-run a possibly-committed mutation before the backstop writes
       // its 504.
-      if (guard.backstopTimer === undefined && inFlightRequestGuards.get(fileName) === guard) {
+      if (!guard.awaitingAcknowledgement && guard.backstopTimer === undefined && inFlightRequestGuards.get(fileName) === guard) {
         inFlightRequestGuards.delete(fileName);
       }
     }
@@ -1164,7 +1171,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         );
         // The 504 backstop reached the caller. Remove the request file, so the
         // poll loop does not list it again and re-run the mutation.
-        await input.client.remove(requestPath).catch(() => undefined);
+        if (!guard.awaitingAcknowledgement) await input.client.remove(requestPath).catch(() => undefined);
         return;
       } catch (error) {
         console.warn(
@@ -1280,6 +1287,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       const responsePath = path.posix.join(directories.responsesDir, fileName);
       const requestId = fileName.replace(/\.json$/i, "") || randomUUID();
       let responseId = requestId;
+      let awaitsAcknowledgement = false;
       try {
         const raw = await withTimeout(
           input.client.readTextFile(requestPath),
@@ -1290,6 +1298,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         if (typeof parsed.id === "string" && parsed.id.length > 0) {
           responseId = parsed.id;
         }
+        awaitsAcknowledgement = policy.enabled && typeof parsed.expiresAt === "number";
       } catch (error) {
         // The read or the parse failed, most likely on the same dead channel that
         // triggered this recovery. Keep the request file, so a later recovery pass
@@ -1338,6 +1347,13 @@ export async function startSandboxCallbackBridgeWorker(input: {
         }
       }
       if (wrote503) {
+        if (awaitsAcknowledgement) {
+          const terminalGuard = guard ?? { claim: "abandon" as const, controller: new AbortController(), finalized: true };
+          terminalGuard.awaitingAcknowledgement = true;
+          terminalGuard.finalized = true;
+          inFlightRequestGuards.set(fileName, terminalGuard);
+          continue;
+        }
         // The 503 landed. Remove the request file, so the poll loop does not
         // re-process it.
         await input.client.remove(requestPath).catch(() => undefined);
@@ -1467,6 +1483,12 @@ export async function startSandboxCallbackBridgeWorker(input: {
         // an exec storm against a real sandbox channel, and with an in-memory
         // client a pure-microtask loop that starves every timer in the process
         // (including the guard's own backstop and abort timers).
+        const listed = new Set(fileNames);
+        for (const [fileName, guard] of inFlightRequestGuards) {
+          if (guard.awaitingAcknowledgement && guard.finalized && guard.backstopTimer === undefined && !listed.has(fileName)) {
+            inFlightRequestGuards.delete(fileName);
+          }
+        }
         const actionableFileNames = fileNames.filter((fileName) => !inFlightRequestGuards.has(fileName));
         if (actionableFileNames.length === 0) {
           lastSuccessfulIterationAt = Date.now();
@@ -1497,7 +1519,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
                 : runWithRuntimeParent(input.getRuntimeParentContext?.(), () =>
                     processRequestFile(fileName),
                   ),
-              iterationTimeoutMs,
+              requestTimeoutMs,
               `Sandbox callback bridge process request ${fileName}`,
             );
             lastSuccessfulIterationAt = Date.now();
@@ -2146,8 +2168,9 @@ const port = Number(process.env.PAPERCLIP_BRIDGE_PORT || "0");
 // channel open. The nonce is a liveness signal, not authentication.
 const bridgeNonce = process.env.PAPERCLIP_BRIDGE_NONCE || "";
 const pollIntervalMs = Number(process.env.PAPERCLIP_BRIDGE_POLL_INTERVAL_MS || "100");
+const queueV2Enabled = !["false", "0"].includes((process.env.${SANDBOX_CALLBACK_QUEUE_V2_ENV} || "").trim().toLowerCase());
 const responseTimeoutMs = Number(
-  process.env.PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS || "${DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS}",
+  process.env.PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS || (bridgeMode === "queue_v1" && queueV2Enabled ? "120000" : "${DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS}"),
 );
 const maxQueueDepth = Number(process.env.PAPERCLIP_BRIDGE_MAX_QUEUE_DEPTH || "${DEFAULT_BRIDGE_MAX_QUEUE_DEPTH}");
 const maxBodyBytes = Number(process.env.PAPERCLIP_BRIDGE_MAX_BODY_BYTES || "${DEFAULT_BRIDGE_MAX_BODY_BYTES}");
@@ -2306,227 +2329,7 @@ function writeJsonResponse(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function runFileGateway() {
-  const requestsDir = path.posix.join(queueDir, "requests");
-  const responsesDir = path.posix.join(queueDir, "responses");
-  const logsDir = path.posix.join(queueDir, "logs");
-  const readyFile = path.posix.join(queueDir, "ready.json");
-
-  async function queueDepth() {
-    const entries = await fs.readdir(requestsDir, { withFileTypes: true }).catch(() => []);
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).length;
-  }
-
-  // Delete request files older than the response deadline. Every live caller
-  // cleans its own request file when it times out, so a file this old is an
-  // orphan: its writer was killed mid-wait, or a previous gateway process died
-  // and left its queue behind. Orphans otherwise count toward the queue-depth
-  // cap forever and wedge the gateway at a permanent 503.
-  async function sweepStaleRequests() {
-    const staleBefore = Date.now() - responseTimeoutMs - 2000;
-    const entries = await fs.readdir(requestsDir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const filePath = path.posix.join(requestsDir, entry.name);
-      const stats = await fs.stat(filePath).catch(() => null);
-      if (stats && stats.mtimeMs < staleBefore) {
-        await fs.rm(filePath, { force: true }).catch(() => undefined);
-      }
-    }
-  }
-
-  async function waitForResponse(requestId, reserveResponse) {
-    const responsePath = path.posix.join(responsesDir, \`\${requestId}.json\`);
-    const deadline = Date.now() + responseTimeoutMs;
-    while (Date.now() < deadline) {
-      const handle = await fs.open(responsePath, "r").catch(error => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
-      if (handle) {
-        try {
-          const stat = await handle.stat();
-          if (stat.size > sandboxBridgeEnvelopeLimit(maxBodyBytes)) throw new Error("Bridge response envelope exceeded the configured size limit.");
-          reserveResponse(6 * stat.size + 1);
-          const bytes = Buffer.alloc(stat.size + 1);
-          let length = 0;
-          while (length < bytes.length) {
-            const read = await handle.read(bytes, length, bytes.length - length, length);
-            if (!read.bytesRead) break;
-            length += read.bytesRead;
-          }
-          if (length !== stat.size) throw new Error("Bridge response envelope changed while reading.");
-          return JSON.parse(bytes.subarray(0, length).toString("utf8"));
-        } finally {
-          await handle.close();
-          await fs.rm(responsePath, { force: true }).catch(() => undefined);
-        }
-      }
-      await sleep(pollIntervalMs);
-    }
-    throw new Error("Timed out waiting for host bridge response.");
-  }
-
-  const server = createServer(async (req, res) => {
-    // readBodyBytes reserves the body's bytes against the process ledger and
-    // hands back a release function; this holds it so the finally below
-    // releases those bytes exactly once no matter how this handler ends —
-    // its normal completion, a thrown error, a client abort, or a deadline
-    // timeout all reach the same finally.
-    let releaseBodyReservation = null;
-    let envelopeReservation = 0;
-    let dispatched = false;
-    try {
-      const auth = req.headers.authorization || "";
-      const receivedToken = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
-      if (!tokensMatch(receivedToken)) {
-        writeJsonResponse(res, 401, { error: "Invalid bridge token." });
-        return;
-      }
-
-      if (await queueDepth() >= maxQueueDepth) {
-        // Reclaim orphaned request files before rejecting; only a queue that
-        // is genuinely full of live requests gets the 503.
-        await sweepStaleRequests();
-        if (await queueDepth() >= maxQueueDepth) {
-          writeJsonResponse(res, 503, { error: "Bridge request queue is full." });
-          return;
-        }
-      }
-
-      const url = new URL(req.url || "/", "http://127.0.0.1");
-      const contentType = typeof req.headers["content-type"] === "string" ? req.headers["content-type"] : "";
-      const multipartAttachment = req.method === "POST"
-        && /^\\/api\\/companies\\/[^/]+\\/issues\\/[^/]+\\/attachments$/.test(url.pathname)
-        && /^multipart\\/form-data(?:;|$)/i.test(contentType);
-      if (req.method && req.method !== "GET" && req.method !== "HEAD" && !/json/i.test(contentType) && !multipartAttachment) {
-        writeJsonResponse(res, 415, { error: "Bridge only accepts JSON request bodies." });
-        return;
-      }
-      const requestId = randomUUID();
-      // Reserve encoded envelopes and response decoding separately from the
-      // incoming byte buffers. Capacity rejection precedes dispatch, hence 503.
-      const { body: requestBody, release } = await readBodyBytes(req);
-      releaseBodyReservation = release;
-      const reserveBytes = 4 * sandboxBridgeEnvelopeLimit(requestBody.length);
-      if (!processBodyLedger.reserve(reserveBytes)) throw new BridgeProcessCapacityError();
-      envelopeReservation = reserveBytes;
-      const payload = {
-        id: requestId,
-        method: req.method || "GET",
-        path: url.pathname,
-        query: url.search,
-        headers: normalizeHeaders(req.headers),
-        ...encodeSandboxBridgeBody(multipartAttachment ? requestBody : requestBody.toString("utf8"), maxBodyBytes),
-        createdAt: new Date().toISOString(),
-      };
-      const requestPath = path.posix.join(requestsDir, \`\${requestId}.json\`);
-      const tempPath = \`\${requestPath}.tmp\`;
-      await fs.writeFile(tempPath, \`\${JSON.stringify(payload)}\\n\`, "utf8");
-      dispatched = true;
-      await fs.rename(tempPath, requestPath);
-
-      let response;
-      try {
-        response = await waitForResponse(requestId, bytes => {
-          if (!processBodyLedger.reserve(bytes)) throw new BridgeProcessCapacityError();
-          envelopeReservation += bytes;
-        });
-      } catch (error) {
-        // The host never delivered a response inside the deadline. Remove this
-        // request's file so it cannot pile up toward the queue-depth cap. The
-        // host's normal response write is guarded on the request file, so the
-        // removal also tells the host that no caller waits anymore. Without
-        // this cleanup a stalled host wedges the gateway at the cap and every
-        // later request gets an immediate 503 until run end.
-        await fs.rm(requestPath, { force: true }).catch(() => undefined);
-        throw error;
-      }
-      const responseHeaders = response.headers || {};
-      // The host marks a possibly-committed mutation with an indeterminate outcome.
-      // The host cannot cancel a host operation that is in flight, so the mutation
-      // may have committed before the worker aborted the handler. A 5xx status is
-      // retryable by convention, so a caller that retries 5xx would apply the
-      // mutation twice. Map the indeterminate outcome to a non-retryable 409, so a
-      // standard retry policy does not repeat the request. The outcome header and
-      // body stay, so a caller that reads them still sees the indeterminate result.
-      const bridgeOutcome = responseHeaders["x-paperclip-bridge-outcome"];
-      if (bridgeOutcome === "indeterminate") {
-        res.statusCode = 409;
-      } else {
-        res.statusCode = typeof response.status === "number" ? response.status : 200;
-      }
-      for (const [key, value] of Object.entries(responseHeaders)) {
-        if (typeof value !== "string" || key.toLowerCase() === "content-length") continue;
-        res.setHeader(key, value);
-      }
-      res.end(decodeSandboxBridgeBody(response, maxBodyBytes));
-    } catch (error) {
-      // Capacity rejection before dispatch is retryable. After a mutation was
-      // dispatched, a missing or corrupt receipt cannot prove that it failed.
-      const uncertainWrite = dispatched && !["GET", "HEAD", "OPTIONS", "TRACE"].includes(req.method || "GET");
-      const status = uncertainWrite ? 409 : error instanceof BridgeProcessCapacityError ? 503 : 502;
-      if (uncertainWrite) res.setHeader("x-paperclip-bridge-outcome", "indeterminate");
-      writeJsonResponse(res, status, {
-        error: error instanceof Error ? error.message : String(error),
-        ...(uncertainWrite ? { outcome: "indeterminate", retryable: false } : {}),
-      });
-    } finally {
-      releaseBodyReservation?.();
-      processBodyLedger.release(envelopeReservation);
-    }
-  });
-
-  async function shutdown() {
-    server.close(() => {
-      process.exit(0);
-    });
-  }
-
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
-
-  await fs.mkdir(requestsDir, { recursive: true });
-  await fs.mkdir(responsesDir, { recursive: true });
-  await fs.mkdir(logsDir, { recursive: true });
-
-  // Newer Node runtimes do not reliably surface a failed bind through
-  // uncaughtException here: with nothing else keeping the event loop alive,
-  // the process can drain and exit 0 before the error event is delivered
-  // (observed on Node 24/25; Node 22 delivered it). Attach an explicit error
-  // listener and pin the loop with a keepalive until the bind settles, so a
-  // startup failure exits 1 with the fault on stderr on every runtime.
-  const bindKeepalive = setInterval(() => {}, 1000);
-  server.once("error", (error) => {
-    clearInterval(bindKeepalive);
-    process.stderr.write(
-      "[paperclip-bridge] server error: " + (error && error.stack ? error.stack : String(error)) + "\\n",
-    );
-    if (!gatewayReady) {
-      process.exit(1);
-    }
-  });
-  server.listen(port, host, async () => {
-    clearInterval(bindKeepalive);
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      throw new Error("Bridge server did not expose a TCP address.");
-    }
-    const ready = {
-      pid: process.pid,
-      host,
-      port: address.port,
-      baseUrl: \`http://\${host}:\${address.port}\`,
-      startedAt: new Date().toISOString(),
-    };
-    const tempReadyFile = \`\${readyFile}.tmp\`;
-    await fs.writeFile(tempReadyFile, JSON.stringify(ready), "utf8");
-    await fs.rename(tempReadyFile, readyFile);
-    // The readiness file is on disk, so the host will adopt this process.
-    // From here on an uncaught fault must not kill the listener.
-    gatewayReady = true;
-  });
-}
+${sandboxCallbackFileGatewaySource()}
 
 // ---------------------------------------------------------------------------
 // http2_v1: run one Node HTTP/2 client session directly on stdin/stdout.
