@@ -501,7 +501,7 @@ import {
 } from "./agent-invokability.js";
 
 
-import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, preserveRunSecretRegistry } from "./run-secret-redaction.js";
 import { declaredSecretValues } from "./run-result-redaction.js";
 
 
@@ -3014,7 +3014,7 @@ export function heartbeatService(
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: preserveRunSecretRegistry(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -3157,6 +3157,7 @@ export function heartbeatService(
         } | null;
       } = { current: null };
       settleLegacyRestartLog = async () => {
+        await runOutput.flushRunLog();
         if (runOutput.handle) await runLogStore.finalize(runOutput.handle);
         await runOutput.flushOutputProgress({ force: true });
       };
@@ -3168,7 +3169,7 @@ export function heartbeatService(
             startedAt,
             sessionIdBefore:
               runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-            contextSnapshot: context,
+            contextSnapshot: preserveRunSecretRegistry(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id))

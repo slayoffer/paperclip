@@ -1,3 +1,4 @@
+import { createRunLogRedactor } from "../run-log-redactor.js";
 import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "../run-secret-redaction.js";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
@@ -32,6 +33,7 @@ export interface HeartbeatRunOutputInput {
 export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput) {
   const { run, runId, issueId, runLogStore, identityRedactor, secretKeys, appendRunEvent, getCurrentUserRedactionOptions } = input;
   let handle: RunLogHandle | null = null;
+  let bufferedLog: ReturnType<typeof createRunLogRedactor> | null = null;
   let stdoutExcerpt = "";
   let stderrExcerpt = "";
   let outputSeq = Number(run.lastOutputSeq ?? 0);
@@ -89,23 +91,20 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
 
     const currentUserRedactionOptions =
       await getCurrentUserRedactionOptions();
-        // SYNA-1817: the run's registered values for log chunks. Declared secret env values are known in memory; the
-        // run's registry (secrets read through the API mid-run) is re-read only when its in-process version changed.
-        let logRegistryValues: string[] = [];
-        let logRegistryVersion = -1;
-        const logRegisteredValues = async () => {
-          const version = runSecretRegistryVersion(run.id);
-          if (version !== logRegistryVersion) {
-            try {
-              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
-              logRegistryVersion = version;
-            } catch {
-              // Keep the previous values; the run row is scanned again when it is written.
-            }
-          }
-          return [...(input.readRunPersistSecrets?.() ?? []), ...logRegistryValues];
-        };
-    const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    // Refresh registry values when this process registers a new run secret.
+    let logRegistryValues: string[] = [];
+    let logRegistryVersion = -1;
+    const logRegisteredValues = async () => {
+      const version = runSecretRegistryVersion(run.id);
+      if (version !== logRegistryVersion) {
+        logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+        logRegistryVersion = version;
+      }
+      return [...(input.readRunPersistSecrets?.() ?? []), ...logRegistryValues];
+    };
+    bufferedLog = createRunLogRedactor({ values: logRegisteredValues, write: persistLog });
+    const appendIdentityRedactedLog = bufferedLog.append;
+    async function persistLog(stream: "stdout" | "stderr", chunk: string) {
       const sanitizedChunk = compactRunLogChunk(
         redactCurrentUserText(chunk, currentUserRedactionOptions),
         undefined,
@@ -181,7 +180,7 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
           truncated: payloadChunk.length !== sanitizedChunk.length,
         },
       });
-    };
+    }
     const onLog = (stream: "stdout" | "stderr", chunk: string) =>
       appendIdentityRedactedLog(stream, identityRedactor.chunk(stream, chunk));
     const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
@@ -224,6 +223,7 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
     get handle() { return handle; },
     outputProgressState,
     flushOutputProgress,
+    flushRunLog: () => bufferedLog?.flush() ?? Promise.resolve(),
     // Finalization awaits I/O and can receive more output before persisting excerpts.
     get stdoutExcerpt() { return stdoutExcerpt; },
     get stderrExcerpt() { return stderrExcerpt; },

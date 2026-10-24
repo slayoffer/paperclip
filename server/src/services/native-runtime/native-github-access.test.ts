@@ -67,7 +67,8 @@ duplex?: { enabled?: boolean; capability: boolean; unavailable?: boolean }) {
       duplexCommandStream: duplex.capability, runnerWebSocketIngress: false,
     } } : {}) } : null;
   const bridgeModes: (string | undefined)[] = [];
-  const result = await createNativeGitHubAccess({ scope, target, cwd: root,
+  const registerSecretValue = vi.fn(async (_value: string) => {});
+  const result = await createNativeGitHubAccess({ scope, target, cwd: root, registerSecretValue,
     env: { PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, PAPERCLIP_API_KEY: "old-run-api-key" }, resolveCredentials, onLog },
     bridgeUnavailable ? async () => { throw new Error("fixture bridge unavailable"); } : async input => {
       const bridge = await startAdapterExecutionTargetPaperclipBridge(input);
@@ -75,7 +76,7 @@ duplex?: { enabled?: boolean; capability: boolean; unavailable?: boolean }) {
       return bridge;
     });
   cleanups.push(result.stop);
-  return Object.assign(result, { root, resolveCredentials, execute, openDuplexChannel, bridgeModes });
+  return Object.assign(result, { root, resolveCredentials, execute, openDuplexChannel, bridgeModes, registerSecretValue });
 }
 function request(broker: NativeGitHubAccess, extra: RequestInit = {}, endpoint = "/runtime-tools/github/credentials") {
   return fetch(broker.env.PAPERCLIP_GITHUB_BROKER_URL + endpoint, {
@@ -257,4 +258,12 @@ it.each([false, true])("keeps anonymous launchers usable when the remote broker 
   });
   expect(result.stdout).toBe("anonymous");
   expect(b.resolveCredentials).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("registers generated broker and bridge values before launcher delivery (remote: %s)", async remote => {
+  const b = await broker(undefined, remote);
+  const registered = b.registerSecretValue.mock.calls.map(([value]) => value);
+  expect(registered).toContain(b.env.PAPERCLIP_GITHUB_BROKER_TOKEN);
+  expect(registered).toContain(b.env.PAPERCLIP_GITHUB_BRIDGE_TOKEN);
+  expect(registered).toHaveLength(remote ? 2 : 1);
 });

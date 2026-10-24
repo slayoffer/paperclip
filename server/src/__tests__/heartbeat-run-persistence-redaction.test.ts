@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -11,6 +11,7 @@ import { createRunSecretRedactionRegistry } from "../services/run-secret-redacti
 
 // SYNA-1817: persisted-row evidence. Real process runs print credential shapes; the stored row must not hold them.
 const support = await getEmbeddedPostgresTestSupport();
+if (!support.supported && process.env.PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TESTS === "1") throw new Error(support.reason ?? "Embedded Postgres is required");
 // Synthetic, well-formed but fake values.
 const BOARD_KEY = `pcp_board_${"0a1b2c3d4e5f".repeat(4)}`;
 const GH = `ghp_${"A1b2C3d4E5".repeat(4)}`;
@@ -21,6 +22,7 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => {
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "b".repeat(64));
     tempDb = await startEmbeddedPostgresTestDatabase("heartbeat-run-persistence-redaction-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
@@ -28,6 +30,7 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     await heartbeatService(db).drainActiveRunExecutions();
     await db?.$client?.end?.({ timeout: 0 });
     await tempDb?.cleanup();
+    vi.unstubAllEnvs();
   });
 
   async function seed(script: string, extra: Record<string, unknown> = {}) {

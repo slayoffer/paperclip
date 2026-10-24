@@ -9,6 +9,7 @@ import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { nativeExecutionUsesTaskWorkspace } from "./external-provider.js";
 import { readGitCacheRestoration } from "../git-workspace-restoration.js";
 import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
+import { preserveRunSecretRegistry } from "../run-secret-redaction.js";
 import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import {
   resolveWorkspaceAfterLowTrustPreflight,
@@ -1104,7 +1105,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     await db
       .update(heartbeatRuns)
       .set({
-        contextSnapshot: context,
+        contextSnapshot: preserveRunSecretRegistry(context),
         updatedAt: new Date(),
       })
       .where(eq(heartbeatRuns.id, run.id));
