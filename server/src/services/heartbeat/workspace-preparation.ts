@@ -121,6 +121,8 @@ export interface HeartbeatWorkspacePreparationInput {
     parsedIssueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
     /** The task environment differs from the reusable workspace binding. */
     separateTaskEnvironmentBinding: boolean;
+    /** An unsafe inherited workspace was replaced by an isolated one. */
+    workspaceReuseFallback: { warning: string } & Record<string, unknown> | null;
     executionPolicy: Parameters<typeof evaluateExecutionAllowlist>[0];
   };
   environment: {
@@ -195,6 +197,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     environmentExecutionWorkspaceSettings,
     parsedIssueExecutionWorkspaceSettings,
     separateTaskEnvironmentBinding,
+    workspaceReuseFallback,
     executionPolicy,
   } = input.policy;
   const {
@@ -798,12 +801,13 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     if (
       shouldSwitchIssueToExistingWorkspace &&
       (issueExecutionWorkspacePreferenceForRun !== "reuse_existing" ||
-        issueExecutionWorkspaceModeForRun !== nextIssueWorkspaceMode)
+        issueExecutionWorkspaceModeForRun !== nextIssueWorkspaceMode || Boolean(workspaceReuseFallback))
     ) {
       nextIssuePatch.executionWorkspacePreference = "reuse_existing";
       nextIssuePatch.executionWorkspaceSettings = {
         ...(parsedIssueExecutionWorkspaceSettings ?? {}),
         mode: nextIssueWorkspaceMode,
+        ...(workspaceReuseFallback ? { workspaceStrategy: parseObject(mergedConfig.workspaceStrategy) } : {}),
       };
     }
     if (Object.keys(nextIssuePatch).length > 0) {
@@ -880,6 +884,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     ...(taskWorkspaceOwner && !pluginPrepared ? { runnerTaskWorkspaceOwner: taskWorkspaceOwner } : {}),
     ...(providerFresh && pluginTaskWorkspace && !pluginPrepared ? { runnerTaskFreshWorkspace: providerFresh } : {}),
     ...(copyOnlyProvisioning ? { [CONTROLLER_PROVISION_COPY_ONLY]: true } : {}),
+    ...(workspaceReuseFallback ? { workspaceReuseFallback } : {}),
     ...(separateTaskEnvironmentBinding ? {
       taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
       createdByRuntime: false,

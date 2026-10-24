@@ -1,4 +1,5 @@
 import path from "node:path";
+import { parseObject } from "../../adapters/utils.js";
 import { copyLegacyRestartProviderState } from "../legacy-restart-provider-state.js";
 import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { describeOwnerSessionResetReason, shouldResetOwnerSessionForWake } from "../owner-sessions.js";
@@ -54,6 +55,7 @@ export interface HeartbeatSessionPreparationInput {
   };
   config: {
     runtimeConfig: Record<string, unknown>;
+    mergedConfig?: Record<string, unknown>;
     agentIdentity: { keyId: string } | undefined;
     issueAssigneeOverrides: unknown;
     originalAiIssueOverrides: unknown;
@@ -65,6 +67,7 @@ export interface HeartbeatSessionPreparationInput {
     routineEnvContext: { env: unknown };
   };
   workspace: Pick<WorkspaceInput["policy"], "requestedExecutionWorkspaceMode" | "effectiveExecutionWorkspaceMode" | "projectExecutionWorkspacePolicy" | "issueExecutionWorkspaceSettings" | "executionPolicy"> & {
+    workspaceReuseFallback?: WorkspaceInput["policy"]["workspaceReuseFallback"];
     requestedReusableExecutionWorkspaceConfig: NonNullable<WorkspaceInput["reuse"]["reusableExistingExecutionWorkspace"]>["config"] | null;
     reusableExistingExecutionWorkspace: WorkspaceInput["reuse"]["reusableExistingExecutionWorkspace"];
   };
@@ -107,7 +110,10 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
             ? workspaceProjectContext.updatedAt.toISOString()
             : (workspaceProjectContext?.updatedAt ?? null),
         projectPolicy: projectExecutionWorkspacePolicy,
-        issueSettings: issueExecutionWorkspaceSettings,
+        issueSettings: input.workspace.workspaceReuseFallback
+          ? { ...issueExecutionWorkspaceSettings, mode: "isolated_workspace",
+              workspaceStrategy: parseObject(input.config.mergedConfig?.workspaceStrategy) }
+          : issueExecutionWorkspaceSettings,
         reusableExecutionWorkspaceConfig:
           requestedReusableExecutionWorkspaceConfig,
         existingExecutionWorkspace: reusableExistingExecutionWorkspace

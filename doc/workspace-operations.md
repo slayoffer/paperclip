@@ -16,7 +16,12 @@ Its creation audit omits `inheritedExecutionWorkspaceFromIssueId`, including whe
 A requested branch that differs from the saved workspace branch requires a separate realization.
 
 Before cross-issue reuse, the runtime checks staged, unstaged, and untracked Git changes.
-A dirty workspace or failed status check causes `workspace_validation_failed`.
+A dirty workspace or failed status check prevents restoration of that workspace.
+For `reuse_existing`, dispatch selects a separate issue workspace before it applies inherited configuration.
+It saves the reason in the new workspace metadata and the run warnings.
+The issue saves its selected strategy. Later wakes use the same binding and strategy.
+They can resume that issue's own changes and provider session.
+An explicit branch request or suspended execution keeps its exact workspace and fails closed.
 The runtime does not repair or provision that workspace for the other issue.
 The source issue can resume its own dirty workspace.
 The check covers persisted bindings and registered worktrees selected by branch.

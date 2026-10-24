@@ -1,3 +1,4 @@
+import { isolatedWorkspaceReuseConfig, shouldKeepWorkspaceReuseIsolation } from "../workspace-reuse-fallback.js";
 import { agentHarnessType } from "@paperclipai/shared";
 import { observabilitySecretValues } from "@paperclipai/adapter-utils/agent-observability";
 import { agentObservabilityService, unavailableAgentObservability, type ResolvedAgentObservability } from "../agent-observability.js";
@@ -68,7 +69,13 @@ export interface HeartbeatExecutionConfigurationInput {
     aiBinding: AiConnectionBinding | undefined;
   };
   policy: Pick<HeartbeatWorkspacePreparationInput["policy"],
-    "trustPreset" | "useIsolatedTaskDirectory"> & { explicitTaskDirectory: boolean };
+    "trustPreset" | "useIsolatedTaskDirectory"> & {
+      explicitTaskDirectory: boolean;
+      workspaceReuseIsolation?: Pick<EnvironmentSelection,
+        "workspaceReuseFallback" | "requestedReuseBranch" | "reusableExistingExecutionWorkspace" | "requestedExecutionWorkspaceMode"> & {
+          issueIdentifier?: string | null;
+        };
+    };
   environment: Pick<EnvironmentSelection,
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
   services: {
@@ -117,6 +124,17 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     // preserving isolated mode and the mandatory sandbox preflight.
     ...((useIsolatedTaskDirectory || explicitTaskDirectory) ? { workspaceStrategy: { type: "project_primary" } } : {}),
   };
+  const isolation = input.policy.workspaceReuseIsolation;
+  if (issueId && isolation && !useIsolatedTaskDirectory && !explicitTaskDirectory
+    && (isolation.workspaceReuseFallback || shouldKeepWorkspaceReuseIsolation({
+      issueId, workspace: isolation.reusableExistingExecutionWorkspace,
+      requestedExistingBranch: isolation.requestedReuseBranch,
+      operatorBranch: isolation.requestedExecutionWorkspaceMode === "operator_branch",
+    }))) {
+    Object.assign(mergedConfig, isolatedWorkspaceReuseConfig({
+      config: mergedConfig, issueId, issueIdentifier: isolation.issueIdentifier,
+    }));
+  }
   const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
     mergedConfig,
     selectedEnvironmentId,

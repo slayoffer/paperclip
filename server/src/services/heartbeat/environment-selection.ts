@@ -3,6 +3,7 @@ import { heartbeatRuns, issues, type Db, type agents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { readGitCacheExpiration } from "../git-workspace-restoration.js";
 import type { ExecutionWorkspace, IssueExecutionWorkspaceSettings, ProjectExecutionWorkspacePolicy } from "@paperclipai/shared";
+import { resolveWorkspaceReuseSelection } from "../workspace-reuse-fallback.js";
 import { parseObject } from "../../adapters/utils.js";
 import { logger } from "../../middleware/logger.js";
 import { parseNativeExecutionInput } from "../../vendor/paperclip-runner/index.js";
@@ -34,7 +35,7 @@ import { ConfigurationIncompleteFailure } from "./run-preparation.js";
 import { assertEnvironmentSelectionForCompany } from "../environment-selection.js";
 import { requiresTaskEnvironmentBinding } from "../execution-workspaces.js";
 import type { environmentRunOrchestrator } from "../environment-run-orchestrator.js";
-import { resolveNativeRecoveryExecutionWorkspaceBinding, resolveExecutionWorkspaceReuseRequestForIssue } from "./workspaces.js";
+import { resolveNativeRecoveryExecutionWorkspaceBinding } from "./workspaces.js";
 
 type Issue = typeof issues.$inferSelect;
 
@@ -93,9 +94,11 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const { run, agent } = input;
   const { issueRef, issueContext, issueId, context, executionProjectId, workspaceProjectContext, boundSourceWorkspace, hasSelectedWorkspaceSource, taskWorkspaceIntent, responsibleUserId } = input.task;
   const {
-    trustPreset, requestedExecutionWorkspaceMode, isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
+    trustPreset, isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
     projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, environmentExecutionWorkspaceSettings,
   } = input.policy;
+  // An unsafe inherited workspace switches this run to an isolated workspace.
+  let requestedExecutionWorkspaceMode = input.policy.requestedExecutionWorkspaceMode;
   const { config, sourceWorkspaceConfig, issueAssigneeOverrides } = input.config;
   const { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder, envOrchestrator } = input.services;
   // A native run's execution input is immutable once persisted. Recovery must therefore
@@ -152,30 +155,18 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       persistedWorkspaceFound: existingExecutionWorkspace !== null,
     });
   // Native and legacy restart recovery both bind the run to its saved workspace.
-  const recoveryExecutionWorkspaceId =
-    resolveNativeRecoveryExecutionWorkspaceBinding({
-      bindingId: persistedRecoveryExecutionWorkspaceId,
-      persistedWorkspaceFound: existingExecutionWorkspace !== null,
-    });
-  const workspaceReuseRequest =
-    resolveExecutionWorkspaceReuseRequestForIssue({
-      issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-      issueExecutionWorkspacePreference: isDotRun ? null : recoveryExecutionWorkspaceId
-        ? "reuse_existing"
-        : (issueRef?.executionWorkspacePreference ?? null),
-      existingExecutionWorkspaceStatus:
-        existingExecutionWorkspace?.status ?? null,
-      requestedExistingBranch: recoveryExecutionWorkspaceId
-        ? null
-        : environmentExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
-      existingExecutionWorkspaceBranchName: existingExecutionWorkspace?.branchName,
-    });
-  const requestedShouldReuseExisting =
-    workspaceReuseRequest.requestedShouldReuseExisting;
-  const reusableExistingExecutionWorkspace =
-    workspaceReuseRequest.existingExecutionWorkspaceAvailable
-      ? existingExecutionWorkspace
-      : null;
+  const { recoveryExecutionWorkspaceId, requestedReuseBranch, workspaceReuseRequest,
+    workspaceReuseFallback, requestedShouldReuseExisting, reusableExistingExecutionWorkspace,
+  } = await resolveWorkspaceReuseSelection({
+    db, companyId: agent.companyId, issueId: issueRef?.id,
+    requestedExecutionWorkspaceId, persistedRecoveryExecutionWorkspaceId, existingExecutionWorkspace,
+    preference: isDotRun ? null : issueRef?.executionWorkspacePreference,
+    operatorBranch: requestedExecutionWorkspaceMode === "operator_branch",
+    strategies: [environmentExecutionWorkspaceSettings?.workspaceStrategy,
+      issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
+      config.workspaceStrategy, projectExecutionWorkspacePolicy?.workspaceStrategy],
+  });
+  if (workspaceReuseFallback) requestedExecutionWorkspaceMode = "isolated_workspace";
   const workspaceAuthorizationActor = { type: "agent" as const, agentId: agent.id, companyId: agent.companyId,
     source: "agent_jwt" as const, runId: run.id, onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
   if (!isDotRun && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !recoveryExecutionWorkspaceId) {
@@ -515,7 +506,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       preserveImplicitDefaultSettings: ["project", "task_default"].includes(taskWorkspaceIntent.source) });
   }
   const explicitTaskDirectory = !isDotRun && taskWorkspaceIntent?.selection.kind === "task_directory";
-  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && ((fresh && !workspaceProjectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
+  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && (((fresh || Boolean(workspaceReuseFallback)) && !workspaceProjectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
     trustPreset: trustPreset.kind,
     environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
     mode: requestedExecutionWorkspaceMode,
@@ -529,6 +520,9 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     ],
   }));
   return {
+    requestedExecutionWorkspaceMode,
+    workspaceReuseFallback,
+    requestedReuseBranch,
     persistedRunnerProfile,
     persistedNativeExecutionInput,
     isDotRun,

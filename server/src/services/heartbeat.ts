@@ -2548,7 +2548,7 @@ export function heartbeatService(
         legacyUseProjectWorkspace:
           issueAssigneeOverrides?.useProjectWorkspace ?? null,
       });
-      const requestedExecutionWorkspaceMode = freshWorkspace?.mode === "fresh_isolated_workspace"
+      let requestedExecutionWorkspaceMode = freshWorkspace?.mode === "fresh_isolated_workspace"
         ? "isolated_workspace" : trustPreset.kind === "low_trust_review" &&
         resolvedExecutionWorkspaceMode === "shared_workspace"
           ? "isolated_workspace"
@@ -2585,7 +2585,7 @@ export function heartbeatService(
         policy: { trustPreset, experimentalInstanceSettings, recovering: Boolean(runOptions.nativeRestartRecovery || runOptions.nativeLeaseOwner) },
         services: { issuesSvc, getPinnedSkillTestContext },
       });
-      const sourceWorkspaceConfig = buildExecutionWorkspaceAdapterConfig({
+      const sourceWorkspaceConfigInput = {
         agentConfig: config,
         projectPolicy: projectExecutionWorkspacePolicy,
         issueSettings: issueExecutionWorkspaceSettings,
@@ -2596,8 +2596,12 @@ export function heartbeatService(
           ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
           ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
         },
-      });
+      };
+      const sourceWorkspaceConfig = buildExecutionWorkspaceAdapterConfig(sourceWorkspaceConfigInput);
       const {
+        requestedExecutionWorkspaceMode: selectedExecutionWorkspaceMode,
+        workspaceReuseFallback,
+        requestedReuseBranch,
         persistedRunnerProfile,
         persistedNativeExecutionInput,
         isDotRun,
@@ -2633,12 +2637,18 @@ export function heartbeatService(
         config: { config, sourceWorkspaceConfig, issueAssigneeOverrides },
         services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder, envOrchestrator },
       }));
+      const selectedSourceWorkspaceConfig = selectedExecutionWorkspaceMode === requestedExecutionWorkspaceMode
+        ? sourceWorkspaceConfig
+        : buildExecutionWorkspaceAdapterConfig({ ...sourceWorkspaceConfigInput, mode: selectedExecutionWorkspaceMode });
+      requestedExecutionWorkspaceMode = selectedExecutionWorkspaceMode;
       let nativeChatExpectedCwd = selectedNativeChatExpectedCwd;
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {
         run, agent,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext },
-        config: { sourceWorkspaceConfig, aiBinding },
-        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory },
+        config: { sourceWorkspaceConfig: selectedSourceWorkspaceConfig, aiBinding },
+        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory,
+          workspaceReuseIsolation: { workspaceReuseFallback, requestedReuseBranch, reusableExistingExecutionWorkspace,
+            requestedExecutionWorkspaceMode, issueIdentifier: issueRef?.identifier } },
         environment: { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput },
         services: { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral },
         onFailureSecretsResolved: (readSecrets) => { readFailureReportSecrets = () => [...readSecrets(), ...identityRedactor.values]; runLifecycle.rememberRunPersistSecrets(run.id, readSecrets); },
@@ -2667,12 +2677,13 @@ export function heartbeatService(
         task: { context, issueRef, issueContext, taskProjectContext, workspaceProjectContext, wakeCommentId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision },
         session: { taskSession, taskSessionDecodedParams, explicitResumeSessionParams, explicitResumeSessionDisplayId, sessionCodec },
         config: {
-          runtimeConfig, agentIdentity, issueAssigneeOverrides, originalAiIssueOverrides,
+          runtimeConfig, mergedConfig, agentIdentity, issueAssigneeOverrides, originalAiIssueOverrides,
           managedAiRuntime, aiBinding, requestedAiBinding, secretManifest, runtimeSkillEntries, routineEnvContext,
         },
         workspace: {
           requestedExecutionWorkspaceMode, effectiveExecutionWorkspaceMode, projectExecutionWorkspacePolicy,
           issueExecutionWorkspaceSettings, executionPolicy, requestedReusableExecutionWorkspaceConfig, reusableExistingExecutionWorkspace,
+          workspaceReuseFallback,
         },
         environment: { environmentResolution, selectedEnvironmentId, selectedEnvironmentForConfig },
         getLatestAgentConfigRevision,
@@ -2721,6 +2732,7 @@ export function heartbeatService(
           environmentExecutionWorkspaceSettings,
           parsedIssueExecutionWorkspaceSettings,
           separateTaskEnvironmentBinding,
+          workspaceReuseFallback,
           executionPolicy,
         },
         environment: {
@@ -3034,6 +3046,7 @@ export function heartbeatService(
       const runtimeWorkspaceWarnings = [
         ...resolvedWorkspace.warnings,
         ...executionWorkspace.warnings,
+        ...(workspaceReuseFallback ? [workspaceReuseFallback.warning] : []),
         ...(runtimeSessionResolution.warning
           ? [runtimeSessionResolution.warning]
           : []),
