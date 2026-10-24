@@ -1820,6 +1820,12 @@ entries. Close-readiness checks, the terminal-workspace reaper, and the final
 cleanup validation still inspect Git afresh. A display result never authorizes
 worktree removal.
 
+Cross-issue ownership checks exclude closed and archived execution workspaces.
+A project-less agent-home folder can be outside a Git repository. This exception
+requires Git's explicit non-repository result and no `.git` entry in the folder
+or its ancestors. Dirty Git folders, damaged repositories, and other inspection
+failures retain the reuse guard.
+
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their
 tools run in plugin workers and do not have remote MCP endpoints. These rows

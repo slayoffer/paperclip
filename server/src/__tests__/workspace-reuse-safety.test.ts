@@ -99,6 +99,63 @@ const support = await getEmbeddedPostgresTestSupport();
   });
   afterAll(async () => { await tempDb?.cleanup(); });
 
+  it.each(["closed", "archived"])("ignores %s foreign workspace records", async (status) => {
+    const f = await fixture();
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Old workspace",
+      cwd: f.root, providerRef: f.root, status });
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "unfinished work\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: f.root });
+    expect(await fs.readFile(path.join(f.root, "tracked.txt"), "utf8")).toBe("unfinished work\n");
+  });
+
+  it("does not let an archived owner bypass an active foreign workspace", async () => {
+    const f = await fixture();
+    await db.insert(issues).values({ id: childIssueId, companyId, projectId, title: "Child" });
+    await db.insert(executionWorkspaces).values([
+      { companyId, projectId, sourceIssueId: childIssueId, status: "archived",
+        mode: "shared_workspace", strategyType: "project_primary", name: "Old owner", cwd: f.root },
+      { companyId, projectId, sourceIssueId, status: "active",
+        mode: "shared_workspace", strategyType: "project_primary", name: "Current owner", cwd: f.root },
+    ]);
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "parent work\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed" });
+  });
+
+  it("permits a project-less home outside Git despite an active foreign record", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-reuse-home-"));
+    roots.push(root);
+    await fs.writeFile(path.join(root, "notes.txt"), "home notes\n");
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Legacy home", cwd: root });
+    const base = { baseCwd: root, source: "agent_home" as const, projectId: null,
+      workspaceId: null, repoUrl: null, repoRef: null };
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: root, source: "agent_home", projectId: null });
+    expect(await fs.readFile(path.join(root, "notes.txt"), "utf8")).toBe("home notes\n");
+    await expect(realizeExecutionWorkspace({ db, base: { ...base, projectId }, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed" });
+    await fs.mkdir(path.join(root, ".git"));
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+        workspaceValidation: { cleanliness: "unknown" },
+      } });
+  });
+
+  it("still protects foreign changes when a project-less home is a Git repository", async () => {
+    const f = await fixture();
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Home repository", cwd: f.root });
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "parent work\n");
+    await expect(realizeExecutionWorkspace({ db,
+      base: { ...f.base, source: "agent_home", projectId: null }, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+        workspaceValidation: { cleanliness: "dirty" },
+      } });
+  });
+
   it("creates the child from its base ref and preserves the dirty parent", async () => {
     const f = await fixture();
     const baseSha = await git(f.root, "rev-parse", "base");
