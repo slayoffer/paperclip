@@ -6,8 +6,7 @@ import { isReviewBridgeWait } from "./review-bridge-contract.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { hasSavedReviewWait, parseReviewHandoffManifest } from "./review-wait.js";
 
-// Known defect with integrity enabled: duplicate parent wake (r18 P1), tracked in SYNA-2572.
-// Keep this flag OFF until SYNA-2572 merges.
+// Activation requires the operator's release and live qualification checks.
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PAPERCLIP_BLOCKED_STATE_INTEGRITY === "true";
 }
