@@ -91,6 +91,7 @@ import type { NativeExecutionInput, NativeSessionBackend } from "../../vendor/pa
 import type { PluginWorkerManager } from "../plugin-worker-manager.js";
 import type { RealizedExecutionWorkspace } from "../workspace-runtime.js";
 import type { reserveWarmNativeInstructionDirectory } from "../native-runtime/index.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 
 type Selection = HeartbeatRuntimeSelectionInput;
 type Selected = Extract<HeartbeatRuntimeSelectionResult, { selected: true }>;
@@ -251,6 +252,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           localAgentJwtScope,
         )
       : null;
+  if (authToken) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, authToken);
   if (
     nativeRuntimeResolution.kind === "legacy" &&
     adapter.supportsLocalAgentJwt &&
@@ -508,6 +510,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         runId: run.id,
         expectedAssignmentDigest: expectedNativeMcpDigest,
       });
+      for (const server of nativeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
       if ("runtimeContext" in nativeExecution) {
         if (nativeMcpServers.length > 1)
           throw new Error(
@@ -745,6 +748,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         runId: run.id,
         responsibleUserId: run.responsibleUserId,
       });
+      if (runtimeTools) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, runtimeTools.bearerToken);
       if (!runtimeTools) {
         logger.warn(
           {
@@ -760,6 +764,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         agent,
         runId: run.id,
       });
+      for (const server of runtimeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
       const runtimeToolDelivery =
         adapter.runtimeToolDelivery ?? "invocation_context";
       if (runtimeTools && runtimeToolDelivery === "native_mcp") {
@@ -815,6 +820,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                 : undefined,
               runtimeMcp,
               runtimeTools,
+              registerSecretValue: (value) => createRunSecretRedactionRegistry(db).register(run.companyId, run.id, value),
               onLog,
               onMeta: onAdapterMeta,
               onEvent: onAdapterEvent,

@@ -563,7 +563,8 @@ import {
   redactCurrentUserText,
 } from "../log-redaction.js";
 
-import { createRunSecretRedactionRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, preserveRunSecretRegistry, runSecretRegistryVersion } from "./run-secret-redaction.js";
+import { createRunLogRedactor } from "./run-log-redactor.js";
 import { declaredSecretValues } from "./run-result-redaction.js";
 
 import {
@@ -3776,7 +3777,7 @@ export function heartbeatService(
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: preserveRunSecretRegistry(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -4056,6 +4057,7 @@ export function heartbeatService(
         },
       };
 
+      let flushRunLog: (() => Promise<void>) | undefined;
       let handle: RunLogHandle | null = null;
       const goalCheckpointSession: {
         current: {
@@ -4111,7 +4113,7 @@ export function heartbeatService(
             startedAt,
             sessionIdBefore:
               runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-            contextSnapshot: context,
+            contextSnapshot: preserveRunSecretRegistry(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id))
@@ -4205,16 +4207,15 @@ export function heartbeatService(
         const logRegisteredValues = async () => {
           const version = runSecretRegistryVersion(run.id);
           if (version !== logRegistryVersion) {
-            try {
-              logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
-              logRegistryVersion = version;
-            } catch {
-              // Keep the previous values; the run row is scanned again when it is written.
-            }
+            logRegistryValues = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+            logRegistryVersion = version;
           }
           return [...runLifecycle.readRunPersistSecrets(run.id), ...logRegistryValues];
         };
-        const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const bufferedLog = createRunLogRedactor({ values: logRegisteredValues, write: persistLog });
+        flushRunLog = () => bufferedLog.flush();
+        const appendIdentityRedactedLog = bufferedLog.append;
+        async function persistLog(stream: "stdout" | "stderr", chunk: string) {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
             undefined,
@@ -4290,7 +4291,7 @@ export function heartbeatService(
               truncated: payloadChunk.length !== sanitizedChunk.length,
             },
           });
-        };
+        }
         const onLog = (stream: "stdout" | "stderr", chunk: string) =>
           appendIdentityRedactedLog(stream, identityRedactor.chunk(stream, chunk));
         if (runScopedMentionedSkillKeys.length > 0) {
@@ -4354,7 +4355,7 @@ export function heartbeatService(
           await db
             .update(heartbeatRuns)
             .set({
-              contextSnapshot: context,
+              contextSnapshot: preserveRunSecretRegistry(context),
               updatedAt: new Date(),
             })
             .where(eq(heartbeatRuns.id, run.id));
@@ -4799,7 +4800,7 @@ export function heartbeatService(
           await db
             .update(heartbeatRuns)
             .set({
-              contextSnapshot: context,
+              contextSnapshot: preserveRunSecretRegistry(context),
               updatedAt: new Date(),
             })
             .where(eq(heartbeatRuns.id, run.id));
@@ -4824,7 +4825,7 @@ export function heartbeatService(
         await runCompletion.completeRun({
           run, agent, issueId, issueRef, signal: executionControl.controller.signal,
           output: {
-            handle, outputProgressState, flushOutputProgress,
+            handle, outputProgressState, flushOutputProgress, flushRunLog,
             get stdoutExcerpt() { return stdoutExcerpt; },
             get stderrExcerpt() { return stderrExcerpt; },
           },
@@ -4963,7 +4964,7 @@ export function heartbeatService(
         await runCompletion.failRun({
           run, agent, issueId, issueRef, signal: executionControl.controller.signal,
           output: {
-            handle, outputProgressState, flushOutputProgress,
+            handle, outputProgressState, flushOutputProgress, flushRunLog,
             get stdoutExcerpt() { return stdoutExcerpt; },
             get stderrExcerpt() { return stderrExcerpt; },
           },

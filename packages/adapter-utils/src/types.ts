@@ -269,6 +269,8 @@ export interface AdapterExecutionContext {
   };
   runtimeMcp?: AdapterRuntimeMcpAccess;
   runtimeTools?: AdapterRuntimeToolAccess;
+  /** Register a generated secret before the adapter exposes it to output or a process. */
+  registerSecretValue?: (value: string) => Promise<void>;
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onEvent?: (event: AdapterRuntimeEvent) => Promise<void>;

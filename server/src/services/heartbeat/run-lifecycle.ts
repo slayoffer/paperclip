@@ -969,7 +969,14 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     try {
       registered = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
     } catch (err) {
-      logger.warn({ err, runId: run.id }, "run secret registry unavailable; masking token shapes and declared values only");
+      logger.warn({ runId: run.id }, "run secret registry unavailable; suppressing persisted output");
+      return {
+        ...patch,
+        ...(patch.error != null ? { error: "***REDACTED***" } : {}),
+        ...(patch.stdoutExcerpt != null ? { stdoutExcerpt: "***REDACTED***" } : {}),
+        ...(patch.stderrExcerpt != null ? { stderrExcerpt: "***REDACTED***" } : {}),
+        ...(patch.resultJson != null ? { resultJson: { redactionUnavailable: true } } : {}),
+      };
     }
     const declared = readRunPersistSecrets(run.id);
     return redactRunPersistencePatch(patch, [...declared, ...registered]);
