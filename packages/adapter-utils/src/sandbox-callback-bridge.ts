@@ -22,6 +22,7 @@ import {
   type SandboxCallbackBridgeBody,
 } from "./sandbox-callback-bridge-body.js";
 import type { BridgeBodyReservation } from "./http2-bridge-server.js";
+import { withBridgeProgressTimeout } from "./bridge-progress-timeout.js";
 
 import {
   runWithoutActiveStep,
@@ -56,10 +57,9 @@ const DEFAULT_BRIDGE_MAX_QUEUE_DEPTH = 64;
 // never fails at the bridge before the server ever sees it.
 const BRIDGE_MULTIPART_FRAMING_HEADROOM_BYTES = 64 * 1024;
 const DEFAULT_BRIDGE_MAX_BODY_BYTES = 10 * 1024 * 1024 + BRIDGE_MULTIPART_FRAMING_HEADROOM_BYTES;
-// Per-iteration timeout for one poll-loop client call. A healthy control-plane
-// round trip finishes in well under one second, so 10s is far above a normal
-// iteration and never false-fires on a slow-but-live call. It is also well
-// under the in-sandbox 30s response deadline
+// A request has separate read, handler, publication, and cleanup stages. Each
+// completed stage renews this deadline. Their combined time is not a stall.
+// The deadline for a stage stays below the in-sandbox 30s response deadline
 // (PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS), so the host loop fails fast and writes
 // 503 responses before the in-sandbox client gives up. A silently unresponsive
 // sandbox channel makes a client call hang with no reject; this timeout turns
@@ -67,8 +67,8 @@ const DEFAULT_BRIDGE_MAX_BODY_BYTES = 10 * 1024 * 1024 + BRIDGE_MULTIPART_FRAMIN
 // the watchdog below decides when to fail the queued requests.
 const DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS = 10_000;
 // Watchdog backstop for a hang that the per-iteration timeout does not catch
-// (for example many slow-but-under-timeout calls, or a stall outside the awaited
-// calls). It is larger than one iteration timeout, so a single slow iteration
+// (for example a stall outside the awaited calls). Completed request stages
+// also renew the watchdog. It is larger than one iteration timeout, so a slow stage
 // never trips it, and it stays under the in-sandbox 30s response deadline.
 const DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS = 20_000;
 // Grace period the recovery path gives an aborted in-flight handler to finalize
@@ -729,11 +729,11 @@ export async function startSandboxCallbackBridgeWorker(input: {
   client: SandboxCallbackBridgeQueueClient;
   queueDir: string;
   pollIntervalMs?: number | null;
-  // Per-iteration timeout for one poll-loop client call (the `listJsonFiles`
-  // poll and one `processRequestFile`). On timeout the loop `catch` runs
+  // Timeout for a poll call or a request stage without progress. Each completed
+  // request stage renews the deadline. On timeout the loop `catch` runs
   // `failPendingRequests`. Defaults to DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS.
   iterationTimeoutMs?: number | null;
-  // Watchdog threshold. When the loop makes no successful iteration within this
+  // Watchdog threshold. When the loop makes no successful stage within this
   // time, the watchdog runs `failPendingRequests` and surfaces a run-level error
   // through `runtimeSpan`. Defaults to DEFAULT_BRIDGE_WATCHDOG_TIMEOUT_MS.
   watchdogTimeoutMs?: number | null;
@@ -869,7 +869,10 @@ export async function startSandboxCallbackBridgeWorker(input: {
   };
   const inFlightRequestGuards = new Map<string, RequestFinalizeGuard>();
 
-  const processRequestFile = async (fileName: string) => {
+  const processRequestFile = async (
+    fileName: string,
+    completeStage: <T>(stage: Promise<T>) => Promise<T>,
+  ) => {
     // Skip a request that already has an active attempt. The guard map holds only
     // in-flight attempts; the attempt's finally removes its guard when it ends. A
     // file that still has a guard is in flight, or it waits for its aborted-handler
@@ -929,12 +932,12 @@ export async function startSandboxCallbackBridgeWorker(input: {
       let lastWriteError = "Sandbox callback bridge could not write the handler response.";
       for (let attempt = 1; attempt <= MAX_BACKSTOP_WRITE_ATTEMPTS; attempt += 1) {
         try {
-          await withTimeout(
+          await completeStage(withTimeout(
             writeBridgeResponse(input.client, requestPath, responsePath, response),
             iterationTimeoutMs,
             `Sandbox callback bridge write response for ${response.id}`,
-          );
-          await input.client.remove(requestPath).catch(() => undefined);
+          ));
+          await completeStage(input.client.remove(requestPath)).catch(() => undefined);
           return;
         } catch (error) {
           lastWriteError = error instanceof Error ? error.message : String(error);
@@ -961,7 +964,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       // clients stat first so a high configured file limit does not reserve that
       // whole limit for a tiny request. Older clients use the conservative cap.
       const envelopeBytes = input.client.fileSize
-        ? await input.client.fileSize(requestPath).catch(() => maxEnvelopeBytes)
+        ? await completeStage(input.client.fileSize(requestPath)).catch(() => maxEnvelopeBytes)
         : maxEnvelopeBytes;
       if (envelopeBytes > maxEnvelopeBytes) {
         await finalize({
@@ -983,7 +986,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       }
       let raw: string;
       try {
-        raw = await input.client.readTextFile(requestPath, readLimit);
+        raw = await completeStage(input.client.readTextFile(requestPath, readLimit));
       } catch (error) {
         // The gateway deletes a request file when its caller stops waiting
         // (client-side timeout cleanup). A read that fails because the file is
@@ -991,7 +994,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         // vanished and skip quietly instead of escalating into a recovery
         // pass. A file that is still listed rethrows, so a real read fault
         // keeps its existing handling.
-        const remaining = await input.client.listJsonFiles(directories.requestsDir).catch(() => null);
+        const remaining = await completeStage(input.client.listJsonFiles(directories.requestsDir)).catch(() => null);
         if (remaining !== null && !remaining.includes(fileName)) {
           return;
         }
@@ -1024,7 +1027,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
           completedAt: new Date().toISOString() });
         return;
       }
-      const denialReason = await authorizeRequest(request);
+      const denialReason = await completeStage(Promise.resolve(authorizeRequest(request)));
       if (denialReason) {
         await finalize({
           id: request.id,
@@ -1051,9 +1054,9 @@ export async function startSandboxCallbackBridgeWorker(input: {
       let handlerReturned = false;
       try {
         const { bodyEncoding, ...forwardRequest } = request;
-        const result = await input.handleRequest({ ...forwardRequest,
+        const result = await completeStage(input.handleRequest({ ...forwardRequest,
           body: bodyEncoding === "base64" ? decodeSandboxBridgeBody(request, maxBodyBytes) : request.body,
-        }, { signal: guard.controller.signal, reservation });
+        }, { signal: guard.controller.signal, reservation }));
         handlerReturned = true;
         const responseBytes = Buffer.byteLength(result.body ?? "");
         if (responseBytes > maxBodyBytes) throw new Error("Bridge response body exceeded the configured size limit.");
@@ -1369,10 +1372,9 @@ export async function startSandboxCallbackBridgeWorker(input: {
     console.warn(`[paperclip] ${error.message}`);
   };
 
-  // The timestamp of the last successful loop iteration. The watchdog compares
-  // it to the current time. The idle branch and every processed request update
-  // it, so steady progress keeps the watchdog re-armed.
-  let lastSuccessfulIterationAt = Date.now();
+  // The watchdog measures time without a completed stage. A request can take
+  // longer than one deadline while its individual stages continue to finish.
+  let lastProgressAt = Date.now();
   let watchdogTrippedAt: number | null = null;
   let watchdogTripInFlight = false;
   // Check often enough to fire soon after the threshold, but not so often that
@@ -1404,12 +1406,11 @@ export async function startSandboxCallbackBridgeWorker(input: {
     // process open. The loop `finally` clears it on every exit.
     const watchdogTimer = setInterval(() => {
       if (settled || stopping) return;
-      const idleMs = Date.now() - lastSuccessfulIterationAt;
+      const idleMs = Date.now() - lastProgressAt;
       if (idleMs < watchdogTimeoutMs) return;
       // Fire once per hang period. Re-arm only after the loop advances
-      // `lastSuccessfulIterationAt` past the last trip (a new successful
-      // iteration), so a persistent hang never fires the watchdog repeatedly.
-      if (watchdogTrippedAt !== null && watchdogTrippedAt >= lastSuccessfulIterationAt) return;
+      // `lastProgressAt` past the last trip (a completed stage), so a persistent hang never fires the watchdog repeatedly.
+      if (watchdogTrippedAt !== null && watchdogTrippedAt >= lastProgressAt) return;
       if (watchdogTripInFlight) return;
       watchdogTrippedAt = Date.now();
       watchdogTripInFlight = true;
@@ -1469,7 +1470,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         // (including the guard's own backstop and abort timers).
         const actionableFileNames = fileNames.filter((fileName) => !inFlightRequestGuards.has(fileName));
         if (actionableFileNames.length === 0) {
-          lastSuccessfulIterationAt = Date.now();
+          lastProgressAt = Date.now();
           if (stopping) {
             break;
           }
@@ -1487,20 +1488,23 @@ export async function startSandboxCallbackBridgeWorker(input: {
             // live parent switches to `agent.turn` during the turn and back to
             // `task.run` after it. Without a runner, the request runs under the
             // run parent with no wrapper span, exactly like the earlier behavior.
-            // The per-iteration timeout wraps the whole request, so a hung
-            // request rejects and the catch below runs the recovery pass.
-            await withTimeout(
-              input.runtimeSpan
+            // Renew the request deadline after each completed stage. A stalled
+            // stage still rejects and reaches the existing recovery guards.
+            await withBridgeProgressTimeout(
+              (completeStage) => input.runtimeSpan
                 ? input.runtimeSpan(CALLBACK_BRIDGE_RELAY_REQUEST_SPAN, () =>
-                    processRequestFile(fileName),
+                    processRequestFile(fileName, completeStage),
                   )
                 : runWithRuntimeParent(input.getRuntimeParentContext?.(), () =>
-                    processRequestFile(fileName),
+                    processRequestFile(fileName, completeStage),
                   ),
               iterationTimeoutMs,
               `Sandbox callback bridge process request ${fileName}`,
+              () => {
+                lastProgressAt = Date.now();
+              },
             );
-            lastSuccessfulIterationAt = Date.now();
+            lastProgressAt = Date.now();
           } catch (error) {
             // A single request attempt failed or hung. Run the same recovery
             // pass the loop previously died on — abort the in-flight handler
@@ -1522,7 +1526,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
             inFlight -= 1;
           }
         }
-        lastSuccessfulIterationAt = Date.now();
+        lastProgressAt = Date.now();
         if (stopping && Date.now() >= stopDeadline) {
           break;
         }
