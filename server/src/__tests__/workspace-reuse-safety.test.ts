@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { companies, createDb, executionWorkspaces, issues, projects } from "@paperclipai/db";
 import { ensurePersistedExecutionWorkspaceAvailable, realizeExecutionWorkspace } from "../services/workspace-runtime.js";
+import { resolveUnsafeWorkspaceReuseFallback } from "../services/workspace-reuse-fallback.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const exec = promisify(execFile);
@@ -124,8 +125,26 @@ const support = await getEmbeddedPostgresTestSupport();
       .rejects.toMatchObject({ code: "workspace_validation_failed" });
   });
 
+  it.each(["closed", "archived"])("ignores a direct %s binding but protects active owners", async (status) => {
+    const f = await fixture();
+    const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Historical binding",
+      cwd: f.root, status }).returning();
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "unfinished work\n");
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, ...f, workspace, issue, agent }))
+      .resolves.toMatchObject({ cwd: f.root });
+    await expect(resolveUnsafeWorkspaceReuseFallback({ db, companyId, issueId: childIssueId, workspace }))
+      .resolves.toBeNull();
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Active owner", cwd: f.root });
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, ...f, workspace, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed" });
+    await expect(resolveUnsafeWorkspaceReuseFallback({ db, companyId, issueId: childIssueId, workspace }))
+      .resolves.toMatchObject({ reason: "cross_issue_workspace_not_clean" });
+  });
+
   it("permits a project-less home outside Git despite an active foreign record", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-reuse-home-"));
+    const root = await fs.mkdtemp(path.join(os.homedir(), ".paperclip-reuse-home-"));
     roots.push(root);
     await fs.writeFile(path.join(root, "notes.txt"), "home notes\n");
     await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,

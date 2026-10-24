@@ -29,8 +29,17 @@ export async function assertWorkspaceReuseIsSafe(input: {
   issueId?: string | null;
   allowNonGitDirectory?: boolean;
 }): Promise<void> {
-  if (!input.issueId || input.sourceIssueId === input.issueId) return;
+  if (!input.issueId) return;
   let sourceIssueId = input.sourceIssueId;
+  if (sourceIssueId && input.executionWorkspaceId && input.db) {
+    const [workspace] = await input.db.select({ status: executionWorkspaces.status })
+      .from(executionWorkspaces).where(and(
+        eq(executionWorkspaces.companyId, input.companyId),
+        eq(executionWorkspaces.id, input.executionWorkspaceId),
+      ));
+    if (workspace && ["closed", "archived"].includes(workspace.status)) sourceIssueId = null;
+  }
+  if (sourceIssueId === input.issueId) return;
   if (!sourceIssueId && input.db) {
     const candidates = await input.db.select({
       sourceIssueId: executionWorkspaces.sourceIssueId,
@@ -80,6 +89,7 @@ export async function assertWorkspaceReuseIsSafe(input: {
       operation: "workspace_runtime.cross_issue_reuse_guard",
       fairnessKeys: [`issue:${input.issueId}`, `issue:${sourceIssueId}`],
       cacheTtlMs: 0,
+      env: { ...process.env, LC_ALL: "C" },
     });
     if (!stdout.trim()) return;
     cleanliness = "dirty";
