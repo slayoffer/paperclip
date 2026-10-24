@@ -1089,7 +1089,8 @@ export async function startSandboxCallbackBridgeWorker(input: {
         // the outcome indeterminate. The caller must not retry a 504 from the
         // bridge, unlike the retry-safe 503 that the recovery path writes only
         // before the host operation starts.
-        if (guard.controller.signal.aborted || (handlerReturned && !["GET", "HEAD", "OPTIONS", "TRACE"].includes(request.method))) {
+        if (guard.controller.signal.aborted || ((policy.enabled || handlerReturned) &&
+            !["GET", "HEAD", "OPTIONS", "TRACE"].includes(request.method))) {
           response = {
             id: request.id,
             status: 504,
@@ -1262,7 +1263,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       "Sandbox callback bridge list pending requests",
     ).catch(() => [] as string[]);
     for (const fileName of fileNames) {
-      const guard = inFlightRequestGuards.get(fileName);
+      let guard = inFlightRequestGuards.get(fileName);
       if (guard && guard.claim === "handler" && (options.abandonInFlight || guard.controller.signal.aborted)) {
         // The handler already started this request's host operation, or it already
         // finalized the request. The timeout and watchdog cannot cancel a host
@@ -1288,6 +1289,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
       const requestId = fileName.replace(/\.json$/i, "") || randomUUID();
       let responseId = requestId;
       let awaitsAcknowledgement = false;
+      let safeToDrain = false;
       try {
         const raw = await withTimeout(
           input.client.readTextFile(requestPath),
@@ -1299,6 +1301,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
           responseId = parsed.id;
         }
         awaitsAcknowledgement = policy.enabled && typeof parsed.expiresAt === "number";
+        safeToDrain = typeof parsed.method === "string" && ["GET", "HEAD", "OPTIONS", "TRACE"].includes(normalizeMethod(parsed.method));
       } catch (error) {
         // The read or the parse failed, most likely on the same dead channel that
         // triggered this recovery. Keep the request file, so a later recovery pass
@@ -1317,6 +1320,22 @@ export async function startSandboxCallbackBridgeWorker(input: {
       // of a silent drop that strands the caller until its own deadline. The
       // request is unclaimed or abandoned, so its host mutation never ran; a later
       // 503 stays exactly-once.
+      if (awaitsAcknowledgement) {
+        // A preparation read can overlap the loop. Fence ownership before writing a retryable response.
+        guard = inFlightRequestGuards.get(fileName);
+        if (guard?.claim === "handler") {
+          if (options.abandonInFlight) {
+            guard.controller.abort(new Error(message));
+            scheduleAbortedHandlerBackstop(fileName, guard, message);
+            continue;
+          }
+          if (!safeToDrain) continue;
+        }
+        guard ??= { claim: "abandon", controller: new AbortController(), finalized: false };
+        guard.claim = "abandon";
+        guard.awaitingAcknowledgement = true;
+        inFlightRequestGuards.set(fileName, guard);
+      }
       let wrote503 = false;
       let lastWriteError = "Sandbox callback bridge could not write the recovery 503.";
       for (let attempt = 1; attempt <= MAX_BACKSTOP_WRITE_ATTEMPTS; attempt += 1) {
@@ -1455,6 +1474,8 @@ export async function startSandboxCallbackBridgeWorker(input: {
             iterationTimeoutMs,
             "Sandbox callback bridge list requests",
           );
+          // The transaction budget starts after listing. Give the watchdog the same progress boundary.
+          if (policy.enabled) lastSuccessfulIterationAt = Date.now();
           consecutivePollFailures = 0;
         } catch (error) {
           if (stopping) {

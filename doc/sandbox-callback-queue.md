@@ -31,11 +31,17 @@ The gateway checks expiry before deleting a request after a response error.
 It also runs cleanup once per second, or sooner for a shorter response deadline.
 Queue admission runs the same cleanup when the queue reaches capacity.
 Legacy entries without a deadline use their modification time and the response timeout, plus two seconds.
+The publisher puts the deadline first in the envelope.
+Cleanup reads at most 128 metadata bytes per entry.
+Concurrent admission checks and the periodic timer share one cleanup pass.
+They do not allocate copies of the queued request bodies.
 
 The worker checks expiry before authorization and again before starting the API operation.
 An expired request does not start a new host mutation.
 A timeout after dispatch can leave an uncertain result.
 The existing non-retryable outcome and response fences still apply.
+A handler failure after mutation dispatch also returns an indeterminate outcome.
+This includes the API forwarder's independent timeout before response headers arrive.
 
 ## Default deadlines
 
@@ -48,6 +54,7 @@ The existing non-retryable outcome and response fences still apply.
 
 The full transaction includes several remote control calls and the API handler.
 Its budget must exceed one control-call budget.
+The watchdog counts a completed queue listing as progress before the transaction starts.
 The gateway budget leaves time for a terminal receipt after the worker deadline.
 Explicit worker test or embedding overrides still apply.
 An explicit `iterationTimeoutMs` also sets the transaction budget unless `requestTimeoutMs` overrides it.
@@ -63,6 +70,7 @@ Atomic publication already existed. This change adds acknowledgement and explici
 
 ```sh
 pnpm exec vitest run packages/adapter-utils/src/sandbox-callback-queue-lifecycle.test.ts
+pnpm exec vitest run packages/adapter-utils/src/sandbox-callback-queue-review.test.ts
 pnpm exec vitest run packages/adapter-utils/src/sandbox-callback-bridge.test.ts packages/adapter-utils/src/sandbox-callback-bridge-recovery.test.ts packages/adapter-utils/src/sandbox-callback-bridge-body.test.ts packages/adapter-utils/src/http2-bridge-server.test.ts --no-file-parallelism
 pnpm --filter @paperclipai/adapter-utils typecheck
 ```
