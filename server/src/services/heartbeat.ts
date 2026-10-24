@@ -1,3 +1,4 @@
+import { buildOwnerRecoveryWake } from "./recovery/owner-resume.js";
 import {
   provisionExecutionWorkspaceForFreshnessDecision,
   resolveExecutionWorkspaceReuseRequestForIssue,
@@ -8018,42 +8019,7 @@ export async function buildPaperclipWakePayload(input: {
     issueDescriptionTruncated ||
     planReviewContext?.truncated === true ||
     documentReviewContext?.truncated === true;
-  const recoveryActionId = readNonEmptyString(
-    input.contextSnapshot.recoveryActionId,
-  );
-  const recoveryCause = readNonEmptyString(input.contextSnapshot.recoveryCause);
-  const recoveryAction = recoveryActionId
-    ? await input.db
-        .select()
-        .from(issueRecoveryActions)
-        .where(
-          and(
-            eq(issueRecoveryActions.id, recoveryActionId),
-            eq(issueRecoveryActions.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const recoveryEvidence = parseObject(recoveryAction?.evidence);
-  const executionAlreadyReconciled =
-    recoveryAction?.status === "resolved" &&
-    Boolean(recoveryEvidence.executionReconciliation);
-  const originalAssigneeId =
-    recoveryAction?.returnOwnerAgentId ??
-    recoveryAction?.previousOwnerAgentId ??
-    null;
-  const originalAssignee = originalAssigneeId
-    ? await input.db
-        .select({ id: agents.id, name: agents.name })
-        .from(agents)
-        .where(
-          and(
-            eq(agents.id, originalAssigneeId),
-            eq(agents.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
+  const recovery = await buildOwnerRecoveryWake(input.db, input);
 
   const externalChatProvider = await resolveExternalChatWakeProvider({
     db: input.db,
@@ -8080,24 +8046,7 @@ export async function buildPaperclipWakePayload(input: {
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
     externalChatProvider,
-    recovery:
-      !executionAlreadyReconciled && (recoveryAction || recoveryCause)
-        ? {
-            cause: recoveryAction?.cause ?? recoveryCause,
-            failureSummary: readNonEmptyString(recoveryEvidence.failureSummary),
-            originalAssignee: originalAssignee
-              ? { id: originalAssignee.id, name: originalAssignee.name }
-              : originalAssigneeId
-                ? { id: originalAssigneeId, name: null }
-                : null,
-            attemptCount: recoveryAction?.attemptCount ?? null,
-            maxAttempts: recoveryAction?.maxAttempts ?? null,
-            nextAction: recoveryAction?.nextAction ?? null,
-            routingFallbackReason: readNonEmptyString(
-              recoveryEvidence.routingFallbackReason,
-            ),
-          }
-        : null,
+    recovery,
     issue: issueSummary
       ? {
           id: issueSummary.id,
