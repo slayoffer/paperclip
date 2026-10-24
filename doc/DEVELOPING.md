@@ -1821,6 +1821,8 @@ cleanup validation still inspect Git afresh. A display result never authorizes
 worktree removal.
 
 Cross-issue ownership checks exclude closed and archived execution workspaces.
+They also exclude records with a closure timestamp. Records with failed cleanup
+and no closure timestamp retain ownership checks.
 A project-less agent-home folder can be outside a Git repository. This exception
 requires Git's explicit non-repository result and no `.git` entry in the folder
 or its ancestors. Dirty Git folders, damaged repositories, and other inspection

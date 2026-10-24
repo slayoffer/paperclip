@@ -100,11 +100,12 @@ const support = await getEmbeddedPostgresTestSupport();
   });
   afterAll(async () => { await tempDb?.cleanup(); });
 
-  it.each(["closed", "archived"])("ignores %s foreign workspace records", async (status) => {
+  it.each(["closed", "archived", "timestamp"])("ignores %s foreign workspace records", async (kind) => {
     const f = await fixture();
     await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
       mode: "shared_workspace", strategyType: "project_primary", name: "Old workspace",
-      cwd: f.root, providerRef: f.root, status });
+      cwd: f.root, providerRef: f.root,
+      status: kind === "timestamp" ? "active" : kind, closedAt: kind === "timestamp" ? new Date() : null });
     await fs.writeFile(path.join(f.root, "tracked.txt"), "unfinished work\n");
     await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
       .resolves.toMatchObject({ cwd: f.root });
@@ -125,11 +126,12 @@ const support = await getEmbeddedPostgresTestSupport();
       .rejects.toMatchObject({ code: "workspace_validation_failed" });
   });
 
-  it.each(["closed", "archived"])("ignores a direct %s binding but protects active owners", async (status) => {
+  it.each(["closed", "archived", "timestamp"])("ignores a direct %s binding but protects active owners", async (kind) => {
     const f = await fixture();
     const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
       mode: "shared_workspace", strategyType: "project_primary", name: "Historical binding",
-      cwd: f.root, status }).returning();
+      cwd: f.root, status: kind === "timestamp" ? "active" : kind,
+      closedAt: kind === "timestamp" ? new Date() : null }).returning();
     await fs.writeFile(path.join(f.root, "tracked.txt"), "unfinished work\n");
     await expect(ensurePersistedExecutionWorkspaceAvailable({ db, ...f, workspace, issue, agent }))
       .resolves.toMatchObject({ cwd: f.root });
@@ -143,6 +145,16 @@ const support = await getEmbeddedPostgresTestSupport();
       .resolves.toMatchObject({ reason: "cross_issue_workspace_not_clean" });
   });
 
+  it("protects a cleanup_failed workspace with no closure timestamp", async () => {
+    const f = await fixture();
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Cleanup failed", cwd: f.root,
+      status: "cleanup_failed" });
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "unfinished work\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed" });
+  });
+
   it("permits a project-less home outside Git despite an active foreign record", async () => {
     const root = await fs.mkdtemp(path.join(os.homedir(), ".paperclip-reuse-home-"));
     roots.push(root);
@@ -153,6 +165,13 @@ const support = await getEmbeddedPostgresTestSupport();
       workspaceId: null, repoUrl: null, repoRef: null };
     await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
       .resolves.toMatchObject({ cwd: root, source: "agent_home", projectId: null });
+    const workspace = { sourceIssueId, mode: "shared_workspace", strategyType: "project_primary",
+      cwd: root, providerRef: root, projectId: null, projectWorkspaceId: null,
+      repoUrl: null, baseRef: null, branchName: null };
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, base, workspace, issue, agent }))
+      .resolves.toMatchObject({ cwd: root });
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, base: { ...base, source: "project_primary" },
+      workspace, issue, agent })).rejects.toMatchObject({ code: "workspace_validation_failed" });
     expect(await fs.readFile(path.join(root, "notes.txt"), "utf8")).toBe("home notes\n");
     await expect(realizeExecutionWorkspace({ db, base: { ...base, projectId }, config: {}, issue, agent }))
       .rejects.toMatchObject({ code: "workspace_validation_failed" });

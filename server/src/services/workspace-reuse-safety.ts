@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, eq, ne, notInArray } from "drizzle-orm";
+import { and, eq, isNull, ne, notInArray } from "drizzle-orm";
 import { executionWorkspaces, issues, type Db } from "@paperclipai/db";
 import { isWorkspaceGitScanError, workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 
@@ -32,12 +32,12 @@ export async function assertWorkspaceReuseIsSafe(input: {
   if (!input.issueId) return;
   let sourceIssueId = input.sourceIssueId;
   if (sourceIssueId && input.executionWorkspaceId && input.db) {
-    const [workspace] = await input.db.select({ status: executionWorkspaces.status })
+    const [workspace] = await input.db.select({ status: executionWorkspaces.status, closedAt: executionWorkspaces.closedAt })
       .from(executionWorkspaces).where(and(
         eq(executionWorkspaces.companyId, input.companyId),
         eq(executionWorkspaces.id, input.executionWorkspaceId),
       ));
-    if (workspace && ["closed", "archived"].includes(workspace.status)) sourceIssueId = null;
+    if (workspace && (workspace.closedAt || ["closed", "archived"].includes(workspace.status))) sourceIssueId = null;
   }
   if (sourceIssueId === input.issueId) return;
   if (!sourceIssueId && input.db) {
@@ -52,6 +52,7 @@ export async function assertWorkspaceReuseIsSafe(input: {
       ne(issues.id, input.issueId),
     )).where(and(
       eq(executionWorkspaces.companyId, input.companyId),
+      isNull(executionWorkspaces.closedAt),
       notInArray(executionWorkspaces.status, ["closed", "archived"]),
     ));
     // Git can return a canonical path while the saved path contains a symlink.
