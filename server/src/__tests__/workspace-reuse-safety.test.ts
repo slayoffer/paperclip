@@ -193,6 +193,17 @@ const support = await getEmbeddedPostgresTestSupport();
     })).resolves.toMatchObject({ cwd: alias });
   });
 
+  it("lets project-less issues share the agent home", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-agent-home-"));
+    roots.push(home);
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Earlier issue", cwd: home });
+    const base = { baseCwd: home, source: "agent_home" as const,
+      projectId: null, workspaceId: null, repoUrl: null, repoRef: null };
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: home, strategy: "project_primary" });
+  });
+
   it("keeps canonical owner selection inside the company", async () => {
     const f = await fixture();
     const otherCompanyId = randomUUID();

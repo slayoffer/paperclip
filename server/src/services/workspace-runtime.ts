@@ -3248,12 +3248,17 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
-    await assertWorkspaceReuseIsSafe({
-      db: input.db,
-      companyId: input.agent.companyId,
-      issueId: input.issue?.id,
-      cwd: input.base.baseCwd,
-    });
+    // The agent home is the agent's own scratch directory for issues without a
+    // project. Every such issue shares it by design, and it is usually not a
+    // Git checkout, so the cross-issue guard can only fail closed there.
+    if (input.base.source !== "agent_home") {
+      await assertWorkspaceReuseIsSafe({
+        db: input.db,
+        companyId: input.agent.companyId,
+        issueId: input.issue?.id,
+        cwd: input.base.baseCwd,
+      });
+    }
     return {
       ...input.base,
       strategy: "project_primary",

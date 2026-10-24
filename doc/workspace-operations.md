@@ -24,6 +24,7 @@ They can resume that issue's own changes and provider session.
 An explicit branch request or suspended execution keeps its exact workspace and fails closed.
 The runtime does not repair or provision that workspace for the other issue.
 The source issue can resume its own dirty workspace.
+Issues without a project run in the agent home. All of them share it, so the runtime skips this check there.
 The check covers persisted bindings and registered worktrees selected by branch.
 Owner selection compares canonical paths within the company, including saved and candidate symbolic-link paths.
 Company and project access checks still apply.
