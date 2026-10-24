@@ -3727,6 +3727,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       issueId: input.issue?.id,
       cwd,
       executionWorkspaceId: input.workspace.id,
+      allowNonGitWorkspace: input.base.source === "agent_home",
     });
   }
 

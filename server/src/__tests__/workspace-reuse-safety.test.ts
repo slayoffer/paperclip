@@ -204,6 +204,33 @@ const support = await getEmbeddedPostgresTestSupport();
       .resolves.toMatchObject({ cwd: home, strategy: "project_primary" });
   });
 
+  it.each(["closed", "archived"] as const)("ignores a %s record of another issue on a dirty folder", async (kind) => {
+    const f = await fixture();
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: `Old ${kind}`, cwd: f.root,
+      ...(kind === "closed" ? { closedAt: new Date() } : { status: "archived" }) });
+    await fs.writeFile(path.join(f.root, "tracked.txt"), "left over\n");
+    await expect(realizeExecutionWorkspace({ db, base: f.base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: f.root });
+  });
+
+  it("lets a project-less issue resume a non-Git agent home recorded by another issue", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-agent-home-"));
+    roots.push(home);
+    const base = { baseCwd: home, source: "agent_home" as const,
+      projectId: null, workspaceId: null, repoUrl: null, repoRef: null };
+    const workspace = { sourceIssueId, mode: "shared_workspace", strategyType: "project_primary",
+      cwd: home, providerRef: home, projectId: null, projectWorkspaceId: null,
+      repoUrl: null, baseRef: null, branchName: null };
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, base, workspace, issue, agent }))
+      .resolves.toMatchObject({ cwd: home });
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db,
+      base: { ...base, source: "project_primary" as const }, workspace, issue, agent,
+    })).rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+      workspaceValidation: { cleanliness: "unknown" },
+    } });
+  });
+
   it("keeps canonical owner selection inside the company", async () => {
     const f = await fixture();
     const otherCompanyId = randomUUID();

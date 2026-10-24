@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
-import { and, eq, ne } from "drizzle-orm";
+import path from "node:path";
+import { and, eq, isNull, ne } from "drizzle-orm";
 import { executionWorkspaces, issues, type Db } from "@paperclipai/db";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 
@@ -11,6 +12,8 @@ export async function assertWorkspaceReuseIsSafe(input: {
   executionWorkspaceId?: string | null;
   sourceIssueId?: string | null;
   issueId?: string | null;
+  /** Agent home folders are shared by design and are often not Git checkouts. */
+  allowNonGitWorkspace?: boolean;
 }): Promise<void> {
   if (!input.issueId || input.sourceIssueId === input.issueId) return;
   let sourceIssueId = input.sourceIssueId;
@@ -24,7 +27,12 @@ export async function assertWorkspaceReuseIsSafe(input: {
       eq(issues.companyId, input.companyId),
       eq(issues.executionWorkspaceId, executionWorkspaces.id),
       ne(issues.id, input.issueId),
-    )).where(eq(executionWorkspaces.companyId, input.companyId));
+    )).where(and(
+      eq(executionWorkspaces.companyId, input.companyId),
+      // Closed and archived records no longer own their folder.
+      isNull(executionWorkspaces.closedAt),
+      ne(executionWorkspaces.status, "archived"),
+    ));
     // Git can return a canonical path while the saved path contains a symlink.
     // Resolve both paths before selecting owners. Cache only within this check.
     const identities = new Map<string, Promise<string>>();
@@ -52,6 +60,8 @@ export async function assertWorkspaceReuseIsSafe(input: {
       ?? owners.find((owner) => owner.linkedIssueId)?.linkedIssueId;
   }
   if (!sourceIssueId) return;
+  // A folder outside any Git checkout has no Git state that restore could change.
+  if (input.allowNonGitWorkspace && !await isInsideGitCheckout(input.cwd)) return;
   let cleanliness = "unknown";
   try {
     const { stdout } = await workspaceGitOperationScheduler.run({
@@ -79,4 +89,14 @@ export async function assertWorkspaceReuseIsSafe(input: {
       issueId: input.issueId,
     } },
   });
+}
+
+async function isInsideGitCheckout(cwd: string): Promise<boolean> {
+  let dir = await fs.realpath(cwd).catch(() => path.resolve(cwd));
+  for (;;) {
+    if (await fs.lstat(path.join(dir, ".git")).then(() => true, () => false)) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
 }
