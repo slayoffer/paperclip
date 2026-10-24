@@ -14897,7 +14897,6 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
 
-      // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
       void (async () => {
         type WakeupRequest = NonNullable<
           Parameters<typeof heartbeat.wakeup>[1]
@@ -14917,8 +14916,7 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
-          // Provider turns use the task identifier as their session key. Board
-          // messages must resume that same session instead of creating a UUID-keyed fork.
+          // Board messages resume the task session.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
           }
@@ -15190,7 +15188,7 @@ export function issueRoutes(
         }
         if (becameTerminal && issue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            issue.parentId,
+            issue.parentId, { issueId: issue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {
@@ -18444,7 +18442,7 @@ export function issueRoutes(
         }
         if (becameTerminal && currentIssue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            currentIssue.parentId,
+            currentIssue.parentId, { issueId: currentIssue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {

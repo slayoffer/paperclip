@@ -1,5 +1,4 @@
-import { seedNativeDependencyCompletion } from "./helpers/native-dependency-completion.js";
-import { finalizeNativeRun } from "../services/native-runtime/native-run-finalizer.js";
+import { nativeDependencyCompletionCases } from "./dependency-release-native.cases.js";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -314,37 +313,10 @@ describeDatabase("durable dependency release wakes", () => {
     expect(heartbeat.wakeup).not.toHaveBeenCalled();
   });
 
-  it("native completion rolls back dependency wakes after status projection", async () => {
-    const runId = await seedNativeDependencyCompletion(db, { companyId, issueId: blocker.id, agentId });
-    await db.execute(sql`CREATE OR REPLACE FUNCTION reject_dependency_commit() RETURNS trigger AS $$
-      BEGIN RAISE EXCEPTION 'outer dependency rollback'; END; $$ LANGUAGE plpgsql`);
-    await db.execute(sql`CREATE TRIGGER reject_dependency_commit BEFORE UPDATE ON status_decisions
-      FOR EACH ROW EXECUTE FUNCTION reject_dependency_commit()`);
-    hasRollbackTrigger = true;
-    const result = await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded" });
-    expect(result).toMatchObject({ phase: "retryable_failure" });
-    const [coordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId));
-    expect(coordinator?.failureDetail?.message).toContain('update "status_decisions"');
-    expect((await svc.getById(blocker.id))?.status).toBe("todo");
-    expect((await svc.getById(dependent.id))?.status).toBe("blocked");
-    expect(await intents()).toEqual([]);
-    expect(await db.select().from(statusDecisions)).toEqual([]);
-    expect(heartbeat.wakeup).not.toHaveBeenCalled();
-  });
-
-  it("native completion dispatches dependency wakes only after the outer commit", async () => {
-    const runId = await seedNativeDependencyCompletion(db, { companyId, issueId: blocker.id, agentId });
-    const finalResult = await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded" });
-    expect(finalResult).toMatchObject({ phase: "committed" });
-    expect((await svc.getById(blocker.id))?.status).toBe("done");
-    expect((await svc.getById(dependent.id))?.status).toBe("todo");
-    expect(await db.select().from(statusDecisions)).toEqual([expect.objectContaining({ applicationState: "applied" })]);
-    const queued = (await db.select().from(agentWakeupRequests)).filter(row => row.requestedByActorId !== "blocked-dependency-release");
-    expect(queued).toEqual([expect.objectContaining({ reason: "issue_blockers_resolved", status: "queued" })]);
-    // Native completion already queued this wake in its transaction.
-    expect(heartbeat.wakeup).not.toHaveBeenCalled();
-    expect((await intents())[0]?.status).toBe("completed_dependency_dispatch");
-  });
+  nativeDependencyCompletionCases(() => ({
+    db, svc, companyId, agentId, blocker, dependent, heartbeat, intents, recover,
+    markRollbackTrigger: () => { hasRollbackTrigger = true; },
+  }));
   it("dispatches explicit outer transaction actions after commit", async () => {
     const actions: IssuePostCommitAction[] = [];
     await db.transaction(async tx => {
