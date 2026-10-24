@@ -25,7 +25,7 @@ it("requires a terminal owner run before it checks an active lease for terminati
   expect(confirm).not.toHaveBeenCalled();
 });
 
-it.each(["succeeded", "failed", "cancelled", "timed_out"])("recovers an active lease for a %s owner only with a saved receipt", async (status) => {
+it.each(["succeeded", "failed", "cancelled", "timed_out", "interrupted"])("recovers an active lease for a %s owner only with a saved receipt", async (status) => {
   const { checks, confirm } = fixture(status);
   expect(await checks.isHolderActive(holder)).toBe(false);
   expect(await checks.isHolderStopped(holder)).toBe(true);

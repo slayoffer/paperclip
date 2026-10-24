@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -22,9 +22,33 @@ async function root() {
   roots.push(value);
   return value;
 }
-async function stopped(base: string, id = "run") {
-  return exec("sh", ["-c", sshWriterTerminationScript(base, id)]).then(r => r.stdout.trim() === "stopped", () => false);
+async function stopped(base: string, id = "run", allowMissingDirectory = false) {
+  return exec("sh", ["-c", sshWriterTerminationScript(base, id, { allowMissingDirectory })]).then(r => r.stdout.trim() === "stopped", () => false);
 }
+
+it("accepts an absent writer directory only with terminal-run confirmation", async () => {
+  const base = await root();
+  expect(await stopped(base)).toBe(false);
+  expect(await stopped(base, "run", true)).toBe(true);
+});
+
+it("refuses a missing workspace and a dangling writer-directory link", async () => {
+  const base = await root();
+  expect(await stopped(path.join(base, "absent"), "run", true)).toBe(false);
+  const directory = sshWriterDirectory(base, "run");
+  await mkdir(path.dirname(directory), { recursive: true });
+  await symlink(path.join(base, "absent"), directory);
+  expect(await stopped(base, "run", true)).toBe(false);
+});
+
+it("keeps incomplete writer evidence closed after terminal-run confirmation", async () => {
+  const base = await root();
+  const directory = sshWriterDirectory(base, "run");
+  await mkdir(directory, { recursive: true });
+  expect(await stopped(base, "run", true)).toBe(false);
+  await writeFile(path.join(directory, "00000000-0000-4000-8000-000000000000"), "uncontained");
+  expect(await stopped(base, "run", true)).toBe(false);
+});
 
 it.skipIf(!containmentSupported)("requires complete evidence and keeps a surviving child control group busy", async () => {
   const base = await root();
@@ -32,6 +56,7 @@ it.skipIf(!containmentSupported)("requires complete evidence and keeps a survivi
   const command = trackSshWriterCommand(`exec sh -c ${shellQuote("sleep 2 </dev/null >/dev/null 2>&1 & exit 0")}`, base, "run");
   await exec("sh", ["-c", command]);
   expect(await stopped(base)).toBe(false);
+  expect(await stopped(base, "run", true)).toBe(false);
   await expect.poll(() => stopped(base), { timeout: 10_000 }).toBe(true);
   const directory = sshWriterDirectory(base, "run");
   await writeFile(path.join(directory, "malformed"), "not a process identity");
