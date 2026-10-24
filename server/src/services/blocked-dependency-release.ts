@@ -46,7 +46,7 @@ export async function releaseResolvedBlockedDependents(
       status: "todo", unblockDescriptor: null, blockedOwnerNotifiedAt: null,
       updatedAt: new Date(), statusVersion: candidate.statusVersion + 1,
     }).where(and(eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.id), eq(issues.status, "blocked")));
-    const intentId = await persistDependencyReleaseWake(tx, candidate);
+    const intentId = await persistDependencyReleaseWake(tx, candidate, blocker.id);
     if (intentId) intents.push(intentId);
     await tx.insert(issueComments).values({
       companyId: candidate.companyId, issueId: candidate.id,
