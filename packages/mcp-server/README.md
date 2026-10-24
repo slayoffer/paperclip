@@ -88,3 +88,19 @@ Escape hatch:
 
 `paperclipApiRequest` is limited to paths under `/api` and JSON bodies. It is
 meant for endpoints that do not yet have a dedicated MCP tool.
+
+Use a path such as `/issues`, without the `/api` prefix. The server adds that
+prefix. A repeated prefix returns an MCP error before any network request.
+
+## Error results
+
+Every failed tool call returns `isError: true`. An HTTP error includes its
+status, method, path without query values, and a body excerpt of at most 512
+characters. The excerpt supports JSON, HTML, and plain text. It removes known
+request credentials and masks credential fields and authentication text.
+HTML excerpts remove tags and hidden content.
+The result does not include request or response headers. Successful responses
+retain their existing content format.
+
+See [MCP error reporting](../../doc/mcp-error-reporting.md) for consumer and
+release boundaries.
