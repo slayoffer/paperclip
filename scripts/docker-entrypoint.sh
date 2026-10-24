@@ -39,9 +39,14 @@ fi
 # Operators can request deep repair after a restore with PAPERCLIP_REPAIR_OWNERSHIP=1.
 home_dir="${PAPERCLIP_HOME:-/paperclip}"
 if [ -d "$home_dir" ]; then
-    if [ "$identity_changed" = true ] || [ "${PAPERCLIP_REPAIR_OWNERSHIP:-0}" = 1 ] ||
-        [ -n "$(find "$home_dir" -maxdepth 2 \( ! -user node -o ! -group node \) -print -quit 2>/dev/null)" ]; then
+    if [ "$identity_changed" = true ] || [ "${PAPERCLIP_REPAIR_OWNERSHIP:-0}" = 1 ]; then
         chown -R node:node "$home_dir"
+    else
+        # Keep the probe outside a condition so set -e preserves find failures.
+        ownership_mismatch=$(find "$home_dir" -maxdepth 2 \( ! -user node -o ! -group node \) -print -quit)
+        if [ -n "$ownership_mismatch" ]; then
+            chown -R node:node "$home_dir"
+        fi
     fi
 fi
 

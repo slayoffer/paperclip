@@ -97,6 +97,16 @@ describe("docker-entrypoint.sh", () => {
     expect(existsSync(logFile)).toBe(false);
   });
 
+  it("preserves probe errors and stops before privilege reduction", async () => {
+    installStubs({ uid: 0, gid: 0 });
+    writeStub("find", 'echo "ownership probe failed" >&2\nexit 73');
+    await expect(runEntrypoint({ PAPERCLIP_HOME: stubDir })).rejects.toMatchObject({
+      code: 73,
+      stderr: "ownership probe failed\n",
+    });
+    expect(existsSync(logFile)).toBe(false);
+  });
+
   it("starts a health fixture within 60 seconds without visiting deep volume contents", async () => {
     installStubs({ uid: 0, gid: 0 });
     const home = join(stubDir, "volume with spaces");

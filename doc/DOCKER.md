@@ -345,7 +345,7 @@ Notes:
   A change to `USER_UID` or `USER_GID` also triggers recursive repair, even when shallow ownership matches.
 - After a restore that changes only deeper ownership, set `PAPERCLIP_REPAIR_OWNERSHIP=1` for one startup.
   This setting forces recursive repair. Remove it before later restarts to retain bounded startup work.
-  Recursive repair can take minutes on large volumes. A failed repair prevents command execution.
+  Recursive repair can take minutes on large volumes. A failed probe or repair prevents command execution.
   Non-root startup cannot repair ownership and executes the command directly, as before.
 - Paperclip data persists via Docker volumes/bind mounts (compose) or at `~/.local/share/paperclip` (quadlet).
 
