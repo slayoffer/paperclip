@@ -1461,6 +1461,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   syncWorkspace?: boolean;
   /** SSH per-run assets. Cleanup preserves company-scoped provider transcripts. */
   runtimeRootDir?: string | null;
+  providerSessionRoot?: string;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
   workspaceBaseline?: DirectorySnapshot;
@@ -1511,6 +1512,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,
       runtimeRootDir: input.runtimeRootDir,
+      providerSessionRoot: input.providerSessionRoot,
       workspaceFileMode: input.workspaceFileMode,
       workspaceExclude: input.workspaceExclude,
       assets: input.assets,

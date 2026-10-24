@@ -5,6 +5,7 @@ import { sshWriterTerminationScript } from "@paperclipai/adapter-utils/ssh-write
 import { resolveEnvironmentDriverConfigForRuntime } from "./environment-config.js";
 import { environmentService } from "./environments.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
+import { isSshInPlaceOwnerRunTerminal } from "./ssh-in-place-run-status.js";
 import { releaseConfirmedSshInPlaceWorktreeLock } from "./ssh-in-place-lock.js";
 
 /** No SSH disconnect or terminal run status is sufficient by itself. */
@@ -24,8 +25,11 @@ export async function confirmSshInPlaceTermination(
     // A changed environment endpoint cannot prove termination on the old host.
     if (lease.providerLeaseId !== `ssh://${config.username}@${config.host}:${config.port}${tracking.remoteCwd}` ||
         config.remoteWorkspacePath !== lease.metadata?.remoteWorkspacePath) return null;
+    // Only terminal runs can prove that an absent directory means no writer started.
+    const allowMissingDirectory = await isSshInPlaceOwnerRunTerminal(db, lease.companyId, lease.heartbeatRunId);
     const result = await runSshCommand(config,
-      sshWriterTerminationScript(config.remoteWorkspacePath, lease.heartbeatRunId), { timeoutMs: 15_000 });
+      sshWriterTerminationScript(config.remoteWorkspacePath, lease.heartbeatRunId, { allowMissingDirectory }),
+      { timeoutMs: 15_000 });
     if (result.stdout.trim() !== "stopped") return null;
     const receipt = remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "stopped" });
     if (!receipt) return null;

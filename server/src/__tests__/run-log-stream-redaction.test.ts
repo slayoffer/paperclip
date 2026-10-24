@@ -41,6 +41,26 @@ describe("streamed run log masking", () => {
     expect(log.text()).not.toContain(opaque);
     expect(log.text()).toContain("REDACTED");
   });
+  it.each(["stdout", "stderr"] as const)("flushes %s first when its retained tail arrived first", async first => {
+    const second = first === "stdout" ? "stderr" : "stdout";
+    const log = fixture();
+    await log.append(first, `first ${opaque.slice(0, 12)}`);
+    await log.append(second, "second");
+    await log.append(first, opaque.slice(12));
+    await log.flush();
+    expect(log.lines).toEqual([
+      { stream: first, text: "first ***REDACTED***" },
+      { stream: second, text: "second" },
+    ]);
+  });
+  it("orders surviving tails after an earlier fragment was emitted", async () => {
+    const log = fixture([]);
+    await log.append("stdout", "complete\n");
+    await log.append("stderr", "first tail");
+    await log.append("stdout", "second tail");
+    await log.flush();
+    expect(log.lines.map(line => line.text)).toEqual(["complete\n", "first tail", "second tail"]);
+  });
   it("masks multi-line values across a selected line boundary", async () => {
     const value = "multi-line\nopaque-value";
     const log = fixture([value]);

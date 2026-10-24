@@ -1,3 +1,9 @@
+import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
+import { releaseBridgeWait } from "../services/review-bridge-waits.js";
+import { isReviewBridgeWait, parseBridgeEvent } from "../services/review-bridge-contract.js";
+import { getRestoredBlockedDependencyWake } from "../services/restored-dependency-wake.js";
+import { blockedStateIntegrityEnabled } from "../services/blocked-state-integrity.js";
+import { assertBlockedIssueUpdate } from "../services/issue-blocked-validation.js";
 import { isClosedIssueStatus, shouldImplicitlyMoveCommentedIssueToTodo, shouldHumanCommentResumeInProgressScheduledRetry, isExplicitResumeCapableStatus, isAssigneeSelfCommentOnTerminalIssue } from "./issue-comment-lifecycle.js";
 import type { IssueThreadInteraction } from "@paperclipai/shared";
 import { interactionResolutionOutboxService } from "../services/interaction-resolution-outbox.js";
@@ -343,8 +349,7 @@ import {
 import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
-import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled, skipSelfUnblockWake } from "../services/self-block-guard.js";
-import { hasSavedReviewWait } from "../services/review-wait.js";
+import { skipSelfUnblockWake } from "../services/self-block-guard.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -4133,6 +4138,10 @@ export function issueRoutes(
     input: Parameters<typeof revalidateActiveSourceRecovery>[0],
   ) {
     try {
+      if (input.actor?.actorType === "user" && (input.resumeRequested || input.reopened || input.blockedToTodoRecovery)) {
+        await releaseBridgeWait(db, input.issue.companyId, input.issue.id, true);
+      }
+      await dispatchBridgeWakes(db, heartbeat.wakeup, { companyId: input.issue.companyId, issueId: input.issue.id });
       return await revalidateActiveSourceRecovery(input);
     } catch (err) {
       logger.warn(
@@ -4641,7 +4650,8 @@ export function issueRoutes(
     }
     const hasExecutionOverride = input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined || input.executionWorkspaceSettings !== undefined;
-    const executionWorkspaceId = input.executionWorkspaceId ?? (hasExecutionOverride ? null : source?.executionWorkspaceId);
+    const executionWorkspaceId = input.executionWorkspaceId ??
+      (hasExecutionOverride || !input.inheritExecutionWorkspaceFromIssueId ? null : source?.executionWorkspaceId);
     if (executionWorkspaceId && (await instanceSettings.getExperimental()).enableIsolatedWorkspaces) {
       const [workspace] = await db.select({ projectId: executionWorkspaces.projectId }).from(executionWorkspaces)
         .where(and(eq(executionWorkspaces.id, executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));
@@ -11815,7 +11825,6 @@ export function issueRoutes(
           identifier: issue.identifier,
           title: issue.title,
           ...buildCreateIssueActivityStatusDetails(issue, res),
-          inheritedExecutionWorkspaceFromIssueId: parent.id,
           ...(Array.isArray(req.body.blockedByIssueIds)
             ? { blockedByIssueIds: req.body.blockedByIssueIds }
             : {}),
@@ -12650,6 +12659,7 @@ export function issueRoutes(
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
+            !isReviewBridgeWait(existing.unblockDescriptor) &&
             !commentWakeSuppressed(commentBody, req.actor) &&
             shouldImplicitlyMoveCommentedIssueToTodo({
               issueStatus: existing.status,
@@ -12892,136 +12902,13 @@ export function issueRoutes(
         }
       }
 
-      const nextStatus = updateFields.status ?? existing.status;
-      if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
-        throw unprocessable("unblockDescriptor requires blocked status");
-      }
-      const descriptor = updateFields.unblockDescriptor ?? null;
-      if (descriptor && typeof descriptor === "object") {
-        const owner = descriptor.owner;
-        if (
-          req.actor.type === "agent" &&
-          (owner === "board" || "userId" in owner) &&
-          !(await hasSavedReviewWait(db, {
-            ...existing,
-            assigneeAgentId: updateFields.assigneeAgentId === undefined
-              ? existing.assigneeAgentId : updateFields.assigneeAgentId,
-          }, req.actor.agentId === existing.assigneeAgentId ? req.actor.agentId : undefined, descriptor))
-        ) {
-          throw forbidden(
-            "Agents may only name themselves as an unblock owner",
-          );
-        }
-        if (owner !== "board" && "agentId" in owner) {
-          const target = await db
-            .select({ id: agents.id })
-            .from(agents)
-            .where(
-              and(
-                eq(agents.id, owner.agentId),
-                eq(agents.companyId, existing.companyId),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-          if (!target)
-            throw unprocessable(
-              "Unblock owner agent must belong to the issue company",
-            );
-          if (
-            req.actor.type === "agent" &&
-            req.actor.agentId !== owner.agentId
-          ) {
-            throw forbidden(
-              "Agents may only name themselves as an unblock owner",
-            );
-          }
-          if (req.actor.type === "agent" && req.actor.agentId === owner.agentId && selfBlockGuardEnabled()) {
-            res.status(409).json({ error: SELF_BLOCK_REFUSAL, details: { code: "self_block_refused" } });
-            return;
-          }
-        } else if (owner !== "board" && "userId" in owner) {
-          const member = await db
-            .select({ id: companyMemberships.id })
-            .from(companyMemberships)
-            .where(
-              and(
-                eq(companyMemberships.companyId, existing.companyId),
-                eq(companyMemberships.principalType, "user"),
-                eq(companyMemberships.principalId, owner.userId),
-                eq(companyMemberships.status, "active"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-          if (!member)
-            throw unprocessable(
-              "Unblock owner user must be an active company member",
-            );
-        }
-      }
-      const enteringBlocked =
-        existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
-        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
-          ? [...new Set(req.body.blockedByIssueIds as string[])]
-          : null;
-        const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
-        }
-      }
+      const enteringBlocked = existing.status !== "blocked" && updateFields.status === "blocked";
+      await assertBlockedIssueUpdate({
+        db, actor: req.actor, existing, updateFields,
+        requestedBlockerIds: req.body.blockedByIssueIds,
+        getDependencyReadiness: svc.getDependencyReadiness,
+        commentBody,
+      });
       if (
         reviewRequest !== undefined &&
         transition.patch.executionState === undefined
@@ -13220,6 +13107,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
+        blockedWaitCommentBody: actor.agentId === existing.assigneeAgentId ? commentBody : null,
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
@@ -13368,8 +13256,9 @@ export function issueRoutes(
       const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
+      const transactionalHandoff = blockedStateIntegrityEnabled() && Boolean(commentBody?.includes("```handoff"));
       const shouldUseTransactionalIssueUpdate =
-        Boolean(commentAttachmentIds?.length) ||
+        transactionalHandoff || Boolean(commentAttachmentIds?.length) ||
         commentWithAdapterOverrides ||
         Boolean(decision) ||
         shouldRelayStop ||
@@ -13385,7 +13274,7 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            if (commentAttachmentIds?.length || commentWithAdapterOverrides) {
+            if (transactionalHandoff || commentAttachmentIds?.length || commentWithAdapterOverrides) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
               transactionalComment = await svc.addComment(
@@ -14200,7 +14089,6 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
 
-      // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
       void (async () => {
         type WakeupRequest = NonNullable<
           Parameters<typeof heartbeat.wakeup>[1]
@@ -14220,8 +14108,7 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
-          // Provider turns use the task identifier as their session key. Board
-          // messages must resume that same session instead of creating a UUID-keyed fork.
+          // Board messages resume the task session.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
           }
@@ -14332,7 +14219,7 @@ export function issueRoutes(
           const shouldWakeAssigneeForComment =
             shouldWakeAssigneeForIssueComment({
               selfComment,
-              noWake: commentWakeSuppressed(commentBody, req.actor),
+              noWake: isReviewBridgeWait(existing.unblockDescriptor) || Boolean(commentBody && parseBridgeEvent(commentBody)) || commentWakeSuppressed(commentBody, req.actor),
               resumeRequested: resumeRequested === true,
               commentCreatedByRunId: comment.createdByRunId,
               issueAtCommentStart: existing,
@@ -14414,35 +14301,14 @@ export function issueRoutes(
           }
         }
 
-        const restoredBlockedReadyDependency =
-          issue.status === "blocked" &&
-          issue.assigneeAgentId &&
-          (existing.status !== "blocked" ||
-            Array.isArray(req.body.blockedByIssueIds) ||
-            existing.assigneeAgentId !== issue.assigneeAgentId);
-        if (
-          restoredBlockedReadyDependency &&
-          typeof dependencyReadinessSvc.getDependencyReadiness === "function"
-        ) {
-          const readiness = await dependencyReadinessSvc.getDependencyReadiness(
-            issue.id,
-          );
-          const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;
-          if (
-            resolvedBlockerIssueId &&
-            readiness.isDependencyReady &&
-            readiness.blockerIssueIds.length > 0
-          ) {
-            await addDependencyResolvedWakeup({
-              agentId: issue.assigneeAgentId!,
-              dependentIssueId: issue.id,
-              resolvedBlockerIssueId,
-              blockerIssueIds: readiness.blockerIssueIds,
-              blockedTransitionAt: issue.blockedTransitionAt,
-              source: "issue.blockers_restored",
-              mutation: "blocked_dependency_restored",
-            });
-          }
+        const restoredDependencyWake = await getRestoredBlockedDependencyWake(db, {
+          existing,
+          issue,
+          blockersSupplied: Array.isArray(req.body.blockedByIssueIds),
+          getDependencyReadiness: dependencyReadinessSvc.getDependencyReadiness,
+        });
+        if (restoredDependencyWake) {
+          await addDependencyResolvedWakeup(restoredDependencyWake);
         }
 
         const stopRelay = stopRelayResult.value;
@@ -14514,7 +14380,7 @@ export function issueRoutes(
         }
         if (becameTerminal && issue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            issue.parentId,
+            issue.parentId, { issueId: issue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {
@@ -17000,7 +16866,7 @@ export function issueRoutes(
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
-          (!commentWakeSuppressed(req.body.body, req.actor) &&
+          (!isReviewBridgeWait(issue.unblockDescriptor) && !commentWakeSuppressed(req.body.body, req.actor) &&
           shouldImplicitlyMoveCommentedIssueToTodo({
             issueStatus: issue.status,
             assigneeAgentId: issue.assigneeAgentId,
@@ -17629,7 +17495,7 @@ export function issueRoutes(
         // explicit resume from a completed prior run remains a valid new turn.
         const shouldWakeAssigneeForComment = shouldWakeAssigneeForIssueComment({
           selfComment,
-          noWake: commentWakeSuppressed(req.body.body, req.actor),
+          noWake: isReviewBridgeWait(issue.unblockDescriptor) || Boolean(parseBridgeEvent(req.body.body)) || commentWakeSuppressed(req.body.body, req.actor),
           resumeRequested: resumeRequested === true,
           commentCreatedByRunId: comment.createdByRunId,
           issueAtCommentStart: issue,
@@ -17752,7 +17618,7 @@ export function issueRoutes(
         }
         if (becameTerminal && currentIssue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            currentIssue.parentId,
+            currentIssue.parentId, { issueId: currentIssue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {

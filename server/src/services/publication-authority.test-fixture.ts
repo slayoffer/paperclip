@@ -12,7 +12,7 @@ export async function startAuthorityDatabase() {
   return { database, db: createDb(database.connectionString, { applicationName: "publication-authority-tests" }) };
 }
 
-export async function authorityFixture(db: Db) {
+export async function authorityFixture(db: Db, initialTime = 1_800_000_000_000) {
   const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
   const runId = randomUUID(), brokerId = randomUUID(), projectId = randomUUID(), workspaceId = randomUUID();
   const identity: PublicationIdentity = {
@@ -24,7 +24,7 @@ export async function authorityFixture(db: Db) {
     repository: "synthetic/authority", branch: `review/${prefix}-1`, operation: "push",
     commitSha: "a".repeat(40), expectedOldSha: "b".repeat(40),
   };
-  let now = 1_800_000_000_000;
+  let now = initialTime;
   let monotonicMs = 10_000;
   const clock = async () => ({ wallMs: now, monotonicMs, epoch: "synthetic-epoch" });
   await db.insert(companies).values({ id: companyId, name: "Synthetic authority", issuePrefix: prefix });

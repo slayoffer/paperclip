@@ -1,3 +1,12 @@
+import { dispatchBridgeWakes } from "../review-bridge-wakes.js";
+import { isReviewBridgeWait } from "../review-bridge-contract.js";
+import { pendingBridgeWakeCondition } from "../review-bridge-waits.js";
+import type { LatestIssueRun } from "./run-types.js";
+import type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
+import { compactRecoveryPresentation, recoveryCauseTitle, recoveryNoticeMetadata } from "./notice-presentation.js";
+import { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS, CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE } from "./failure-classification.js";
+export { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "./failure-classification.js";
+export type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
 import { createResolvedDependencyWakeBackstop } from "./resolved-dependency-backstop.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -205,22 +214,6 @@ export type RecoveryWakeup = (
   opts?: RecoveryWakeupOptions,
 ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
 
-type LatestIssueRun =
-  | (Pick<
-      typeof heartbeatRuns.$inferSelect,
-      | "id"
-      | "agentId"
-      | "status"
-      | "error"
-      | "errorCode"
-      | "contextSnapshot"
-      | "livenessState"
-      | "startedAt"
-      | "createdAt"
-    > & {
-      resultJson?: unknown;
-    })
-  | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & {
   status: "succeeded";
 };
@@ -267,99 +260,6 @@ type SuccessfulRunHandoffRecoveryEvidence = {
   handoffAttempt: number;
   maxHandoffAttempts: number;
 };
-
-function compactRecoveryPresentation(title: string): IssueCommentPresentation {
-  const normalizedTitle = title.trim();
-  return {
-    kind: "system_notice",
-    tone: "warning",
-    title:
-      normalizedTitle.length > 160
-        ? `${normalizedTitle.slice(0, 159)}…`
-        : normalizedTitle,
-    detailsDefaultOpen: false,
-    density: "compact",
-  };
-}
-
-function recoveryCauseTitle(cause: StrandedRecoveryCause) {
-  switch (cause) {
-    case "process_lost":
-      return "retries exhausted";
-    case "codex_output_inactivity_monitor":
-      return "output-inactivity retry exhausted";
-    case "workspace_validation_failed":
-      return "workspace validation failed";
-    case "configuration_incomplete":
-      return "configuration incomplete";
-    case "execution_review_participant_recovery":
-      return "reviewer recovery failed";
-    case "provider_quota":
-      return "provider quota unavailable";
-    case SUCCESSFUL_RUN_MISSING_STATE_REASON:
-      return "missing disposition recovery failed";
-    default:
-      return "execution path recovery failed";
-  }
-}
-
-function recoveryNoticeMetadata(input: {
-  cause: string;
-  latestRun: LatestIssueRun;
-  recoveryActionId?: string | null;
-  previousStatus: string;
-  recoveryOwner?: Pick<typeof agents.$inferSelect, "id" | "name"> | null;
-}): IssueCommentMetadata {
-  const rows: IssueCommentMetadata["sections"][number]["rows"] = [
-    ...(input.recoveryActionId
-      ? [
-          {
-            type: "key_value" as const,
-            label: "Recovery action",
-            value: input.recoveryActionId,
-          },
-        ]
-      : []),
-    { type: "key_value", label: "Cause", value: input.cause },
-    {
-      type: "key_value",
-      label: "Previous status",
-      value: input.previousStatus,
-    },
-    ...(input.recoveryOwner
-      ? [
-          {
-            type: "agent_link" as const,
-            label: "Recovery owner",
-            agentId: input.recoveryOwner.id,
-            name: input.recoveryOwner.name.slice(0, 160),
-          },
-        ]
-      : [
-          {
-            type: "key_value" as const,
-            label: "Recovery owner",
-            value: "board",
-          },
-        ]),
-    ...(input.latestRun
-      ? [
-          {
-            type: "run_link" as const,
-            label: "Latest run",
-            runId: input.latestRun.id,
-            title: input.latestRun.status,
-          },
-        ]
-      : []),
-  ];
-
-  return {
-    version: 1,
-    sourceRunId: input.latestRun?.id ?? null,
-    sections: [{ title: "Recovery", rows }],
-  };
-}
 
 function readRecoveryRunErrorFamily(latestRun: LatestIssueRun) {
   const result = parseObject(latestRun?.resultJson);
@@ -467,262 +367,7 @@ function isTerminalIssueRun(latestRun: LatestIssueRun) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(latestRun.status);
 }
 
-const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
-  "adapter_failed",
-  "codex_transient_upstream",
-  "codex_harness_crash",
-  "claude_transient_upstream",
-  "provider_quota",
-  "timeout",
-]);
-
-const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
-  "native_provider_model_rejected",
-  "provider_tool_definition_invalid",
-  "adapter_engine_unavailable",
-  "agent_not_invokable",
-  "agent_not_found",
-  "budget_blocked",
-  "budget_exhausted",
-  "issue_paused",
-  "issue_dependencies_blocked",
-  // This is the fail-closed fallback for exceptions raised before an adapter
-  // process starts. Known transient preflight failures use dedicated bounded
-  // retry paths instead of generic issue continuation recovery.
-  "setup_failed",
-  // Setup owns the shared durable retry budget for temporary Git scans.
-  // Generic continuation must not retry permanent failures or reset that budget.
-  "workspace_git_scan_timeout",
-  "workspace_git_scan_saturated",
-  "workspace_git_scan_cancelled",
-  "workspace_git_scan_output_limit",
-  "workspace_git_scan_failed",
-  "low_trust_isolation_unavailable",
-  "low_trust_requires_isolated_workspace",
-  "low_trust_boundary_mismatch",
-  "low_trust_requires_sandbox_environment",
-  "low_trust_runtime_services_denied",
-]);
-
-// A continuation cancelled with this code is a *deliberate wait* (the latest run
-// reported it was parked for review/approval), not a lost execution path. When the
-// issue has a real waiting target we convert it into a normal dependency wait rather
-// than escalating it as stranded.
-const CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE =
-  "issue_continuation_waiting_on_review";
 const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
-
-const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
-const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
-const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
-export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
-
-const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your (?:\w+ )?limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
-const CONFIGURATION_INCOMPLETE_ERROR_RE =
-  /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
-
-export type AdapterFailureRecoveryClassification =
-  | { kind: "provider_quota"; retryAt: Date; parsedResetTime: boolean }
-  | { kind: "configuration_incomplete" }
-  | null;
-
-function parseProviderQuotaClockReset(error: string, now: Date) {
-  const match = error.match(
-    /(?:try again at|resets?(?:\s+at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
-  );
-  if (!match) return null;
-
-  const hourValue = Number.parseInt(match[1] ?? "", 10);
-  const minute = Number.parseInt(match[2] ?? "0", 10);
-  const meridiem = (match[3] ?? "").toLowerCase();
-  if (!Number.isInteger(hourValue)) return null;
-  if (
-    meridiem ? hourValue < 1 || hourValue > 12 : hourValue < 0 || hourValue > 23
-  )
-    return null;
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-
-  let hour = meridiem ? hourValue % 12 : hourValue;
-  if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? match[5])?.trim();
-  if (!timeZone) {
-    const retryAt = new Date(now);
-    retryAt.setUTCHours(hour, minute, 0, 0);
-    if (retryAt.getTime() <= now.getTime())
-      retryAt.setUTCDate(retryAt.getUTCDate() + 1);
-    return retryAt;
-  }
-
-  try {
-    const wallClock = (date: Date) =>
-      Object.fromEntries(
-        new Intl.DateTimeFormat("en-US", {
-          timeZone,
-          hourCycle: "h23",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-          .formatToParts(date)
-          .map((part) => [part.type, part.value]),
-      );
-    const nowParts = wallClock(now);
-    const buildRetryAt = (dayOffset: number) => {
-      const targetDay = new Date(
-        Date.UTC(
-          Number(nowParts.year),
-          Number(nowParts.month) - 1,
-          Number(nowParts.day) + dayOffset,
-          hour,
-          minute,
-        ),
-      );
-      let candidate = targetDay;
-      const targetMs = targetDay.getTime();
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        const actual = wallClock(candidate);
-        const actualMs = Date.UTC(
-          Number(actual.year),
-          Number(actual.month) - 1,
-          Number(actual.day),
-          Number(actual.hour),
-          Number(actual.minute),
-        );
-        const adjustment = targetMs - actualMs;
-        if (adjustment === 0) break;
-        candidate = new Date(candidate.getTime() + adjustment);
-      }
-      return candidate;
-    };
-    const sameDay = buildRetryAt(0);
-    return sameDay.getTime() > now.getTime() ? sameDay : buildRetryAt(1);
-  } catch {
-    return null;
-  }
-}
-
-export function classifyAdapterFailureForRecovery(
-  latestRun: Pick<
-    NonNullable<LatestIssueRun>,
-    "error" | "errorCode" | "resultJson"
-  >,
-  now = new Date(),
-): AdapterFailureRecoveryClassification {
-  // An engine prerequisite cannot be repaired by asking the same unavailable
-  // engine to retry. Use the existing configuration-blocker path.
-  if (latestRun.errorCode === "adapter_engine_unavailable" || latestRun.errorCode === "provider_tool_definition_invalid" || latestRun.errorCode === "native_provider_model_rejected") {
-    return { kind: "configuration_incomplete" };
-  }
-  if (
-    latestRun.errorCode !== "adapter_failed" &&
-    latestRun.errorCode !== "provider_quota" &&
-    latestRun.errorCode !== "configuration_incomplete"
-  ) {
-    return null;
-  }
-  const resultJson = parseObject(latestRun.resultJson);
-  const error = [
-    latestRun.errorCode ?? "",
-    latestRun.error ?? "",
-    JSON.stringify(resultJson),
-  ].join("\n");
-  if (
-    latestRun.errorCode === "configuration_incomplete" ||
-    CONFIGURATION_INCOMPLETE_ERROR_RE.test(error)
-  ) {
-    return { kind: "configuration_incomplete" };
-  }
-  if (
-    latestRun.errorCode !== "provider_quota" &&
-    !PROVIDER_QUOTA_ERROR_RE.test(error)
-  )
-    return null;
-
-  const persistedRetryAt =
-    readNonEmptyString(resultJson.retryNotBefore) ??
-    readNonEmptyString(resultJson.transientRetryNotBefore) ??
-    readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
-  const parsedPersistedRetryAt = persistedRetryAt
-    ? new Date(persistedRetryAt)
-    : null;
-  if (
-    parsedPersistedRetryAt &&
-    !Number.isNaN(parsedPersistedRetryAt.getTime()) &&
-    parsedPersistedRetryAt > now
-  ) {
-    return {
-      kind: "provider_quota",
-      retryAt: parsedPersistedRetryAt,
-      parsedResetTime: true,
-    };
-  }
-
-  const parsedClockReset = parseProviderQuotaClockReset(error, now);
-  if (parsedClockReset) {
-    return {
-      kind: "provider_quota",
-      retryAt: parsedClockReset,
-      parsedResetTime: true,
-    };
-  }
-  return {
-    kind: "provider_quota",
-    retryAt: new Date(
-      now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
-    ),
-    parsedResetTime: false,
-  };
-}
-
-type ContinuationRetryClassification = {
-  kind:
-    | "transient_infra"
-    | "non_retryable"
-    | "deliberate_wait_without_target"
-    | "default";
-  maxAttempts: number;
-  baseBackoffMs: number;
-  errorCode: string | null;
-};
-
-export function classifyContinuationFailure(
-  latestRun: LatestIssueRun,
-): ContinuationRetryClassification {
-  const errorCode = readNonEmptyString(latestRun?.errorCode);
-  if (errorCode === CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE) {
-    return {
-      kind: "deliberate_wait_without_target",
-      maxAttempts: DISPOSITION_REPAIR_MAX_ATTEMPTS,
-      baseBackoffMs: CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS,
-      errorCode,
-    };
-  }
-  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
-    return {
-      kind: "non_retryable",
-      maxAttempts: 0,
-      baseBackoffMs: 0,
-      errorCode,
-    };
-  }
-  if (errorCode && TRANSIENT_INFRA_CONTINUATION_ERROR_CODES.has(errorCode)) {
-    return {
-      kind: "transient_infra",
-      maxAttempts: CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS,
-      baseBackoffMs: CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS,
-      errorCode,
-    };
-  }
-  return {
-    kind: "default",
-    maxAttempts: CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS,
-    baseBackoffMs: 0,
-    errorCode,
-  };
-}
 
 function successfulRunHandoffRecoveryEvidence(
   latestRun: LatestIssueRun,
@@ -3851,6 +3496,10 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
+    if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
+      await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
+      return "covered";
+    }
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
         ? legacyDispositionEpisode(latestRun) : undefined
@@ -4396,6 +4045,7 @@ export function recoveryService(
   async function reconcileStrandedAssignedIssues(opts?: {
     issueCreatedAtGte?: Date | null;
   }) {
+    await dispatchBridgeWakes(db, deps.enqueueWakeup);
     const candidates = await db
       .select()
       .from(issues)
@@ -4412,6 +4062,7 @@ export function recoveryService(
             : undefined,
           isNull(issues.hiddenAt),
           not(unadmittedChatWakeupCondition(issues.id, issues.companyId)),
+          not(pendingBridgeWakeCondition(issues.id, issues.companyId)),
         ),
       );
 

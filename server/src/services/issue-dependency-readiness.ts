@@ -1,25 +1,20 @@
 import { notFound } from "../errors.js";
-import { and, eq, inArray, sql } from "drizzle-orm";
-import { heartbeatRuns, issueRelations, issues, workspaceOperations, type Db } from "@paperclipai/db";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { type Db, heartbeatRuns, issues, issueRelations, workspaceOperations } from "@paperclipai/db";
+import { createIssueDependencyReadiness } from "./issue-blocker-details.js";
+import { blockerIsResolved } from "./blocked-state-integrity.js";
 import { isWorkspaceFinalizationOperationActive } from "./workspace-finalization-activity.js";
 
 import type { IssueDependencyReadiness } from "@paperclipai/shared/types/issue-dependency-readiness";
 export type { IssueDependencyReadiness } from "@paperclipai/shared/types/issue-dependency-readiness";
+export { createIssueDependencyReadiness } from "./issue-blocker-details.js";
 
-export function createIssueDependencyReadiness(
-  issueId: string,
-): IssueDependencyReadiness {
-  return {
-    issueId,
-    blockerIssueIds: [],
-    unresolvedBlockerIssueIds: [],
-    unresolvedBlockerIds: [],
-    unresolvedBlockerCount: 0,
-    pendingFinalizeBlockerIssueIds: [],
-    allBlockersDone: true,
-    isDependencyReady: true,
-  };
-}
+type BlockerReadinessRow = {
+  issueId: string;
+  blockerIssueId: string;
+  blockerStatus: string;
+  blockerExecutionWorkspaceId: string | null;
+};
 
 async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
@@ -62,6 +57,12 @@ async function listPendingFinalizeBlockerIssueIds(
           workspaceOperations.executionWorkspaceId,
           executionWorkspaceIds,
         ),
+        or(
+          inArray(workspaceOperations.issueId, blockerIssueIds),
+          isNull(workspaceOperations.issueId),
+          // A shared workspace can be finalized by a different issue.
+          and(eq(workspaceOperations.phase, "workspace_finalize"), eq(workspaceOperations.status, "succeeded")),
+        ),
       ),
     );
 
@@ -74,6 +75,8 @@ async function listPendingFinalizeBlockerIssueIds(
     { id: string; heartbeatRunId: string | null; phase: string; status: string; startedAt: Date }
   >();
   const latestSuccessfulFinalizeByWorkspace = new Map<string, Date>();
+  const attributedRows = new Map<string, typeof rows>();
+  const unattributedRows = new Map<string, typeof rows>();
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
     if (row.phase === "workspace_finalize" && row.status === "succeeded") {
@@ -90,6 +93,9 @@ async function listPendingFinalizeBlockerIssueIds(
     if (row.issueId) {
       const key = `${row.issueId}:${row.executionWorkspaceId}`;
       if (!blockerWorkspaceKeys.has(key)) continue;
+      const group = attributedRows.get(key) ?? [];
+      group.push(row);
+      attributedRows.set(key, group);
       const current = latestAttributedByBlockerWorkspace.get(key);
       if (!current || row.startedAt > current.startedAt) {
         latestAttributedByBlockerWorkspace.set(key, {
@@ -102,6 +108,9 @@ async function listPendingFinalizeBlockerIssueIds(
       continue;
     }
 
+    const group = unattributedRows.get(row.executionWorkspaceId) ?? [];
+    group.push(row);
+    unattributedRows.set(row.executionWorkspaceId, group);
     const current = latestUnattributedByWorkspace.get(row.executionWorkspaceId);
     if (!current || row.startedAt > current.startedAt) {
       latestUnattributedByWorkspace.set(row.executionWorkspaceId, {
@@ -128,8 +137,16 @@ async function listPendingFinalizeBlockerIssueIds(
         `${pair.blockerIssueId}:${pair.executionWorkspaceId}`,
       ) ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
     if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
-    const relevantRows = rows.filter(row => row.executionWorkspaceId === pair.executionWorkspaceId
-      && (!row.issueId || row.issueId === pair.blockerIssueId));
+    const relevantRows = [
+      ...(attributedRows.get(`${pair.blockerIssueId}:${pair.executionWorkspaceId}`) ?? []),
+      ...(unattributedRows.get(pair.executionWorkspaceId) ?? []),
+    ];
+    const finalizedRuns = new Map<string, Date>();
+    for (const row of relevantRows) {
+      if (!row.heartbeatRunId || row.phase !== "workspace_finalize" || row.status !== "succeeded") continue;
+      const current = finalizedRuns.get(row.heartbeatRunId);
+      if (!current || row.startedAt > current) finalizedRuns.set(row.heartbeatRunId, row.startedAt);
+    }
     const liveWork = relevantRows.some(row => {
       if (!row.heartbeatRunId) return false;
       if (row.phase === "workspace_finalize" && isWorkspaceFinalizationOperationActive({
@@ -137,9 +154,7 @@ async function listPendingFinalizeBlockerIssueIds(
       })) return true;
       const owner = runsById.get(row.heartbeatRunId);
       return owner && ["queued", "running", "scheduled_retry"].includes(owner.status)
-        && !relevantRows.some(finalize => finalize.heartbeatRunId === row.heartbeatRunId
-          && finalize.phase === "workspace_finalize" && finalize.status === "succeeded"
-          && finalize.startedAt >= row.startedAt);
+        && !(finalizedRuns.has(row.heartbeatRunId) && finalizedRuns.get(row.heartbeatRunId)! >= row.startedAt);
     });
     if (liveWork) {
       pending.add(pair.blockerIssueId);
@@ -157,6 +172,7 @@ async function listPendingFinalizeBlockerIssueIds(
   return pending;
 }
 
+
 export async function listIssueDependencyReadinessMap(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -164,11 +180,7 @@ export async function listIssueDependencyReadinessMap(
   requestedBlockers?: { issueId: string; blockerIssueIds: string[] },
 ) {
   const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
-  const readinessMap = new Map<string, IssueDependencyReadiness>();
-  for (const issueId of uniqueIssueIds) {
-    readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
-  }
-  if (uniqueIssueIds.length === 0) return readinessMap;
+  if (uniqueIssueIds.length === 0) return new Map<string, IssueDependencyReadiness>();
 
   // Preview the proposed relation without changing the stored graph.
   const blockerRows = requestedBlockers
@@ -202,16 +214,45 @@ export async function listIssueDependencyReadinessMap(
       ),
     );
 
-  // Collect issue/workspace pairs of "done" blockers — these are the only ones
-  // subject to the workspace-finalize barrier. Blockers that aren't done already
-  // mark the dependent as not-ready and don't need a finalize check.
-  const doneBlockerWorkspacePairs: Array<{
+  return computeDependencyReadinessMap(dbOrTx, companyId, uniqueIssueIds, blockerRows);
+}
+
+/** Evaluate proposed blocker links before the update stores them. */
+export async function getRequestedBlockerDependencyReadiness(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+  blockerIds: string[],
+) {
+  const blockers = blockerIds.length === 0 ? [] : await dbOrTx.select({
+    blockerIssueId: issues.id,
+    blockerStatus: issues.status,
+    blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+  }).from(issues).where(and(eq(issues.companyId, companyId), inArray(issues.id, blockerIds)));
+  const readiness = await computeDependencyReadinessMap(dbOrTx, companyId, [issueId],
+    blockers.map(blocker => ({ ...blocker, issueId })));
+  return readiness.get(issueId)!;
+}
+
+async function computeDependencyReadinessMap(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueIds: string[],
+  blockerRows: BlockerReadinessRow[],
+) {
+  const readinessMap = new Map<string, IssueDependencyReadiness>();
+  for (const issueId of issueIds) {
+    readinessMap.set(issueId, createIssueDependencyReadiness(issueId));
+  }
+
+  // Resolved blockers must pass the workspace-finalize barrier.
+  const resolvedBlockerWorkspacePairs = new Map<string, {
     blockerIssueId: string;
     executionWorkspaceId: string;
-  }> = [];
+  }>();
   for (const row of blockerRows) {
-    if (row.blockerStatus === "done" && row.blockerExecutionWorkspaceId) {
-      doneBlockerWorkspacePairs.push({
+    if (blockerIsResolved(row.blockerStatus) && row.blockerExecutionWorkspaceId) {
+      resolvedBlockerWorkspacePairs.set(`${row.blockerIssueId}:${row.blockerExecutionWorkspaceId}`, {
         blockerIssueId: row.blockerIssueId,
         executionWorkspaceId: row.blockerExecutionWorkspaceId,
       });
@@ -221,7 +262,7 @@ export async function listIssueDependencyReadinessMap(
     await listPendingFinalizeBlockerIssueIds(
       dbOrTx,
       companyId,
-      doneBlockerWorkspacePairs,
+      [...resolvedBlockerWorkspacePairs.values()],
     );
 
   for (const row of blockerRows) {

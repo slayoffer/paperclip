@@ -42,7 +42,9 @@ export function createRunLogRedactor(input: {
   write: (stream: Stream, text: string) => Promise<void>;
 }) {
   const pending: Record<Stream, string> = { stdout: "", stderr: "" };
+  const fragments: Record<Stream, Array<{ sequence: number; length: number }>> = { stdout: [], stderr: [] };
   const dropping: Record<Stream, ReturnType<typeof createDiscardState> | null> = { stdout: null, stderr: null };
+  let sequence = 0;
   let tail = Promise.resolve();
   function serial(work: () => Promise<void>) {
     const result = tail.then(work);
@@ -67,6 +69,17 @@ export function createRunLogRedactor(input: {
     if (end > 0) {
       await input.write(stream, redactRunLogText(text.slice(0, end), values));
       pending[stream] = text.slice(end);
+      let consumed = end;
+      let count = 0;
+      for (const fragment of fragments[stream]) {
+        if (fragment.length > consumed) {
+          fragment.length -= consumed;
+          break;
+        }
+        consumed -= fragment.length;
+        count++;
+      }
+      fragments[stream].splice(0, count);
     }
     if (pending[stream].length > MAX_PENDING_CHARS) {
       // An unbounded line must not retain unbounded plaintext or expose a cut token.
@@ -74,6 +87,7 @@ export function createRunLogRedactor(input: {
       const discard = createDiscardState();
       discard(pending[stream], values, false);
       pending[stream] = "";
+      fragments[stream] = [];
       dropping[stream] = discard;
     }
   }
@@ -86,12 +100,15 @@ export function createRunLogRedactor(input: {
         dropping[stream] = null;
         chunk = chunk.slice(resumeAt);
       }
+      if (chunk.length > 0) fragments[stream].push({ sequence: sequence++, length: chunk.length });
       pending[stream] += chunk;
       await emit(stream, false);
     }),
     flush: () => serial(async () => {
-      await emit("stdout", true);
-      await emit("stderr", true);
+      // Each tail stays atomic for masking. Order tails by their first retained fragment.
+      const streams: Stream[] = ["stdout", "stderr"];
+      streams.sort((a, b) => (fragments[a][0]?.sequence ?? Infinity) - (fragments[b][0]?.sequence ?? Infinity));
+      for (const stream of streams) await emit(stream, true);
     }),
   };
 }

@@ -1,8 +1,9 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { heartbeatRuns } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { processAdapter } from "../adapters/process/index.js";
+import { getSecretProvider } from "../secrets/provider-registry.js";
 import { createRunSecretRedactionRegistry, preserveRunSecretRegistry } from "../services/run-secret-redaction.js";
 import { redactRunPersistencePatch } from "../services/run-result-redaction.js";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
@@ -117,22 +118,58 @@ if (!support.supported && process.env.PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TE
     }, 60_000);
   }
 
-  it("preserves early and concurrent registrations through context replacement", async () => {
+  it("preserves registrations through an overlapping context replacement", async () => {
     const binding = await fixture.seed();
     const early = "synthetic-early-opaque-8mV4q", concurrent = "synthetic-concurrent-opaque-9rT3k";
+    const adapterEntered = Promise.withResolvers<void>(), releaseAdapter = Promise.withResolvers<void>();
+    const registrationLocked = Promise.withResolvers<void>(), releaseRegistration = Promise.withResolvers<void>();
     vi.spyOn(processAdapter, "execute").mockImplementation(async ctx => {
+      adapterEntered.resolve();
+      await releaseAdapter.promise;
       const registry = createRunSecretRedactionRegistry(fixture.db);
       expect(await registry.valuesForRun(binding.companyId, ctx.runId)).toEqual(expect.arrayContaining([early, concurrent]));
       await fixture.complete(binding.issueId);
       await ctx.onLog("stdout", `early ${early} concurrent ${concurrent}\n`);
       return { exitCode: 0, signal: null, timedOut: false, resultJson: { output: `${early} ${concurrent}`, neutral: 7 } };
     });
-    // Pause execution before its first context update, using the actual database registration path.
     const registry = createRunSecretRedactionRegistry(fixture.db);
     const run = await fixture.start(binding);
-    await Promise.all([registry.register(binding.companyId, run.id, early), registry.register(binding.companyId, run.id, concurrent)]);
-    await fixture.db.update(heartbeatRuns).set({ contextSnapshot: preserveRunSecretRegistry({ issueId: binding.issueId, neutral: true }) }).where(eq(heartbeatRuns.id, run.id));
-    await fixture.heartbeat.drainActiveRunExecutions();
+    let registration: Promise<void> | undefined, replacement: Promise<unknown> | undefined;
+    try {
+      await adapterEntered.promise;
+      await registry.register(binding.companyId, run.id, early);
+      const [stale] = await fixture.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      const provider = getSecretProvider("local_encrypted");
+      const createSecret = provider.createSecret.bind(provider);
+      vi.spyOn(provider, "createSecret").mockImplementation(async input => {
+        if (input.value === concurrent) {
+          // Registration holds the real row lock before it encrypts its value.
+          registrationLocked.resolve();
+          await releaseRegistration.promise;
+        }
+        return createSecret(input);
+      });
+      registration = registry.register(binding.companyId, run.id, concurrent);
+      await registrationLocked.promise;
+      replacement = fixture.db.update(heartbeatRuns).set({
+        contextSnapshot: sql`${preserveRunSecretRegistry({ ...stale!.contextSnapshot, neutral: true })} /* matrix-context-replacement */`,
+      }).where(eq(heartbeatRuns.id, run.id)).then(() => {});
+      // Prove the replacement reached PostgreSQL while registration owns the row.
+      await vi.waitFor(async () => {
+        const rows = await fixture.db.$client<{ waiting: boolean }[]>`
+          select exists(select 1 from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+              and query like ${"%matrix-context-replacement%"}) as waiting`;
+        expect(rows[0]?.waiting).toBe(true);
+      }, { timeout: 5_000, interval: 10 });
+      releaseRegistration.resolve();
+      await Promise.all([registration, replacement]);
+    } finally {
+      releaseRegistration.resolve();
+      await Promise.allSettled([registration, replacement]);
+      releaseAdapter.resolve();
+      await fixture.heartbeat.drainActiveRunExecutions();
+    }
     const { row, log } = await fixture.read(run.id);
     expect(row.status).toBe("succeeded");
     expect(JSON.stringify([row.resultJson, row.stdoutExcerpt, log])).not.toContain(early);

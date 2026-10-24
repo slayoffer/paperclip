@@ -18,7 +18,7 @@ const common = {
   commitSha: sha,
 };
 
-// This contract has no HTTP route. Synthetic service callers supply verified identities separately.
+// The isolated source listener uses this unchanged contract. Identity comes from TLS and a signed run token.
 export const publicationBindingsSchema = z.discriminatedUnion("operation", [
   z.object({ ...common, operation: z.literal("push"), expectedOldSha: sha }).strict(),
   z.object({

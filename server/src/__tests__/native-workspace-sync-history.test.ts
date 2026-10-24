@@ -19,8 +19,7 @@ const runner: CommandManagedRuntimeRunner = {
       exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0,
       signal: error?.signal ?? null, timedOut: error?.killed ?? false, stdout, stderr,
     }));
-    // Git can exit before it consumes the supplied archive. Its exit result
-    // remains authoritative when the input pipe closes in that case.
+    // A probe can exit before it reads stdin. Keep the child's exit result.
     child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
       if (error.code !== "EPIPE") reject(error);
     });
@@ -33,14 +32,6 @@ async function git(cwd: string, ...args: string[]) {
 }
 
 describe("native warm workspace Git history", () => {
-  it.each([0, 17])("preserves exit code %i when the process does not consume standard input", async (exitCode) => {
-    const result = await runner.execute({
-      command: process.execPath,
-      args: ["-e", `process.exit(${exitCode})`],
-      stdin: "x".repeat(1024 * 1024),
-    });
-    expect(result.exitCode).toBe(exitCode);
-  });
   const oldHome = process.env.PAPERCLIP_HOME;
   const oldInstance = process.env.PAPERCLIP_INSTANCE_ID;
   const roots: string[] = [];
@@ -50,6 +41,16 @@ describe("native warm workspace Git history", () => {
     if (oldInstance === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
     else process.env.PAPERCLIP_INSTANCE_ID = oldInstance;
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  });
+
+  it.each([0, 7])("preserves exit code %s when the child does not read stdin", async (exitCode) => {
+    const result = await runner.execute({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write('probe'); process.exit(${exitCode})`],
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 5_000,
+    });
+    expect(result).toMatchObject({ exitCode, stdout: "probe", stderr: "", timedOut: false });
   });
 
   it.each(["unchanged", "host_commit", "host_branch", "remote_commit", "nested_commit"] as const)(

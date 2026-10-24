@@ -19,6 +19,8 @@ A reused native session registers these values for each new run before activatio
 The log writer keeps incomplete lines in memory for each output stream.
 It also retains enough text to mask registered values that contain line breaks.
 Success, failure, timeout, and cancellation flush the remaining text through the same policy.
+Terminal stream tails use the arrival order of their first retained fragments.
+Each tail remains one redacted record, including interleaved callbacks from that stream.
 A pending line above 65,536 characters becomes a redaction marker.
 The writer tracks registered prefixes while it discards the remaining fragments.
 Recovery requires a line break outside every partial registered value.

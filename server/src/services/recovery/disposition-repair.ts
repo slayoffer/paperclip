@@ -1,3 +1,5 @@
+import { isReviewBridgeWait } from "../review-bridge-contract.js";
+import { blockedStateIntegrityEnabled, hasOutsideWait, hasPendingHandoffWait } from "../blocked-state-integrity.js";
 import { createHash } from "node:crypto";
 import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -30,6 +32,8 @@ type DispositionRepairIssue = Pick<
   | "executionPolicy"
   | "executionState"
   | "monitorNextCheckAt"
+  | "identifier"
+  | "unblockDescriptor"
 >;
 
 export type DispositionRepairSourceState = {
@@ -181,7 +185,7 @@ export async function collectDispositionRepairSourceState(
         .where(
           and(
             eq(agentWakeupRequests.companyId, issue.companyId),
-            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "pending_bridge_dispatch", "dispatching_bridge"]),
             sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
             input.excludeWakeupRequestId
               ? ne(agentWakeupRequests.id, input.excludeWakeupRequestId)
@@ -202,7 +206,9 @@ export async function collectDispositionRepairSourceState(
   const pendingApproval = linkedApprovals.some((row) =>
     row.status === "pending" || row.status === "revision_requested",
   );
-  const durablePathReason = issue.assigneeUserId
+  const recordedWait = issue.status === "blocked" && (isReviewBridgeWait(issue.unblockDescriptor) ||
+    (blockedStateIntegrityEnabled() && (hasOutsideWait(issue.unblockDescriptor) || await hasPendingHandoffWait(db, issue))));
+  const durablePathReason = recordedWait ? "recorded_wait" : issue.assigneeUserId
     ? "user_owner"
     : blockers.length > 0
       ? "blocker"
@@ -219,6 +225,7 @@ export async function collectDispositionRepairSourceState(
   const durableState = {
     source: {
       status: issue.status,
+      ...(blockedStateIntegrityEnabled() || isReviewBridgeWait(issue.unblockDescriptor) ? { unblockDescriptor: issue.unblockDescriptor } : {}),
       assigneeAgentId: issue.assigneeAgentId,
       assigneeUserId: issue.assigneeUserId,
       executionPolicy: issue.executionPolicy,
