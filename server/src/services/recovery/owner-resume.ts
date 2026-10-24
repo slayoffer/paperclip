@@ -25,6 +25,7 @@ const OWNER_CONTINUATION_CAUSES = new Set([
 export async function buildOwnerRecoveryWake(db: Db, input: {
   companyId: string;
   agentId?: string | null;
+  runId?: string | null;
   contextSnapshot: Record<string, unknown>;
 }) {
   const context = input.contextSnapshot;
@@ -39,23 +40,25 @@ export async function buildOwnerRecoveryWake(db: Db, input: {
   const evidence = record(action?.evidence);
   if (action?.status === "resolved" && evidence.executionReconciliation) return null;
   if (!action && !recoveryCause) return null;
-  const cause = action?.cause ?? recoveryCause;
+  const historical = action && ["resolved", "cancelled"].includes(action.status);
+  const cause = historical ? recoveryCause ?? "stranded_assigned_issue" : action?.cause ?? recoveryCause;
   const originalOwnerId = action?.returnOwnerAgentId ?? action?.previousOwnerAgentId ?? null;
   const originalOwner = originalOwnerId ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(
     eq(agents.id, originalOwnerId), eq(agents.companyId, input.companyId),
   )).then(rows => rows[0] ?? null) : null;
   let ownerResume = false;
-  if (ownerRecoveryResumeEnabled() && input.agentId && issueId && cause &&
+  if (ownerRecoveryResumeEnabled() && input.agentId && input.runId && issueId && cause &&
       context.recoveryIntent !== "status_only" && context.allowDeliverableWork !== false &&
+      record(evidence.automaticRecovery).replay !== "blocked" &&
       OWNER_CONTINUATION_CAUSES.has(cause)) {
     const [task] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)));
     // A board action can contain a real decision. Never infer approval from its cause.
     const active = await issueRecoveryActionService(db).getActiveForIssue(input.companyId, issueId);
-    const governingAction = active ?? action;
+    const governingAction = active ?? (historical ? null : action);
     const actionAllowsWork = !governingAction ||
       (governingAction.ownerType === "agent" && governingAction.ownerAgentId === input.agentId &&
         OWNER_CONTINUATION_CAUSES.has(governingAction.cause));
-    if (task?.assigneeAgentId === input.agentId && !task.assigneeUserId &&
+    if (task?.assigneeAgentId === input.agentId && task.executionRunId === input.runId && !task.assigneeUserId &&
         ["todo", "in_progress"].includes(task.status) && actionAllowsWork) {
       const sourceId = text(context.retryOfRunId) ?? text(evidence.latestRunId) ?? text(evidence.runId);
       const [source] = sourceId ? await db.select().from(heartbeatRuns).where(and(
@@ -74,7 +77,7 @@ export async function buildOwnerRecoveryWake(db: Db, input: {
       : originalOwnerId ? { id: originalOwnerId, name: null } : null,
     attemptCount: action?.attemptCount ?? null,
     maxAttempts: action?.maxAttempts ?? null,
-    nextAction: action?.nextAction ?? null,
+    nextAction: historical ? null : action?.nextAction ?? null,
     routingFallbackReason: text(evidence.routingFallbackReason),
   };
 }

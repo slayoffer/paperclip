@@ -7,6 +7,10 @@ It requires no database migration.
 
 A recovery wake for the current task owner can permit normal source work.
 The server reads the current company, issue, owner, recovery action, and source run.
+The current run must hold the issue execution lock before it can receive this contract.
+Source-scoped owner claims use the normal execution lock while the switch is on.
+A continuation waits until an earlier execution and its cleanup release the issue.
+Eligible source-scoped turns also use normal checkout.
 It marks an eligible wake with `recovery.executionMode: "owner_resume"`.
 The adapter then instructs the owner to inspect saved progress and continue the task.
 This contract replaces the generic instruction that forbids deliverable work during recovery.
@@ -17,7 +21,8 @@ stranded assignment, and self-owned disposition repair.
 The issue must remain `todo` or `in_progress` with the same agent owner.
 A referenced source run must belong to that company, issue, and agent.
 Workspace restore failures and failed restart reconciliation retain the repair contract.
-A board-owned action also retains the repair contract.
+An active board-owned action also retains the repair contract.
+A resolved historical action does not represent an outstanding board decision.
 Another agent's recovery task does not gain authority to perform the source work.
 
 Callback failures can leave a successful model turn without a recorded task disposition.
@@ -42,5 +47,6 @@ Run these checks on an approved build host:
 ```sh
 pnpm exec vitest run server/src/__tests__/owner-recovery-resume.test.ts packages/adapter-utils/src/server-utils.test.ts --no-file-parallelism
 pnpm exec vitest run server/src/services/legacy-restart-recovery.test.ts server/src/__tests__/owner-session-guards.test.ts server/src/__tests__/owner-sessions.test.ts server/src/__tests__/issue-recovery-actions.test.ts --no-file-parallelism
+pnpm exec vitest run server/src/__tests__/owner-recovery-execution-lock.test.ts server/src/__tests__/heartbeat-auto-checkout.test.ts --no-file-parallelism
 pnpm -r typecheck
 ```

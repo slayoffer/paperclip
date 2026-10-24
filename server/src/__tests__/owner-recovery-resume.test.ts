@@ -34,11 +34,12 @@ describeDb("owner recovery prompt contract", () => {
   beforeEach(() => vi.stubEnv("PAPERCLIP_OWNER_RECOVERY_RESUME_ENABLED", "true"));
   afterEach(() => vi.unstubAllEnvs());
 
-  async function fixture(cause = "process_lost") {
+  async function fixture(cause = "process_lost", withExecution = true) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
     const runId = randomUUID();
+    const ownerRunId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Recovery fixture", defaultResponsibleUserId: responsibleUserId, issuePrefix: `R${companyId.slice(0, 6)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Owner", role: "engineer", status: "idle", adapterType: "codex_local" });
     await db.insert(issues).values({ id: issueId, companyId, title: "Finish the source change", description: "Implement the remaining task change.",
@@ -46,8 +47,12 @@ describeDb("owner recovery prompt contract", () => {
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "failed", errorCode: cause,
       contextSnapshot: { issueId }, resultJson: {} });
     const contextSnapshot: Record<string, unknown> = { issueId, retryOfRunId: runId, wakeReason: "source_scoped_recovery_action", recoveryCause: cause };
-    const input = { db, companyId, agentId, contextSnapshot };
-    return { companyId, agentId, issueId, runId, input };
+    if (withExecution) {
+      await db.insert(heartbeatRuns).values({ id: ownerRunId, companyId, agentId, status: "running", contextSnapshot: { issueId } });
+      await db.update(issues).set({ executionRunId: ownerRunId }).where(eq(issues.id, issueId));
+    }
+    const input = { db, companyId, agentId, runId: withExecution ? ownerRunId : undefined, contextSnapshot };
+    return { companyId, agentId, issueId, runId, ownerRunId, input };
   }
 
   async function expectNormal(input: Parameters<typeof buildPaperclipWakePayload>[0]) {
@@ -98,7 +103,7 @@ describeDb("owner recovery prompt contract", () => {
   });
 
   it.each(["process_lost", "callback_503"])("completes real owner work in one repair turn after %s", async failure => {
-    const f = await fixture();
+    const f = await fixture("process_lost", false);
     const adapterType = `owner_recovery_${failure}`;
     const seen: string[] = [];
     registerServerAdapter({
@@ -134,10 +139,10 @@ describeDb("owner recovery prompt contract", () => {
       await heartbeat.drainActiveRunExecutions();
       unregisterServerAdapter(adapterType);
     }
-  });
+  }, 30_000);
 
   it("keeps a real host decision as a pending board card", async () => {
-    const f = await fixture();
+    const f = await fixture("process_lost", false);
     const adapterType = "owner_recovery_host_decision";
     let calls = 0;
     registerServerAdapter({
@@ -171,6 +176,26 @@ describeDb("owner recovery prompt contract", () => {
       await heartbeat.drainActiveRunExecutions();
       unregisterServerAdapter(adapterType);
     }
+  });
+
+  it("uses normal owner work after the board resolves the referenced action", async () => {
+    const f = await fixture();
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId: f.companyId, sourceIssueId: f.issueId, kind: "stranded_assigned_issue", cause: "process_lost",
+      ownerType: "board", returnOwnerAgentId: f.agentId, status: "resolved", outcome: "restored",
+      fingerprint: f.runId, evidence: {}, nextAction: "Board operator: inspect the stopped run.", resolvedAt: new Date(),
+    }).returning();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.issueId));
+    f.input.contextSnapshot = { issueId: f.issueId, wakeReason: "issue_recovery_action_restored", recoveryActionId: action.id };
+    await expectNormal(f.input);
+    expect((await buildPaperclipWakePayload(f.input))?.recovery?.nextAction).toBeNull();
+    expect(await issueRecoveryActionService(db).getActiveForIssue(f.companyId, f.issueId)).toBeNull();
+  });
+
+  it("does not permit source work without this run's execution lock", async () => {
+    const f = await fixture();
+    expect((await buildPaperclipWakePayload({ ...f.input, runId: undefined }))?.recovery).not.toHaveProperty("executionMode");
+    expect((await buildPaperclipWakePayload({ ...f.input, runId: randomUUID() }))?.recovery).not.toHaveProperty("executionMode");
   });
 
   it("retains a board-owned credential decision instead of treating it as owner continuation", async () => {
