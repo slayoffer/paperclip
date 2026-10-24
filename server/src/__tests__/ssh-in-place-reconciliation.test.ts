@@ -69,7 +69,7 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
     if (fixture) await stopSshEnvLabFixture(fixture);
     if (root) await rm(root, { recursive: true, force: true });
   });
-  async function owner(input: { status?: string; tracking?: boolean; leaseId?: string } = {}) {
+  async function owner(input: { status?: string; tracking?: boolean; leaseId?: string; writerDirectory?: boolean } = {}) {
     const companyId = randomUUID(); companyIds.push(companyId);
     await db.insert(companies).values({ id: companyId, name: "Owner recovery", issuePrefix: `R${companyId.slice(0, 7)}` });
     const [agent] = await db.insert(agents).values({ companyId, name: "Writer", role: "engineer", adapterType: "process" }).returning();
@@ -90,7 +90,8 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
     }).returning();
     leaseIds.push(lease.id);
     await acquireSshInPlaceWorktreeLock({ key: cwd, leaseId: lease.id, runId: run.id, waitMs: 0, isHolderActive: async () => true });
-    const directory = sshWriterDirectory(config.remoteWorkspacePath, run.id); await mkdir(directory, { recursive: true });
+    const directory = sshWriterDirectory(config.remoteWorkspacePath, run.id);
+    if (input.writerDirectory !== false) await mkdir(directory, { recursive: true });
     return { companyId, environment, run, lease, cwd, directory };
   }
   async function stoppedWriter(f: Awaited<ReturnType<typeof owner>>) {
@@ -126,9 +127,28 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
     expect(result.cwd).toBe(f.cwd);
     expect(info.mock.calls.some(call => call[1] === "SSH workspace realized in place on the shared host path")).toBe(true);
   });
-  it.each(["queued", "running", "interrupted"])("preserves an owner whose run status is %s", async status => {
+  it.each(["queued", "running"])("preserves an owner whose run status is %s", async status => {
     const f = await owner({ status }); await stoppedWriter(f);
     expect((await createSshInPlaceOwnershipReconciler(db)()).released).toBe(0);
+    expect(readSshInPlaceWorktreeLockHolder(f.cwd)?.leaseId).toBe(f.lease.id);
+  });
+  it("releases interrupted ownership after the contained writer stops", async () => {
+    const f = await owner({ status: "interrupted", tracking: true }); await stoppedWriter(f);
+    expect(await createSshInPlaceOwnershipReconciler(db)()).toEqual({ scanned: 1, released: 1 });
+    expect(hasRemoteTerminationReceipt(await stored(f.lease.id))).toBe(true);
+    expect(readSshInPlaceWorktreeLockHolder(f.cwd)).toBeNull();
+  });
+  it.each(["cancelled", "failed"])("releases a %s owner without a writer directory", async status => {
+    const f = await owner({ status, tracking: true, writerDirectory: false });
+    await expect(readdir(f.directory)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await createSshInPlaceOwnershipReconciler(db)()).toEqual({ scanned: 1, released: 1 });
+    expect(hasRemoteTerminationReceipt(await stored(f.lease.id))).toBe(true);
+    expect(readSshInPlaceWorktreeLockHolder(f.cwd)).toBeNull();
+  });
+  it.each(["queued", "running"])("preserves a %s owner without a writer directory", async status => {
+    const f = await owner({ status, tracking: true, writerDirectory: false });
+    expect(await createSshInPlaceOwnershipReconciler(db)()).toEqual({ scanned: 0, released: 0 });
+    expect(hasRemoteTerminationReceipt(await stored(f.lease.id))).toBe(false);
     expect(readSshInPlaceWorktreeLockHolder(f.cwd)?.leaseId).toBe(f.lease.id);
   });
   it("preserves live PIDs, missing identities, and changed SSH endpoints", async () => {

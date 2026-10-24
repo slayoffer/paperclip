@@ -1,5 +1,33 @@
 # Workspace operations
 
+## Child execution contexts
+
+A child inherits its parent’s project and project workspace by default.
+It does not inherit the parent’s execution workspace binding.
+The child realizes its own branch from its selected base ref.
+The child helper preserves unresolved strategy settings, but removes the parent’s exact branch pin.
+An explicit child branch or base ref takes precedence.
+
+Set `inheritExecutionWorkspaceFromIssueId` to request a source execution workspace.
+The internal child helper also supports explicit `executionWorkspaceInheritanceMode: "linkage"`.
+A direct execution workspace binding remains supported.
+The child endpoint does not accept a workspace inheritance source or mode.
+Its creation audit omits `inheritedExecutionWorkspaceFromIssueId`, including when a caller selects the parent’s workspace directly.
+A requested branch that differs from the saved workspace branch requires a separate realization.
+
+Before cross-issue reuse, the runtime checks staged, unstaged, and untracked Git changes.
+A dirty workspace or failed status check prevents restoration of that workspace.
+For `reuse_existing`, dispatch selects a separate issue workspace before it applies inherited configuration.
+It saves the reason in the new workspace metadata and the run warnings.
+The issue saves its selected strategy. Later wakes use the same binding and strategy.
+They can resume that issue's own changes and provider session.
+An explicit branch request or suspended execution keeps its exact workspace and fails closed.
+The runtime does not repair or provision that workspace for the other issue.
+The source issue can resume its own dirty workspace.
+The check covers persisted bindings and registered worktrees selected by branch.
+Owner selection compares canonical paths within the company, including saved and candidate symbolic-link paths.
+Company and project access checks still apply.
+
 ## Task environment selection
 
 `executionWorkspaceSettings.environmentId` selects an environment for one task.
@@ -34,6 +62,10 @@ Snapshot formats and restore merge rules stay the same.
 Run logs show queue wait times and elapsed times for Git import, workspace sync,
 baseline capture, and asset sync. Each step reports its start and its result.
 The queue does not change the agent run cap or execution leases.
+
+SSH transfer stream errors fail only the affected transfer. The transfer closes its streams and stops its child processes.
+It waits for child closure before cleanup. After five seconds, it sends `SIGKILL` to children that remain.
+The caller receives the error, and progress logs record a failure when progress reporting is enabled.
 
 SSH Git imports preserve the source repository's remote tracking references.
 The bundle includes their history and restores symbolic references such as `origin/HEAD`.

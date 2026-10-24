@@ -2642,9 +2642,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it("recovers legacy startup before adapter.invoke using the claimed adapter identity", async () => {
     const f = await seedRunFixture({ agentStatus: "idle", adapterType: "claude_local" });
     await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, f.runId));
-    await db.update(heartbeatRuns).set({ runnerProfileJson: {
-      adapterDispatch: { adapterType: "claude_local" },
-    } }).where(eq(heartbeatRuns.id, f.runId));
+    await db.update(heartbeatRuns).set({
+      runnerProfileJson: { adapterDispatch: { adapterType: "claude_local" } },
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+    }).where(eq(heartbeatRuns.id, f.runId));
     await heartbeatService(db).reapOrphanedRuns();
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
     expect(source.resultJson).toMatchObject({ conversationContinuation: "continue_conversation_v1" });
@@ -2655,6 +2656,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("schedules one conversation continuation after losing the provider", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
+      adapterType: "gemini_local",
       agentStatus: "idle",
       processPid: 999_999_999,
       contextSnapshot: {
@@ -2689,8 +2691,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       timeoutConfigured: false,
       timeoutFired: false,
     });
-    // The legacy engine writes this terminal status through the same
-    // guarded emitter that reports a genuine failed transition to Sentry.
+    // Report each failed transition through the guarded Sentry emitter.
     expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
     expect(mockCaptureRunFailure).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2712,8 +2713,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.agentId, agentId)),
     ).toHaveLength(2);
-    // A replay over the same already-failed run must not report a second
-    // Sentry event for one terminal failure.
+    // Report one Sentry event per failed transition.
     expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
 
     const issue = await waitForValue(async () =>
@@ -5251,8 +5251,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       result: { version: 1, outcome: "accepted" },
     });
 
-    // The continuation wake was claimed and a run spawned, but the process was lost before
-    // the agent produced any output — no pid/process-group was ever recorded.
+    // The continuation stopped before provider dispatch. No process metadata exists.
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
     await db
       .update(agentWakeupRequests)
       .set({

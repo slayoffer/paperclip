@@ -129,6 +129,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
    * `<workspaceRemoteDir>/.paperclip-runtime/<adapterKey>` and nothing removes it.
    */
   runtimeRootDir?: string | null;
+  providerSessionRoot?: string;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
   assets?: RemoteManagedRuntimeAsset[];
@@ -155,8 +156,9 @@ async function prepareRemoteManagedRuntimeInner(input: {
   }
   const runtimeRootDir = explicitRuntimeRootDir ??
     path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
-  const providerSessions = explicitRuntimeRootDir ? sshProviderSessionDirectories({
-    runtimeRoot: explicitRuntimeRootDir,
+  const providerSessions = explicitRuntimeRootDir || input.providerSessionRoot ? sshProviderSessionDirectories({
+    runtimeRoot: runtimeRootDir,
+    providerSessionRoot: input.providerSessionRoot,
     adapterKey: input.adapterKey,
     companyId: input.companyId,
     workspace: workspaceRemoteDir,

@@ -10,6 +10,7 @@ Source inputs: `GOAL.md`, `PRODUCT.md`, `SPEC.md`, `DATABASE.md`, current monore
 See [details](spec-implementation/part-1.md#1-document-role).
 
 The Synthiq fork provides an optional [guarded pull queue](pull-queue.md).
+Children use separate [execution contexts](workspace-operations.md#child-execution-contexts) unless sharing is explicit.
 Task-only [environment selection](workspace-operations.md#task-environment-selection) precedes defaults and preserves inherited workspace bindings.
 `PAPERCLIP_PULL_QUEUE_ENABLED=true` enables event selection, real-work counts, ghost release, and monitor protection.
 The default is off. Normal run admission, budget limits, and governance gates remain authoritative.
@@ -22,6 +23,10 @@ The fork also supports [saved review waits](review-waits.md).
 An agent can record a bounded bridge wait for its latest saved review handoff.
 Matching board events or expiry release the wait through durable wake delivery.
 Disposition recovery preserves the wait and existing execution safety holds.
+
+The fork supports optional [owner sessions](owner-sessions.md) for the local command engines.
+The default is off. A selected owner resumes one thread per project across issue worktrees.
+Company, credential, workspace, and host boundaries remain mandatory.
 
 ## 2. V1 Outcomes
 
@@ -320,6 +325,10 @@ See [details](spec-implementation/part-8.md#1011-current-implementation-api-adde
 
 See [details](spec-implementation/part-8.md#11-heartbeat-and-adapter-contract).
 
+The fork supports [legacy CLI restart recovery](restart-session-recovery.md).
+Recovery retains the run and provider session when termination and workspace evidence permit a safe resume.
+Missing or conflicting evidence retains the reconciliation path.
+
 ## 11.1 Adapter Interface
 
 See [details](spec-implementation/part-8.md#111-adapter-interface).
@@ -343,6 +352,7 @@ See [details](spec-implementation/part-8.md#114-context-delivery).
 ## 11.5 Recovery Work Classes
 
 See [details](spec-implementation/part-8.md#115-recovery-work-classes).
+The fork also defines the [owner recovery continuation contract](owner-recovery-resume.md).
 
 ## 11.6 Scheduler Rules
 

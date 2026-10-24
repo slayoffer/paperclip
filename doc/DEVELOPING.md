@@ -1112,6 +1112,8 @@ eval "$(npx paperclipai worktree env)"
 
 For project execution worktrees, Paperclip can also run a project-defined provision command after it creates or reuses an isolated git worktree. Configure this on the project's execution workspace policy (`workspaceStrategy.provisionCommand`). The command runs inside the derived worktree and receives `PAPERCLIP_WORKSPACE_*`, `PAPERCLIP_PROJECT_ID`, `PAPERCLIP_AGENT_ID`, and `PAPERCLIP_ISSUE_*` environment variables so each repo can bootstrap itself however it wants.
 
+Children use separate execution contexts by default. See [child execution contexts](workspace-operations.md#child-execution-contexts) for explicit sharing and Git checks.
+
 An issue's partial `workspaceStrategy` inherits omitted fields from the enabled project's strategy when both use the same type. For example, an issue can override `baseRef` without losing the project's provision, runtime provision, or teardown commands. An explicit value, including `null` or an empty string, replaces the project value. Clearing a command restores the runtime's usual default behavior; use `provisionCommand: "true"` for an explicit no-op. A different strategy type or a disabled project policy does not supply these defaults. An issue's `existingBranch` pin also excludes the project's `branchTemplate`.
 
 An issue can pin its isolated worktree to an exact pre-existing branch instead of a template-derived one — the contract PR-preparation tasks use. Set the issue's `executionWorkspaceSettings` to `{ "mode": "isolated_workspace", "workspaceStrategy": { "type": "git_worktree", "existingBranch": "<branch>" } }`. The validator requires isolated mode plus a `git_worktree` strategy and rejects `branchTemplate` alongside `existingBranch`. At dispatch the runtime attaches (never creates, renames, fast-forwards, or resets) that branch: it reuses a registered worktree that already has the branch checked out (including legacy `.worktrees/` paths), otherwise it attaches the branch under the managed worktree parent. A missing branch, an occupied worktree path on another branch, or a non-worktree strategy fails closed with a `workspace_validation_failed` error instead of falling back to the shared checkout or a derived branch, and an inherited `reuse_existing` workspace binding on a different branch is ignored in favor of realizing the pinned branch.
@@ -1144,6 +1146,8 @@ In Vite middleware mode, Paperclip gives HMR a dedicated HTTP server bound to th
 When a workspace service runs Paperclip for browser OAuth QA, configure its `expose.urlTemplate` with the canonical URL the browser can reach. Paperclip preserves explicit `PAPERCLIP_PUBLIC_URL` or `BETTER_AUTH_URL` settings; otherwise it uses a valid exposed HTTPS origin (or loopback HTTP) as the managed runtime fallback for Better Auth and `/api/tools/oauth/callback`. Internal service names such as `http://paperclip-dev:<port>` are rejected unless that hostname is genuinely the browser route. Use a unique origin per isolated worktree. See [Execution Workspaces And Runtime Services](../docs/guides/board-operator/execution-workspaces-and-runtime-services.md#browser-reachable-origins-for-oauth-qa) for configuration and verification.
 
 ## Wake Context Delivery
+
+See [Owner sessions](owner-sessions.md) for the optional Synthiq session mode and canary variables.
 
 Built-in adapters deliver wake context through the run prompt, including structured
 execution-continuation data. They do not export `PAPERCLIP_WAKE_PAYLOAD_JSON`. A
@@ -1815,6 +1819,14 @@ results for up to five seconds after completion. The cache holds at most 256
 entries. Close-readiness checks, the terminal-workspace reaper, and the final
 cleanup validation still inspect Git afresh. A display result never authorizes
 worktree removal.
+
+Cross-issue ownership checks exclude closed and archived execution workspaces.
+They also exclude records with a closure timestamp. Records with failed cleanup
+and no closure timestamp retain ownership checks.
+A project-less agent-home folder can be outside a Git repository. This exception
+requires Git's explicit non-repository result and no `.git` entry in the folder
+or its ancestors. Dirty Git folders, damaged repositories, and other inspection
+failures retain the reuse guard.
 
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their

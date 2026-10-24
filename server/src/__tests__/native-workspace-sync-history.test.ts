@@ -11,7 +11,7 @@ import { runLocalGit } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { prepareNativeWorkspaceSync } from "../services/native-runtime/native-workspace-sync.js";
 
 const runner: CommandManagedRuntimeRunner = {
-  execute: (input) => new Promise((resolve) => {
+  execute: (input) => new Promise((resolve, reject) => {
     const child = execFile(input.command, input.args ?? [], {
       cwd: input.cwd, env: { ...process.env, ...input.env },
       timeout: input.timeoutMs, maxBuffer: 16 * 1024 * 1024,
@@ -19,6 +19,10 @@ const runner: CommandManagedRuntimeRunner = {
       exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0,
       signal: error?.signal ?? null, timedOut: error?.killed ?? false, stdout, stderr,
     }));
+    // A probe can exit before it reads stdin. Keep the child's exit result.
+    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") reject(error);
+    });
     child.stdin?.end(input.stdin ?? "");
   }),
 };
@@ -37,6 +41,16 @@ describe("native warm workspace Git history", () => {
     if (oldInstance === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
     else process.env.PAPERCLIP_INSTANCE_ID = oldInstance;
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  });
+
+  it.each([0, 7])("preserves exit code %s when the child does not read stdin", async (exitCode) => {
+    const result = await runner.execute({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write('probe'); process.exit(${exitCode})`],
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 5_000,
+    });
+    expect(result).toMatchObject({ exitCode, stdout: "probe", stderr: "", timedOut: false });
   });
 
   it.each(["unchanged", "host_commit", "host_branch", "remote_commit", "nested_commit"] as const)(

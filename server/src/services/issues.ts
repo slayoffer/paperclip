@@ -9,6 +9,7 @@ import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked
 import { assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
+import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -241,8 +242,6 @@ export const ISSUE_SUBTREE_DIAGNOSTICS_MAX_WAKE_REQUESTS_PER_NODE = 5;
 export const ISSUE_SUBTREE_DIAGNOSTICS_MAX_ACTIVITY_RECORDS_PER_NODE = 5;
 const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
 export const MAX_CHILD_ISSUES_CREATED_BY_HELPER = 25;
-const MAX_CHILD_COMPLETION_SUMMARIES = 20;
-const CHILD_COMPLETION_SUMMARY_BODY_MAX_CHARS = 500;
 // Non-human author sentinels that agents post under. These ARE eligible for
 // agent-attribution derivation even though `local-board` is also materialized
 // as a row in the `user` table (it is the implicit board admin). Genuine human
@@ -476,9 +475,6 @@ function buildPreRealizationExecutionWorkspaceSettings(
         : {}),
       ...(settings.workspaceStrategy.branchTemplate
         ? { branchTemplate: settings.workspaceStrategy.branchTemplate }
-        : {}),
-      ...(settings.workspaceStrategy.existingBranch
-        ? { existingBranch: settings.workspaceStrategy.existingBranch }
         : {}),
       ...(settings.workspaceStrategy.worktreeParentDir
         ? { worktreeParentDir: settings.workspaceStrategy.worktreeParentDir }
@@ -2008,17 +2004,7 @@ type IssueSubtreeDiagnosticsActivityResultRow =
   IssueSubtreeDiagnosticsActivityRow & {
     rowNumber: number | string;
   };
-export type ChildIssueCompletionSummary = {
-  id: string;
-  identifier: string | null;
-  title: string;
-  status: string;
-  priority: string;
-  assigneeAgentId: string | null;
-  assigneeUserId: string | null;
-  updatedAt: Date;
-  summary: string | null;
-};
+export type { ChildIssueCompletionSummary } from "./issue-parent-completion.js";
 
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   if (actorRunId) return checkoutRunId === actorRunId;
@@ -2051,16 +2037,6 @@ function chunkList<T>(values: T[], size: number): T[][] {
   return chunks;
 }
 
-function truncateInlineSummary(
-  value: string | null | undefined,
-  maxChars = CHILD_COMPLETION_SUMMARY_BODY_MAX_CHARS,
-) {
-  const normalized = value?.trim();
-  if (!normalized) return null;
-  return normalized.length > maxChars
-    ? `${normalized.slice(0, Math.max(0, maxChars - 15)).trimEnd()} [truncated]`
-    : normalized;
-}
 
 function truncateByCodePoint(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
@@ -8748,104 +8724,7 @@ export function issueService(db: Db) {
       postCommitActions?: IssuePostCommitAction[],
     ) => listWakeableBlockedDependents(db, blockerIssueId, dbOrTx, postCommitActivityPublications, postCommitActions),
 
-    getWakeableParentAfterChildCompletion: async (
-      parentIssueId: string,
-      completedChildResult?: { issueId: string; summary: string | null } | null,
-    ) => {
-      const parent = await db
-        .select({
-          id: issues.id,
-          conversationAgentId: issues.conversationAgentId,
-          originKind: issues.originKind,
-          assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
-          companyId: issues.companyId,
-        })
-        .from(issues)
-        .where(eq(issues.id, parentIssueId))
-        .then((rows) => rows[0] ?? null);
-      if (!parent || parent.conversationAgentId || !parent.assigneeAgentId || ["backlog", "cancelled"].includes(parent.status) ||
-          (parent.status === "done" && parent.originKind !== "onboarding_first_task")) {
-        return null;
-      }
-
-      const children = await db
-        .select({
-          id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
-          assigneeAgentId: issues.assigneeAgentId,
-          assigneeUserId: issues.assigneeUserId,
-          updatedAt: issues.updatedAt,
-        })
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, parent.companyId),
-            eq(issues.parentId, parentIssueId),
-          ),
-        )
-        .orderBy(asc(issues.issueNumber), asc(issues.createdAt));
-      if (children.length === 0) return null;
-      if (
-        !children.every(
-          (child) => child.status === "done" || child.status === "cancelled",
-        )
-      ) {
-        return null;
-      }
-
-      const childIdsForSummaries = children
-        .slice(0, MAX_CHILD_COMPLETION_SUMMARIES)
-        .map((child) => child.id);
-      const commentRows =
-        childIdsForSummaries.length > 0
-          ? await db
-              .select({
-                issueId: issueComments.issueId,
-                body: issueComments.body,
-                createdAt: issueComments.createdAt,
-              })
-              .from(issueComments)
-              .where(
-                and(
-                  eq(issueComments.companyId, parent.companyId),
-                  inArray(issueComments.issueId, childIdsForSummaries),
-                  isNull(issueComments.deletedAt),
-                ),
-              )
-              .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-          : [];
-      const latestCommentByIssueId = new Map<string, string>();
-      for (const comment of commentRows) {
-        if (!latestCommentByIssueId.has(comment.issueId)) {
-          latestCommentByIssueId.set(comment.issueId, comment.body);
-        }
-      }
-      const childIssueSummaries: ChildIssueCompletionSummary[] = children
-        .slice(0, MAX_CHILD_COMPLETION_SUMMARIES)
-        .map((child) => ({
-          ...child,
-          summary: truncateInlineSummary(
-            child.id === completedChildResult?.issueId
-              ? (completedChildResult.summary ??
-                  latestCommentByIssueId.get(child.id))
-              : latestCommentByIssueId.get(child.id),
-          ),
-        }));
-
-      return {
-        onboardingCompletion: parent.originKind === "onboarding_first_task",
-        id: parent.id,
-        assigneeAgentId: parent.assigneeAgentId,
-        childIssueIds: children.map((child) => child.id),
-        childIssueSummaries,
-        childIssueSummaryTruncated:
-          children.length > childIssueSummaries.length,
-      };
-    },
+    getWakeableParentAfterChildCompletion: getWakeableParentAfterChildCompletion.bind(null, db),
 
     createChild: async (parentIssueId: string, data: IssueChildCreateInput) => {
       const parent = await db
@@ -8909,7 +8788,7 @@ export function issueService(db: Db) {
       const {
         acceptanceCriteria,
         blockParentUntilDone,
-        executionWorkspaceInheritanceMode = "linkage",
+        executionWorkspaceInheritanceMode = "strategy_only",
         actorAgentId,
         actorUserId,
         ...issueData
@@ -8922,16 +8801,6 @@ export function issueService(db: Db) {
       // boundary; create() then resolves the target project's own workspaces.
       const childProjectId = issueData.projectId ?? parent.projectId;
       const childInheritsParentProject = childProjectId === parent.projectId;
-      const hasExplicitExecutionWorkspaceOverride =
-        issueData.executionWorkspaceId !== undefined ||
-        issueData.executionWorkspacePreference !== undefined ||
-        issueData.executionWorkspaceSettings !== undefined;
-      const inheritedPreRealizationWorkspaceSettings =
-        inheritStrategyOnly && !hasExplicitExecutionWorkspaceOverride
-          ? buildPreRealizationExecutionWorkspaceSettings(
-              parent.executionWorkspaceSettings,
-            )
-          : null;
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
         parentId: parent.id,
@@ -8955,15 +8824,9 @@ export function issueService(db: Db) {
           issueData.description,
           acceptanceCriteria,
         ),
-        ...(inheritedPreRealizationWorkspaceSettings
-          ? {
-              executionWorkspaceSettings:
-                inheritedPreRealizationWorkspaceSettings,
-            }
+        ...(!inheritStrategyOnly
+          ? { inheritExecutionWorkspaceFromIssueId: parent.id }
           : {}),
-        ...(inheritStrategyOnly
-          ? { skipExecutionWorkspaceInheritance: true }
-          : { inheritExecutionWorkspaceFromIssueId: parent.id }),
       });
 
       if (blockParentUntilDone) {
@@ -9568,6 +9431,15 @@ export function issueService(db: Db) {
           }
           if (
             inheritsSourceProject &&
+            !hasExplicitExecutionWorkspaceOverride &&
+            inheritExecutionWorkspaceFromIssueId == null
+          ) {
+            executionWorkspaceSettings = buildPreRealizationExecutionWorkspaceSettings(
+              workspaceSource.executionWorkspaceSettings,
+            );
+          }
+          if (
+            inheritsSourceProject &&
             isolatedWorkspacesEnabled &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
@@ -9585,7 +9457,12 @@ export function issueService(db: Db) {
                 ),
               )
               .then((rows) => rows[0] ?? null);
-            if (sourceWorkspace) {
+            if (sourceWorkspace && inheritExecutionWorkspaceFromIssueId == null) {
+              executionWorkspaceSettings = {
+                ...executionWorkspaceSettings,
+                mode: issueExecutionWorkspaceModeForPersistedWorkspace(sourceWorkspace.mode),
+              };
+            } else if (sourceWorkspace) {
               executionWorkspaceId = sourceWorkspace.id;
               executionWorkspacePreference = "reuse_existing";
               executionWorkspaceSettings = {

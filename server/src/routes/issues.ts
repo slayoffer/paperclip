@@ -4650,7 +4650,8 @@ export function issueRoutes(
     }
     const hasExecutionOverride = input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined || input.executionWorkspaceSettings !== undefined;
-    const executionWorkspaceId = input.executionWorkspaceId ?? (hasExecutionOverride ? null : source?.executionWorkspaceId);
+    const executionWorkspaceId = input.executionWorkspaceId ??
+      (hasExecutionOverride || !input.inheritExecutionWorkspaceFromIssueId ? null : source?.executionWorkspaceId);
     if (executionWorkspaceId && (await instanceSettings.getExperimental()).enableIsolatedWorkspaces) {
       const [workspace] = await db.select({ projectId: executionWorkspaces.projectId }).from(executionWorkspaces)
         .where(and(eq(executionWorkspaces.id, executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));
@@ -11824,7 +11825,6 @@ export function issueRoutes(
           identifier: issue.identifier,
           title: issue.title,
           ...buildCreateIssueActivityStatusDetails(issue, res),
-          inheritedExecutionWorkspaceFromIssueId: parent.id,
           ...(Array.isArray(req.body.blockedByIssueIds)
             ? { blockedByIssueIds: req.body.blockedByIssueIds }
             : {}),
@@ -14089,7 +14089,6 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
 
-      // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
       void (async () => {
         type WakeupRequest = NonNullable<
           Parameters<typeof heartbeat.wakeup>[1]
@@ -14109,8 +14108,7 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
-          // Provider turns use the task identifier as their session key. Board
-          // messages must resume that same session instead of creating a UUID-keyed fork.
+          // Board messages resume the task session.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
           }
@@ -14382,7 +14380,7 @@ export function issueRoutes(
         }
         if (becameTerminal && issue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            issue.parentId,
+            issue.parentId, { issueId: issue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {
@@ -17620,7 +17618,7 @@ export function issueRoutes(
         }
         if (becameTerminal && currentIssue.parentId) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
-            currentIssue.parentId,
+            currentIssue.parentId, { issueId: currentIssue.id, summary: null },
           );
           if (parent) {
             addWakeup(parent.assigneeAgentId, {

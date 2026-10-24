@@ -1,26 +1,6 @@
 import type { PaperclipMcpConfig } from "./config.js";
-
-export class PaperclipApiError extends Error {
-  readonly status: number;
-  readonly method: string;
-  readonly path: string;
-  readonly body: unknown;
-
-  constructor(input: {
-    status: number;
-    method: string;
-    path: string;
-    body: unknown;
-    message: string;
-  }) {
-    super(input.message);
-    this.name = "PaperclipApiError";
-    this.status = input.status;
-    this.method = input.method;
-    this.path = input.path;
-    this.body = input.body;
-  }
-}
+import { PaperclipApiError, readResponseText } from "./api-error.js";
+export { PaperclipApiError } from "./api-error.js";
 
 export interface JsonRequestOptions {
   body?: unknown;
@@ -31,15 +11,8 @@ function isWriteMethod(method: string): boolean {
   return !["GET", "HEAD"].includes(method.toUpperCase());
 }
 
-function buildErrorMessage(method: string, path: string, status: number, body: unknown): string {
-  if (body && typeof body === "object" && "error" in body && typeof body.error === "string") {
-    return `${method} ${path} failed with ${status}: ${body.error}`;
-  }
-  return `${method} ${path} failed with ${status}`;
-}
-
 async function parseResponseBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  const text = await readResponseText(response);
   if (!text) return null;
   try {
     return JSON.parse(text) as unknown;
@@ -79,6 +52,9 @@ export class PaperclipApiClient {
     if (!path.startsWith("/")) {
       throw new Error(`API path must start with "/": ${path}`);
     }
+    if (/^\/api(?:\/|[?#]|$)/.test(path)) {
+      throw new Error("The server adds /api. Remove the prefix from the request path.");
+    }
 
     const url = new URL(path.slice(1), `${this.config.apiUrl}/`);
     const headers: Record<string, string> = {
@@ -97,7 +73,9 @@ export class PaperclipApiClient {
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
-    const parsedBody = await parseResponseBody(response);
+    const parsedBody = response.ok
+      ? await parseResponseBody(response)
+      : await readResponseText(response);
 
     if (!response.ok) {
       throw new PaperclipApiError({
@@ -105,7 +83,7 @@ export class PaperclipApiClient {
         method: method.toUpperCase(),
         path,
         body: parsedBody,
-        message: buildErrorMessage(method.toUpperCase(), path, response.status, parsedBody),
+        secrets: [this.config.apiKey],
       });
     }
 
