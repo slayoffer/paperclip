@@ -41,6 +41,7 @@ It dispatches those queues through the root database after the outer commit.
 A transaction-bound issue service never dispatches from a savepoint.
 Without a caller queue, its durable intents remain available for recovery after commit.
 Failed or deferred dispatches remain pending. The periodic dependency check retries them for released `todo` issues.
+A retry reuses a saved resolved-blocker ID only while that ID remains in the current blocker set.
 An expired dispatch claim also permits a retry. An existing wake prevents a duplicate dispatch.
 Route completion and recovery use the same cycle key when integrity is enabled.
 They suppress an existing completed wake for that cycle.

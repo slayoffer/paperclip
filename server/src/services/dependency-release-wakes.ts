@@ -88,7 +88,9 @@ export async function dispatchPendingDependencyReleaseWakes(
         await settle("completed_dependency_dispatch");
         continue;
       }
+      // A deferred intent can outlive replacement of its original blocker links.
       const resolvedBlockerIssueId = typeof payload.resolvedBlockerIssueId === "string"
+        && blockerIssueIds.includes(payload.resolvedBlockerIssueId)
         ? payload.resolvedBlockerIssueId : blockerIssueIds[0];
       const parent = resolvedBlockerIssueId ? await getWakeableParentAfterChildCompletion(db, issueId,
         { issueId: resolvedBlockerIssueId, summary: null }, true) : null;

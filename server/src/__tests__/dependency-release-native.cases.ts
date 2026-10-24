@@ -142,16 +142,16 @@ export function nativeDependencyCompletionCases(context: () => Context) {
         source: "local_implicit" };
       next();
     });
+    const parentProbe = vi.spyOn(parentCompletion, "getWakeableParentAfterChildCompletion");
     app.use("/api", issueRoutes(db, {} as never));
     app.use(errorHandler);
-    const parentProbe = vi.spyOn(parentCompletion, "getWakeableParentAfterChildCompletion");
     const server = app.listen(0, "127.0.0.1");
     await once(server, "listening");
     try {
       const response = await request(server).patch(`/api/issues/${blocker.id}`).send({ status: "done" });
       expect(response.status, JSON.stringify(response.body)).toBe(200);
       // Wait for the route's detached parent check before fixture cleanup.
-      const routeCheck = () => parentProbe.mock.calls.findIndex(call => call[1] === dependent.id && call[3] === false);
+      const routeCheck = () => parentProbe.mock.calls.findIndex(call => call[1] === dependent.id && call[3] !== true);
       await vi.waitFor(() => expect(routeCheck()).toBeGreaterThanOrEqual(0));
       expect(await parentProbe.mock.results[routeCheck()]!.value).toBeNull();
       await vi.waitFor(() => expect(heartbeat.wakeup).toHaveBeenCalledTimes(1));
