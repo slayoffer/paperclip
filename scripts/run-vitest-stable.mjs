@@ -21,6 +21,7 @@ const serverSrcDir = path.join(repoRoot, "server", "src");
 const serverTestsDir = path.join(repoRoot, "server", "src", "__tests__");
 const nonServerProjects = [
   "@paperclipai/shared",
+  "@paperclipai/mcp-server",
   "@paperclipai/skills-catalog",
   "@paperclipai/db",
   "@paperclipai/adapter-utils",
@@ -107,7 +108,7 @@ function excludedServerSuites(groupName) {
 }
 const generalWorkspacesAGroupName = "general-workspaces-a";
 const generalWorkspacesBGroupName = "general-workspaces-b";
-// The db project runs as its own lane (release-verify.yml after #15831).
+// The db project has its own lane.
 const generalWorkspacesCGroupName = "general-workspaces-c";
 const generalWorkspacesAProjects = ["@paperclipai/ui", "paperclipai"];
 const generalWorkspacesCProjects = ["@paperclipai/db"];
