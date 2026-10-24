@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { agents, authUsers, companies, createDb, heartbeatRuns, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
@@ -31,6 +31,7 @@ describeDb("owner recovery prompt contract", () => {
     await db.insert(authUsers).values({ id: responsibleUserId, name: "Test operator", email: "owner-recovery@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
   }, 20_000);
   afterAll(async () => { await tempDb?.cleanup(); });
+  beforeEach(() => vi.stubEnv("PAPERCLIP_OWNER_RECOVERY_RESUME_ENABLED", "true"));
   afterEach(() => vi.unstubAllEnvs());
 
   async function fixture(cause = "process_lost") {
