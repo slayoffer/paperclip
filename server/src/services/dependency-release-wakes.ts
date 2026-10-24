@@ -6,6 +6,7 @@ import { blockedStateIntegrityEnabled, blockedWaitFacts } from "./blocked-state-
 import { buildIssueBlockersResolvedWakeStateKey, findExistingIssueBlockersResolvedWakeForReadyState,
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import { logger } from "../middleware/logger.js";
+import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion.js";
 
 type EnqueueWakeup = ReturnType<typeof heartbeatService>["wakeup"];
 const pending = "pending_dependency_dispatch";
@@ -13,7 +14,7 @@ const dispatching = "dispatching_dependency";
 const actor = "blocked-dependency-release";
 
 /** The issue row lock serializes one durable intent per released blocked cycle. */
-export async function persistDependencyReleaseWake(tx: Db, issue: typeof issues.$inferSelect) {
+export async function persistDependencyReleaseWake(tx: Db, issue: typeof issues.$inferSelect, resolvedBlockerIssueId: string) {
   if (!issue.assigneeAgentId) return null;
   const relations = await tx.select({ id: issueRelations.issueId }).from(issueRelations).where(and(
     eq(issueRelations.companyId, issue.companyId), eq(issueRelations.relatedIssueId, issue.id),
@@ -26,7 +27,8 @@ export async function persistDependencyReleaseWake(tx: Db, issue: typeof issues.
     companyId: issue.companyId, agentId: issue.assigneeAgentId, source: "automation", triggerDetail: "system",
     reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, status: pending,
     requestedByActorType: "system", requestedByActorId: actor, idempotencyKey: `dependency-release:${key}`,
-    payload: { issueId: issue.id, blockerIssueIds, blockedTransitionAt: issue.blockedTransitionAt?.toISOString() ?? null,
+    payload: { issueId: issue.id, blockerIssueIds, resolvedBlockerIssueId,
+      blockedTransitionAt: issue.blockedTransitionAt?.toISOString() ?? null,
       releaseStatusVersion: issue.statusVersion + 1 },
   }).returning({ id: agentWakeupRequests.id });
   return intent!.id;
@@ -86,15 +88,27 @@ export async function dispatchPendingDependencyReleaseWakes(
         await settle("completed_dependency_dispatch");
         continue;
       }
-      const resolvedBlockerIssueId = blockerIssueIds[0];
+      const resolvedBlockerIssueId = typeof payload.resolvedBlockerIssueId === "string"
+        ? payload.resolvedBlockerIssueId : blockerIssueIds[0];
+      const parent = resolvedBlockerIssueId ? await getWakeableParentAfterChildCompletion(db, issueId,
+        { issueId: resolvedBlockerIssueId, summary: null }, true) : null;
+      const childContext = parent?.childIssueIds.includes(resolvedBlockerIssueId!) ? {
+        completedChildIssueId: resolvedBlockerIssueId,
+        childIssueIds: parent.childIssueIds,
+        childIssueSummaries: parent.childIssueSummaries,
+        onboardingCompletion: parent.onboardingCompletion,
+        childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+      } : {};
+      const reason = parent?.childIssueIds.includes(resolvedBlockerIssueId!)
+        ? "issue_children_completed" : ISSUE_BLOCKERS_RESOLVED_WAKE_REASON;
       const wake = await enqueueWakeup(intent.agentId, {
-        source: "automation", triggerDetail: "system", reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-        payload: { issueId, resolvedBlockerIssueId, blockerIssueIds },
+        source: "automation", triggerDetail: "system", reason,
+        payload: { issueId, resolvedBlockerIssueId, blockerIssueIds, ...childContext },
         idempotencyKey: buildIssueBlockersResolvedWakeStateKey(state),
         requestedByActorType: "system", requestedByActorId: `dependency-release-dispatch:${intent.id}`,
         issueStateGuard: { statuses: ["todo"], assigneeAgentId: intent.agentId, statusVersion: issue.statusVersion },
-        contextSnapshot: { issueId, taskId: issueId, wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-          source: "blocked_dependency_release", resolvedBlockerIssueId, blockerIssueIds },
+        contextSnapshot: { issueId, taskId: issueId, wakeReason: reason,
+          source: "blocked_dependency_release", resolvedBlockerIssueId, blockerIssueIds, ...childContext },
       });
       if (wake || await findExistingIssueBlockersResolvedWakeForReadyState(db, state)) {
         await settle("completed_dependency_dispatch");
