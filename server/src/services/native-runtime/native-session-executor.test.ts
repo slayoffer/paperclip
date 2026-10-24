@@ -73,6 +73,12 @@ vi.mock("./native-github-access.js", () => ({
   createNativeGitHubAccess: githubAccess.create,
 }));
 
+const runSecretRegistration = vi.hoisted(() => ({ register: vi.fn(async () => undefined) }));
+vi.mock("../run-secret-redaction.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../run-secret-redaction.js")>();
+  return { ...actual, createRunSecretRedactionRegistry: (db: Db) => ({ ...actual.createRunSecretRedactionRegistry(db), register: runSecretRegistration.register }) };
+});
+
 type BackendFactoryOptions = {
   runnerInstanceId?: string;
   acpxRuntimeDirectory?: string;
@@ -331,6 +337,7 @@ import {
 } from "./native-session-executor.js";
 
 beforeEach(() => {
+  runSecretRegistration.register.mockClear();
   state.createAssignedMcpTools.mockReset();
   state.resolveRunnerBinary.mockReset().mockReturnValue("/tmp/paperclip-runnerd");
   state.resolveCurrentWakeCommentsBinding.mockReset().mockResolvedValue(null);
@@ -7154,6 +7161,8 @@ describe("native warm session supervision", () => {
           expect(githubAccess.create).toHaveBeenCalledTimes(brokerReady ? 1 : 2);
           expect(githubAccess.activate.mock.calls.map(([binding]) => binding.runId))
             .toEqual([first.binding.runId, second.binding.runId]);
+          expect(runSecretRegistration.register).toHaveBeenCalledWith(first.binding.companyId, first.binding.runId, "stable-session-capability");
+          expect(runSecretRegistration.register).toHaveBeenCalledWith(second.binding.companyId, second.binding.runId, "stable-session-capability");
           // Replacement fixture publishes no new provider handle: both the old
           // owner and the unclaimed replacement broker must be cleaned up.
           expect(githubAccess.stop).toHaveBeenCalledTimes(brokerReady ? 0 : 2);
