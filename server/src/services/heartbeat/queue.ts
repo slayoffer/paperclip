@@ -1,3 +1,4 @@
+import { ownerRecoveryResumeEnabled } from "../recovery/owner-resume.js";
 import { ownerSessionsEnabled } from "../owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "../deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "../review-bridge-wakes.js";
@@ -1165,7 +1166,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
       )).for("update") : [];
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
-        context.wakeReason !== "source_scoped_recovery_action";
+        (context.wakeReason !== "source_scoped_recovery_action" || ownerRecoveryResumeEnabled());
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
           owner.checkoutRunId && owner.checkoutRunId !== run.id) {
         return { ownsIssue, blocked: true };
