@@ -106,6 +106,13 @@ copy mode").
   The driver saves the receipt before it removes ownership.
   At the next run startup, acquisition repeats this check for a terminal owner run.
   Server startup and periodic execution reconciliation also check terminal owners.
+  Terminal statuses include `succeeded`, `failed`, `cancelled`, `timed_out`, and `interrupted`.
+  A company-scoped database read confirms the run status before a probe can accept an absent writer directory.
+  The original remote workspace must still exist.
+  The wrapper creates the writer directory before any tracked command starts.
+  Thus, an absent directory can produce a stopped receipt for a terminal run.
+  Live runs and missing run rows retain ownership when the directory is absent.
+  Existing empty directories, malformed records, and legacy records still retain ownership.
   Each sweep scans at most twenty leases and advances through older uncertain rows.
   It validates company, run, lease, worktree, and original SSH endpoint identities.
   Legacy leases can recover their worktree path from the execution workspace.
@@ -115,7 +122,7 @@ copy mode").
   The local SSH client PID cannot prove remote termination.
   A saved receipt permits ownership release after a server interruption.
   This also recovers an active bookkeeping lease after a controller interruption.
-  Missing records, unsupported hosts, failed checks, and changed endpoints preserve ownership.
+  Incomplete records, unsupported containment, failed checks, and changed endpoints preserve ownership.
   Do not remove ownership files based only on a run status or elapsed time.
   An interrupted directory guard also stays closed. The server never removes it through a timeout.
 
@@ -130,9 +137,9 @@ server worktree was the run's workspace the whole time.
 - A run in `in_place` mode and a copy-mode run of a different environment can
   still work on one worktree at the same time. The copy run's restore merge then
   sees the in_place run's edits as local changes.
-- Older runs have no writer records. Their ownership remains until an operator proves termination.
+- Existing writer directories without valid records retain ownership until an operator proves termination.
   Manual recovery requires separate authorization. This change does not remove old locks by age.
-- Receipts require Linux control groups version 2 and a reachable systemd user manager.
+- Receipts for recorded writers require Linux control groups version 2 and a reachable systemd user manager.
   The `systemd-run` command must support `--expand-environment=no` (systemd 254 or newer).
   Without these capabilities, commands run without containment and ownership remains.
   A scope creation failure fails the command and preserves ownership.
