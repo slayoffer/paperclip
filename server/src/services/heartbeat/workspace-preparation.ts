@@ -107,6 +107,8 @@ export interface HeartbeatWorkspacePreparationInput {
     parsedIssueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
     /** The task environment differs from the reusable workspace binding. */
     separateTaskEnvironmentBinding: boolean;
+    /** An unsafe inherited workspace was replaced by an isolated one. */
+    workspaceReuseFallback: { warning: string } & Record<string, unknown> | null;
     executionPolicy: Parameters<typeof evaluateExecutionAllowlist>[0];
   };
   environment: {
@@ -172,6 +174,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     environmentExecutionWorkspaceSettings,
     parsedIssueExecutionWorkspaceSettings,
     separateTaskEnvironmentBinding,
+    workspaceReuseFallback,
     executionPolicy,
   } = input.policy;
   const {
@@ -633,12 +636,13 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     if (
       shouldSwitchIssueToExistingWorkspace &&
       (issueExecutionWorkspacePreferenceForRun !== "reuse_existing" ||
-        issueExecutionWorkspaceModeForRun !== nextIssueWorkspaceMode)
+        issueExecutionWorkspaceModeForRun !== nextIssueWorkspaceMode || Boolean(workspaceReuseFallback))
     ) {
       nextIssuePatch.executionWorkspacePreference = "reuse_existing";
       nextIssuePatch.executionWorkspaceSettings = {
         ...(parsedIssueExecutionWorkspaceSettings ?? {}),
         mode: nextIssueWorkspaceMode,
+        ...(workspaceReuseFallback ? { workspaceStrategy: parseObject(mergedConfig.workspaceStrategy) } : {}),
       };
     }
     if (Object.keys(nextIssuePatch).length > 0) {
@@ -718,6 +722,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   }
   const nextExecutionWorkspaceMetadata = {
     ...baseExecutionWorkspaceMetadata,
+    ...(workspaceReuseFallback ? { workspaceReuseFallback } : {}),
     ...(separateTaskEnvironmentBinding ? {
       taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
       createdByRuntime: false,
