@@ -11295,12 +11295,70 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
     expect(sourceRun?.id).not.toBe(runId);
     expect(sourceRun?.livenessState).toBe("plan_only");
+    expect(sourceRun?.lastUsefulActionAt).toBeNull();
+    const evidenceRows = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(and(
+        eq(heartbeatRunEvents.runId, String(sourceRunId)),
+        eq(heartbeatRunEvents.eventType, "execution.evidence"),
+      ));
+    expect(evidenceRows.length).toBeGreaterThan(0);
     if (withLegacyReview) {
       expect(await db.select().from(issues).where(eq(issues.id, legacyReviewId))).toEqual(legacyReviewBefore);
       const source = (await issueService(db).list(companyId)).find((issue) => issue.id === issueId);
       expect(source).toBeDefined();
       expect(source).not.toHaveProperty("productivityReview");
     }
+  });
+
+  it("retains real tool progress and its time when automatic evidence follows", async () => {
+    const { companyId, agentId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+    });
+    // Separate these times from real workspace activity during the test.
+    const toolTime = new Date(Date.now() + 60_000);
+    const evidenceTime = new Date(toolTime.getTime() + 60_000);
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => {
+      await db.insert(heartbeatRunEvents).values([
+        {
+          companyId, agentId, runId: ctx.runId, seq: 100_000,
+          eventType: "tool_call", createdAt: toolTime,
+        },
+        {
+          companyId, agentId, runId: ctx.runId, seq: 100_001,
+          eventType: "execution.evidence", createdAt: evidenceTime,
+        },
+      ]);
+      return {
+        exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "I will inspect the repo next and then implement the fix.",
+        provider: "test", model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 31_000));
+    await heartbeat.resumeQueuedRuns();
+
+    const retryRun = await waitForValue(async () => {
+      const rows = await db.select().from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId));
+      return rows.find((row) => row.id !== runId && row.livenessState === "advanced") ?? null;
+    }, 5_000);
+    if (retryRun?.id) {
+      await waitForRunToSettle(heartbeat, retryRun.id, 5_000);
+    }
+    expect(retryRun?.livenessState).toBe("advanced");
+    expect(retryRun?.lastUsefulActionAt).toEqual(toolTime);
+    const evidenceRows = await db.select().from(heartbeatRunEvents)
+      .where(and(
+        eq(heartbeatRunEvents.runId, String(retryRun?.id)),
+        eq(heartbeatRunEvents.eventType, "execution.evidence"),
+      ));
+    expect(evidenceRows.some((row) => row.createdAt > toolTime)).toBe(true);
   });
 
   it("treats a plan document update as progress and does not enqueue liveness continuation", async () => {

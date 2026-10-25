@@ -4,6 +4,8 @@ The controller retains content-free evidence in `heartbeat_run_events`.
 The event type is `execution.evidence`.
 The schema is `paperclip.execution-evidence/v1`.
 These records use the local run log. They add no external transmission.
+Automatic evidence records do not count as useful work or update the latest-action time.
+Actual tool activity still counts as progress.
 
 Each dispatch creates an evidence scope.
 The final receipt confirms whether admission and controller ownership succeeded.
