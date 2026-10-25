@@ -88,6 +88,7 @@ describeDatabase("assignee external waits", () => {
     runId = run!.id;
     [source] = await db.insert(issues).values({ companyId, identifier: "SYNA-3100", title: "External wait",
       status: "in_progress", assigneeAgentId: agentId, checkoutRunId: runId, executionRunId: runId }).returning();
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: source.id } }).where(eq(heartbeatRuns.id, runId));
   });
   afterEach(async () => {
     try {
