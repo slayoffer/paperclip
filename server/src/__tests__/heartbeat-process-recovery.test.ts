@@ -486,31 +486,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   }, 20_000);
 
   afterEach(async () => {
-    vi.clearAllMocks();
-    // A recovery policy can stop before adapter dispatch; do not leak an
-    // unused one-shot failure into the next test's otherwise healthy run.
-    mockAdapterExecute.mockReset();
-    const nativeExecutor = await vi.importActual<
-      typeof import("../services/native-runtime/native-session-executor.js")
-    >("../services/native-runtime/native-session-executor.js");
-    mockRetainedNativeCleanup
-      .mockReset()
-      .mockImplementation(nativeExecutor.reconcileRetainedNativeSessionCleanup);
-    const localServiceSupervisor = await vi.importActual<
-      typeof import("../services/local-service-supervisor.js")
-    >("../services/local-service-supervisor.js");
-    mockTerminateLocalService.mockImplementation(
-      localServiceSupervisor.terminateLocalService,
-    );
-    mockAdapterExecute.mockImplementation(async () => ({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-      errorMessage: null,
-      summary: "Recovered stranded heartbeat work.",
-      provider: "test",
-      model: "test-model",
-    }));
     runningProcesses.clear();
     for (const child of childProcesses) {
       child.kill("SIGKILL");
@@ -525,6 +500,36 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
     cleanupPids.clear();
     await cancelActiveRunsForCleanup(db, 5_000);
+    // A terminal row does not mean that the executor finished its writes.
+    // Keep this fixture's mocks until every tracked wake and run settles.
+    await db.update(agents).set({ status: "paused" });
+    await heartbeatService(db).drainActiveRunExecutions();
+    vi.clearAllMocks();
+    // A recovery policy can stop before adapter dispatch; do not leak an
+    // unused one-shot failure into the next test's otherwise healthy run.
+    mockAdapterExecute.mockReset();
+    const nativeExecutor = await vi.importActual<
+      typeof import("../services/native-runtime/native-session-executor.js")
+    >("../services/native-runtime/native-session-executor.js");
+    mockRetainedNativeCleanup
+      .mockReset()
+      .mockImplementation(nativeExecutor.reconcileRetainedNativeSessionCleanup);
+    const localServiceSupervisor = await vi.importActual<
+      typeof import("../services/local-service-supervisor.js")
+    >("../services/local-service-supervisor.js");
+    mockTerminateLocalService.mockReset().mockImplementation(
+      localServiceSupervisor.terminateLocalService,
+    );
+    mockAdapterExecute.mockImplementation(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      summary: "Recovered stranded heartbeat work.",
+      provider: "test",
+      model: "test-model",
+    }));
+
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db
@@ -7767,12 +7772,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           .set({ status: "paused" })
           .where(eq(agents.id, agentId));
         release();
+        await heartbeat.drainActiveRunExecutions();
         if (next!)
-          await vi.waitFor(async () =>
-            expect((await heartbeat.getRun(next!.id))?.status).not.toBe(
-              "running",
-            ),
-          );
+          expect((await heartbeat.getRun(next!.id))?.status).not.toBe("running");
       }
     },
   );
