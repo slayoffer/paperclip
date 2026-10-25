@@ -61,6 +61,7 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism
           server/src/__tests__/dependency-release.test.ts
+          server/src/__tests__/dependency-wake-concurrency.test.ts
           server/src/__tests__/issue-dependency-wakeup-release.test.ts
           server/src/__tests__/workspace-operations-reconciliation.test.ts
           server/src/__tests__/issues-service.test.ts

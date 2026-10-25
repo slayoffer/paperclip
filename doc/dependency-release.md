@@ -32,6 +32,14 @@ It marks replay as `not_required` and records `actionOutcome: not_started`.
 Conflicting execution evidence retains the hold.
 This includes actions whose status is already `resolved` but whose replay flag still blocks execution.
 
+Wake admission checks dependency receipts again while it holds the company-scoped issue row lock.
+This check and the request insert use the same transaction.
+Concurrent finalize, route, and backstop producers can pass their earlier readiness checks.
+Only the first producer admits a request and records an emitted wake.
+Coalesced requests also cover the current ready state.
+Failed, cancelled, and skipped requests permit another admission attempt.
+A later blocked cycle uses a different key.
+
 Homelab owns deployment and live verification.
 After deployment, its normal release event resolves false holds on the affected dependents.
 No database edit or agent call to the board-only recovery API is required.

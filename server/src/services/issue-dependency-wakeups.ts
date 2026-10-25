@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
@@ -13,6 +13,7 @@ const IDEMPOTENT_DEPENDENCY_WAKE_STATUSES = [
   "queued",
   "deferred_issue_execution",
   "claimed",
+  "coalesced",
   "completed",
 ] as const;
 
@@ -29,6 +30,30 @@ const IN_FLIGHT_DEPENDENCY_WAKE_STATUSES = [
 
 const IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET = new Set<string>(IDEMPOTENT_DEPENDENCY_WAKE_STATUSES);
 const IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET = new Set<string>(IN_FLIGHT_DEPENDENCY_WAKE_STATUSES);
+
+/** Call inside wake admission, after locking the company-scoped issue row. */
+export async function hasAdmittedDependencyWake(
+  tx: Pick<Db, "select">,
+  companyId: string,
+  idempotencyKey: string | null | undefined,
+): Promise<boolean> {
+  if (!idempotencyKey?.startsWith(`${ISSUE_BLOCKERS_RESOLVED_WAKE_REASON}:state:`)) return false;
+  const isRelease = idempotencyKey.endsWith(":release");
+  const otherKey = isRelease ? idempotencyKey.slice(0, -":release".length) : `${idempotencyKey}:release`;
+  // A completed pre-release wake can need a repair wake. An in-flight wake
+  // covers both key forms, so concurrent route and backstop callers coalesce.
+  const [existing] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.companyId, companyId),
+    or(
+      and(eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+        inArray(agentWakeupRequests.status, [...IDEMPOTENT_DEPENDENCY_WAKE_STATUSES])),
+      and(eq(agentWakeupRequests.idempotencyKey, otherKey),
+        inArray(agentWakeupRequests.status, [...(isRelease
+          ? [...IN_FLIGHT_DEPENDENCY_WAKE_STATUSES, "coalesced"] : IDEMPOTENT_DEPENDENCY_WAKE_STATUSES)])),
+    ),
+  )).limit(1);
+  return Boolean(existing);
+}
 
 export type IssueBlockersResolvedWakeCycleInput = Date | string | null | undefined;
 

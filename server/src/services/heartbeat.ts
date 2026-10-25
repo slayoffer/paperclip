@@ -446,7 +446,7 @@ import {
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import { hasAdmittedDependencyWake, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -27678,6 +27678,12 @@ export function heartbeatService(
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
+
+          // Producers can race after their optimistic readiness checks. The
+          // issue lock makes this receipt check atomic with wake insertion.
+          if (!executionWaitRequestId && await hasAdmittedDependencyWake(
+            tx, agent.companyId, opts.idempotencyKey,
+          )) return { kind: "skipped" as const };
 
           if (executionWaitRequestId) {
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
