@@ -23,16 +23,16 @@ describeDatabase("remote MCP connection timeout", () => {
   });
 
   it.each([
-    { name: "25-second connection budget permits a 15-second call", configured: 25_000, callMs: 15_000, succeeds: true },
-    { name: "default budget expires at 10 seconds", configured: undefined, callMs: 10_000, succeeds: false },
-    { name: "default budget permits a call before 10 seconds", configured: undefined, callMs: 9_999, succeeds: true },
-    { name: "session setup does not consume the call budget", configured: undefined, setupMs: 4_000, callMs: 9_000, succeeds: true },
-    { name: "session setup has its own 10-second limit", configured: 25_000, setupMs: 6_000, callMs: 1, succeeds: false },
-    { name: "explicit request budget overrides the connection", configured: 25_000, explicit: 100, callMs: 100, succeeds: false },
-    { name: "connection budget clamps to 60 seconds", configured: 90_000, callMs: 60_000, succeeds: false },
-    { name: "connection budget clamps to one millisecond", configured: -1, callMs: 1, succeeds: false },
-    { name: "connection budget rounds down", configured: 10.9, callMs: 10, succeeds: false },
-    { name: "invalid connection budget uses the default", configured: "25000", callMs: 10_000, succeeds: false },
+    { name: "25-second connection budget permits a 15-second call", configured: 25_000, callMs: 15_000, budget: 25_000, succeeds: true },
+    { name: "default budget expires at 10 seconds", configured: undefined, callMs: 15_000, budget: 10_000, succeeds: false },
+    { name: "default budget permits a fast call", configured: undefined, callMs: 1, budget: 10_000, succeeds: true },
+    { name: "session setup does not consume the call budget", configured: undefined, explicit: 500, setupMs: 200, callMs: 400, budget: 500, succeeds: true },
+    { name: "session setup has its own 10-second limit", configured: 25_000, setupMs: 6_000, callMs: 1, budget: 10_000, succeeds: false },
+    { name: "explicit request budget overrides the connection", configured: 25_000, explicit: 100, callMs: 1_000, budget: 100, succeeds: false },
+    { name: "connection budget clamps to 60 seconds", configured: 90_000, callMs: 1, budget: 60_000, succeeds: true },
+    { name: "connection budget clamps to one millisecond", configured: -1, callMs: 100, budget: 1, succeeds: false },
+    { name: "connection budget rounds down", configured: 10.9, callMs: 100, budget: 10, succeeds: false },
+    { name: "invalid connection budget uses the default", configured: "25000", callMs: 1, budget: 10_000, succeeds: true },
   ])("$name", async (scenario) => {
     const [company] = await db.insert(companies).values({
       name: "Timeout test", issuePrefix: randomUUID(),
@@ -59,8 +59,21 @@ describeDatabase("remote MCP connection timeout", () => {
       remoteHttpRequest: async (_url, init) => {
         const request = JSON.parse(String(init.body));
         methods.push(request.method);
-        await vi.advanceTimersByTimeAsync(request.method === "tools/call" ? scenario.callMs : scenario.setupMs ?? 0);
-        if (init.signal?.aborted) throw new DOMException("Timed out", "AbortError");
+        const delay = request.method === "tools/call" ? scenario.callMs : scenario.setupMs ?? 0;
+        await new Promise<void>((resolve, reject) => {
+          const signal = init.signal;
+          const abort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", abort);
+            reject(new DOMException("Timed out", "AbortError"));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", abort);
+            resolve();
+          }, delay);
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
         if (request.method === "tools/call") callSignal = init.signal;
         if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
         return Response.json({
@@ -74,21 +87,26 @@ describeDatabase("remote MCP connection timeout", () => {
     const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
     const tool = (await gateway.listToolsForSession(session.token)).find((item) => item.connectionId === remote.connection.id)!;
     expect(tool).toBeTruthy();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const clears = vi.spyOn(globalThis, "clearTimeout");
     try {
       const execution = gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { key: "a", value: "b" }, timeoutMs: scenario.explicit });
       if (scenario.succeeds) {
         await expect(execution).resolves.toMatchObject({ status: "completed", result: { content: "ok" } });
-        // Successful calls must release their deadline timer.
-        await vi.advanceTimersByTimeAsync(60_000);
         expect(callSignal?.aborted).toBe(false);
       } else {
         await expect(execution).rejects.toMatchObject({ status: 504, reasonCode: "tool_timeout" });
       }
-      if (scenario.setupMs === 4_000) expect(methods).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+      const deadlineIndex = timers.mock.calls.findIndex(([, ms]) => ms === scenario.budget);
+      expect(deadlineIndex).toBeGreaterThanOrEqual(0);
+      expect(clears).toHaveBeenCalledWith(timers.mock.results[deadlineIndex].value);
+      if (scenario.setupMs === 200) {
+        expect(methods).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+      }
     } finally {
-      vi.useRealTimers();
+      timers.mockRestore();
+      clears.mockRestore();
       forgetMcpHttpSessions(remote.connection.id);
     }
-  });
+  }, 40_000);
 });
