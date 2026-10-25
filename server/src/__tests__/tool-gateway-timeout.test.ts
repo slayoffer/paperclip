@@ -28,6 +28,7 @@ describeDatabase("remote MCP connection timeout", () => {
     { name: "default budget permits a fast call", configured: undefined, callMs: 1, budget: 10_000, succeeds: true },
     { name: "session setup does not consume the call budget", configured: undefined, explicit: 500, setupMs: 200, callMs: 400, budget: 500, succeeds: true },
     { name: "session setup has its own 10-second limit", configured: 25_000, setupMs: 6_000, callMs: 1, budget: 10_000, succeeds: false },
+    { name: "stalled setup response body reports a timeout", configured: 25_000, setupMs: 1, stalledSetupBody: true, callMs: 1, budget: 10_000, succeeds: false },
     { name: "explicit request budget overrides the connection", configured: 25_000, explicit: 100, callMs: 1_000, budget: 100, succeeds: false },
     { name: "connection budget clamps to 60 seconds", configured: 90_000, callMs: 1, budget: 60_000, succeeds: true },
     { name: "connection budget clamps to one millisecond", configured: -1, callMs: 100, budget: 1, succeeds: false },
@@ -74,6 +75,15 @@ describeDatabase("remote MCP connection timeout", () => {
           signal?.addEventListener("abort", abort, { once: true });
           if (signal?.aborted) abort();
         });
+        if (request.method === "initialize" && scenario.stalledSetupBody) {
+          return new Response(new ReadableStream({
+            start(body) {
+              init.signal?.addEventListener("abort", () => {
+                body.error(new DOMException("Timed out", "AbortError"));
+              }, { once: true });
+            },
+          }), { headers: { "content-type": "application/json" } });
+        }
         if (request.method === "tools/call") callSignal = init.signal;
         if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
         return Response.json({
@@ -100,6 +110,7 @@ describeDatabase("remote MCP connection timeout", () => {
       const deadlineIndex = timers.mock.calls.findIndex(([, ms]) => ms === scenario.budget);
       expect(deadlineIndex).toBeGreaterThanOrEqual(0);
       expect(clears).toHaveBeenCalledWith(timers.mock.results[deadlineIndex].value);
+      if (scenario.stalledSetupBody) expect(methods).toEqual(["initialize"]);
       if (scenario.setupMs === 200) {
         expect(methods).toEqual(["initialize", "notifications/initialized", "tools/call"]);
       }

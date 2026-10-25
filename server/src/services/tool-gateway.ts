@@ -6140,6 +6140,23 @@ export function createToolGatewayService(
       );
       return { result, headerSummary, execution };
     } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        await markRemoteConnectionHealth(
+          connection,
+          "error",
+          "Remote MCP tool call timed out.",
+        );
+        throw new ToolGatewayHttpError(
+          504,
+          "Remote MCP tool call timed out",
+          "tool_timeout",
+          {
+            connectionId: connection.id,
+            catalogEntryId: entry.id,
+            execution,
+          },
+        );
+      }
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
           : error.reason === "malformed_response" ? malformedRemoteMcpResponse()
@@ -6165,23 +6182,6 @@ export function createToolGatewayService(
           {
             ...error.details,
             execution: error.details.execution ?? execution,
-          },
-        );
-      }
-      if (error instanceof Error && error.name === "AbortError") {
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP tool call timed out.",
-        );
-        throw new ToolGatewayHttpError(
-          504,
-          "Remote MCP tool call timed out",
-          "tool_timeout",
-          {
-            connectionId: connection.id,
-            catalogEntryId: entry.id,
-            execution,
           },
         );
       }
