@@ -140,7 +140,6 @@ import {
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
   envBindingSchema,
   isEnvironmentDriverSupportedForAdapter,
-  isToolConnectionAttentionHealth,
   type BillingType,
   type ChatProvider,
   type CostStatus,
@@ -463,6 +462,7 @@ import {
 } from "./authorization.js";
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
+import { canDeliverRuntimeMcpConnection } from "./tool-connection-discovery.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import {
@@ -4778,8 +4778,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       ((Boolean(runIdentity?.activeIdentityContextId) &&
         (connection.config?.sourceTemplateKey === "github" ||
           connection.transportConfig?.sourceTemplateKey === "github")) ||
-        connection.credentialPolicy === "per_user" ||
-        !isToolConnectionAttentionHealth(connection.healthStatus)) &&
+        canDeliverRuntimeMcpConnection(connection)) &&
       (connection.transport === "mcp_remote" ||
         connection.transport === "local_stdio" || isBrowserUseConnection(connection) || githubBotConnectionIds.has(connection.id)),
   );
