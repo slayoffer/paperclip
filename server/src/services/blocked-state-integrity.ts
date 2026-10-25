@@ -5,6 +5,7 @@ import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import { isReviewBridgeWait } from "./review-bridge-contract.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { hasSavedReviewWait, parseReviewHandoffManifest } from "./review-wait.js";
+import { externalWaitDeadline } from "./external-wait.js";
 
 // Activation requires the operator's release and live qualification checks.
 export function blockedStateIntegrityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -140,6 +141,7 @@ export async function hasNonDependencyBlockedWait(db: Pick<Db, "select">, issueI
   const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
   if (!issue || issue.status !== "blocked") return false;
   if (isReviewBridgeWait(issue.unblockDescriptor)) return true;
+  if (externalWaitDeadline(issue.unblockDescriptor) !== null) return true;
   if (!blockedStateIntegrityEnabled()) return false;
   const facts = await blockedWaitFacts(db, issue, issue.unblockDescriptor, []);
   return facts.hasTarget || facts.outside;
