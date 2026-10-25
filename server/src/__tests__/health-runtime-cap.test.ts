@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { healthRoutes } from "../routes/health.js";
 import { getProcessRunningRunsCap } from "../services/instance-run-cap.js";
 import * as runtimeCapSource from "../services/runtime-cap.js";
+import { privateHostnameGuard } from "../middleware/private-hostname-guard.js";
 
 vi.mock("../dev-server-status.js", () => ({ readPersistedDevServerStatus: () => undefined }));
 vi.mock("../services/native-runtime/native-restart-recovery.js", () => ({
@@ -18,6 +19,7 @@ const listeners: Server[] = [];
 async function app(options: { authenticated?: boolean; db?: Db; peer?: string; warm?: boolean } = {}) {
   const server = express();
   server.set("trust proxy", true);
+  server.use(privateHostnameGuard({ enabled: true, allowedHostnames: [], bindHost: "0.0.0.0" }));
   server.use((req, _res, next) => {
     if (options.peer) Object.defineProperty(req.socket, "remoteAddress", { value: options.peer });
     next();
@@ -71,6 +73,22 @@ describe.skipIf(process.platform !== "linux")("local runtime cap health receipt"
       expect(response.body.runtimeCap).toEqual({ ...initial.body.runtimeCap, nonce: "after" });
       expect(response.body.runtimeCap.cap).toBe(getProcessRunningRunsCap());
     }
+  });
+
+  it.each(["[::1]:3100", "[0:0:0:0:0:0:0:1]:3100"])(
+    "permits IPv6 loopback through the private hostname guard: %s", async (host) => {
+      const response = await request(await app({ authenticated: true, peer: "::1" }))
+        .get("/api/health?capNonce=ipv6").set("Host", host);
+      expect(response.status).toBe(200);
+      expect(response.body.runtimeCap.cap).toBe(24);
+    },
+  );
+
+  it("retains the private hostname rejection for other IPv6 addresses", async () => {
+    const response = await request(await app()).get("/api/health?capNonce=foreign")
+      .set("Host", "[2001:db8::1]:3100");
+    expect(response.status).toBe(403);
+    expect(response.body.runtimeCap).toBeUndefined();
   });
 
   it.each([false, true])("retains the receipt with a database, warm standby %s", async (warm) => {
