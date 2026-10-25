@@ -1,4 +1,4 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
@@ -44,6 +44,11 @@ export async function hasAdmittedDependencyWake(
   // covers both key forms, so concurrent route and backstop callers coalesce.
   const [existing] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
     eq(agentWakeupRequests.companyId, companyId),
+    // A native status intent still needs scheduler admission. Its separate
+    // dispatch receipt, or an intent linked to a run, proves that admission.
+    or(isNull(agentWakeupRequests.requestedByActorId),
+      ne(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+      isNotNull(agentWakeupRequests.runId)),
     or(
       and(eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
         inArray(agentWakeupRequests.status, [...IDEMPOTENT_DEPENDENCY_WAKE_STATUSES])),

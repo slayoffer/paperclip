@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, agentWakeupRequests, companies, createDb, heartbeatRuns,
   issueRelations, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -27,7 +27,10 @@ suite("concurrent dependency wake producers", () => {
     stopTaskDrain();
   });
 
-  it("admits one request and one activity entry when finalize races the backstop", async () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it("admits one wake when finalize races the backstop", async () => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", "false");
     const companyId = randomUUID(), agentId = randomUUID();
     const blockerId = randomUUID(), dependentId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Concurrent wake test",
@@ -64,9 +67,10 @@ suite("concurrent dependency wake producers", () => {
     ]);
 
     expect(arrivals).toBe(2);
-    const requests = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    const requests = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId)))
+      .filter(row => row.requestedByActorId !== "blocked-dependency-release");
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.idempotencyKey).toMatch(/:release$/);
+    expect(requests[0]?.idempotencyKey?.endsWith(":release")).toBe(true);
     expect(results.reduce((count, result) => count + result.healed, 0)).toBe(1);
     const events = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
       eq(activityLog.entityId, dependentId), eq(activityLog.action, "issue.blockers_resolved_wake_emitted")));
@@ -75,8 +79,58 @@ suite("concurrent dependency wake producers", () => {
 
     const repeated = await backstop.reconcileResolvedDependencyWakeBackstop({ companyId });
     expect(repeated.healed).toBe(0);
-    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+    const afterRepeat = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(afterRepeat.filter(row => row.requestedByActorId !== "blocked-dependency-release")).toHaveLength(1);
   }, 30_000);
+
+  it("serializes concurrent admissions for the unsuffixed integrity key", async () => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", "true");
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Integrity admission race",
+      issuePrefix: `T${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Owner", role: "engineer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Ready dependent",
+      status: "todo", assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    const key = buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: issueId, blockerIssueIds: [] });
+    const options = { source: "automation" as const, triggerDetail: "system" as const,
+      reason: "issue_blockers_resolved", idempotencyKey: key, payload: { issueId },
+      requestedByActorType: "system" as const };
+    const results = await Promise.all([
+      heartbeatService(db).wakeup(agentId, { ...options, requestedByActorId: "heartbeat_finalize" }),
+      heartbeatService(createDb(temp.connectionString)).wakeup(agentId,
+        { ...options, requestedByActorId: "issue_graph_liveness_backstop" }),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
+
+  it("dispatches a native status intent before treating its key as admitted", async () => {
+    vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", "true");
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Native intent admission",
+      issuePrefix: `T${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Owner", role: "engineer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Released native dependent",
+      status: "todo", assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    const key = buildIssueBlockersResolvedWakeStateKey({ dependentIssueId: issueId, blockerIssueIds: [] });
+    const [intent] = await db.insert(agentWakeupRequests).values({ companyId, agentId,
+      source: "automation", reason: "issue_blockers_resolved", idempotencyKey: key,
+      requestedByActorType: "system", requestedByActorId: "native-status-committer",
+      payload: { issueId } }).returning();
+    expect(await hasAdmittedDependencyWake(db, companyId, key)).toBe(false);
+    const heartbeat = heartbeatService(db);
+    expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId })).toMatchObject({ dispatched: 1, deferred: 0 });
+    const requests = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(requests).toHaveLength(2);
+    expect(requests.find(row => row.id === intent!.id)).toMatchObject({ status: "coalesced" });
+    expect(requests[0]!.runId).toBeTruthy();
+    expect(requests[0]!.runId).toBe(requests[1]!.runId);
+    expect(await hasAdmittedDependencyWake(db, companyId, key)).toBe(true);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
 
   it.each(["queued", "deferred_issue_execution", "claimed", "coalesced", "completed",
     "failed", "cancelled", "skipped"])("checks the persisted %s receipt without preventing valid retries", async status => {
