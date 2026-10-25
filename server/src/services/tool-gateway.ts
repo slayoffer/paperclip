@@ -5748,6 +5748,13 @@ export function createToolGatewayService(
       session,
       tool,
     );
+    if (useDefaultTimeout && connection.transport === "mcp_remote") {
+      ms = timeoutMs(
+        typeof connection.config.toolTimeoutMs === "number"
+          ? connection.config.toolTimeoutMs
+          : undefined,
+      );
+    }
     // Recheck immediately before dispatch, including previously approved calls
     // and connections whose stored grant/catalog predates scope reduction.
     assertGoogleChatToolArgumentsSupported(connection, entry.toolName, parameters);
@@ -5789,7 +5796,8 @@ export function createToolGatewayService(
       },
     };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ms);
+    let responseBudgetMs = ms;
+    let timer = setTimeout(() => controller.abort(), ms);
     timer.unref?.();
     try {
       const dispatchRemote = (target: string, init: RequestInit) =>
@@ -5800,7 +5808,7 @@ export function createToolGatewayService(
               // This call site owns a caller-set budget that can exceed the
               // transport's default response deadline, so hand it down rather than
               // letting the tighter default cut a legitimately slow tool short.
-              responseTimeoutMs: ms,
+              responseTimeoutMs: responseBudgetMs,
             });
       if (isRailwayEndpoint(connection.config.url) && normalizeRailwayToolName(entry.toolName).startsWith(RAILWAY_TOOL_PREFIX)) {
         if (!isRailwayConnection(connection) || connection.config.railwayApiStatus !== "available") {
@@ -5833,6 +5841,11 @@ export function createToolGatewayService(
       }
       let requestHeaders = headers;
       if (connection.config.mcpSessionRequired === true) {
+        // Session setup has its own budget, including both protocol messages.
+        clearTimeout(timer);
+        responseBudgetMs = DEFAULT_TOOL_TIMEOUT_MS;
+        timer = setTimeout(() => controller.abort(), responseBudgetMs);
+        timer.unref?.();
         requestHeaders = await getMcpHttpSession({
           scope: `${connection.id}:grant:${grant.id}:actor:${session.agentId}:${endpoint}`,
           send: (init) =>
@@ -5844,6 +5857,10 @@ export function createToolGatewayService(
           headers,
           requestId,
         });
+        clearTimeout(timer);
+        responseBudgetMs = ms;
+        timer = setTimeout(() => controller.abort(), ms);
+        timer.unref?.();
       }
       // The guard runs inside this call and the connection is pinned to the
       // address it approved, so an operator-supplied hostname cannot be rebound
