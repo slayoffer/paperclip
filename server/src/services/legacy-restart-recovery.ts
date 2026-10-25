@@ -1,3 +1,4 @@
+import { withStopRequestEvidence } from "./run-execution-evidence.js";
 import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
@@ -91,15 +92,18 @@ export async function suspendLegacyRunForRestart(
   const process = runningProcesses.get(run.id);
   const control = adapterExecutionControls.get(run.id);
   if (!process && !control) return false;
-  suspended.add(run.id);
-  control?.controller.abort(new Error("server_restart"));
-  if (process) {
-    try {
-      await terminate({ pid: process.child.pid, processGroupId: process.processGroupId,
-        graceMs: Math.max(1, process.graceSec) * 1000 });
-    } finally { runningProcesses.delete(run.id); }
-  }
-  return true;
+  return withStopRequestEvidence({ db, run, requestedAt: new Date().toISOString(), reason: "server_restart",
+    source: "shutdown" }, async () => {
+    suspended.add(run.id);
+    control?.controller.abort(new Error("server_restart"));
+    if (process) {
+      try {
+        await terminate({ pid: process.child.pid, processGroupId: process.processGroupId,
+          graceMs: Math.max(1, process.graceSec) * 1000 });
+      } finally { runningProcesses.delete(run.id); }
+    }
+    return true;
+  });
 }
 
 export async function saveLegacyRestartProviderHome(db: Db, run: Run, home: string) {

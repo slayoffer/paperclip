@@ -18,6 +18,16 @@ on:
       - "server/src/__tests__/execution-control-sweeper.test.ts"
       - "server/src/services/environment-runtime.ts"
       - "server/src/services/environment-ssh-driver.ts"
+      - "server/src/services/heartbeat.ts"
+      - "server/src/services/run-execution-evidence*"
+      - "server/src/services/reconcile-execution-evidence.ts"
+      - "server/src/services/stop-request-evidence.test.ts"
+      - "server/src/services/run-cancellation*"
+      - "server/src/services/legacy-restart-recovery*"
+      - "server/src/services/native-runtime/native-session-executor.ts"
+      - "server/src/routes/agents.ts"
+      - "server/src/routes/openapi.ts"
+      - "server/src/__tests__/execution-evidence.test.ts"
       - "server/src/services/heartbeat-github-launchers*"
       - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
       - "server/src/__tests__/ssh-in-place-*.test.ts"
@@ -98,3 +108,19 @@ jobs:
           server/src/__tests__/ssh-in-place-lock-checks.test.ts
           server/src/__tests__/ssh-in-place-reconciliation.test.ts
           server/src/__tests__/execution-control-sweeper.test.ts
+
+      - name: Test complete local execution evidence
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          packages/adapter-utils/src/local-execution-evidence.test.ts
+          server/src/services/run-execution-evidence.test.ts
+          server/src/services/stop-request-evidence.test.ts
+          server/src/services/run-cancellation.test.ts
+          server/src/services/legacy-restart-recovery.test.ts
+          server/src/__tests__/execution-evidence.test.ts
+          server/src/__tests__/heartbeat-native-runner-cancellation.test.ts
+      - name: Test Stop and shutdown safety
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          server/src/__tests__/heartbeat-process-recovery.test.ts
+          --testNamePattern 'cancel|shutdown|Stop'

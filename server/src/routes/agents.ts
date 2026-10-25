@@ -1,3 +1,5 @@
+import { readRunExecutionEvidence } from "../services/run-execution-evidence.js";
+import { reconcileExecutionEvidence } from "../services/reconcile-execution-evidence.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { completeConnectionIntentSchema } from "@paperclipai/shared";
@@ -7632,6 +7634,16 @@ export function agentRoutes(
       details: { traceId: removed.id, recoverable: false },
     });
     res.json({ ok: true });
+  });
+
+  router.get("/heartbeat-runs/:runId/execution-evidence", async (req, res) => {
+    const runId = readHeartbeatRunId(req);
+    const run = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
+    if (!run) return;
+    if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
+    const evidence = await readRunExecutionEvidence(db, run);
+    const report = reconcileExecutionEvidence(evidence);
+    res.json(await runRedactions.redactForRun(run.companyId, run.id, { ...report, collectedAt: evidence.collectedAt }));
   });
 
   router.get("/heartbeat-runs/:runId/events", async (req, res) => {
