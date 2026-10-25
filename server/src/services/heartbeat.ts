@@ -64,6 +64,7 @@ import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompati
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
+import { readWakeupDiagnostics } from "./wakeup-diagnostics.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispatch.js";
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
@@ -20044,8 +20045,9 @@ export function heartbeatService(
   function trackWakeup(
     agentId: string,
     opts: WakeupOptions = {},
+    diagnosticRequestId?: string,
   ): ReturnType<typeof enqueueWakeup> {
-    const promise = enqueueWakeup(agentId, opts);
+    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId);
     activeWakeupPromises.add(promise);
     void promise
       .catch(() => {})
@@ -20053,6 +20055,25 @@ export function heartbeatService(
         activeWakeupPromises.delete(promise);
       });
     return promise;
+  }
+
+  async function wakeupWithDiagnostics(agentId: string, opts: WakeupOptions = {}) {
+    const requestId = randomUUID();
+    const readDiagnostics = async () => {
+      const agent = await getAgent(agentId);
+      return agent ? readWakeupDiagnostics(db, { companyId: agent.companyId, agentId, requestId }) : null;
+    };
+    try {
+      const run = await trackWakeup(agentId, opts, requestId);
+      return { run, skipped: run ? null : await readDiagnostics() };
+    } catch (error) {
+      // Preserve existing HTTP conflict behavior for paused agents and budget gates.
+      if (error instanceof HttpError && error.status === 409) {
+        const skipped = await readDiagnostics();
+        if (skipped) error.details = { ...parseObject(error.details), wakeup: skipped };
+      }
+      throw error;
+    }
   }
 
   async function executeRun(
@@ -26863,7 +26884,7 @@ export function heartbeatService(
     }
   }
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false) {
+  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -26876,6 +26897,13 @@ export function heartbeatService(
     if (payload) {
       delete payload.queuedCommentInterrupt;
       delete payload.manualUserWake;
+      if (diagnosticRequestId) {
+        delete payload.heartbeatSkip;
+        delete payload.executionWait;
+        delete payload.issueTokenBudget;
+        delete payload.unresolvedBlockerIssueIds;
+        delete payload.coalescedIntoWakeupRequestId;
+      }
     }
     if (opts.manualUserWake) {
       if (opts.requestedByActorType !== "user" || !opts.requestedByActorId || opts.failedRunId) {
@@ -26904,13 +26932,27 @@ export function heartbeatService(
     payload = { ...payload, [DEFERRED_WAKE_CONTEXT_KEY]: { ...enrichedContextSnapshot } };
     let issueId =
       readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
-    if (executionReconciliationWake && !issueId) return null;
-
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    const diagnosticCompanyId = agent.companyId;
+    const skipWithoutReceipt = async (skipReason: string, message: string) => {
+      // API diagnostics must also identify gates that do not normally create receipts.
+      if (diagnosticRequestId) await db.insert(agentWakeupRequests).values({
+        id: diagnosticRequestId, companyId: diagnosticCompanyId, agentId, source, triggerDetail,
+        reason: skipReason, error: message, payload: { issueId }, status: "skipped",
+        requestedByActorType: opts.requestedByActorType ?? null,
+        requestedByActorId: opts.requestedByActorId ?? null, finishedAt: new Date(),
+      });
+      return null;
+    };
+    if (executionReconciliationWake && !issueId) {
+      return skipWithoutReceipt("execution_reconciliation_issue_required", "Execution reconciliation requires a task.");
+    }
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.
-    if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") return null;
+    if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") {
+      return skipWithoutReceipt("issue_comment_mention_ignored", "A mention does not start a run.");
+    }
     if (issueId) {
       const conversation = await getIssueExecutionContext(agent.companyId, issueId);
       if (reason === "issue_children_completed" && conversation?.originKind === "onboarding_first_task") enrichedContextSnapshot.onboardingCompletion = true;
@@ -26918,10 +26960,18 @@ export function heartbeatService(
         if (opts.manualUserWake && conversation!.conversationUserId !== opts.requestedByActorId) {
           throw new HttpError(403, "Only the conversation owner can start a chat run");
         }
-        if (isConversationExecutionWake(conversation, reason ?? readNonEmptyString(enrichedContextSnapshot.wakeReason))) return null;
-        if (agent.id !== conversation!.conversationAgentId) return null;
-        if (!(await instanceSettings.getExperimental()).enableAgentChat) return null;
-        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot) && reason !== CHAT_COMPLETION_WAKE_REASON) return null;
+        if (isConversationExecutionWake(conversation, reason ?? readNonEmptyString(enrichedContextSnapshot.wakeReason))) {
+          return skipWithoutReceipt("conversation_execution_wake_ignored", "This execution event does not start a chat run.");
+        }
+        if (agent.id !== conversation!.conversationAgentId) {
+          return skipWithoutReceipt("conversation_agent_mismatch", "This agent does not own the conversation.");
+        }
+        if (!(await instanceSettings.getExperimental()).enableAgentChat) {
+          return skipWithoutReceipt("conversation_chat_disabled", "Agent chat is disabled.");
+        }
+        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot) && reason !== CHAT_COMPLETION_WAKE_REASON) {
+          return skipWithoutReceipt("conversation_waiting_for_input", "The conversation requires new input.");
+        }
       }
     }
     if (agent.adapterType === "paperclip_runner") {
@@ -27000,7 +27050,7 @@ export function heartbeatService(
     }
     const durableReceiptFields = durableRequest
       ? { id: durableRequest.id, requestedAt: durableRequest.requestedAt }
-      : {};
+      : diagnosticRequestId ? { id: diagnosticRequestId } : {};
     const existingDurableReceipt = async (queryDb: Db) => {
       if (!durableRequest) return null;
       const receipt = await queryDb
@@ -27042,6 +27092,7 @@ export function heartbeatService(
     const coalesceExecutionWait =
       opts.requestedByActorType === "system" &&
       !durableRequest &&
+      !diagnosticRequestId &&
       !wakeCommentId &&
       queuedCommentIdsFromRunContext(enrichedContextSnapshot).length === 0 &&
       !isInteractionResolutionWakePayload(payload ?? {}) &&
@@ -27165,6 +27216,10 @@ export function heartbeatService(
         await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON, {
           error: `Wake suppressed: this issue used ${budgetState.spent} input tokens since ` +
             `${budgetState.windowStart.toISOString()} (budget ${issueTokenBudget.budget}).`,
+          payload: { ...payload, issueTokenBudget: {
+            used: budgetState.spent, limit: issueTokenBudget.budget,
+            windowStart: budgetState.windowStart.toISOString(),
+          } },
         });
         logger.info({ issueId, agentId, spent: budgetState.spent, cardCreated }, "issue token budget reached; wake skipped");
         return null;
@@ -27351,7 +27406,7 @@ export function heartbeatService(
 
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
-      if (opts.requestedByActorType !== "user" || executionWaitRequestId) {
+      if (opts.requestedByActorType !== "user" || executionWaitRequestId || diagnosticRequestId) {
         await writeSkippedRequest("agent.not_invokable", {
           error: invokability.message,
         }, { status: agent.status, reason: invokability.reason });
@@ -27549,6 +27604,7 @@ export function heartbeatService(
               await tx
                 .insert(agentWakeupRequests)
                 .values({
+                  ...durableReceiptFields,
                   companyId: agent.companyId,
                   agentId,
                   source,
@@ -28252,6 +28308,7 @@ export function heartbeatService(
                 source,
                 triggerDetail,
                 reason: "issue_dependencies_blocked",
+                error: "Wake suppressed because this issue has unresolved dependencies.",
                 payload: {
                   ...(payload ?? {}),
                   issueId,
@@ -28436,6 +28493,9 @@ export function heartbeatService(
                   wakeupRequestId: activeExecutionRun.wakeupRequestId,
                 },
                 allowRunCoalescing: isConversation(issue) ? false : opts.allowRunCoalescing,
+                diagnosticReceipt: diagnosticRequestId
+                  ? { id: diagnosticRequestId, requestedAt: new Date() }
+                  : undefined,
                 durableReceipt: durableRequest
                   ? {
                       id: durableRequest.id,
@@ -30301,6 +30361,7 @@ export function heartbeatService(
       }),
 
     wakeup: trackWakeup,
+    wakeupWithDiagnostics,
     dispatchPendingNativeStatusWakeups,
     triggerIssueMonitor,
 

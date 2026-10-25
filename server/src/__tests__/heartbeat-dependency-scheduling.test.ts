@@ -453,14 +453,21 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       type: "blocks",
     });
 
-    const blockedWake = await heartbeat.wakeup(agentId, {
+    const blockedWake = await heartbeat.wakeupWithDiagnostics(agentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: "issue_assigned",
       payload: { issueId: blockedIssueId },
       contextSnapshot: { issueId: blockedIssueId, wakeReason: "issue_assigned" },
     });
-    expect(blockedWake).toBeNull();
+    expect(blockedWake.run).toBeNull();
+    expect(blockedWake.skipped).toMatchObject({
+      reason: "issue_dependencies_blocked",
+      details: {
+        unresolvedBlockerIssueIds: [blockerId],
+        unresolvedBlockers: [{ id: blockerId, status: "todo" }],
+      },
+    });
 
     const blockedWakeRequest = await waitForCondition(async () => {
       const wakeup = await db
