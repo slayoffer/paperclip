@@ -2171,6 +2171,13 @@
       "when": 1792858999084,
       "tag": "0311_shocking_ultron",
       "breakpoints": true
+    },
+    {
+      "idx": 312,
+      "version": "7",
+      "when": 1792967951765,
+      "tag": "0312_curly_squirrel_girl",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,6 @@
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
-import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
+import { claimedAdapterType, conversationRecoveryActionPredicate, createConversationOwnershipReader } from "./conversation-continuation.js";
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
@@ -324,8 +324,9 @@ export async function settleUnrecoverableExecutions(
   await db.transaction(async tx => {
     const foldable = await tx.select().from(issueRecoveryActions).where(obsoleteConversationHold)
       .limit(25).for("update", { skipLocked: true });
+    const readOwnership = createConversationOwnershipReader(tx as unknown as Db);
     for (const candidate of foldable) {
-      if (await getConversationOwnershipBlocker(tx as unknown as Db, candidate.companyId, candidate.sourceIssueId)) continue;
+      if (await readOwnership(candidate.companyId, candidate.sourceIssueId)) continue;
       const [action] = await tx.update(issueRecoveryActions).set({
         status: "resolved",
         outcome: "cancelled",

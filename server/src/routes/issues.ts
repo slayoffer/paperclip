@@ -8455,7 +8455,7 @@ export function issueRoutes(
       relations, recoveryActionsByRelationIssue,
     );
     // Recovery revalidation may change the blocker; read it afterwards.
-    const executionBlocker = await timing.time("execution_blocker", () => getExecutionBlocker(db, issue.companyId, issue.id));
+    const executionBlocker = await timing.time("execution_blocker", () => getExecutionBlocker(db, issue.companyId, issue.id, { readProjection: true }));
     res.setHeader("Server-Timing", timing.header());
     res.json({
       ...issue,
