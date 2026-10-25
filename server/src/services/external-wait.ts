@@ -8,9 +8,10 @@ const MAX_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
 /** Keep the deadline in the action, where the external watchdog reads it. */
 export function externalWaitDeadline(descriptor: IssueUnblockDescriptor | null | undefined): number | null {
   if (descriptor?.kind !== "external" || descriptor.owner !== "board") return null;
-  const deadlines = [...descriptor.action.matchAll(/\bdeadline:[ \t]*(\S+)/gi)];
+  const deadlines = [...descriptor.action.matchAll(/\bdeadline:[ \t]*(\S*)/gi)];
   if (deadlines.length !== 1 || !deadlineSchema.safeParse(deadlines[0][1]).success) return null;
-  return Date.parse(deadlines[0][1]);
+  const deadline = Date.parse(deadlines[0][1]);
+  return Number.isFinite(deadline) ? deadline : null;
 }
 
 export function assertAssigneeExternalWait(

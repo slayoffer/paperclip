@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Server } from "node:http";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +42,9 @@ describe("external wait deadline", () => {
 
   it.each([
     "Wait for the vendor", "deadline: tomorrow", "deadline: 2026-02-30T10:00:00Z",
+    "deadline: 2026-10-27T10:00:00+99:00",
     "deadline: 2026-10-27", "deadline: 2026-10-27T10:00:00",
+    "deadline:\ndeadline: 2026-10-27T10:00:00Z",
     "deadline: 2026-10-27T10:00:00Z deadline: 2026-10-28T10:00:00Z",
   ])("refuses an invalid or ambiguous action: %s", action => {
     expect(externalWaitDeadline(wait(action))).toBeNull();
@@ -64,6 +67,7 @@ describeDatabase("assignee external waits", () => {
   let agentId: string;
   let source: typeof issues.$inferSelect;
   let runId: string;
+  const servers: Server[] = [];
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-external-waits-");
@@ -85,6 +89,9 @@ describeDatabase("assignee external waits", () => {
       status: "in_progress", assigneeAgentId: agentId, checkoutRunId: runId, executionRunId: runId }).returning();
   });
   afterEach(async () => {
+    await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    })));
     for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns,
       agentWakeupRequests, issues, agents, companies]) await db.delete(table);
     vi.unstubAllEnvs();
@@ -100,7 +107,9 @@ describeDatabase("assignee external waits", () => {
     });
     result.use("/api", issueRoutes(db, {} as never));
     result.use(errorHandler);
-    return result;
+    const server = result.listen(0, "127.0.0.1");
+    servers.push(server);
+    return server;
   }
 
   function validate(descriptor: IssueUnblockDescriptor, update: { assigneeAgentId?: string | null } = {}, actorId = agentId) {
