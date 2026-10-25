@@ -13,6 +13,8 @@ on:
       - server/src/services/review-wait.ts
       - server/src/services/self-block-guard*.ts
       - server/src/services/issue-recovery-actions.ts
+      - server/src/services/issue-token-budget.ts
+      - server/src/services/review-bridge-wakes.ts
       - server/src/services/recovery/**
       - packages/db/src/**
       - packages/shared/src/**

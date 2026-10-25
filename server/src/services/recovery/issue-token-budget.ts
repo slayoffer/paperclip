@@ -1,5 +1,5 @@
 import { and, eq, gte, like, ne, or } from "drizzle-orm";
-import { issues, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { issueThreadInteractions, type Db } from "@paperclipai/db";
 import {
   ensureIssueTokenBudgetCard,
   ISSUE_TOKEN_BUDGET_CARD_KEY_PREFIX,
@@ -37,18 +37,6 @@ export async function isRecoveryIssueTokenBudgetBlocked(
   const [stop] = await findStop(db, state.windowStart);
   if (stop) return true;
 
-  // Concurrent recovery checks can observe different rolling-window starts.
-  // Serialize first creation on the source issue, then recheck the grant.
-  return db.transaction(async (tx) => {
-    const [source] = await tx.select({ id: issues.id }).from(issues)
-      .where(and(eq(issues.companyId, issue.companyId), eq(issues.id, issue.id)))
-      .for("update");
-    if (!source) return true;
-    const client = tx as unknown as Db;
-    const current = await loadIssueTokenBudgetState(client, input);
-    if (!current.exceeded) return false;
-    const [existing] = await findStop(tx, current.windowStart);
-    if (!existing) await ensureIssueTokenBudgetCard(client, { ...input, state: current });
-    return true;
-  });
+  await ensureIssueTokenBudgetCard(db, { ...input, state });
+  return true;
 }

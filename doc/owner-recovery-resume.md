@@ -47,7 +47,8 @@ An exhausted issue keeps one budget confirmation card as its stop record.
 Repeated sweeps reuse that card, including a rejected card, without creating recovery actions or skipped wakes.
 Recovery checks the budget again on each sweep.
 An accepted budget card, a raised limit, or usage outside the rolling window can permit recovery again.
-This check applies to stranded issues and direct legacy disposition repair.
+This check applies to stranded issues, direct legacy disposition repair, and bridge wake dispatch.
+Heartbeat admission and recovery use the same lock when they create the stop card.
 
 Run these checks on an approved build host:
 

@@ -12,6 +12,9 @@ import {
   issues,
 } from "@paperclipai/db";
 import { recoveryService } from "../services/recovery/service.js";
+import { ensureIssueTokenBudgetCard, issueTokenBudgetConfig, loadIssueTokenBudgetState } from "../services/issue-token-budget.js";
+import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
+import { BRIDGE_DISPATCH_ACTOR, BRIDGE_DISPATCH_PENDING } from "../services/review-bridge-waits.js";
 import { isRecoveryIssueTokenBudgetBlocked } from "../services/recovery/issue-token-budget.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -135,6 +138,51 @@ if (!support.supported) console.warn(`Skipping recovery budget tests: ${support.
       .toEqual([true, true, true, true, true]);
     expect(await cards(issue.id)).toHaveLength(1);
     await expectNoRecovery(issue);
+  });
+
+  it("shares rolling-window card deduplication with heartbeat admission", async () => {
+    const issue = await seed();
+    vi.stubEnv("PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE", "");
+    // Heartbeat admission uses this same card writer. Give its snapshot a
+    // different rolling-window start to reproduce the two-key race.
+    const config = issueTokenBudgetConfig()!;
+    const input = { companyId: issue.companyId, issueId: issue.id, config };
+    const state = await loadIssueTokenBudgetState(db, { ...input, now: new Date(Date.now() + 1000) });
+    await Promise.all([
+      isRecoveryIssueTokenBudgetBlocked(db, issue),
+      ensureIssueTokenBudgetCard(db, { ...input, state }),
+    ]);
+    expect(await cards(issue.id)).toHaveLength(1);
+    await expectNoRecovery(issue);
+  });
+
+  it("does not claim or rotate a bridge intent while the issue budget blocks it", async () => {
+    const issue = await seed();
+    const [source] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    const [intent] = await db.insert(agentWakeupRequests).values({
+      companyId: issue.companyId, agentId: issue.agentId, source: "automation",
+      triggerDetail: "system", reason: "review_bridge_event", status: BRIDGE_DISPATCH_PENDING,
+      requestedByActorType: "system", requestedByActorId: BRIDGE_DISPATCH_ACTOR,
+      idempotencyKey: `bridge-budget:${issue.id}`,
+      payload: { issueId: issue.id, receiptId: randomUUID(), statusVersion: source!.statusVersion },
+    }).returning();
+    const enqueueWakeup = vi.fn(async () => null);
+    for (let tick = 0; tick < 4; tick += 1) {
+      expect(await dispatchBridgeWakes(db, enqueueWakeup, { companyId: issue.companyId })).toBe(0);
+    }
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, issue.companyId));
+    expect(wakes).toEqual([intent]);
+    expect(await cards(issue.id)).toHaveLength(1);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issue.id)))
+      .toHaveLength(0);
+
+    const [stop] = await cards(issue.id);
+    await db.update(issueThreadInteractions).set({ status: "accepted", resolvedAt: new Date() })
+      .where(eq(issueThreadInteractions.id, stop!.id));
+    await dispatchBridgeWakes(db, enqueueWakeup, { companyId: issue.companyId });
+    expect(enqueueWakeup).toHaveBeenCalledOnce();
   });
 
   it("does not stop recovery when the budget is disabled", async () => {
