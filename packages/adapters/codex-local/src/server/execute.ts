@@ -836,7 +836,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "codex"),
             providerSessionRoot: ownerSession?.providerSessionRoot,
             installCommand: SANDBOX_INSTALL_COMMAND,
-            detectCommand: DEFAULT_CODEX_COMMAND,
+            detectCommand: configuredCommand,
             onProgress: (line) => onLog("stdout", line),
             onRuntimeProgress: ctx.onRuntimeProgress,
             assets: [
@@ -1063,7 +1063,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       command: configuredCommand,
       target: runtimeExecutionTarget,
       cwd: effectiveExecutionCwd,
-      env: runtimeEnv,
+      env: executionTargetIsRemote ? env : runtimeEnv,
       onLog,
     });
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, runtimeExecutionTarget, effectiveExecutionCwd, runtimeEnv);

@@ -23,6 +23,7 @@ const cleanupDirs: string[] = [];
 
 afterEach(async () => {
   vi.resetAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(cleanupDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -92,6 +93,17 @@ describe("Codex command selection", () => {
     await rm(path.join(input.cwd, "codex"));
     await expect(resolveCodexCommand(input)).rejects.toThrow('Command not found in PATH: "codex"');
     expect(input.onLog).not.toHaveBeenCalled();
+  });
+
+  it("uses the host search path to validate the SSH client", async () => {
+    const input = await localInput();
+    await writeFile(path.join(input.cwd, "ssh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    vi.stubEnv("PATH", input.cwd);
+    input.command = "codex";
+    input.env.PATH = "/remote-only/bin";
+    input.target = { kind: "remote", transport: "ssh", spec: {} } as AdapterExecutionTarget;
+    expect(await resolveCodexCommand(input)).toBe("codex");
+    expect(runAdapterExecutionTargetShellCommand).not.toHaveBeenCalled();
   });
 
   // Both transports must probe the leased environment rather than host files.

@@ -1,6 +1,7 @@
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { lstat } from "node:fs/promises";
 import path from "node:path";
+import { ensurePathInEnv } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   runAdapterExecutionTargetShellCommand,
@@ -73,7 +74,12 @@ async function commandIsMissing(input: CommandInput, command: string): Promise<b
 
 export async function resolveCodexCommand(input: CommandInput): Promise<string> {
   if (input.command === DEFAULT_CODEX_COMMAND) {
-    await ensureAdapterExecutionTargetCommandResolvable(input.command, input.target, input.cwd, input.env);
+    // SSH validation resolves the local transport client, not a remote CLI.
+    // Remote identity overrides must not replace the host's SSH search path.
+    const resolverEnv = input.target?.kind === "remote" && input.target.transport === "ssh"
+      ? ensurePathInEnv(process.env)
+      : input.env;
+    await ensureAdapterExecutionTargetCommandResolvable(input.command, input.target, input.cwd, resolverEnv);
     return input.command;
   }
   if (!(await commandIsMissing(input, input.command))) return input.command;

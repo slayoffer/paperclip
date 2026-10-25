@@ -9,7 +9,6 @@ import {
   ensurePathInEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
-  ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetDirectory,
   maybeRunSandboxInstallCommand,
   runAdapterExecutionTargetProcess,
@@ -24,6 +23,7 @@ import { parseCodexJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { codexHomeDir, readCodexAuthInfo } from "./quota.js";
 import { buildCodexExecArgs } from "./codex-args.js";
+import { DEFAULT_CODEX_COMMAND, resolveCodexCommand } from "./command.js";
 import {
   isManagedCodexHomePath,
   prepareManagedCodexHome,
@@ -271,7 +271,7 @@ export async function testEnvironment(
 
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
-  const command = asString(config.command, "codex");
+  let command = asString(config.command, DEFAULT_CODEX_COMMAND);
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
   const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
@@ -314,7 +314,11 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -325,7 +329,20 @@ export async function testEnvironment(
   });
   if (installCheck) checks.push(installCheck);
   try {
-    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
+    command = await resolveCodexCommand({
+      runId,
+      command,
+      target,
+      cwd,
+      env: targetIsRemote ? env : runtimeEnv,
+      onLog: async (_stream, message) => {
+        checks.push({
+          code: "codex_command_fallback",
+          level: "warn",
+          message: message.trim(),
+        });
+      },
+    });
     checks.push({
       code: "codex_command_resolvable",
       level: "info",
