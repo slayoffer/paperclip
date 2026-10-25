@@ -67,5 +67,6 @@ jobs:
           packages/adapter-utils/src/sandbox-callback-bridge-recovery.test.ts
           server/src/__tests__/issue-recovery-actions.test.ts
           server/src/__tests__/issue-recovery-bridge.test.ts
+          server/src/__tests__/issue-recovery-token-budget.test.ts
           server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
           server/src/services/self-block-guard.test.ts

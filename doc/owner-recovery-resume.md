@@ -42,6 +42,13 @@ The restart controller still requires its existing termination and session evide
 The owner-session feature still uses its existing project key and serialized admission.
 The prompt flag cannot clear a recovery hold or authorize replay of uncertain actions.
 
+When `PAPERCLIP_ISSUE_TOKEN_BUDGET` is enabled, recovery checks issue input-token usage before it creates actions or wakes.
+An exhausted issue keeps one budget confirmation card as its stop record.
+Repeated sweeps reuse that card, including a rejected card, without creating recovery actions or skipped wakes.
+Recovery checks the budget again on each sweep.
+An accepted budget card, a raised limit, or usage outside the rolling window can permit recovery again.
+This check applies to stranded issues and direct legacy disposition repair.
+
 Run these checks on an approved build host:
 
 ```sh
