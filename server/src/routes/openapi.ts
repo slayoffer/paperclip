@@ -1,3 +1,7 @@
+import { commonOpenApiResponses } from "./openapi-responses.js";
+import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
+import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
+import { registerTaskDrainPaths } from "./openapi-task-drain.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import {
@@ -210,7 +214,6 @@ import {
   patchInstanceGeneralSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
-  startTaskDrainRequestSchema,
   // Resource memberships
   updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
@@ -314,22 +317,6 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
-type OpenApiResponse = Record<string, unknown>;
-type OpenApiPathRegistration = {
-  method: string;
-  path: string;
-  request?: {
-    params?: z.ZodTypeAny;
-    query?: z.ZodTypeAny;
-    body?: {
-      content: Record<string, { schema: unknown }>;
-      required?: boolean;
-    };
-  };
-  responses?: Record<string, OpenApiResponse>;
-  [key: string]: unknown;
-};
-
 // Zod 4 stores each schema definition on `_def` with a lowercase `type`
 // discriminator and moves the wrapped members onto that def. This loose view
 // lets the converter read those members, because Zod 4 does not export a
@@ -661,53 +648,7 @@ const cliAuthChallengeIdParamSchema = z.string().trim()
 
 const ErrorSchema = registry.register("Error", z.object({ error: z.string() }));
 
-const responses = {
-  ok: (schema: z.ZodTypeAny = z.record(z.string(), z.unknown())) => ({
-    description: "Success",
-    content: { "application/json": { schema } },
-  }),
-  noContent: { description: "No content" },
-  badRequest: {
-    description: "Bad request",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unauthorized: {
-    description: "Unauthorized",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  forbidden: {
-    description: "Forbidden",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  notFound: {
-    description: "Not found",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  conflict: {
-    description: "Conflict",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  payloadTooLarge: {
-    description: "Payload too large",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unsupportedMediaType: {
-    description: "Unsupported media type",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unprocessable: {
-    description: "Unprocessable entity",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  serverError: {
-    description: "Internal server error",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  tooManyRequests: {
-    description: "Too many requests",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-};
+const responses = commonOpenApiResponses(ErrorSchema);
 
 const jsonBody = (schema: z.ZodTypeAny) => ({
   content: { "application/json": { schema } },
@@ -6319,37 +6260,7 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
-registry.registerPath({
-  method: "get",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Get the task-drain status for this process only; quiescent counts in-process work, and a process restart clears it even when the database still holds running rows",
-  responses: { 200: r.ok(), 401: r.unauthorized },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Start a task drain, so new run admission holds until active runs finish",
-  request: { body: jsonBody(startTaskDrainRequestSchema) },
-  responses: {
-    200: r.ok(),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-  },
-});
-
-registry.registerPath({
-  method: "delete",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary: "End a task drain and restore run admission",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
+registerTaskDrainPaths(registry, r);
 
 registry.registerPath({
   method: "get",
@@ -11656,6 +11567,8 @@ for (const [method, path, body] of experimentalApiPaths) {
     },
   });
 }
+
+registerCredentialTransferPaths(registry, responses);
 
 // ─── Spec builder ─────────────────────────────────────────────────────────────
 

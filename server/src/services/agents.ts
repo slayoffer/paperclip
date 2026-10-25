@@ -1,3 +1,4 @@
+import { createAgentReadById } from "./agent-read-by-id.js";
 import { agentAppearanceSchema, randomAgentAppearance, resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
@@ -433,19 +434,9 @@ export function agentService(db: Db) {
     }));
   }
 
-  async function getById(id: string) {
-    const row = await db
-      .select()
-      .from(agents)
-      .where(eq(agents.id, id))
-      .then((rows) => rows[0] ?? null);
-    if (!row) return null;
-    const [companyRows, hydrated] = await Promise.all([
-      listCompanyAgentRows(row.companyId),
-      hydrateAgentSpend([row]).then((rows) => rows[0]!),
-    ]);
-    return normalizeAgentRow(hydrated, companyRows);
-  }
+  const getById = createAgentReadById(db, {
+    listCompanyAgentRows, hydrateAgentSpend, normalizeAgentRows,
+  });
 
   async function requireGetById(id: string) {
     const agent = await getById(id);
@@ -982,7 +973,7 @@ export function agentService(db: Db) {
 
     update: updateAgent,
 
-    pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
+    pause: async (id: string, reason: "manual" | "budget" | "system" | `ops-guard:${string}` = "manual") => {
       const existing = await getById(id);
       if (!existing) return null;
       if (existing.status === "terminated") throw conflict("Cannot pause terminated agent");

@@ -54,6 +54,15 @@ export async function explicitOperatorRunIdentity(
   return { actorId, cause: "queued_comment_interrupt" };
 }
 
+const runIdentityColumns = {
+  id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+  status: heartbeatRuns.status, activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
+  responsibleUserId: heartbeatRuns.responsibleUserId, wakeupRequestId: heartbeatRuns.wakeupRequestId,
+  invocationSource: heartbeatRuns.invocationSource,
+  nativeIssueId: heartbeatRuns.nativeIssueId, runtimeMode: heartbeatRuns.runtimeMode,
+  contextSnapshot: heartbeatRuns.contextSnapshot,
+};
+
 export type RunIdentityContext = typeof runIdentityContexts.$inferSelect;
 type Executor = Pick<Db, "select" | "insert" | "update">;
 
@@ -71,14 +80,13 @@ async function lockIdentityTask(
 ) {
   const [run] = await executor
     .select({
-      context: heartbeatRuns.contextSnapshot,
-      issueId: heartbeatRuns.nativeIssueId,
+      issueId: heartbeatRuns.contextTaskIdentity, nativeIssueId: heartbeatRuns.nativeIssueId,
     })
     .from(heartbeatRuns)
     .where(
       and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)),
     );
-  const issueId = run?.context?.issueId ?? run?.context?.taskId ?? run?.issueId;
+  const issueId = run?.issueId ?? run?.nativeIssueId;
   if (
     issueId !== undefined &&
     issueId !== null &&
@@ -150,8 +158,8 @@ async function activate(executor: Executor, context: RunIdentityContext) {
         eq(heartbeatRuns.companyId, context.companyId),
       ),
     )
-    .returning();
-  const issueId = run?.contextSnapshot?.issueId ?? run?.contextSnapshot?.taskId;
+    .returning({ issueId: heartbeatRuns.contextTaskIdentity });
+  const issueId = run?.issueId;
   if (typeof issueId === "string")
     await executor
       .update(issues)
@@ -179,7 +187,7 @@ export async function initializeRunIdentity(
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(
@@ -199,7 +207,7 @@ export async function initializeRunIdentity(
     const operatorIdentity = await explicitOperatorRunIdentity(tx, run);
     const [parent] = input.parentRunId
       ? await tx
-          .select()
+          .select({ activeIdentityContextId: heartbeatRuns.activeIdentityContextId })
           .from(heartbeatRuns)
           .where(
             and(
@@ -290,7 +298,7 @@ export async function prepareSteeredIdentity(
   },
 ) {
   const [run] = await executor
-    .select()
+    .select(runIdentityColumns)
     .from(heartbeatRuns)
     .where(
       and(
@@ -343,7 +351,7 @@ export async function reserveSteeredIdentity(
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(
@@ -430,13 +438,16 @@ export async function acceptSteeredIdentity(
 
 export async function captureRunIdentity(
   db: Db,
-  input: { companyId: string; runId: string; agentId: string },
+  input: { companyId: string; runId: string; agentId: string; includeContext?: boolean },
 ) {
   // Lock acquisition serializes with steering delivery and its durable acknowledgement.
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select()
+      .select({ ...runIdentityColumns,
+        contextSnapshot: input.includeContext === false
+          ? sql<Record<string, unknown> | null>`null` : heartbeatRuns.contextSnapshot,
+      })
       .from(heartbeatRuns)
       .where(
         and(
@@ -510,7 +521,7 @@ export async function reconcileSteeredIdentity(
   await db.transaction(async (tx) => {
     await lockIdentityTask(tx, context.companyId, context.runId);
     const [run] = await tx
-      .select()
+      .select(runIdentityColumns)
       .from(heartbeatRuns)
       .where(
         and(

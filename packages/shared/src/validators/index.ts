@@ -1,3 +1,5 @@
+export { pauseAgentSchema, type PauseAgent } from "./agent-pause.js";
+
 export {
   connectionsSearchInputSchema,
   connectionRequestInputSchema,
@@ -882,3 +884,4 @@ export * from "./email.js";
 export { restoreAgentInstructionSchema } from "./agent.js";
 
 export * from "./skill-source.js";
+export * from "./credential-transfers.js";

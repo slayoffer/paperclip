@@ -25,6 +25,7 @@ export const apiPrefixes: Record<string, string> = {
   "company-skill-policy.ts": "/api",
   "connection-intents.ts": "/api",
   "costs.ts": "/api",
+  "credential-transfers.ts": "/api",
   "dashboard.ts": "/api",
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",

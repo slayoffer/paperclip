@@ -6,6 +6,7 @@ import { activityLog, agents, agentWakeupRequests, companies, createDb, heartbea
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { heartbeatService, startTaskDrain, stopTaskDrain } from "../services/heartbeat.js";
 import { recoveryService } from "../services/recovery/service.js";
+import { buildIssueBlockersResolvedWakeStateKey, hasAdmittedDependencyWake } from "../services/issue-dependency-wakeups.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const suite = support.supported ? describe : describe.skip;
@@ -43,6 +44,7 @@ suite("concurrent dependency wake producers", () => {
       relatedIssueId: dependentId, type: "blocks" });
 
     const heartbeat = heartbeatService(db);
+    const otherServer = heartbeatService(createDb(temp.connectionString));
     let arrivals = 0;
     let release!: () => void;
     const bothProducers = new Promise<void>(resolve => { release = resolve; });
@@ -50,7 +52,8 @@ suite("concurrent dependency wake producers", () => {
       // Both real producers must pass their optimistic checks before admission.
       if (++arrivals === 2) release();
       await bothProducers;
-      return heartbeat.wakeup(id, options);
+      return options?.contextSnapshot?.source === "workspace.finalize"
+        ? heartbeat.wakeup(id, options) : otherServer.wakeup(id, options);
     };
     const finalize = recoveryService(db, { enqueueWakeup });
     const backstop = recoveryService(db, { enqueueWakeup });
@@ -74,4 +77,32 @@ suite("concurrent dependency wake producers", () => {
     expect(repeated.healed).toBe(0);
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
   }, 30_000);
+
+  it.each(["queued", "deferred_issue_execution", "claimed", "coalesced", "completed",
+    "failed", "cancelled", "skipped"])("checks the persisted %s receipt without preventing valid retries", async status => {
+    const companyId = randomUUID(), agentId = randomUUID(), dependentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Admission receipt test",
+      issuePrefix: `T${companyId.slice(0, 6)}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Owner", role: "engineer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    const state = { dependentIssueId: dependentId, blockerIssueIds: [randomUUID()],
+      blockedTransitionAt: new Date("2026-10-25T00:00:00Z") };
+    const key = buildIssueBlockersResolvedWakeStateKey(state);
+    await db.insert(agentWakeupRequests).values({ companyId, agentId, status,
+      source: "automation", reason: "issue_blockers_resolved", idempotencyKey: key + ":release" });
+    const covered = ["queued", "deferred_issue_execution", "claimed", "coalesced", "completed"].includes(status);
+    expect(await hasAdmittedDependencyWake(db, companyId, key + ":release")).toBe(covered);
+    expect(await hasAdmittedDependencyWake(db, companyId, key)).toBe(covered);
+    expect(await hasAdmittedDependencyWake(db, randomUUID(), key + ":release")).toBe(false);
+    const nextCycle = buildIssueBlockersResolvedWakeStateKey({ ...state,
+      blockedTransitionAt: new Date("2026-10-26T00:00:00Z") });
+    expect(await hasAdmittedDependencyWake(db, companyId, nextCycle + ":release")).toBe(false);
+    expect(await hasAdmittedDependencyWake(db, companyId, "another-wake-key")).toBe(false);
+
+    await db.update(agentWakeupRequests).set({ idempotencyKey: key })
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    // A completed old wake permits the historical release repair.
+    expect(await hasAdmittedDependencyWake(db, companyId, key + ":release"))
+      .toBe(covered && status !== "completed");
+  });
 });

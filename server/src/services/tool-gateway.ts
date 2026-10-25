@@ -1,3 +1,9 @@
+import { validateTransferGatewayOperation } from "./credential-transfer-gateway-operation.js";
+import { type CredentialTransferOperation } from "@paperclipai/shared";
+import { isInteractionResolutionReplay } from "./interaction-revision.js";
+import { buildHumanizedActionPreview, ToolGatewayDescriptor, isIdentifierArgumentKey, humanizeArgumentValue, humanizeArgumentKey, REDACTED_ARGUMENT_SENTINEL, ToolGatewayProviderType, ConnectedMcpGatewayMetadata } from "./tool-action-preview.js";
+export type { ToolGatewayProviderType, ConnectedMcpGatewayMetadata, ToolGatewayDescriptor } from "./tool-action-preview.js";
+import { markToolConnectionHealth } from "./tool-connection-health.js";
 import { ToolGatewayHttpError, MAX_REMOTE_MCP_RESPONSE_BYTES, responseTooLargeError, readBoundedRemoteResponse, malformedRemoteMcpResponse } from "./tool-gateway-errors.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
@@ -103,7 +109,7 @@ import type {
 } from "./plugin-tool-dispatcher.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
-import { connectionGrantCredentialRef, resolveConnectionGrantSecret } from "./connection-credentials.js";
+import { connectionGrantCredentialRef as grantRefForCredential, resolveConnectionGrantSecret } from "./connection-credentials.js";
 import { railwayCommandBudgetMs, createRailwayClient, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_API_URL, RAILWAY_TOOL_PREFIX, RailwayError } from "./railway.js";
 import { RAILWAY_SSH_SECRET_PATH, runRailwaySshCommand } from "./railway-ssh.js";
 import {
@@ -261,52 +267,6 @@ const DEFAULT_MCP_GATEWAY_PROTOCOL_LIMITS: McpGatewayProtocolLimitOptions = {
 };
 const TOOL_APPROVAL_DESCRIPTION_SUFFIX =
   "Requires human approval: calling it posts an approval card on your task and you will be woken with the result once decided.";
-
-export type ToolGatewayProviderType =
-  | "mcp_http_fixture"
-  | "mcp_stdio_fixture"
-  | "provider_rest"
-  | "mcp_remote_http"
-  | "mcp_local_stdio"
-  | "paperclip_self"
-  | "paperclip_plugin"
-  | "paperclip_virtual"
-  | "paperclip_github_chat"
-  | "paperclip_slack_chat";
-
-export interface ConnectedMcpGatewayMetadata {
-  applicationId: string;
-  applicationKey: string | null;
-  applicationDisplayName: string;
-  connectionId: string;
-  catalogEntryId: string;
-  transport: "mcp_remote" | "local_stdio" | "rest_api";
-  gatewayToolName: string;
-  upstreamToolName: string;
-  catalogName: string;
-  inputSchema: Record<string, unknown>;
-  outputSchema: Record<string, unknown> | null;
-  annotations: Record<string, unknown>;
-  risk: {
-    level: string;
-    isReadOnly: boolean;
-    isWrite: boolean;
-    isDestructive: boolean;
-  };
-  onDemandTools?: boolean;
-}
-
-export interface ToolGatewayDescriptor extends AgentToolDescriptor {
-  providerType: ToolGatewayProviderType;
-  risk: "read" | "write" | "destructive";
-  applicationId?: string | null;
-  applicationKey?: string | null;
-  applicationDisplayName?: string | null;
-  connectionId?: string | null;
-  catalogEntryId?: string | null;
-  upstreamToolName?: string | null;
-  providerMetadata?: ConnectedMcpGatewayMetadata | Record<string, unknown>;
-}
 
 export interface ToolGatewaySession {
   id: string;
@@ -848,79 +808,6 @@ type ConnectedCredentialVersionSnapshot = {
   versionSelector: string;
   resolvedVersion: number;
 };
-
-const REDACTED_ARGUMENT_SENTINEL = "***REDACTED***";
-
-/** Turn a machine field key (`note_body`, `noteBody`, `note-body`) into a Title-Cased label. */
-function humanizeArgumentKey(key: string): string {
-  const words = key
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (words.length === 0) return key;
-  return words
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-/** Identifier-ish fields leak raw IDs into the prosumer card; the vocab gate forbids them. */
-function isIdentifierArgumentKey(key: string): boolean {
-  return /(^|[_-])(id|ids|uuid|guid|key|token|hash|sha\d*)$/i.test(key);
-}
-
-/** Render a single argument value as short, plain text — or null if it shouldn't be shown. */
-function humanizeArgumentValue(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (trimmed === REDACTED_ARGUMENT_SENTINEL) return "hidden for privacy";
-    return trimmed.length > 140 ? `${trimmed.slice(0, 137)}…` : trimmed;
-  }
-  if (typeof value === "number" || typeof value === "boolean")
-    return String(value);
-  return null;
-}
-
-/**
- * Build the prosumer-facing "Ask first" preview (M5/M7/M9). Deliberately free of the
- * words tool/risk/transport/arguments and of raw JSON — those only belong on the
- * Advanced surfaces (M8a/M8b) and the board-only formal-approval interaction.
- */
-function buildHumanizedActionPreview(input: {
-  tool: ToolGatewayDescriptor;
-  argumentsSummary: ReturnType<typeof summarizeToolValue>;
-}): string {
-  const actionName = input.tool.displayName?.trim() || input.tool.name;
-  const trustLine =
-    input.tool.risk === "destructive"
-      ? `${actionName}. This can permanently change or remove data.`
-      : actionName;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.argumentsSummary.summary);
-  } catch {
-    return trustLine;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    return trustLine;
-
-  const fieldLines: string[] = [];
-  for (const [key, value] of Object.entries(
-    parsed as Record<string, unknown>,
-  )) {
-    if (fieldLines.length >= 6) break;
-    if (isIdentifierArgumentKey(key)) continue;
-    const rendered = humanizeArgumentValue(value);
-    if (rendered === null) continue;
-    fieldLines.push(`**${humanizeArgumentKey(key)}:** ${rendered}`);
-  }
-
-  if (fieldLines.length === 0) return trustLine;
-  return [trustLine, ...fieldLines].join(" · ");
-}
 
 const BUILTIN_TOOLS: ToolGatewayDescriptor[] = [
   {
@@ -3625,31 +3512,11 @@ export function createToolGatewayService(
     return { headers, summary };
   }
 
-  async function markRemoteConnectionHealth(
+  const markRemoteConnectionHealth = (
     connection: typeof toolConnections.$inferSelect,
     status: "ok" | "error" | "missing_secret" | "degraded",
     message: string | null,
-  ) {
-    const now = new Date();
-    await db
-      .update(toolConnections)
-      .set({
-        healthStatus: status,
-        healthMessage: message,
-        healthCheckedAt: now,
-        lastHealthAt: now,
-        lastError: status === "ok" ? null : message,
-        updatedAt: now,
-      })
-      .where(eq(toolConnections.id, connection.id));
-  }
-
-  function grantRefForCredential(
-    grant: typeof connectionGrants.$inferSelect,
-    ref: McpConnectionCredentialRef,
-  ): ToolCredentialSecretRef | undefined {
-    return connectionGrantCredentialRef(grant, ref);
-  }
+  ) => markToolConnectionHealth(db, connection, status, message);
 
   async function resolveGrantSecretValue(
     session: ToolGatewaySession,
@@ -4140,7 +4007,16 @@ export function createToolGatewayService(
     for (const ref of connection.credentialRefs ?? []) {
       if (ref.placement !== "header") continue;
       const grantRef = grantRefForCredential(grant, ref);
-      if (!grantRef) continue;
+      if (!grantRef) {
+        const message = "A configured header credential has no reference in the selected grant. Reconnect this connection.";
+        await markRemoteConnectionHealth(connection, "missing_secret", message);
+        throw new ToolGatewayHttpError(
+          422,
+          message,
+          "mcp_remote_missing_secret",
+          { connectionId: connection.id, grantId: grant.id, credential: ref.name },
+        );
+      }
       try {
         const value = await resolveGrantSecretValue(
           session,
@@ -8972,6 +8848,46 @@ export function createToolGatewayService(
         });
     },
 
+    /** Authorize the bounded in-process transfer without logging secret arguments or results. */
+    async authorizeCredentialTransfer(input: {
+      sessionToken: string; companyId: string; issueId: string; agentId: string; userId: string;
+      connectionId: string; grantId: string; toolNames: readonly string[]; operation: CredentialTransferOperation;
+      consumeRateLimit?: boolean;
+    }) {
+      // Only the validated, approved operation enters policy evaluation. No credential values enter here.
+      const operation = validateTransferGatewayOperation(input);
+      const session = await getActiveSession(input.sessionToken);
+      await assertGatewayTokenAction(session, "tools/call");
+      if (session.companyId !== input.companyId || session.issueId !== input.issueId
+        || session.agentId !== input.agentId || session.responsibleUserId !== input.userId) {
+        throw new ToolGatewayHttpError(403, "The transfer identity does not match.", "transfer_identity_mismatch");
+      }
+      const [connection] = await db.select().from(toolConnections).where(and(
+        eq(toolConnections.companyId, input.companyId), eq(toolConnections.id, input.connectionId),
+      ));
+      if (!connection || !connection.enabled || connection.status !== "active") {
+        throw new ToolGatewayHttpError(403, "The transfer connection is unavailable.", "transfer_connection_unavailable");
+      }
+      const grant = await resolveConnectionGrant(session, connection, false);
+      if (grant.id !== input.grantId || grant.kind !== "user" || grant.subjectUserId !== input.userId
+        || input.toolNames.length === 0) {
+        throw new ToolGatewayHttpError(403, "The transfer grant does not match.", "transfer_grant_mismatch");
+      }
+      for (const name of input.toolNames) {
+        const tool = await findToolForSession(session, name);
+        if (tool.connectionId !== input.connectionId) {
+          throw new ToolGatewayHttpError(403, "The transfer tool does not match.", "transfer_tool_mismatch");
+        }
+        const decision = await policyService.decide(policyInputForTool({ session, tool,
+          parameters: operation, consumeRateLimit: input.consumeRateLimit === true }),
+          { requireKnownArguments: true, authorityOnly: input.consumeRateLimit !== true });
+        // Operation-document approval cannot override a gateway denial or an ask-first tool policy.
+        if (!decision.allowed) {
+          throw new ToolGatewayHttpError(403, "The transfer tool requires authority.", "transfer_tool_denied");
+        }
+      }
+    },
+
     async browserUseSessionAuthorized(binding: { companyId: string; agentId: string; runId: string; issueId: string; connectionId: string; grantId: string; invocationId: string }) {
       const [connection] = await db.select().from(toolConnections).where(and(eq(toolConnections.companyId, binding.companyId), eq(toolConnections.id, binding.connectionId)));
       const [invocation] = await db.select().from(toolInvocations).where(and(eq(toolInvocations.companyId, binding.companyId), eq(toolInvocations.id, binding.invocationId)));
@@ -9525,6 +9441,8 @@ export function createToolGatewayService(
 
     async approveActionRequest(input: {
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       rememberAction?: boolean;
       issueId?: string;
       interactionId?: string;
@@ -9593,6 +9511,10 @@ export function createToolGatewayService(
             "action_context_mismatch",
           );
         }
+      }
+      if (actionRequest.status !== "pending" && (input.expectedRevision !== undefined || input.idempotencyKey !== undefined)) {
+        const replay = await commitToolActionReview(db, { ...input, decision: "approved" });
+        if (isInteractionResolutionReplay(replay)) return actionRequestResolution(replay);
       }
       if (
         ["executing", "executed", "failed"].includes(actionRequest.status) &&
@@ -9765,6 +9687,7 @@ export function createToolGatewayService(
         ...input,
         decision: "approved",
       });
+      if (isInteractionResolutionReplay(updated)) return actionRequestResolution(updated);
       await reflectToolActionInteractionLifecycle({
         actionRequestId: updated.id,
         status: "approved",
@@ -9799,6 +9722,8 @@ export function createToolGatewayService(
 
     async declineActionRequest(input: {
       companyId: string;
+      expectedRevision?: string;
+      idempotencyKey?: string;
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
@@ -9809,6 +9734,7 @@ export function createToolGatewayService(
         ...input,
         decision: "rejected",
       });
+      if (isInteractionResolutionReplay(updated)) return updated;
       await options
         .onToolActionSettled?.(updated.id)
         .catch((error) =>

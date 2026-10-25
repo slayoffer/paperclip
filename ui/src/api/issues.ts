@@ -1,3 +1,5 @@
+import { issueListSearchParams, IssueListFilters } from "./issue-list-search-params";
+export type { IssueListFilters } from "./issue-list-search-params";
 import type { SetIssueTitle } from "@paperclipai/shared";
 import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type {
@@ -78,86 +80,6 @@ export type ResolveRecoveryActionResponse = {
   issue: Issue;
   recoveryAction: IssueRecoveryAction;
 };
-
-export type IssueListFilters = {
-  attention?: "blocked";
-  status?: string;
-  projectId?: string;
-  parentId?: string;
-  assigneeAgentId?: string;
-  participantAgentId?: string;
-  assigneeUserId?: string;
-  touchedByUserId?: string;
-  inboxArchivedByUserId?: string;
-  unreadForUserId?: string;
-  labelId?: string;
-  workspaceId?: string;
-  executionWorkspaceId?: string;
-  originKind?: string;
-  originKindPrefix?: string;
-  originId?: string;
-  descendantOf?: string;
-  createdFromIssueId?: string;
-  includeRoutineExecutions?: boolean;
-  includeBlockedBy?: boolean;
-  includeBlockedInboxAttention?: boolean;
-  includeLiveDescendantSummary?: boolean;
-  hasPlanDocument?: boolean;
-  q?: string;
-  limit?: number;
-  offset?: number;
-  sortField?: "updated" | "id";
-  afterId?: string;
-  sortDir?: "asc" | "desc";
-};
-
-function issueListSearchParams(filters?: IssueListFilters) {
-  const params = new URLSearchParams();
-  if (filters?.attention) params.set("attention", filters.attention);
-  if (filters?.status) params.set("status", filters.status);
-  if (filters?.projectId) params.set("projectId", filters.projectId);
-  if (filters?.parentId) params.set("parentId", filters.parentId);
-  if (filters?.assigneeAgentId)
-    params.set("assigneeAgentId", filters.assigneeAgentId);
-  if (filters?.participantAgentId)
-    params.set("participantAgentId", filters.participantAgentId);
-  if (filters?.assigneeUserId)
-    params.set("assigneeUserId", filters.assigneeUserId);
-  if (filters?.touchedByUserId)
-    params.set("touchedByUserId", filters.touchedByUserId);
-  if (filters?.inboxArchivedByUserId)
-    params.set("inboxArchivedByUserId", filters.inboxArchivedByUserId);
-  if (filters?.unreadForUserId)
-    params.set("unreadForUserId", filters.unreadForUserId);
-  if (filters?.labelId) params.set("labelId", filters.labelId);
-  if (filters?.workspaceId) params.set("workspaceId", filters.workspaceId);
-  if (filters?.executionWorkspaceId)
-    params.set("executionWorkspaceId", filters.executionWorkspaceId);
-  if (filters?.originKind) params.set("originKind", filters.originKind);
-  if (filters?.originKindPrefix)
-    params.set("originKindPrefix", filters.originKindPrefix);
-  if (filters?.originId) params.set("originId", filters.originId);
-  if (filters?.descendantOf) params.set("descendantOf", filters.descendantOf);
-  if (filters?.createdFromIssueId) params.set("createdFromIssueId", filters.createdFromIssueId);
-  if (filters?.includeRoutineExecutions)
-    params.set("includeRoutineExecutions", "true");
-  if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");
-  if (filters?.includeBlockedInboxAttention)
-    params.set("includeBlockedInboxAttention", "true");
-  if (filters?.includeLiveDescendantSummary)
-    params.set("includeLiveDescendantSummary", "true");
-  if (filters?.hasPlanDocument !== undefined) {
-    params.set("hasPlanDocument", filters.hasPlanDocument ? "true" : "false");
-  }
-  if (filters?.q) params.set("q", filters.q);
-  if (filters?.limit) params.set("limit", String(filters.limit));
-  if (filters?.offset !== undefined)
-    params.set("offset", String(filters.offset));
-  if (filters?.sortField) params.set("sortField", filters.sortField);
-  if (filters?.sortDir) params.set("sortDir", filters.sortDir);
-  if (filters?.afterId) params.set("afterId", filters.afterId);
-  return params;
-}
 
 export const issuesApi = {
   /** Fetch every page for bounded task-detail relations, not just the default first page. */
@@ -435,16 +357,18 @@ export const issuesApi = {
       selectedClientKeys?: string[];
       selectedOptionIds?: string[];
       rememberAction?: boolean;
+      expectedRevision?: string;
+      idempotencyKey?: string;
     },
   ) =>
     api.post<IssueThreadInteraction>(
       `/issues/${id}/interactions/${interactionId}/accept`,
       data ?? {},
     ),
-  rejectInteraction: (id: string, interactionId: string, reason?: string) =>
+  rejectInteraction: (id: string, interactionId: string, reason?: string, preconditions?: { expectedRevision?: string; idempotencyKey?: string }) =>
     api.post<IssueThreadInteraction>(
       `/issues/${id}/interactions/${interactionId}/reject`,
-      reason ? { reason } : {},
+      { ...preconditions, ...(reason ? { reason } : {}) },
     ),
   cancelInteraction: (id: string, interactionId: string, reason?: string) =>
     api.post<IssueThreadInteraction>(

@@ -128,8 +128,25 @@ export const patchInstanceSettingsSchema = z.object({
 export const MAX_TASK_DRAIN_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const startTaskDrainRequestSchema = z.object({
-  ttlMs: z.number().int().positive().max(MAX_TASK_DRAIN_TTL_MS).nullable().optional(),
+  ttlMs: z.number().int().positive().max(MAX_TASK_DRAIN_TTL_MS).default(15 * 60 * 1000),
 }).strict();
+
+export const stopTaskDrainRequestSchema = z.object({
+  leaseId: z.string().uuid(),
+}).strict();
+
+export const taskDrainLeaseSchema = z.object({
+  leaseId: z.string().uuid(),
+  ownerId: z.string().min(1),
+  startedAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+}).strict().refine((lease) => {
+  const duration = Date.parse(lease.expiresAt) - Date.parse(lease.startedAt);
+  return duration > 0 && duration <= MAX_TASK_DRAIN_TTL_MS;
+}, "Invalid drain lease duration");
+
+export type TaskDrainLease = z.infer<typeof taskDrainLeaseSchema>;
+export type StopTaskDrainRequest = z.infer<typeof stopTaskDrainRequestSchema>;
 
 export type InstanceGeneralSettings = z.infer<typeof instanceGeneralSettingsSchema>;
 // The patch schema removes each default so an absent key stays absent. Declare

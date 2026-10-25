@@ -2,24 +2,12 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } from "./ssh-config.js";
 import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
-
-async function clearLocalDirectory(
-  localDir: string,
-  preserveEntries: string[] = [],
-): Promise<void> {
-  await fs.mkdir(localDir, { recursive: true });
-  const preserve = new Set(preserveEntries);
-  const entries = await fs.readdir(localDir);
-  await Promise.all(
-    entries
-      .filter((entry) => !preserve.has(entry))
-      .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
-  );
-}
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
   await fs.mkdir(targetDir, { recursive: true });
@@ -29,6 +17,7 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
       recursive: true,
       force: true,
       preserveTimestamps: true,
+      verbatimSymlinks: true,
     });
   }));
 }
@@ -121,6 +110,7 @@ export async function syncDirectoryToSsh(input: {
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
     });
+    const stopChildren = createSshTransferStopper([tar, ssh]);
 
     let tarStderr = "";
     let sshStderr = "";
@@ -151,11 +141,15 @@ export async function syncDirectoryToSsh(input: {
         return;
       }
       settled = true;
-      tar.kill("SIGTERM");
-      ssh.kill("SIGTERM");
-      reject(error);
+      tar.stdout?.destroy();
+      progress?.counter.destroy();
+      ssh.stdin?.destroy();
+      void stopChildren().then(() => reject(error), reject);
     };
 
+    // Child process errors do not include errors from their stdio streams.
+    tar.stdout?.on("error", fail);
+    ssh.stdin?.on("error", fail);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -236,6 +230,7 @@ export async function syncDirectoryFromSsh(input: {
         stdio: ["pipe", "ignore", "pipe"],
         env: tarSpawnEnv(),
       });
+      const stopChildren = createSshTransferStopper([ssh, tar]);
 
       let sshStderr = "";
       let tarStderr = "";
@@ -262,11 +257,14 @@ export async function syncDirectoryFromSsh(input: {
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
-        ssh.kill("SIGTERM");
-        tar.kill("SIGTERM");
-        reject(error);
+        ssh.stdout?.destroy();
+        progress?.counter.destroy();
+        tar.stdin?.destroy();
+        void stopChildren().then(() => reject(error), reject);
       };
 
+      ssh.stdout?.on("error", fail);
+      tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
@@ -295,8 +293,16 @@ export async function syncDirectoryFromSsh(input: {
     });
     await progress?.finish();
 
-    await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
-    await copyDirectoryContents(stagingDir, input.localDir);
+    await fs.mkdir(input.localDir, { recursive: true });
+    if ((await fs.readdir(input.localDir)).length === 0) {
+      // Managed restores use an empty staging target. Avoid a second manifest and fsync pass.
+      await copyDirectoryContents(stagingDir, input.localDir);
+    } else {
+      const baseline = await captureDirectorySnapshot(input.localDir, {
+        exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+      });
+      await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
+    }
   } catch (error) {
     await progress?.fail();
     throw error;

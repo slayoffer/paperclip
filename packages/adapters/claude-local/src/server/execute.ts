@@ -1,3 +1,4 @@
+import { prepareOwnerSessionLaunch } from "@paperclipai/adapter-utils/owner-session";
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -8,6 +9,7 @@ import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
   overrideAdapterExecutionTargetRemoteCwd,
+  resolveAdapterExecutionTargetInPlaceRuntimeRootDir,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesManagedHome,
@@ -37,6 +39,8 @@ import {
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
   joinPromptSections,
+  checkpointSessionOutput,
+  RESTART_RESUME_PROMPT,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
@@ -413,11 +417,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     };
   }
+  if (ctx.context.paperclipRestartResume === true && engineSelection.engine !== "cli") {
+    throw new Error("restart_engine_changed");
+  }
   if (engineSelection.engine === "acp") {
     return executeClaudeAcp(ctx);
   }
 
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
@@ -606,18 +613,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? config.managedAiConnection ? sharedClaudeConfigDir : await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
+  // An `in_place` realization runs in the authoritative workspace root itself,
+  // so the run skips the workspace copy (same contract as codex-local).
+  const targetWorkspaceRealization = executionTarget?.workspaceRealization ?? null;
+  const workspaceInPlace = targetWorkspaceRealization?.mode === "in_place";
+  const ownerSession = await prepareOwnerSessionLaunch({ context, companyId: agent.companyId, agentId: agent.id, target: executionTarget });
+  if (ownerSession && localProcessSandbox) localProcessSandbox.launchDir = ownerSession.cwd;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
           "stdout",
-          `[paperclip] Syncing workspace and Claude runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+          `[paperclip] Syncing ${workspaceInPlace ? "Claude runtime assets" : "workspace and Claude runtime assets"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
         return await prepareAdapterExecutionTargetRuntime({
           runId,
           target: executionTarget,
           adapterKey: "claude",
+          companyId: agent.companyId,
           timeoutSec,
           workspaceLocalDir: cwd,
+          workspaceRemoteDir: workspaceInPlace ? targetWorkspaceRealization?.authoritativeRoot : undefined,
+          syncWorkspace: !workspaceInPlace,
+          // Temporary assets stay outside the worktree. Transcripts persist separately.
+          runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "claude"),
+            providerSessionRoot: ownerSession?.providerSessionRoot,
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           onProgress: (line) => onLog("stdout", line),
@@ -647,6 +666,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
+  const issueExecutionCwd = effectiveExecutionCwd;
+  if (ownerSession) effectiveExecutionCwd = ownerSession.cwd;
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
   refreshPaperclipWorkspaceEnvForExecution({
     env,
@@ -662,7 +683,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     workspaceHints,
     agentHome,
     executionTargetIsRemote,
-    executionCwd: effectiveExecutionCwd,
+    executionCwd: issueExecutionCwd,
   });
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
@@ -719,6 +740,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
     paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
       runId,
+        registerSecretValue: ctx.registerSecretValue,
       target: runtimeExecutionTarget,
       enableSandboxDuplexBridge: adapterExecutionTargetEnablesSandboxDuplexBridge(runtimeExecutionTarget),
       duplexObservabilityRecorder: adapterExecutionTargetDuplexObservabilityRecorder(runtimeExecutionTarget),
@@ -787,6 +809,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }) &&
     adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
   const sessionId = canResumeSession ? runtimeSessionId : null;
+  if (context.paperclipRestartResume === true && !sessionId) {
+    throw new Error("restart_session_identity_changed");
+  }
   if (runtimeSessionId && !isValidUuid) {
     await onLog(
       "stdout",
@@ -876,6 +901,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
+    if (ownerSession) args.push("--add-dir", issueExecutionCwd);
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
@@ -911,10 +937,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? ""
       : renderTemplate(promptTemplate, templateData);
     const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-    const prompt = joinPromptSections([
+    const prompt = context.paperclipRestartResume === true ? RESTART_RESUME_PROMPT : joinPromptSections([
       renderedBootstrapPrompt,
       selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
       wakePrompt,
+      ownerSession?.workspacePrompt(issueExecutionCwd, Boolean(resumeSessionId)) ?? "",
       sessionHandoffNote,
       taskContextNote,
       renderedPrompt,
@@ -962,16 +989,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    const checkpointLog = checkpointSessionOutput({ expectedSessionId: context.paperclipRestartResume === true ? sessionId ?? undefined : undefined, adapterType: "claude_local", params: { cwd: effectiveExecutionCwd, promptBundleKey: promptBundle.bundleKey, mcpServerIdentity: runtimeMcpIdentity,
+        ...(executionTargetIsRemote ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget) } : {}), }, onLog, onEvent });
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       onProcessStopped: providerStop.beginInvocation(),
-      cwd,
+      cwd: ownerSession?.cwd ?? cwd,
       env,
       stdin: prompt,
       timeoutSec,
       graceSec,
       onSpawn,
       onRuntimeProgress: ctx.onRuntimeProgress,
-      onLog,
+      onLog: checkpointLog,
       runLogTail: paperclipBridge?.runLogTail,
       settleRunDisposition: paperclipBridge?.settleRunDisposition,
       terminalResultCleanup: {
@@ -981,6 +1010,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       localProcessSandbox,
     });
 
+    checkpointLog.assertValid();
     const parsedStream = parseClaudeStreamJson(proc.stdout);
     const parsed = parsedStream.resultJson ?? parseJson(proc.stdout);
     return { proc, parsedStream, parsed };
@@ -1140,7 +1170,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const resolvedSessionParams = resolvedSessionId
       ? ({
         sessionId: resolvedSessionId,
-        cwd,
+          ...(ownerSession ? { ownerSession: true, ownerSessionIssueId: context.issueId } : {}),
+        cwd: ownerSession ? effectiveExecutionCwd : cwd,
         promptBundleKey: promptBundle.bundleKey,
         mcpServerIdentity: runtimeMcpIdentity,
         ...(executionTargetIsRemote
@@ -1322,6 +1353,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : null;
 
     if (sessionErrorKind !== null) {
+      if (context.paperclipRestartResume === true) throw new Error("restart_session_missing");
       const reason =
         sessionErrorKind === "poisoned"
           ? "returned a poisoned message-id"
@@ -1356,7 +1388,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
     }
 
-    return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
+    return toAdapterResult(initial, { fallbackSessionId: ownerSession && !canResumeSession ? null : runtimeSessionId || runtime.sessionId });
   } finally {
     try {
       await providerStop.collectBeforeRestore();

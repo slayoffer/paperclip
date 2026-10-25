@@ -1,3 +1,6 @@
+import { issueUnblockDescriptorSchema } from "./issue-unblock.js";
+import { isValidExistingBranchName } from "./issue-branch-name.js";
+export { isValidExistingBranchName } from "./issue-branch-name.js";
 import {
   issueThreadInteractionStatusSchema,
   issueThreadInteractionKindSchema,
@@ -136,23 +139,6 @@ export const ISSUE_EXECUTION_WORKSPACE_PREFERENCES = [
 // Mirrors git check-ref-format for a single branch name. The runtime verifies
 // the branch actually exists before attaching, so this only rejects values
 // that could never be a branch (path escapes, option injection, ref syntax).
-export function isValidExistingBranchName(value: string): boolean {
-  if (value.length === 0 || value.length > 255) return false;
-  if (value.startsWith("-") || value.startsWith("/") || value.startsWith("."))
-    return false;
-  if (value.endsWith("/") || value.endsWith(".") || value.endsWith(".lock"))
-    return false;
-  if (
-    value.includes("..") ||
-    value.includes("//") ||
-    value.includes("@{") ||
-    value.includes("/.")
-  )
-    return false;
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x20\x7f~^:?*[\\]/.test(value)) return false;
-  return true;
-}
 
 const executionWorkspaceStrategySchema = z
   .object({
@@ -694,18 +680,7 @@ const createIssueBaseSchema = z.object({
   goalId: z.string().guid().optional().nullable(),
   parentId: z.string().guid().optional().nullable(),
   blockedByIssueIds: z.array(z.string().guid()).optional(),
-  unblockDescriptor: z
-    .object({
-      owner: z.union([
-        z.object({ agentId: z.string().guid() }).strict(),
-        z.object({ userId: z.string().trim().min(1) }).strict(),
-        z.literal("board"),
-      ]),
-      action: multilineTextSchema.pipe(z.string().trim().min(1).max(2_000)),
-    })
-    .strict()
-    .optional()
-    .nullable(),
+  unblockDescriptor: issueUnblockDescriptorSchema,
   inheritExecutionWorkspaceFromIssueId: z.string().guid().optional().nullable(),
   title: z.string().min(1),
   description: multilineTextSchema.optional().nullable(),
@@ -1526,6 +1501,7 @@ export const requestConfirmationSecretProposalPayloadSchema = z.object({
 export const requestConfirmationPayloadSchema = z.object({
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
+  credentialOperation: z.boolean().optional(),
   acceptLabel: z.string().trim().min(1).max(80).nullable().optional(),
   rejectLabel: z.string().trim().min(1).max(80).nullable().optional(),
   rejectRequiresReason: z.boolean().optional(),
@@ -2025,6 +2001,8 @@ export type CreateIssueThreadInteractionInput = z.input<
 
 export const acceptIssueThreadInteractionSchema = z
   .object({
+    expectedRevision: z.string().min(1).max(200).optional(),
+    idempotencyKey: z.string().min(1).max(200).optional(),
     rememberAction: z.boolean().optional(),
     selectedClientKeys: z
       .array(z.string().trim().min(1).max(120))
@@ -2087,6 +2065,8 @@ export const resolveConfirmationFromCommentSchema = z.object({
 export type ResolveConfirmationFromComment = z.infer<typeof resolveConfirmationFromCommentSchema>;
 
 export const rejectIssueThreadInteractionSchema = z.object({
+  expectedRevision: z.string().min(1).max(200).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
   reason: z.string().trim().max(4000).optional(),
 });
 export type RejectIssueThreadInteraction = z.infer<
@@ -2131,6 +2111,8 @@ const respondQuestionAnswerSchema = askUserQuestionsAnswerSchema.extend({
 }));
 
 export const respondIssueThreadInteractionSchema = z.object({
+  expectedRevision: z.string().min(1).max(200).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
   answers: z.array(respondQuestionAnswerSchema).max(20),
   summaryMarkdown: multilineTextSchema
     .pipe(z.string().max(20000))
