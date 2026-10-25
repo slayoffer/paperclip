@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
+import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -89,16 +90,20 @@ describeDatabase("assignee external waits", () => {
       status: "in_progress", assigneeAgentId: agentId, checkoutRunId: runId, executionRunId: runId }).returning();
   });
   afterEach(async () => {
-    await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
-      server.close(error => error ? reject(error) : resolve());
-    })));
-    for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns,
-      agentWakeupRequests, issues, agents, companies]) await db.delete(table);
-    vi.unstubAllEnvs();
+    try {
+      await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
+        if (!server.listening) return resolve();
+        server.close(error => error ? reject(error) : resolve());
+      })));
+    } finally {
+      for (const table of [issueThreadInteractions, activityLog, issueComments, issueRelations, heartbeatRuns,
+        agentWakeupRequests, issues, agents, companies]) await db.delete(table);
+      vi.unstubAllEnvs();
+    }
   });
   afterAll(async () => { await database?.cleanup(); });
 
-  function app() {
+  async function app() {
     const result = express();
     result.use(express.json());
     result.use((req, _res, next) => {
@@ -109,6 +114,10 @@ describeDatabase("assignee external waits", () => {
     result.use(errorHandler);
     const server = result.listen(0, "127.0.0.1");
     servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
     return server;
   }
 
@@ -123,7 +132,7 @@ describeDatabase("assignee external waits", () => {
   it.each([false, true])("accepts the route request without a handoff or early wake, integrity=%s", async integrity => {
     vi.stubEnv("PAPERCLIP_BLOCKED_STATE_INTEGRITY", String(integrity));
     const unblockDescriptor = wait(deadline());
-    const res = await request(app()).patch(`/api/issues/${source.id}`).send({ status: "blocked", unblockDescriptor });
+    const res = await request(await app()).patch(`/api/issues/${source.id}`).send({ status: "blocked", unblockDescriptor });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toMatchObject({ status: "blocked", assigneeAgentId: agentId, unblockDescriptor });
     const stored = (await svc.getById(source.id))!;
@@ -149,7 +158,7 @@ describeDatabase("assignee external waits", () => {
     ["user owner", () => ({ ...wait(deadline()), owner: { userId: "board" } }), 403],
     ["other agent", () => ({ ...wait(deadline()), owner: { agentId: randomUUID() } }), 422],
   ] as const)("refuses %s without a mutation or wake", async (_name, descriptor, status) => {
-    const res = await request(app()).patch(`/api/issues/${source.id}`).send({ status: "blocked", unblockDescriptor: descriptor() });
+    const res = await request(await app()).patch(`/api/issues/${source.id}`).send({ status: "blocked", unblockDescriptor: descriptor() });
     expect(res.status, JSON.stringify(res.body)).toBe(status);
     expect(await svc.getById(source.id)).toMatchObject({ status: "in_progress", unblockDescriptor: null });
     expect(heartbeat.wakeup).not.toHaveBeenCalled();
@@ -169,6 +178,17 @@ describeDatabase("assignee external waits", () => {
       updateFields: { status: "blocked", unblockDescriptor: wait("Wait for the vendor") },
       getDependencyReadiness: svc.getDependencyReadiness,
     })).resolves.toBeUndefined();
+  });
+
+  it("refuses an old assignee after route validation and a concurrent board reassignment", async () => {
+    const unblockDescriptor = wait(deadline());
+    await validate(unblockDescriptor);
+    const peerId = randomUUID();
+    await db.insert(agents).values({ id: peerId, companyId, name: "New owner", role: "engineer", status: "idle" });
+    await db.update(issues).set({ assigneeAgentId: peerId }).where(eq(issues.id, source.id));
+    await expect(svc.update(source.id, { status: "blocked", unblockDescriptor, actorAgentId: agentId }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(await svc.getById(source.id)).toMatchObject({ status: "in_progress", assigneeAgentId: peerId, unblockDescriptor: null });
   });
 
   it("keeps the external wait when a dependency completes", async () => {
