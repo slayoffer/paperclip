@@ -78,6 +78,16 @@ describe("execution evidence reconciliation", () => {
   it("reports pending stop evidence before its storage receipt", async () => {
     expect(reconcileExecutionEvidence({ run, records: await fixture(), pendingStopRequests: 1 }).gaps).toContain("stop_source_pending");
   });
+  it.each([
+    { writeMs: undefined }, { writeMs: -1 }, { writeMs: Infinity },
+    { failureKinds: undefined }, { failureKinds: ["timeout"] },
+    { sourceStorageFailed: undefined }, { sourceStorageFailed: "false" },
+    { executionAdmitted: undefined },
+  ])("rejects a missing or inconsistent final receipt: %j", async patch => {
+    const records = await fixture();
+    records[records.length - 1] = { ...records.at(-1)!, ...patch };
+    expect(reconcileExecutionEvidence({ run, records }).complete).toBe(false);
+  });
   it("bounds a stuck evidence store and does not retry each omitted boundary", async () => {
     vi.useFakeTimers();
     try {

@@ -83,6 +83,7 @@ export async function recordLegacyRestartFallback(db: Db, run: Run, reason: stri
 export async function suspendLegacyRunForRestart(
   db: Db, run: Run, suspended: Set<string>,
   terminate: (input: { pid: number | undefined; processGroupId: number | null; graceMs: number }) => Promise<void>,
+  requestedAt = new Date().toISOString(),
 ) {
   if (run.runtimeMode !== "legacy") return false;
   const [current] = await db.select().from(heartbeatRuns).where(and(
@@ -92,7 +93,7 @@ export async function suspendLegacyRunForRestart(
   const process = runningProcesses.get(run.id);
   const control = adapterExecutionControls.get(run.id);
   if (!process && !control) return false;
-  return withStopRequestEvidence({ db, run, requestedAt: new Date().toISOString(), reason: "server_restart",
+  return withStopRequestEvidence({ db, run, requestedAt, reason: "server_restart",
     source: "shutdown" }, async () => {
     suspended.add(run.id);
     control?.controller.abort(new Error("server_restart"));

@@ -5765,6 +5765,9 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -5777,7 +5780,7 @@ export function agentRoutes(
       return;
     }
 
-    await heartbeat.cancelActiveForAgent(id);
+    await heartbeat.cancelActiveForAgent(id, undefined, stopRequest);
 
     await logActivity(db, {
       companyId: agent.companyId,
@@ -5914,6 +5917,9 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/terminate", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -5957,6 +5963,7 @@ export function agentRoutes(
     const cancellation = await heartbeat.cancelInvocationsForAgents(
       [id, ...invalidOrgChainDescendantIds],
       "Cancelled because the agent was terminated or became invalid-org-chain under a terminated manager",
+      stopRequest,
     );
 
     await logActivity(db, {
@@ -7180,6 +7187,9 @@ export function agentRoutes(
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const runId = readHeartbeatRunId(req);
     const existing = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
@@ -7187,12 +7197,7 @@ export function agentRoutes(
     // Stamp the cancellation as operator-initiated (this route is board-only).
     // Recovery reads this to stand down instead of classifying the cancelled
     // run as agent stranding and re-waking the agent the operator just stopped.
-    const run = await heartbeat.cancelRun(runId, "Cancelled by a board operator", {
-      resultJson: {
-        cancelledByActorType: "user",
-        cancelledByUserId: req.actor.userId ?? null,
-      },
-    });
+    const run = await heartbeat.cancelRun(runId, "Cancelled by a board operator", stopRequest);
 
     if (run) {
       await logActivity(db, {

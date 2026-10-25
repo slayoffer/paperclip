@@ -7,6 +7,7 @@ import { withLocalExecutionEvidence, type LocalExecutionEvidence } from "@paperc
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
 import { requestedRunCancellation } from "./run-cancellation.js";
+import { projectLocalEvidence } from "./local-evidence-projection.js";
 
 export const EXECUTION_EVIDENCE_EVENT = "execution.evidence";
 export const EXECUTION_EVIDENCE_SCHEMA = "paperclip.execution-evidence/v1";
@@ -18,18 +19,27 @@ export type EvidenceRecord = Record<string, unknown> & {
   schema: typeof EXECUTION_EVIDENCE_SCHEMA; scopeId: string; index: number; kind: string;
 };
 const stopScope = new AsyncLocalStorage<string>();
+const executionAdmission = new AsyncLocalStorage<() => void>();
 const storageFailures = new Set<string>();
+let sourceStorageUnverified = false;
 const pendingStops = new Map<string, number>();
+function markStorageFailure(runId: string) {
+  if (sourceStorageUnverified) return;
+  storageFailures.add(runId);
+  if (storageFailures.size >= 10_000) { sourceStorageUnverified = true; storageFailures.clear(); }
+}
+const hasStorageFailure = (runId: string) => sourceStorageUnverified || storageFailures.has(runId);
 
 /** One ordered manifest per owner. A lost write leaves a gap or an unclosed scope. */
 export function createExecutionEvidenceRecorder(write: (event: EvidenceRecord) => Promise<void>, scope: "execution" | "stop",
-  onFailure: () => void = () => {}, ready: Promise<void> = Promise.resolve()) {
+  onFailure: () => void = () => {}, ready: Promise<void> = Promise.resolve(), initiallyAdmitted = true) {
   const scopeId = randomUUID();
   let index = 0;
   let failedWrites = 0;
   let writeMs = 0;
   const failureKinds = new Set<string>();
   let pending = ready;
+  let executionAdmitted = initiallyAdmitted;
   const append = (data: Record<string, unknown> & { kind: string }) => {
     const record: EvidenceRecord = { ...data, schema: EXECUTION_EVIDENCE_SCHEMA, scopeId, index: index++ };
     pending = pending.then(async () => {
@@ -53,17 +63,19 @@ export function createExecutionEvidenceRecorder(write: (event: EvidenceRecord) =
   void append({ kind: "scope_started", scope, sourceId: EXECUTION_EVIDENCE_SOURCE_ID, at: new Date().toISOString() });
   return {
     append,
-    sink: (data: LocalExecutionEvidence) => append(data),
+    admit: () => { executionAdmitted = true; },
+    sink: (data: LocalExecutionEvidence) => append(projectLocalEvidence(data)),
     async finish() {
       await pending;
       await append({ kind: "scope_finished", scope, sourceId: EXECUTION_EVIDENCE_SOURCE_ID, at: new Date().toISOString(),
-        expectedRecords: index + 1, failedWrites, failureKinds: [...failureKinds], writeMs });
+        expectedRecords: index + 1, failedWrites, failureKinds: [...failureKinds], writeMs,
+        sourceStorageFailed: false, executionAdmitted: scope === "execution" && executionAdmitted });
       return { failedWrites, failureKinds: [...failureKinds], writeMs };
     },
   };
 }
 
-function recorderForRun(db: Db, run: RunIdentity, scope: "execution" | "stop", ready?: Promise<void>) {
+function recorderForRun(db: Db, run: RunIdentity, scope: "execution" | "stop", ready?: Promise<void>, initiallyAdmitted = true) {
   let binding: Promise<Binding> | undefined;
   return createExecutionEvidenceRecorder(async payload => {
     binding ??= "companyId" in run ? Promise.resolve(run) : db.select({
@@ -73,21 +85,23 @@ function recorderForRun(db: Db, run: RunIdentity, scope: "execution" | "stop", r
       return rows[0];
     });
     const identity = await binding;
-    if (payload.kind === "scope_finished") payload = { ...payload, sourceStorageFailed: storageFailures.has(run.id) };
+    if (payload.kind === "scope_finished") payload = { ...payload, sourceStorageFailed: hasStorageFailure(run.id) };
     await appendHeartbeatRunEvent(db, {
       companyId: identity.companyId, agentId: identity.agentId, runId: identity.id,
       eventType: EXECUTION_EVIDENCE_EVENT, stream: "system", level: "info", payload,
     });
-  }, scope, () => { storageFailures.add(run.id); }, ready);
+  }, scope, () => { markStorageFailure(run.id); }, ready, initiallyAdmitted);
 }
 
-export async function withRunExecutionEvidence<T>(db: Db, run: RunIdentity, operation: () => Promise<T>): Promise<T> {
-  const recorder = recorderForRun(db, run, "execution");
-  try { return await withLocalExecutionEvidence(recorder.sink, operation); }
+export function admitRunExecutionEvidence() { executionAdmission.getStore()?.(); }
+
+export async function withRunExecutionEvidence<T>(db: Db, run: RunIdentity, operation: () => Promise<T>, initiallyAdmitted = true): Promise<T> {
+  const recorder = recorderForRun(db, run, "execution", undefined, initiallyAdmitted);
+  try { return await executionAdmission.run(recorder.admit, () => withLocalExecutionEvidence(recorder.sink, operation)); }
   finally {
     const result = await recorder.finish();
     if (result.failedWrites) {
-      storageFailures.add(run.id);
+      markStorageFailure(run.id);
       logger.warn({ runId: run.id, failedWrites: result.failedWrites, failureKinds: result.failureKinds }, "Execution evidence is incomplete");
     }
   }
@@ -128,7 +142,7 @@ export async function withStopRequestEvidence<T>(input: {
   const recorder = recorderForRun(input.db, input.run, "stop", ready);
   pendingStops.set(input.run.id, (pendingStops.get(input.run.id) ?? 0) + 1);
   const requestId = randomUUID();
-  const cancellation = requestedRunCancellation(input.metadata ?? {}, input.reason);
+  const cancellation = requestedRunCancellation(input.metadata ?? {}, input.reason, input.requestedAt);
   const actorId = cancellation.initiator.id;
   void recorder.append({ kind: "stop_request", requestId, requestedAt: input.requestedAt,
     source: input.source ?? cancellation.source, reason: stopEvidenceReason(input.reason),
@@ -150,7 +164,7 @@ export async function withStopRequestEvidence<T>(input: {
     if (remaining) pendingStops.set(input.run.id, remaining);
     else pendingStops.delete(input.run.id);
     if (result.failedWrites) {
-      storageFailures.add(input.run.id);
+      markStorageFailure(input.run.id);
       logger.warn({ runId: input.run.id, failedWrites: result.failedWrites, failureKinds: result.failureKinds }, "Stop evidence is incomplete");
     }
   }
@@ -170,13 +184,13 @@ export async function readRunExecutionEvidence(db: Db, run: Binding) {
         eq(heartbeatRunEvents.eventType, EXECUTION_EVIDENCE_EVENT),
       )).orderBy(asc(heartbeatRunEvents.seq));
     // Check the complete stream too. Removing a whole stop scope must leave a visible gap.
-    const [stream] = await tx.select({ count: sql<number>`count(*)`, last: sql<number>`max(${heartbeatRunEvents.seq})` })
+    const [stream] = await tx.select({ count: sql<number>`count(*)`, first: sql<number>`min(${heartbeatRunEvents.seq})`, last: sql<number>`max(${heartbeatRunEvents.seq})` })
       .from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id)));
     const expected = Number(current.nextEventSeq) - 1;
     return { run: current, records: rows.map(row => row.payload), collectedAt: new Date().toISOString(),
       sourceInstanceId: EXECUTION_EVIDENCE_SOURCE_ID,
-      storageFailed: storageFailures.has(run.id),
+      storageFailed: hasStorageFailure(run.id),
       pendingStopRequests: pendingStops.get(run.id) ?? 0,
-      runEventStreamComplete: Number(stream?.count) === expected && (expected === 0 || Number(stream?.last) === expected) };
+      runEventStreamComplete: Number(stream?.count) === expected && (expected === 0 || (Number(stream?.first) === 1 && Number(stream?.last) === expected)) };
   });
 }

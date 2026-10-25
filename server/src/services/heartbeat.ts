@@ -1,4 +1,4 @@
-import { observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
+import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
   provisionExecutionWorkspaceForFreshnessDecision,
@@ -15151,7 +15151,7 @@ export function heartbeatService(
         restartSuspendedRunIds.push(run.id);
         continue;
       }
-      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess, now.toISOString())) {
         restartSuspendedRunIds.push(run.id);
         continue;
       }
@@ -20060,7 +20060,7 @@ export function heartbeatService(
   }
 
   async function executeRun(...args: Parameters<typeof executeRunInner>) {
-    return withRunExecutionEvidence(db, { id: args[0] }, () => executeRunInner(...args));
+    return withRunExecutionEvidence(db, { id: args[0] }, () => executeRunInner(...args), false);
   }
 
   async function executeRunInner(
@@ -20202,6 +20202,7 @@ export function heartbeatService(
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
     activeRunExecutions.add(run.id);
+    admitRunExecutionEvidence();
     const executionControl = createAdapterExecutionControl();
     // This coarse scope also covers host finalization after the adapter returns.
     // Nested scopes refine the label without making any termination claim.
@@ -29509,6 +29510,7 @@ export function heartbeatService(
   }
 
   type CancelRunOptions = {
+    requestedAt?: string;
     errorCode?: string;
     resultJson?: Record<string, unknown>;
     eventMessage?: string;
@@ -29518,6 +29520,8 @@ export function heartbeatService(
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
   };
+
+  type StopRequestContext = Pick<CancelRunOptions, "requestedAt" | "resultJson">;
 
   function cancellationTerminationGraceMs(
     configuredGraceSec: number,
@@ -29531,8 +29535,9 @@ export function heartbeatService(
   }
 
   async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
-    return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: new Date().toISOString(),
-      reason, metadata: options.resultJson }, () => cancelRunInternalImpl(runId, reason, options));
+    const request = { ...options, requestedAt: options.requestedAt ?? new Date().toISOString() };
+    return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: request.requestedAt,
+      reason, metadata: request.resultJson }, () => cancelRunInternalImpl(runId, reason, request));
   }
 
   async function cancelRunInternalImpl(
@@ -29565,7 +29570,7 @@ export function heartbeatService(
       return run;
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
-    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
+    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason, options.requestedAt);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -29840,7 +29845,9 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    context: StopRequestContext = {},
   ) {
+    const requestedAt = context.requestedAt ?? new Date().toISOString();
     const agent = await getAgent(agentId);
     const runs = await db
       .select()
@@ -29853,19 +29860,19 @@ export function heartbeatService(
       );
 
     for (const run of runs) {
-      await withStopRequestEvidence({ db, run, requestedAt: new Date().toISOString(), reason }, async () => {
+      await withStopRequestEvidence({ db, run, requestedAt, reason, metadata: context.resultJson }, async () => {
         const stopOwnership =
           run.runtimeMode !== "native"
             ? captureAdapterStopOwnership(run.id)
             : undefined;
         try {
           if (stopOwnership?.control) {
-            await cancelRunInternal(run.id, reason, { errorCode });
+            await cancelRunInternal(run.id, reason, { ...context, requestedAt, errorCode });
             return;
           }
           if (run.runtimeMode === "native") {
             await db.update(heartbeatRuns).set({ resultJson:
-              sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation({}, reason) })}::jsonb`,
+              sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation(context.resultJson ?? {}, reason, requestedAt) })}::jsonb`,
             }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, run.status)));
             await cancelHeartbeatNativeRun({
               db,
@@ -29886,10 +29893,11 @@ export function heartbeatService(
             errorCode,
             resultJson: {
               ...persistedCancellationResult,
+              ...context.resultJson,
               ...(agent ? mergeRunStopMetadataForAgent(agent, "cancelled", {
                 resultJson: persistedCancellationResult, errorCode, errorMessage: reason,
               }) : {}),
-              cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation({}, reason),
+              cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation(context.resultJson ?? {}, reason, requestedAt),
             },
           });
 
@@ -29960,13 +29968,15 @@ export function heartbeatService(
   async function cancelInvocationsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    context: StopRequestContext = {},
   ) {
+    const request = { ...context, requestedAt: context.requestedAt ?? new Date().toISOString() };
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
     );
     let runsCancelled = 0;
     for (const agentId of uniqueAgentIds) {
-      runsCancelled += await cancelActiveForAgentInternal(agentId, reason);
+      runsCancelled += await cancelActiveForAgentInternal(agentId, reason, "cancelled", request);
     }
     const wakeupsCancelled = await cancelPendingWakeupsForAgentsInternal(
       uniqueAgentIds,
@@ -29980,10 +29990,12 @@ export function heartbeatService(
   }
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
+    const request = { requestedAt: new Date().toISOString() };
     if (scope.scopeType === "agent") {
       await cancelActiveForAgentInternal(
         scope.scopeId,
         "Cancelled due to budget pause",
+        "cancelled", request,
       );
       await cancelPendingWakeupsForBudgetScope(scope);
       return;
@@ -30006,7 +30018,7 @@ export function heartbeatService(
         : await listProjectScopedRunIds(scope.companyId, scope.scopeId);
 
     for (const runId of runIds) {
-      await cancelRunInternal(runId, "Cancelled due to budget pause");
+      await cancelRunInternal(runId, "Cancelled due to budget pause", request);
     }
 
     await cancelPendingWakeupsForBudgetScope(scope);
@@ -30480,11 +30492,11 @@ export function heartbeatService(
      * agent pause route. For non-pause cancellations use cancelRun, or call the internal
      * cancelActiveForAgentInternal(agentId, reason, errorCode) with an explicit errorCode.
      */
-    cancelActiveForAgent: (agentId: string, reason?: string) =>
-      cancelActiveForAgentInternal(agentId, reason, "agent_paused"),
+    cancelActiveForAgent: (agentId: string, reason?: string, context?: StopRequestContext) =>
+      cancelActiveForAgentInternal(agentId, reason, "agent_paused", context),
 
-    cancelInvocationsForAgents: (agentIds: string[], reason: string) =>
-      cancelInvocationsForAgentsInternal(agentIds, reason),
+    cancelInvocationsForAgents: (agentIds: string[], reason: string, context?: StopRequestContext) =>
+      cancelInvocationsForAgentsInternal(agentIds, reason, context),
 
     cancelBudgetScopeWork,
 

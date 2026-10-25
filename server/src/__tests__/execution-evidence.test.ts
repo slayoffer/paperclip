@@ -24,9 +24,9 @@ describe("durable local execution evidence", () => {
     await database?.cleanup();
   });
 
-  async function seed(runtimeMode: "legacy" | "native" = "legacy") {
-    const run = { id: randomUUID(), companyId: randomUUID(), agentId: randomUUID() };
-    await db.insert(companies).values({ id: run.companyId, name: "Evidence fixture", issuePrefix: `E${run.companyId.slice(0, 6)}` });
+  async function seed(runtimeMode: "legacy" | "native" = "legacy", companyId?: string) {
+    const run = { id: randomUUID(), companyId: companyId ?? randomUUID(), agentId: randomUUID() };
+    if (!companyId) await db.insert(companies).values({ id: run.companyId, name: "Evidence fixture", issuePrefix: `E${run.companyId.slice(0, 6)}` });
     await db.insert(agents).values({ id: run.agentId, companyId: run.companyId, name: "Fixture", role: "engineer",
       status: "paused", adapterType: runtimeMode === "native" ? "paperclip_runner" : "process", adapterConfig: {} });
     const issueId = runtimeMode === "native" ? randomUUID() : null;
@@ -115,6 +115,28 @@ describe("durable local execution evidence", () => {
     const report = reconcileExecutionEvidence(await readRunExecutionEvidence(db, run));
     expect(report.complete).toBe(true);
     expect(report.stops[0]).toMatchObject({ source: "shutdown", requestedAt: requestedAt.toISOString(), terminalOutcome: "interrupted" });
+  });
+
+  it.each(["pause", "terminate"])("retains one operator request time for every run in a bulk %s", async action => {
+    const first = await seed();
+    let second: typeof first;
+    if (action === "pause") {
+      second = { ...first, id: randomUUID() };
+      await db.insert(heartbeatRuns).values({ ...second, status: "running", startedAt: new Date(), runtimeModeResolvedAt: new Date() });
+    } else second = await seed("legacy", first.companyId);
+    const requestedAt = new Date(Date.now() - 1_000).toISOString();
+    const context = { requestedAt, resultJson: { cancelledByActorType: "user", cancelledByUserId: "board-fixture" } };
+    const service = heartbeatService(db);
+    await withRunExecutionEvidence(db, first, () => withRunExecutionEvidence(db, second, async () => {
+      if (action === "pause") await service.cancelActiveForAgent(first.agentId, undefined, context);
+      else await service.cancelInvocationsForAgents([first.agentId, second.agentId], "Agent terminated", context);
+    }));
+    for (const run of [first, second]) {
+      const report = reconcileExecutionEvidence(await readRunExecutionEvidence(db, run));
+      expect(report.complete).toBe(true);
+      expect(report.stops).toHaveLength(1);
+      expect(report.stops[0]).toMatchObject({ source: "operator", requestedAt, initiator: { type: "user", id: "board-fixture" } });
+    }
   });
 
   it("reads more than 200 records, measures overhead, and rejects a foreign company binding", async () => {

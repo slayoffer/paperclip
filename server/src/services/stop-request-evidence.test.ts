@@ -6,7 +6,8 @@ vi.mock("./heartbeat-run-events.js", () => ({ appendHeartbeatRunEvent: async (_d
   if (store.fail) throw new Error("private storage error");
   store.records.push(input.payload);
 } }));
-import { observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
+import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
+import { emitLocalExecutionEvidence } from "@paperclipai/adapter-utils/local-execution-evidence";
 import { scheduleSshWorkspaceOperation } from "@paperclipai/adapter-utils/workspace-operation-schedule";
 import { reconcileExecutionEvidence } from "./reconcile-execution-evidence.js";
 
@@ -70,4 +71,22 @@ it("reconciles a Stop inside a restore attempt with the later terminal outcome",
   expect(report.complete).toBe(true);
   expect(report.phaseStopObserved).toBe(true);
   expect(report.stops[0]?.terminalOutcome).toBe("cancelled");
+});
+
+it("does not turn a skipped historical dispatch into execution coverage", async () => {
+  await withRunExecutionEvidence(db, run, async () => undefined, false);
+  const historical = { ...run, status: "succeeded", finishedAt: new Date() };
+  expect(reconcileExecutionEvidence({ run: historical, records: store.records }).gaps).toContain("execution_source_coverage_missing");
+  store.records = [];
+  await withRunExecutionEvidence(db, run, async () => { admitRunExecutionEvidence(); }, false);
+  expect(reconcileExecutionEvidence({ run: historical, records: store.records }).complete).toBe(true);
+});
+
+it("excludes unknown adapter labels and raw content from evidence storage", async () => {
+  await withRunExecutionEvidence(db, run, () => emitLocalExecutionEvidence({
+    kind: "ssh_phase", attemptId: randomUUID(), phase: "private customer content", boundary: "started",
+    at: new Date().toISOString(), rawToolArguments: "private customer content",
+  } as unknown as Parameters<typeof emitLocalExecutionEvidence>[0]));
+  expect(JSON.stringify(store.records)).not.toContain("private customer content");
+  expect(store.records.some(r => r.kind === "invalid_evidence")).toBe(true);
 });

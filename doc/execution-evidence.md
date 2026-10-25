@@ -5,13 +5,20 @@ The event type is `execution.evidence`.
 The schema is `paperclip.execution-evidence/v1`.
 These records use the local run log. They add no external transmission.
 
-Each executor creates an evidence scope. Each Stop call creates a separate scope.
+Each dispatch creates an evidence scope.
+The final receipt confirms whether admission and controller ownership succeeded.
+A skipped dispatch cannot establish executor coverage. Each Stop call creates a separate scope.
 A native helper inside that same Stop call reuses its request identity.
 Repeated public Stop calls retain separate request identities, including calls after termination.
+Board pause and termination retain their authenticated actor and one time captured before route work.
+Every run in a bulk request uses that same request time.
+Shutdown suspension uses the drain's captured request time.
 
 Each scope has a random identity, consecutive record indexes, and a final record count.
 The final record also retains failed write counts and measured database write time.
 A missing start, end, record, or count prevents complete coverage.
+The final receipt requires complete failure fields, a finite write duration, and explicit source storage health.
+The recorder projects adapter events onto closed fields and labels before storage.
 The reader also checks the complete run-event sequence against `heartbeat_runs.next_event_seq`.
 This detects removal of an entire evidence scope.
 

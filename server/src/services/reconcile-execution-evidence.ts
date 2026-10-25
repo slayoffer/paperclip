@@ -6,7 +6,9 @@ function object(value: unknown): RecordValue {
   return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {};
 }
 function time(value: unknown): number {
-  return typeof value === "string" && /^\d{4}-\d\d-\d\dT.*Z$/.test(value) ? Date.parse(value) : NaN;
+  if (typeof value !== "string") return NaN;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : NaN;
 }
 const text = (value: unknown): string | null => typeof value === "string" ? value : null;
 const terminal = new Set(["succeeded", "failed", "cancelled", "timed_out", "interrupted"]);
@@ -57,9 +59,11 @@ export function reconcileExecutionEvidence(input: {
         last.expectedRecords !== ordered.length || ordered.some((r, i) => r.index !== i) ||
         ordered.slice(1, -1).some(r => ["scope_started", "scope_finished"].includes(String(r.kind)))) gaps.add("scope_gap");
     if (!Number.isFinite(time(first.at)) || !Number.isFinite(time(last.at)) || time(last.at) < time(first.at)) gaps.add("scope_time_invalid");
-    if (last.failedWrites !== 0) gaps.add("storage_failed");
-    if (last.sourceStorageFailed === true) gaps.add("storage_failed");
-    if (first.scope === "execution") executionScopes++;
+    if (last.failedWrites !== 0 || last.sourceStorageFailed !== false ||
+        !Array.isArray(last.failureKinds) || last.failureKinds.length !== 0) gaps.add("storage_failed");
+    if (typeof last.writeMs !== "number" || !Number.isFinite(last.writeMs) || last.writeMs < 0 ||
+        typeof last.executionAdmitted !== "boolean") gaps.add("invalid_receipt");
+    if (first.scope === "execution" && last.executionAdmitted === true) executionScopes++;
   }
   if (!executionScopes) gaps.add("execution_source_coverage_missing");
   const phases = [...attempts].map(([attemptId, records]) => {

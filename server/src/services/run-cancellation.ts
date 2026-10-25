@@ -29,14 +29,13 @@ export function readRunCancellation(result: Run["resultJson"] | undefined): RunC
     ...(Object.hasOwn(entry, "requestedAt") ? { requestedAt: typeof entry.requestedAt === "string" ? entry.requestedAt : null } : {}) };
 }
 
-export function requestedRunCancellation(result: Run["resultJson"], reason: string): RunCancellation {
+export function requestedRunCancellation(result: Run["resultJson"], reason: string, requestedAt = new Date().toISOString()): RunCancellation {
   const queued = typeof result?.queuedCommentInterruptQueueId === "string";
   const actorType = result?.cancelledByActorType ?? result?.interruptedByActorType;
   const user = actorType === "user" || actorType === "board" || typeof result?.cancelledByUserId === "string";
   const agent = actorType === "agent";
   const actorId = result?.cancelledByUserId ?? result?.cancelledByAgentId ?? result?.interruptedByActorId;
   const source: CancellationSource = queued ? "queued_message" : user ? "operator" : "control_plane";
-  const requestedAt = new Date().toISOString();
   return { source, expected: true, requestedAt, initiator: {
     type: user ? "user" : agent ? "agent" : "system",
     ...(typeof actorId === "string" ? { id: actorId } : {}),
