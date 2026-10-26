@@ -27,6 +27,7 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   // Company-level reads used to discover work and context
   { method: "GET", path: /^\/api\/companies\/[^/]+$/ },
   { method: "GET", path: /^\/api\/companies\/[^/]+\/dashboard$/ },
+  { method: "GET", path: /^\/api\/companies\/[^/]+\/run-stats$/ },
   { method: "GET", path: /^\/api\/companies\/[^/]+\/agents$/ },
   { method: "GET", path: /^\/api\/companies\/[^/]+\/issues$/ },
   { method: "GET", path: /^\/api\/companies\/[^/]+\/projects$/ },

@@ -1,5 +1,6 @@
 import type { AgentAppearance } from "@paperclipai/shared";
 import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT } from "@paperclipai/shared";
+import type { RunStatsQuery, RunStatsReport } from "@paperclipai/shared/run-stats";
 import type { IssueRecoveryAction } from "@paperclipai/shared";
 import type {
   HeartbeatRun,
@@ -10,6 +11,11 @@ import type {
 } from "@paperclipai/shared";
 import { tenantSessionRecovery } from "@/lib/tenant-session-recovery";
 import { api, type RequestOptions } from "./client";
+
+export function getRunStats(companyId: string, query: RunStatsQuery) {
+  const params = new URLSearchParams(Object.entries(query));
+  return api.get<RunStatsReport>(`/companies/${companyId}/run-stats?${params}`);
+}
 
 export interface RunLivenessFields {
   livenessState: HeartbeatRun["livenessState"];
