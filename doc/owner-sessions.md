@@ -58,6 +58,7 @@ Codex command output reports cumulative usage. Owner mode subtracts the latest v
 Task-keyed Codex CLI sessions use the same cumulative declaration and subtraction.
 `codex exec resume` emits thread totals in `turn.completed`, so each wake records only the increase.
 The adapter fixture `resume-usage.json` cites the Codex 0.162.1 implementation and checks this declaration.
+The server test `session-usage.test.ts` persists ordinary Codex run samples and checks resume deltas, failed turns, and a fresh baseline after thread replacement.
 A failed turn without usage does not reset that total.
 The canary query in `server/scripts/owner-session-baseline.sql` skips such turns the same way.
 Claude retains its per-run usage accounting.

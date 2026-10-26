@@ -80,7 +80,7 @@ export async function loadIssueTokenBudgetState(
     .from(heartbeatRuns)
     .where(and(
       eq(heartbeatRuns.companyId, companyId),
-      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      eq(heartbeatRuns.contextIssueId, issueId),
       gte(heartbeatRuns.createdAt, windowStart),
     )))[0]?.n ?? 0);
   return { spent, windowStart, exceeded: spent >= config.budget };

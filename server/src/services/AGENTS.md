@@ -19,4 +19,7 @@ Recheck budget, dependency, pause, and recovery gates before reusing an old skip
 Check the current issue token budget before question delivery claims and resolution wake admission.
 A stopped issue keeps pending intents without new wake receipts or question delivery attempts.
 Budget acceptance retries both outboxes after commit. Keep acceptance replay protection in that path.
-A null question wake without a durable receipt consumes the bounded error retry limit.
+Known admission holds from the exact wake invocation preserve the answer without an error retry.
+Only unexplained null wakes consume the bounded error retry limit. Old skipped receipts are not current diagnostics.
+Advance the pending-answer cursor past budget-held rows. Reuse budget checks only within the current page.
+After a budget acceptance commits, catch each pending-row delivery failure and continue with the remaining rows.

@@ -1,4 +1,6 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
+import { conflict } from "../errors.js";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -73,7 +75,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const resolution = async () => (await db.select().from(interactionResolutionOutbox)
       .where(eq(interactionResolutionOutbox.interactionId, confirmation.id)))[0];
     const receipts = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
-    return { ...f, wakeup, heartbeat, questions, resolutions, question, resolution, receipts };
+    return { ...f, confirmationId: confirmation.id, wakeup, heartbeat, questions, resolutions, question, resolution, receipts };
   }
 
   it.each(["pending", "rejected"])("keeps answers pending without receipts or attempts while the budget card is %s", async (status) => {
@@ -95,13 +97,33 @@ const support = await getEmbeddedPostgresTestSupport();
     ))).toHaveLength(1);
   });
 
-  it.each([true, false])("budget acceptance retries only the issue's pending rows once (durable=%s)", async (durable) => {
+  it.each([
+    { durable: true, failure: null }, { durable: false, failure: null },
+    { durable: true, failure: "saved" }, { durable: false, failure: "saved" },
+    { durable: true, failure: "grant" },
+  ])("budget acceptance isolates pending-row failures (durable=$durable, failure=$failure)", async ({ durable, failure }) => {
     const f = await fixture();
     await f.questions.sweepPending();
     await f.resolutions.sweepPending();
     const [card] = await db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.issueId, f.issueId), eq(issueThreadInteractions.status, "pending"),
     ));
+    let extraId: string | null = null;
+    if (failure) {
+      extraId = randomUUID();
+      await db.insert(issueThreadInteractions).values({ id: extraId, companyId: f.companyId,
+        issueId: f.issueId, kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "Continue later row" } });
+      await db.insert(interactionResolutionOutbox).values({ interactionId: extraId, companyId: f.companyId,
+        issueId: f.issueId, wakes: [{ agentId: f.agentId, options: {
+          idempotencyKey: `interaction:${extraId}`, payload: { issueId: f.issueId },
+        } }] });
+      const admit = f.wakeup.getMockImplementation()!;
+      f.wakeup.mockImplementation(async (agentId, options) => {
+        const key = String(options.idempotencyKey);
+        if (key.includes(failure === "saved" ? f.confirmationId : card.id)) throw conflict("agent.not_invokable");
+        return admit(agentId, options);
+      });
+    }
     const unrelated = await seedQuestionResponseDelivery(db);
     // Also include a different issue in the same company.
     const [otherIssue] = await db.insert(issues).values({ companyId: f.companyId, title: "Unrelated", status: "todo" }).returning();
@@ -129,11 +151,14 @@ const support = await getEmbeddedPostgresTestSupport();
       const response = await post();
       expect(response.status, JSON.stringify(response.body)).toBe(200);
       expect(await f.question()).toMatchObject({ status: "fallback_queued", attemptCount: 1, errorCount: 0 });
-      expect((await f.resolution()).deliveredAt).not.toBeNull();
+      if (failure === "saved") expect((await f.resolution()).deliveredAt).toBeNull();
+      else expect((await f.resolution()).deliveredAt).not.toBeNull();
+      if (extraId) expect((await db.select().from(interactionResolutionOutbox)
+        .where(eq(interactionResolutionOutbox.interactionId, extraId)))[0].deliveredAt).not.toBeNull();
       // One budget-card continuation, one answer, and one saved confirmation continuation.
       expect(await f.receipts()).toHaveLength(3);
-      expect(f.wakeup).toHaveBeenCalledTimes(3);
-      if (durable) {
+      expect(f.wakeup).toHaveBeenCalledTimes(failure ? 4 : 3);
+      if (durable && !failure) {
         expect((await post()).status).toBe(200);
         expect(f.wakeup).toHaveBeenCalledTimes(3);
       }

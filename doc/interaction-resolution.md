@@ -61,7 +61,9 @@ Queue suppression keeps an intent pending. A successful HTTP answer does not mea
 Both outboxes check the target issue token budget before wake admission.
 A budget stop creates no wake receipt and consumes no question delivery attempt or error retry.
 Budget acceptance retries the issue's pending outboxes after commit, including on an acceptance replay.
-Other question wake results without a durable receipt use the bounded five-error retry limit.
+Known holds reported for the exact question wake keep the answer pending without consuming an error retry.
+Only unexplained null question wakes use the bounded five-error retry limit.
+Budget-grant retries catch and log each row's delivery failure. Acceptance still succeeds and later rows are attempted.
 Confirmation intents retain their pending state and fair traversal after other admission suppression.
 
 Legacy callers can omit both fields. They retain pending-state, audience, expiry,
@@ -90,8 +92,9 @@ Database failures leave the intent pending. Permission and proposal expiry failu
 Closed issues prevent binding execution.
 Concurrent retries cannot apply the binding twice.
 
-Each worker traverses pending rows by creation time and interaction identifier.
+Both outbox workers traverse pending rows by creation time and interaction identifier.
 PostgreSQL compares the exact timestamp precision.
 It advances its cursor after suppressed admissions and failed attempts.
 It returns to the oldest pending rows after it reaches the end.
 The cursor belongs to the worker instance. A server restart starts traversal from the oldest pending row.
+The question worker shares each issue's budget result within one page and reads it again on the next page.

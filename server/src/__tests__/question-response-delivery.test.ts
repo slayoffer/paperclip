@@ -500,7 +500,7 @@ describeEmbeddedPostgres("question response delivery", () => {
     });
   });
 
-  it("counts suppressed wakes and wake errors toward the retry limit", async () => {
+  it("counts unexplained wakes and errors toward the retry limit", async () => {
     const seeded = await seed({ sourceStatus: "running" });
     const fallbackRunId = randomUUID();
     let wakeAttempts = 0;

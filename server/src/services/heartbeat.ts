@@ -9,7 +9,7 @@ import { resolveWorkspaceReuseSelection, isolatedWorkspaceReuseConfig, shouldKee
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -373,6 +373,7 @@ import {
   issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
+import { readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import {
   resolveDefaultAgentWorkspaceDir,
@@ -5602,70 +5603,6 @@ function normalizeUsageTotals(
       Math.floor(asNumber(usage.cachedInputTokens, 0)),
     ),
     outputTokens: Math.max(0, Math.floor(asNumber(usage.outputTokens, 0))),
-  };
-}
-
-function readRawUsageTotals(usageJson: unknown): UsageTotals | null {
-  const parsed = parseObject(usageJson);
-  if (Object.keys(parsed).length === 0) return null;
-
-  const inputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(parsed.rawInputTokens, asNumber(parsed.inputTokens, 0)),
-    ),
-  );
-  const cachedInputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(
-        parsed.rawCachedInputTokens,
-        asNumber(parsed.cachedInputTokens, 0),
-      ),
-    ),
-  );
-  const outputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(parsed.rawOutputTokens, asNumber(parsed.outputTokens, 0)),
-    ),
-  );
-
-  if (inputTokens <= 0 && cachedInputTokens <= 0 && outputTokens <= 0) {
-    return null;
-  }
-
-  return {
-    inputTokens,
-    cachedInputTokens,
-    outputTokens,
-  };
-}
-
-function deriveNormalizedUsageDelta(
-  current: UsageTotals | null,
-  previous: UsageTotals | null,
-): UsageTotals | null {
-  if (!current) return null;
-  if (!previous) return { ...current };
-
-  const inputTokens =
-    current.inputTokens >= previous.inputTokens
-      ? current.inputTokens - previous.inputTokens
-      : current.inputTokens;
-  const cachedInputTokens =
-    current.cachedInputTokens >= previous.cachedInputTokens
-      ? current.cachedInputTokens - previous.cachedInputTokens
-      : current.cachedInputTokens;
-  const outputTokens =
-    current.outputTokens >= previous.outputTokens
-      ? current.outputTokens - previous.outputTokens
-      : current.outputTokens;
-
-  return {
-    inputTokens: Math.max(0, inputTokens),
-    cachedInputTokens: Math.max(0, cachedInputTokens),
-    outputTokens: Math.max(0, outputTokens),
   };
 }
 
@@ -11948,11 +11885,12 @@ export function heartbeatService(
       };
     }
 
-    const previousRawUsage = usageBasis === "session_cumulative"
-      ? await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals)
-      : readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
-        excludeRunId: runId,
-      }))?.usageJson);
+    if (usageBasis === "session_cumulative") return resolveCumulativeSessionUsage(db, {
+      agentId, runId, sessionId, rawUsage,
+    });
+    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+      excludeRunId: runId,
+    }))?.usageJson);
     return {
       normalizedUsage: deriveNormalizedUsageDelta(rawUsage, previousRawUsage),
       previousRawUsage,
