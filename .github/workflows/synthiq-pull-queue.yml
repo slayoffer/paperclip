@@ -57,6 +57,7 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --project @paperclipai/server
           server/src/__tests__/heartbeat-pull-queue.test.ts
+          server/src/__tests__/heartbeat-pull-queue-gap.test.ts
           server/src/services/agent-wip-limit.test.ts
           server/src/__tests__/issue-execution-policy.test.ts
           server/src/__tests__/issue-dependency-wakeups-routes.test.ts
