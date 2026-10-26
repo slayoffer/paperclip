@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   classifyCodexAuthRefreshFailure,
   extractCodexRetryNotBefore,
@@ -10,6 +11,17 @@ import {
 } from "./parse.js";
 
 describe("parseCodexJsonl", () => {
+  it("declares resumed thread totals as cumulative for task-keyed and owner sessions", () => {
+    const fixture = JSON.parse(readFileSync(new URL("./__fixtures__/resume-usage.json", import.meta.url), "utf8"));
+    const turns = fixture.turns.map((event: Record<string, unknown>) => parseCodexJsonl([
+      JSON.stringify({ type: "thread.started", thread_id: "resume-fixture" }), JSON.stringify(event),
+    ].join("\n")));
+    expect(turns.map((turn: ReturnType<typeof parseCodexJsonl>) => turn.usageBasis))
+      .toEqual(Array(4).fill("session_cumulative"));
+    expect(turns.map((turn: ReturnType<typeof parseCodexJsonl>) => turn.usage.inputTokens))
+      .toEqual([550_000, 1_100_000, 2_190_000, 3_360_000]);
+  });
+
   it("captures session id, assistant summary, usage, and error message", () => {
     const stdout = [
       JSON.stringify({ type: "thread.started", thread_id: "thread_123" }),
@@ -32,7 +44,7 @@ describe("parseCodexJsonl", () => {
         cachedInputTokens: 2,
         outputTokens: 4,
       },
-      usageBasis: "per_run",
+      usageBasis: "session_cumulative",
       errorMessage: "resume failed",
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
@@ -68,7 +80,7 @@ describe("parseCodexJsonl", () => {
         cachedInputTokens: 2,
         outputTokens: 4,
       },
-      usageBasis: "per_run",
+      usageBasis: "session_cumulative",
       errorMessage: null,
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,

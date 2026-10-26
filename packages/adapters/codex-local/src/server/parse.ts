@@ -90,7 +90,8 @@ export function parseCodexJsonl(stdout: string) {
     sessionId,
     summary: finalMessage?.trim() ?? "",
     usage,
-    usageBasis: "per_run" as const,
+    // The exec JSONL processor copies ThreadTokenUsage.total, including on resume.
+    usageBasis: "session_cumulative" as const,
     errorMessage,
     sawProtocolEvent,
     sawProtocolTerminalEvent,

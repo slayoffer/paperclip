@@ -58,6 +58,11 @@ Confirmation continuations use `interaction_resolution_outbox`. Question respons
 The startup and periodic delivery sweeps retry pending intents. An identical answer retry also attempts delivery.
 The wake queue's existing interaction keys prevent duplicate admission after a lost delivery response.
 Queue suppression keeps an intent pending. A successful HTTP answer does not mean the agent already started.
+Both outboxes check the target issue token budget before wake admission.
+A budget stop creates no wake receipt and consumes no question delivery attempt or error retry.
+Budget acceptance retries the issue's pending outboxes after commit, including on an acceptance replay.
+Other question wake results without a durable receipt use the bounded five-error retry limit.
+Confirmation intents retain their pending state and fair traversal after other admission suppression.
 
 Legacy callers can omit both fields. They retain pending-state, audience, expiry,
 and target checks, but receive no displayed-revision protection or keyed retry guarantee.

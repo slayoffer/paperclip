@@ -1,7 +1,6 @@
-import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  agentWakeupRequests,
   agents,
   chatPublications,
   heartbeatRuns,
@@ -16,6 +15,8 @@ import { getTelemetryClient } from "../telemetry.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import type { heartbeatService } from "./heartbeat.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
+import { findDurableQuestionResponseWake } from "./question-response-wake.js";
 import { hydrateQuestionInteraction, questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
 export { questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
 export { isRetiredExternalChatQuestionSource } from "./question-response-source-retirement.js";
@@ -44,18 +45,6 @@ class DeliveryClaimUnavailableError extends Error {
     this.name = "DeliveryClaimUnavailableError";
   }
 }
-const DURABLE_WAKE_REQUEST_STATUSES = [
-  "queued",
-  "claimed",
-  "running",
-  "succeeded",
-  "completed",
-  "coalesced",
-  "deferred_issue_execution",
-  "retrying",
-  "scheduled_retry",
-] as const;
-
 type QuestionInteractionRow = typeof issueThreadInteractions.$inferSelect;
 type DeliveryRow = typeof issueQuestionResponseDeliveries.$inferSelect;
 type Heartbeat = Pick<
@@ -439,45 +428,17 @@ export function questionResponseDeliveryService(
     companyId: string;
     idempotencyKey: string;
   }) {
-    const request = await db
-      .select({
-        agentId: agentWakeupRequests.agentId,
-        id: agentWakeupRequests.id,
-        runId: agentWakeupRequests.runId,
-        status: agentWakeupRequests.status,
-      })
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, input.companyId),
-          eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
-          inArray(agentWakeupRequests.status, [
-            ...DURABLE_WAKE_REQUEST_STATUSES,
-          ]),
-        ),
-      )
-      .orderBy(desc(agentWakeupRequests.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (!request?.runId) return request ? { request, run: null } : null;
-    const run = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.id, request.runId),
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.agentId, request.agentId),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    return { request, run };
+    return findDurableQuestionResponseWake(db, input);
   }
 
   async function deliver(
     interactionId: string,
   ): Promise<QuestionResponseDeliveryOutcome | null> {
+    const [pending] = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.interactionId, interactionId)).limit(1);
+    // Check before claiming: a budget stop consumes neither a claim nor an error retry.
+    if (pending && ["pending", "delivering"].includes(pending.status) &&
+      await isRecoveryIssueTokenBudgetBlocked(db, { companyId: pending.companyId, id: pending.issueId })) return null;
     const claimed = await claim(interactionId);
     if (!claimed) return terminalOutcome(interactionId);
 
@@ -951,11 +912,9 @@ export function questionResponseDeliveryService(
             }));
       if (!wakeRun && !durableWake) {
         const errorCode = "question_response_wake_skipped";
-        // Scheduling suppression is an availability state, not a delivery
-        // failure. Keep the durable receipt retryable until the suppression is
-        // lifted; the bounded limit remains reserved for actual wake errors.
-        await releaseForRetry(claimed, errorCode, { bounded: false });
-        return null;
+        if (!await releaseForRetry(claimed, errorCode)) return null;
+        return recordTerminal({ delivery: claimed, interaction, status: "failed",
+          mode: null, targetRunId: null, adapter, errorCode });
       }
       const eligibleQueuedSuccessor = externalChatBoundary
         ? null

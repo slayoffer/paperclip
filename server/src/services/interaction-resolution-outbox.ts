@@ -3,6 +3,7 @@ import { agentWakeupRequests, interactionResolutionOutbox, issueThreadInteractio
 import type { IssueThreadInteraction } from "@paperclipai/shared";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logger } from "../middleware/logger.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
 import { readObject, readSecretProposalContinuationContext } from "../routes/interaction-continuation-context.js";
 
 import { resumeAcceptedBinding } from "./interaction-binding-execution.js";
@@ -64,6 +65,11 @@ export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssig
         notInArray(agentWakeupRequests.status, ["skipped", "failed", "cancelled"]),
       )).limit(1);
       if (!(await existing()).length) {
+        const targetIssueId = readObject(options.payload).issueId;
+        if (await isRecoveryIssueTokenBudgetBlocked(db, {
+          companyId: entry.companyId,
+          id: typeof targetIssueId === "string" ? targetIssueId : entry.issueId,
+        })) return;
         try {
           await heartbeat.wakeup(wake.agentId, options as Parameters<IssueAssignmentWakeupDeps["wakeup"]>[1]);
         } catch (error) {
