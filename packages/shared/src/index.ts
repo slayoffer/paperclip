@@ -1,3 +1,4 @@
+export type { RuntimeCap } from "./types/runtime-cap.js";
 export * from "./slack-app-manifest.js";
 export type { LightIssue } from "./types/issue-light.js";
 export * from "./interaction-exports.js";

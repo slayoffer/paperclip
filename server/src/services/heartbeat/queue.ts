@@ -1,3 +1,4 @@
+import { getProcessRunningRunsCap } from "../instance-run-cap.js";
 import { ownerRecoveryResumeEnabled } from "../recovery/owner-resume.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
 import { CONTEXT_COMPACTION_WAKE_REASON, ContextCompactionError, isContextCompactionRun, readContextCompactionRequest } from "../context-compaction.js";
@@ -282,12 +283,7 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
 ]);
 
 
-export function maxRunningRunsCap(env: NodeJS.ProcessEnv = process.env): number | null {
-  const raw = env.PAPERCLIP_MAX_RUNNING_RUNS?.trim();
-  if (!raw || !/^\d+$/.test(raw)) return null;
-  const n = Number(raw);
-  return n >= 1 ? n : null;
-}
+export { maxRunningRunsCap } from "../instance-run-cap.js";
 
 export function shouldRequireIssueCommentForWake(
   contextSnapshot: Record<string, unknown> | null | undefined,
@@ -2139,7 +2135,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       // Synthiq fork (2026-10-17, Guild slim-down): PAPERCLIP_MAX_RUNNING_RUNS caps running runs instance-wide. A queued
       // run stays queued and the periodic sweep starts it when a slot frees. Agent start locks are per agent, so two
       // agents starting at the same moment can briefly exceed the cap by one or two.
-      const instanceCap = maxRunningRunsCap();
+      const instanceCap = getProcessRunningRunsCap();
       if (instanceCap !== null && availableSlots > 0) {
         const instanceRunning = Number((await db
           .select({ n: sql<number>`count(*)::int` })
