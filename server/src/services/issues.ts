@@ -10,6 +10,7 @@ import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked
 import { assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
+import { recordPullQueueParking } from "./pull-queue-state.js";
 import { assertAssigneeExternalWait } from "./external-wait.js";
 import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
@@ -10592,9 +10593,7 @@ export function issueService(db: Db) {
       const runUpdate = async (tx: any) => {
         const changesPrivacy = issueData.visibility !== undefined || issueData.parentId !== undefined || issueData.projectId !== undefined;
         if (changesPrivacy) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
-        // The receipt baseline must be read under the same row lock as the
-        // write. Otherwise a concurrent update can be mistaken for a change
-        // made by this request.
+        // Read the receipt baseline under the write lock.
         const receiptExisting = await tx
           .select()
           .from(issues)
@@ -10738,9 +10737,9 @@ export function issueService(db: Db) {
           agentId: actorAgentId ?? null,
           userId: actorUserId ?? null,
         });
+        await recordPullQueueParking(tx, receiptExisting, updated, issueData.status);
         await recordChatCompletion(tx, receiptExisting, updated);
-        // An operator explicitly choosing a disposition owns that decision,
-        // including choosing In Review while the conversation is Idle.
+        // An operator disposition owns the conversation decision.
         if (actorUserId && issueData.status !== undefined) {
           await tx.update(chatConversations).set({ state: "active", updatedAt: new Date() })
             .where(and(eq(chatConversations.companyId, updated.companyId), eq(chatConversations.issueId, updated.id),

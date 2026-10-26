@@ -176,8 +176,8 @@ databaseTests("event-driven pull queue", () => {
     expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(6);
   });
 
-  it("uses normal heartbeat admission and retains its issue token budget", async () => {
-    const issue = await task();
+  it("checks the issue token budget before heartbeat admission", async () => {
+    const issue = await task({ status: "todo" });
     await run(issue.id, { status: "succeeded", finishedAt: new Date(), usageJson: { inputTokens: 6_000_000 } });
     vi.stubEnv("PAPERCLIP_ISSUE_TOKEN_BUDGET", "5000000");
     const heartbeat = heartbeatService(db);
@@ -186,7 +186,8 @@ databaseTests("event-driven pull queue", () => {
     schedulers.push(queue);
     await queue.notify(companyId);
     const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
-    expect(receipts).toEqual([expect.objectContaining({ status: "skipped", reason: "issue.token_budget_exceeded" })]);
+    expect(receipts).toEqual([]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issue.id))).toHaveLength(1);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
   });
 
