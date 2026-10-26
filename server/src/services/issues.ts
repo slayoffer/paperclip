@@ -9,6 +9,7 @@ import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked
 import { assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
+import { assertAssigneeExternalWait } from "./external-wait.js";
 import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -10390,6 +10391,9 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (actorAgentId && patch.unblockDescriptor?.kind === "external" && patch.unblockDescriptor.owner === "board") {
+          assertAssigneeExternalWait(receiptExisting, actorAgentId, patch, patch.unblockDescriptor);
+        }
         if (actorAgentId && actorRunId) {
           // Recheck under a run lock: a request admitted before Stop must not
           // commit a late Done after cancellation revoked its credentials.

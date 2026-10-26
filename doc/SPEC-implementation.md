@@ -24,6 +24,10 @@ An agent can record a bounded bridge wait for its latest saved review handoff.
 Matching board events or expiry release the wait through durable wake delivery.
 Disposition recovery preserves the wait and existing execution safety holds.
 
+The fork permits [external waits](external-waits.md) from the unchanged assignee.
+A board-owned external descriptor requires one future action deadline within seven days.
+The external watchdog releases the wait at its deadline.
+
 The fork supports optional [owner sessions](owner-sessions.md) for the local command engines.
 The default is off. A selected owner resumes one thread per project across issue worktrees.
 Company, credential, workspace, and host boundaries remain mandatory.
