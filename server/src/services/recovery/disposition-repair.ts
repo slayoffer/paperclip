@@ -1,4 +1,5 @@
 import { isReviewBridgeWait } from "../review-bridge-contract.js";
+import { externalWaitDeadline } from "../external-wait.js";
 import { blockedStateIntegrityEnabled, hasOutsideWait, hasPendingHandoffWait } from "../blocked-state-integrity.js";
 import { createHash } from "node:crypto";
 import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
@@ -206,7 +207,8 @@ export async function collectDispositionRepairSourceState(
   const pendingApproval = linkedApprovals.some((row) =>
     row.status === "pending" || row.status === "revision_requested",
   );
-  const recordedWait = issue.status === "blocked" && (isReviewBridgeWait(issue.unblockDescriptor) ||
+  const externalWait = externalWaitDeadline(issue.unblockDescriptor) !== null;
+  const recordedWait = issue.status === "blocked" && (isReviewBridgeWait(issue.unblockDescriptor) || externalWait ||
     (blockedStateIntegrityEnabled() && (hasOutsideWait(issue.unblockDescriptor) || await hasPendingHandoffWait(db, issue))));
   const durablePathReason = recordedWait ? "recorded_wait" : issue.assigneeUserId
     ? "user_owner"
@@ -225,7 +227,7 @@ export async function collectDispositionRepairSourceState(
   const durableState = {
     source: {
       status: issue.status,
-      ...(blockedStateIntegrityEnabled() || isReviewBridgeWait(issue.unblockDescriptor) ? { unblockDescriptor: issue.unblockDescriptor } : {}),
+      ...(blockedStateIntegrityEnabled() || isReviewBridgeWait(issue.unblockDescriptor) || externalWait ? { unblockDescriptor: issue.unblockDescriptor } : {}),
       assigneeAgentId: issue.assigneeAgentId,
       assigneeUserId: issue.assigneeUserId,
       executionPolicy: issue.executionPolicy,
