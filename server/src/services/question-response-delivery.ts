@@ -1,3 +1,4 @@
+import { releaseQuestionResponseForRetry } from "./question-response-retry.js";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -169,7 +170,8 @@ export function questionResponseDeliveryService(
         .then((rows) => rows[0] ?? null);
       if (
         !current ||
-        ["delivered", "fallback_queued", "failed"].includes(current.status)
+        ["delivered", "fallback_queued", "failed"].includes(current.status) ||
+        (current.nextAttemptAt && current.nextAttemptAt > claimAt)
       )
         return null;
       if (
@@ -306,35 +308,8 @@ export function questionResponseDeliveryService(
     };
   }
 
-  async function releaseForRetry(
-    delivery: DeliveryRow,
-    errorCode: string,
-    options: { bounded: boolean } = { bounded: true },
-  ) {
-    const at = now();
-    const nextErrorCount = delivery.errorCount + (options.bounded ? 1 : 0);
-    const exhausted =
-      options.bounded && nextErrorCount >= MAX_DELIVERY_ATTEMPTS;
-    await db
-      .update(issueQuestionResponseDeliveries)
-      .set({
-        // Keep an exhausted claim owned until recordTerminal commits its outcome.
-        status: exhausted ? "delivering" : "pending",
-        ...(options.bounded ? { errorCount: nextErrorCount } : {}),
-        lastErrorCode: errorCode,
-        updatedAt: at,
-      })
-      .where(
-        and(
-          eq(issueQuestionResponseDeliveries.id, delivery.id),
-          eq(issueQuestionResponseDeliveries.status, "delivering"),
-          eq(
-            issueQuestionResponseDeliveries.attemptCount,
-            delivery.attemptCount,
-          ),
-        ),
-      );
-    return exhausted;
+  function releaseForRetry(delivery: DeliveryRow, errorCode: string, options = { bounded: true }) {
+    return releaseQuestionResponseForRetry(db, delivery, errorCode, options, now(), MAX_DELIVERY_ATTEMPTS);
   }
 
   async function withClaimLease<T>(
@@ -911,7 +886,8 @@ export function questionResponseDeliveryService(
             }));
       if (!wakeRun && !durableWake) {
         const errorCode = suppression ?? "question_response_wake_skipped";
-        if (!await releaseForRetry(claimed, errorCode, { bounded: !suppression })) return null;
+        if (suppression !== "agent.terminated" &&
+            !await releaseForRetry(claimed, errorCode, { bounded: !suppression })) return null;
         return recordTerminal({ delivery: claimed, interaction, status: "failed",
           mode: null, targetRunId: null, adapter, errorCode });
       }

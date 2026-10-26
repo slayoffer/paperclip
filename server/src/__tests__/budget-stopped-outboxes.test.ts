@@ -105,6 +105,12 @@ const support = await getEmbeddedPostgresTestSupport();
     const f = await fixture();
     await f.questions.sweepPending();
     await f.resolutions.sweepPending();
+    // A grant must also retry a budget gate race that already saved a future deadline.
+    const nextAttemptAt = new Date(Date.now() + 1_800_000);
+    await db.update(issueQuestionResponseDeliveries).set({ nextAttemptAt })
+      .where(eq(issueQuestionResponseDeliveries.interactionId, f.interaction.id));
+    await db.update(interactionResolutionOutbox).set({ nextAttemptAt })
+      .where(eq(interactionResolutionOutbox.interactionId, f.confirmationId));
     const [card] = await db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.issueId, f.issueId), eq(issueThreadInteractions.status, "pending"),
     ));

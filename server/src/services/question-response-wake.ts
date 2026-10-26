@@ -3,17 +3,18 @@ import { agentWakeupRequests, heartbeatRuns, type Db } from "@paperclipai/db";
 import type { heartbeatService } from "./heartbeat.js";
 
 export type QuestionResponseHeartbeat = Pick<ReturnType<typeof heartbeatService>, "wakeup" | "cancelRun"> &
-  Partial<Pick<ReturnType<typeof heartbeatService>, "wakeupWithDiagnostics">>;
+  Partial<Pick<ReturnType<typeof heartbeatService>, "wakeupWithDiagnostics" | "wakeupForOutbox">>;
 
 /** Use this invocation's diagnostics. Old skipped receipts cannot explain a new null result. */
 export async function wakeQuestionResponse(
-  heartbeat: QuestionResponseHeartbeat,
+  heartbeat: Pick<QuestionResponseHeartbeat, "wakeup" | "wakeupWithDiagnostics" | "wakeupForOutbox">,
   agentId: string,
   options: Parameters<QuestionResponseHeartbeat["wakeup"]>[1],
 ) {
   const explained = (reason: unknown) => typeof reason === "string" && reason.length > 0 && reason !== "wakeup_skipped"
     ? reason : null;
   try {
+    if (heartbeat.wakeupForOutbox) return await heartbeat.wakeupForOutbox(agentId, options ?? {});
     if (!heartbeat.wakeupWithDiagnostics) return { run: await heartbeat.wakeup(agentId, options), suppression: null };
     const result = await heartbeat.wakeupWithDiagnostics(agentId, options);
     return { run: result.run, suppression: explained(result.skipped?.reason) };

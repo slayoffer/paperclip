@@ -65,7 +65,7 @@ import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompati
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
-import { readWakeupDiagnostics } from "./wakeup-diagnostics.js";
+import { createDiagnosticWakeup, createOutboxWakeup } from "./wakeup-diagnostics.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispatch.js";
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
@@ -19980,8 +19980,9 @@ export function heartbeatService(
     agentId: string,
     opts: WakeupOptions = {},
     diagnosticRequestId?: string,
+    onSkip?: (reason: string) => void,
   ): ReturnType<typeof enqueueWakeup> {
-    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId);
+    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId, onSkip);
     activeWakeupPromises.add(promise);
     void promise
       .catch(() => {})
@@ -19991,24 +19992,9 @@ export function heartbeatService(
     return promise;
   }
 
-  async function wakeupWithDiagnostics(agentId: string, opts: WakeupOptions = {}) {
-    const requestId = randomUUID();
-    const readDiagnostics = async () => {
-      const agent = await getAgent(agentId);
-      return agent ? readWakeupDiagnostics(db, { companyId: agent.companyId, agentId, requestId }) : null;
-    };
-    try {
-      const run = await trackWakeup(agentId, opts, requestId);
-      return { run, skipped: run ? null : await readDiagnostics() };
-    } catch (error) {
-      // Preserve existing HTTP conflict behavior for paused agents and budget gates.
-      if (error instanceof HttpError && error.status === 409) {
-        const skipped = await readDiagnostics();
-        if (skipped) error.details = { ...parseObject(error.details), wakeup: skipped };
-      }
-      throw error;
-    }
-  }
+  const diagnosticWakeup = createDiagnosticWakeup(db, getAgent, trackWakeup);
+  const wakeupWithDiagnostics = (agentId: string, opts: WakeupOptions = {}) => diagnosticWakeup(agentId, opts);
+  const wakeupForOutbox = createOutboxWakeup(trackWakeup);
 
   async function executeRun(
     runId: string,
@@ -26818,7 +26804,7 @@ export function heartbeatService(
     }
   }
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string) {
+  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string, onSkip?: (reason: string) => void) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -26870,6 +26856,7 @@ export function heartbeatService(
     if (!agent) throw notFound("Agent not found");
     const diagnosticCompanyId = agent.companyId;
     const skipWithoutReceipt = async (skipReason: string, message: string) => {
+      if (onSkip) { onSkip(skipReason); return null; }
       // API diagnostics must also identify gates that do not normally create receipts.
       if (diagnosticRequestId) await db.insert(agentWakeupRequests).values({
         id: diagnosticRequestId, companyId: diagnosticCompanyId, agentId, source, triggerDetail,
@@ -27036,6 +27023,7 @@ export function heartbeatService(
       patch: Partial<typeof agentWakeupRequests.$inferInsert> = {},
       waitCondition?: Record<string, unknown>,
     ) => {
+      if (onSkip) { onSkip(skipReason); return { created: false }; }
       if (executionWaitRequestId) {
         await db.update(agentWakeupRequests).set({
           payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}',
@@ -30296,6 +30284,7 @@ export function heartbeatService(
 
     wakeup: trackWakeup,
     wakeupWithDiagnostics,
+    wakeupForOutbox,
     dispatchPendingNativeStatusWakeups,
     triggerIssueMonitor,
 

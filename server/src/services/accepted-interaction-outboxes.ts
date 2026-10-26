@@ -38,9 +38,19 @@ export async function deliverAcceptedInteractionOutboxes(
       db.select({ id: interactionResolutionOutbox.interactionId }).from(interactionResolutionOutbox).where(and(
         eq(interactionResolutionOutbox.companyId, interaction.companyId),
         eq(interactionResolutionOutbox.issueId, interaction.issueId),
-        isNull(interactionResolutionOutbox.deliveredAt),
+        isNull(interactionResolutionOutbox.deliveredAt), isNull(interactionResolutionOutbox.failedAt),
       )),
     ]);
+    // A committed grant is an explicit retry signal, including a gate race held by backoff.
+    await db.update(issueQuestionResponseDeliveries).set({ nextAttemptAt: null }).where(and(
+      eq(issueQuestionResponseDeliveries.companyId, interaction.companyId),
+      eq(issueQuestionResponseDeliveries.issueId, interaction.issueId), eq(issueQuestionResponseDeliveries.status, "pending"),
+    ));
+    await db.update(interactionResolutionOutbox).set({ nextAttemptAt: null }).where(and(
+      eq(interactionResolutionOutbox.companyId, interaction.companyId),
+      eq(interactionResolutionOutbox.issueId, interaction.issueId),
+      isNull(interactionResolutionOutbox.deliveredAt), isNull(interactionResolutionOutbox.failedAt),
+    ));
     for (const row of pendingQuestions) await attempt(questions, row.id);
     for (const row of pendingResolutions) {
       if (!deliverCurrent || row.id !== interaction.id) await attempt(resolutions, row.id);
