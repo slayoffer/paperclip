@@ -32,7 +32,6 @@ import {
   CONNECTION_INTENT_AGENT_GUIDANCE,
   CONNECTION_RUNTIME_TOOL_NAMES,
   envBindingSchema,
-  isToolConnectionAttentionHealth,
   type ChatProvider,
   type RoutineRevisionSnapshotV1,
   type SourceTrustMetadata,
@@ -91,6 +90,7 @@ import {
 } from "../secrets.js";
 import { createToolGatewayService } from "../tool-gateway.js";
 import { toolAccessService } from "../tool-access.js";
+import { canDeliverRuntimeMcpConnection } from "../tool-connection-discovery.js";
 import {
   buildDocumentReviewContext,
   buildPlanReviewContext,
@@ -1024,8 +1024,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       ((Boolean(runIdentity?.activeIdentityContextId) &&
         (connection.config?.sourceTemplateKey === "github" ||
           connection.transportConfig?.sourceTemplateKey === "github")) ||
-        connection.credentialPolicy === "per_user" ||
-        !isToolConnectionAttentionHealth(connection.healthStatus)) &&
+        canDeliverRuntimeMcpConnection(connection)) &&
       (connection.transport === "mcp_remote" ||
         connection.transport === "local_stdio" || isBrowserUseConnection(connection) || githubBotConnectionIds.has(connection.id) || spekoConnectionIds.has(connection.id)),
   );

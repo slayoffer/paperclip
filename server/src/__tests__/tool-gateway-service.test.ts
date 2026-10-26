@@ -1128,7 +1128,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(failed).toMatchObject({ status: reasonCode === "tool_timeout" ? "timed_out" : "failed" });
   });
 
-  it.each([401, 403])("keeps the connection blocked after an HTTP %s authentication failure", async (status) => {
+  it.each([401, 403])("keeps authentication errors visible and permits explicit retries after HTTP %s", async (status) => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection } = await createRemoteMcpToolFixture(db, company.id);
     await db.insert(toolPolicies).values(readPolicyRow(company, "Allow read tools"));
@@ -1141,8 +1141,11 @@ describeEmbeddedPostgres("tool gateway service", () => {
       .rejects.toMatchObject({ reasonCode: "mcp_remote_status", details: { status } });
     const [updated] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
     expect(updated.healthStatus).toBe("error");
-    expect((await gateway.listToolsForSession(session.token)).filter((entry) => entry.connectionId === connection.id)).toEqual([]);
+    expect((await gateway.listToolsForSession(session.token)).filter((entry) => entry.connectionId === connection.id)).toEqual([tool]);
     expect(provider).toHaveBeenCalledTimes(1);
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
+      .rejects.toMatchObject({ reasonCode: "mcp_remote_status", details: { status } });
+    expect(provider).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -1152,7 +1155,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     ["notifications/initialized", 401],
     ["notifications/initialized", 403],
     ["notifications/initialized", 503],
-  ] as const)("gates only authentication failures during %s with HTTP %s", async (method, status) => {
+  ] as const)("records authentication health without hiding retryable tools during %s with HTTP %s", async (method, status) => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection } = await createRemoteMcpToolFixture(db, company.id);
     await db.update(toolConnections).set({
@@ -1177,7 +1180,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const authenticationFailure = status === 401 || status === 403;
     expect(updated.healthStatus).toBe(authenticationFailure ? "error" : "ok");
     const listed = (await gateway.listToolsForSession(session.token)).filter((entry) => entry.connectionId === connection.id);
-    expect(listed).toHaveLength(authenticationFailure ? 0 : 1);
+    expect(listed).toHaveLength(1);
     expect(methods).toEqual(method === "initialize" ? ["initialize"] : ["initialize", "notifications/initialized"]);
   });
 
