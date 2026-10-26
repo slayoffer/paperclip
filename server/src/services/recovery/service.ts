@@ -9,6 +9,7 @@ import { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDE
 export { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "./failure-classification.js";
 export type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
 import { createResolvedDependencyWakeBackstop } from "./resolved-dependency-backstop.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./issue-token-budget.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -3509,6 +3510,8 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
+    if (await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
+
     if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
       await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
       return "covered";
@@ -4143,6 +4146,10 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
+        if (await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+          result.skipped += 1;
+          continue;
+        }
         if (issue.originKind === "chat_channel") {
           await settleSlackConversation(db, issue.companyId, issue.id);
           const [current] = await db.select({ externalConversationState: externalConversationStateSql() })

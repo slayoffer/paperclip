@@ -13,6 +13,8 @@ on:
       - server/src/services/review-wait.ts
       - server/src/services/self-block-guard*.ts
       - server/src/services/issue-recovery-actions.ts
+      - server/src/services/issue-token-budget.ts
+      - server/src/services/review-bridge-wakes.ts
       - server/src/services/recovery/**
       - packages/db/src/**
       - packages/shared/src/**
@@ -67,5 +69,6 @@ jobs:
           packages/adapter-utils/src/sandbox-callback-bridge-recovery.test.ts
           server/src/__tests__/issue-recovery-actions.test.ts
           server/src/__tests__/issue-recovery-bridge.test.ts
+          server/src/__tests__/issue-recovery-token-budget.test.ts
           server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
           server/src/services/self-block-guard.test.ts
