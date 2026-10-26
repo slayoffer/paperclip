@@ -140,7 +140,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity } from "../activity-log.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "../issue-dependency-wakeups.js";
+import { hasAdmittedDependencyWake, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "../issue-dependency-wakeups.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
   isVerifiedIssueTreeControlInteractionWake,
@@ -2621,6 +2621,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
+
+          // Producers can race after their optimistic readiness checks. The
+          // issue lock makes this receipt check atomic with wake insertion.
+          if (!executionWaitRequestId && await hasAdmittedDependencyWake(
+            tx, agent.companyId, opts.idempotencyKey,
+          )) return { kind: "skipped" as const };
 
           if (executionWaitRequestId) {
             const pending = await readDeferredWakeForAdmission(tx as unknown as Db, {
