@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
+import { blockerIsResolved } from "./blocked-state-integrity.js";
 import type { recoveryService } from "./recovery/service.js";
 import { logger } from "../middleware/logger.js";
 
@@ -9,7 +10,7 @@ export async function wakeDependentsAfterFinalization(db: Db, recovery: ReturnTy
 ) {
   try {
     const [issue] = await db.select({ status: issues.status }).from(issues).where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)));
-    if (issue?.status === "done" || issue?.status === "cancelled") {
+    if (issue && blockerIsResolved(issue.status)) {
       await recovery.reconcileResolvedDependencyWakeBackstop({ runId: run.id, companyId: run.companyId,
         blockerIssueId: issueId, source: "workspace.finalize" });
     }
