@@ -2,6 +2,7 @@ import { commonOpenApiResponses } from "./openapi-responses.js";
 import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
 import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
 import { registerTaskDrainPaths } from "./openapi-task-drain.js";
+import { registerRunStatsPaths } from "./openapi-run-stats.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import {
@@ -6261,6 +6262,7 @@ registry.registerPath({
 });
 
 registerTaskDrainPaths(registry, r);
+registerRunStatsPaths(registry, r);
 
 registry.registerPath({
   method: "get",
