@@ -779,6 +779,8 @@ export type AdmitWakeBehindIssueExecutionInput = {
   activeExecutionRun: WakeAdmissionActiveExecutionRun;
   allowRunCoalescing?: boolean;
   durableReceipt?: DurableWakeAdmissionReceipt;
+  /** Correlates API diagnostics only. It grants no durable actor or replay authority. */
+  diagnosticReceipt?: DurableWakeAdmissionReceipt;
   reason?: string | null;
   /** Tracks which runs are still live in this process, for the zombie-run filter. */
   liveRunExecutions: { has(id: string): boolean };
@@ -846,6 +848,14 @@ export function createAdmitWakeBehindIssueExecution(deps: {
         )
       : input.activeExecutionRun;
 
+    const persistenceReceipt = input.durableReceipt ?? input.diagnosticReceipt;
+    const diagnosticPayload = input.diagnosticReceipt ? {
+      heartbeatSkip: {
+        reason: "This issue already has an active execution run.",
+        executionRunId: input.activeExecutionRun.id,
+        executionAgentId: input.activeExecutionRun.agentId,
+      },
+    } : {};
     const sameDurableActor =
       !input.durableReceipt ||
       (await deps.reader.matchesActiveWakeActor(scope, {
@@ -883,8 +893,8 @@ export function createAdmitWakeBehindIssueExecution(deps: {
         activeExecutionRunId: target.id,
         activeExecutionRunStatus: target.status,
         mergedContextSnapshot,
-        ...(input.durableReceipt
-          ? { durableReceipt: input.durableReceipt }
+        ...(persistenceReceipt
+          ? { durableReceipt: persistenceReceipt }
           : {}),
         agentId: input.agentId,
         source: input.source,
@@ -935,18 +945,20 @@ export function createAdmitWakeBehindIssueExecution(deps: {
         mergedPayload,
         nextCoalescedCount: (existingDeferred.coalescedCount ?? 0) + 1,
         ...(manualUserWakeActorId ? { manualUserWakeActorId } : {}),
-        ...(input.durableReceipt || (input.requestedByActorType === "user" &&
+        ...(persistenceReceipt || (input.requestedByActorType === "user" &&
             readNonEmptyString(input.requestedByActorId) && readNonEmptyString(input.wakeCommentId))
           ? {
               coalescedReceipt: {
-                ...input.durableReceipt,
+                ...persistenceReceipt,
                 agentId: input.agentId,
                 source: input.source,
                 triggerDetail: input.triggerDetail,
-                reason: input.reason ?? null,
+                reason: input.diagnosticReceipt && !input.durableReceipt
+                  ? "issue_execution_deferred" : input.reason ?? null,
                 payload: {
                   ...(input.payload ?? {}),
                   issueId: input.issueId,
+                  ...diagnosticPayload,
                   coalescedIntoWakeupRequestId: existingDeferred.id,
                 },
                 requestedByActorType: input.requestedByActorType,
@@ -962,6 +974,7 @@ export function createAdmitWakeBehindIssueExecution(deps: {
 
     const deferredPayload = {
       ...(input.payload ?? {}),
+      ...diagnosticPayload,
       issueId: input.issueId,
       [DEFERRED_WAKE_CONTEXT_KEY]: input.contextSnapshot,
     };
@@ -971,7 +984,7 @@ export function createAdmitWakeBehindIssueExecution(deps: {
       source: input.source,
       triggerDetail: input.triggerDetail,
       payload: deferredPayload,
-      ...(input.durableReceipt ? { durableReceipt: input.durableReceipt } : {}),
+      ...(persistenceReceipt ? { durableReceipt: persistenceReceipt } : {}),
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId,
       idempotencyKey: input.idempotencyKey,
