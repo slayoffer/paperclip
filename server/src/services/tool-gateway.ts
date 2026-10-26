@@ -1,3 +1,4 @@
+import { connectedMcpConnectionFilter } from "./tool-connection-discovery.js";
 import { validateTransferGatewayOperation } from "./credential-transfer-gateway-operation.js";
 import { type CredentialTransferOperation } from "@paperclipai/shared";
 import { isInteractionResolutionReplay } from "./interaction-revision.js";
@@ -1158,26 +1159,6 @@ export function createToolGatewayService(
     return [...BUILTIN_TOOLS, ...pluginTools()];
   }
 
-  function connectedMcpConnectionFilter(companyId: string) {
-    return and(
-      eq(toolConnections.companyId, companyId),
-      inArray(toolConnections.transport, ["mcp_remote", "local_stdio", "rest_api"]),
-      eq(toolConnections.status, "active"),
-      eq(toolConnections.enabled, true),
-      // A personal connection has no company-level credential to probe. A
-      // credential-less health sweep can therefore mark it as errored even
-      // while the responsible user's grant is valid. Keep its cached active
-      // catalog discoverable; execution resolves and validates that user's
-      // grant, and a successful call restores the shared health indicator.
-      or(
-        inArray(toolConnections.healthStatus, ["ok", "healthy"]),
-        eq(toolConnections.credentialPolicy, "per_user"),
-      ),
-      eq(toolApplications.companyId, companyId),
-      inArray(toolApplications.type, ["mcp_http", "mcp_stdio", "rest_api"]),
-      eq(toolApplications.status, "active"),
-    );
-  }
 
   async function connectedMcpToolsForCompany(
     companyId: string,

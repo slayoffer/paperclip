@@ -1938,9 +1938,9 @@ rl.on("line", (line) => {
       toolName: "kv_set",
       connectionEnabled: false,
     });
-    await createRemoteMcpTool(db, company.id, {
-      applicationKey: "unhealthy-demo",
-      connectionName: "Unhealthy Demo",
+    const retryable = await createRemoteMcpTool(db, company.id, {
+      applicationKey: "kv-demo",
+      connectionName: "KV Demo Retryable",
       toolName: "kv_set",
       healthStatus: "error",
     });
@@ -1957,15 +1957,17 @@ rl.on("line", (line) => {
 
     const connectedTools = (await gateway.listToolsForSession(session.token))
       .filter((tool) => tool.providerType === "mcp_remote_http");
-    expect(connectedTools).toHaveLength(2);
+    expect(connectedTools).toHaveLength(3);
     expect(connectedTools.map((tool) => tool.catalogEntryId).sort()).toEqual([
       first.catalogEntry.id,
       second.catalogEntry.id,
+      retryable.catalogEntry.id,
     ].sort());
-    expect(new Set(connectedTools.map((tool) => tool.name)).size).toBe(2);
+    expect(new Set(connectedTools.map((tool) => tool.name)).size).toBe(3);
     expect(connectedTools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
       expect.stringMatching(new RegExp(`^mcp\\.kv-demo-${first.connection.id.replace(/-/g, "").slice(0, 8)}:kv-set$`)),
       expect.stringMatching(new RegExp(`^mcp\\.kv-demo-${second.connection.id.replace(/-/g, "").slice(0, 8)}:kv-set$`)),
+      expect.stringMatching(new RegExp(`^mcp\\.kv-demo-${retryable.connection.id.replace(/-/g, "").slice(0, 8)}:kv-set$`)),
     ]));
   });
 
