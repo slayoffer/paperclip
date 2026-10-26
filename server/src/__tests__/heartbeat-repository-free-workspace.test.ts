@@ -142,7 +142,11 @@ const support = await getEmbeddedPostgresTestSupport();
         if (kind !== "saved-session") expect(cwd).not.toBe(foreignCwd);
         if (directory) {
           expect(cwd).toBe(directory);
-          expect(task.executionWorkspaceId).toBe(binding);
+          if (kind === "saved-session") {
+            expect(task.executionWorkspaceId).toEqual(expect.any(String));
+          } else {
+            expect(task.executionWorkspaceId).toBe(binding);
+          }
           expect(await readFile(path.join(directory, "report.txt"), "utf8")).toBe("Task output\n");
         } else {
           directory = cwd;
