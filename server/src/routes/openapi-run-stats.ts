@@ -1,15 +1,44 @@
 import { z } from "zod";
-import { runStatsQuerySchema } from "@paperclipai/shared/run-stats";
+import { grantAgentStatsReadSchema, runStatsQuerySchema } from "@paperclipai/shared/run-stats";
 import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
 
 type Responses = {
   ok: (schema: z.ZodTypeAny) => OpenApiResponse;
-} & Record<"badRequest" | "unauthorized" | "forbidden" | "unprocessable" | "tooManyRequests" | "serverError", OpenApiResponse>;
+} & Record<"badRequest" | "unauthorized" | "forbidden" | "notFound" | "conflict" | "unprocessable" | "tooManyRequests" | "serverError", OpenApiResponse>;
 
 export function registerRunStatsPaths(
   registry: { registerPath(path: OpenApiPathRegistration): void },
   r: Responses,
 ) {
+  registry.registerPath({
+    method: "post",
+    path: "/api/companies/{companyId}/agents/{agentId}/permission-grants",
+    tags: ["agents"],
+    summary: "Grant read-only statistics access to an existing agent",
+    description: [
+      "Only board callers with company access and users:manage_permissions authorization can grant stats:read.",
+      "The agent must belong to that company and have an existing membership.",
+      "The operation preserves all existing grants, scopes, membership roles, and membership statuses.",
+      "Repeated or concurrent requests create no duplicate grant or activity entry.",
+      "A suspended member remains suspended. Human memberships cannot change through this route.",
+    ].join(" "),
+    security: [{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }],
+    request: {
+      params: z.object({ companyId: z.string().uuid(), agentId: z.string().uuid() }),
+      body: { required: true, content: { "application/json": { schema: grantAgentStatsReadSchema } } },
+    },
+    responses: {
+      200: r.ok(z.object({
+        companyId: z.string().uuid(), agentId: z.string().uuid(),
+        permissionKey: z.literal("stats:read"), created: z.boolean(),
+      }).strict()),
+      400: r.badRequest,
+      401: r.unauthorized,
+      403: r.forbidden,
+      404: r.notFound,
+      409: r.conflict,
+    },
+  });
   const count = z.number().int().nonnegative();
   const report = z.object({
     companyId: z.string().uuid(),

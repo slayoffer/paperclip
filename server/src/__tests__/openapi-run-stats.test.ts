@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { buildOpenApiSpec } from "../routes/openapi.js";
 
 describe("run statistics OpenAPI contract", () => {
+  it("documents the board-only agent statistics grant and strict request", () => {
+    const path = buildOpenApiSpec().paths["/api/companies/{companyId}/agents/{agentId}/permission-grants"];
+    expect(Object.keys(path)).toEqual(["post"]);
+    expect(path.post.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+    expect(path.post.description).toContain("users:manage_permissions");
+    const body = path.post.requestBody.content["application/json"].schema;
+    expect(body.additionalProperties).toBe(false);
+    expect(body.required).toEqual(["permissionKey"]);
+    expect(body.properties.permissionKey.enum).toEqual(["stats:read"]);
+    expect(Object.keys(path.post.responses).sort()).toEqual(["200", "400", "401", "403", "404", "409"]);
+  });
   it("documents the bounded query, access rules, count response, and errors", () => {
     const path = buildOpenApiSpec().paths["/api/companies/{companyId}/run-stats"];
     expect(Object.keys(path)).toEqual(["get"]);
