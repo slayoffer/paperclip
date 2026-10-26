@@ -137,14 +137,22 @@ describe("pinned existing branch fetch", () => {
     const f = await fixture();
     const configPath = path.join(f.root, "git-config");
     await fs.writeFile(configPath, "[protocol \"file\"]\n\tallow = never\n");
+    await git(f.checkout, "remote", "set-url", "origin", "fixture-auth://origin");
     const auth = vi.fn(async () => ({
       configArgs: ["-c", "protocol.file.allow=always"],
-      env: { GIT_CONFIG_GLOBAL: configPath, GIT_TERMINAL_PROMPT: "0" },
+      env: {
+        GIT_CONFIG_GLOBAL: configPath,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: `url.${f.remote}.insteadOf`,
+        GIT_CONFIG_VALUE_0: "fixture-auth://origin",
+      },
     }));
 
     const workspace = await realize(f.checkout, branch, auth);
 
     expect(await git(workspace.cwd, "rev-parse", "HEAD")).toBe(f.tip);
+    expect(auth).toHaveBeenCalledWith("fixture-auth://origin");
     expect(await fs.readFile(path.join(f.checkout, ".git", "config"), "utf8")).not.toContain("protocol.file");
     expect(await fs.readFile(path.join(f.checkout, ".git", "config"), "utf8")).not.toContain(configPath);
   });
@@ -163,6 +171,25 @@ describe("pinned existing branch fetch", () => {
     });
     expect(auth).toHaveBeenCalledOnce();
     expect(await git(f.checkout, "branch", "--list", branch)).toBe("");
+  });
+
+  it("refuses credential-provider rejection before ambient Git can fetch the branch", async () => {
+    const f = await fixture();
+    const auth = vi.fn(async () => {
+      throw new Error("private provider diagnostic");
+    });
+
+    await expect(realize(f.checkout, branch, auth)).rejects.toMatchObject({
+      code: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: {
+          fetchError: `Could not refresh base ref refs/remotes/origin/${branch}: Git credential resolution failed. No fetch was attempted.`,
+        },
+      },
+    });
+    expect(auth).toHaveBeenCalledOnce();
+    expect(await git(f.checkout, "branch", "--list", branch)).toBe("");
+    await expect(git(f.checkout, "rev-parse", "--verify", `refs/remotes/origin/${branch}`)).rejects.toThrow();
   });
 
   it("preserves an existing local branch and its dirty registered worktree", async () => {

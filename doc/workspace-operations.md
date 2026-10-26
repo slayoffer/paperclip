@@ -36,6 +36,7 @@ If the local branch is missing, preparation fetches that branch from `origin` th
 A successful fetch creates a local branch at the fetched commit before worktree validation.
 The branch remains operator-owned, so workspace cleanup does not delete it.
 A failed fetch cannot use a stale remote-tracking ref.
+If the credential provider fails, preparation refuses the fetch instead of using ambient credentials.
 The refusal names the local and remote refs when the branch remains unavailable.
 Source edits and workspace reuse checks still apply.
 

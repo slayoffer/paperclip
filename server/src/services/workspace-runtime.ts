@@ -976,7 +976,13 @@ export async function refreshRemoteTrackingBaseRef(
     .catch(() => null);
   if (!remoteUrl) return [];
 
-  const auth = resolveGitAuth ? await resolveGitAuth(remoteUrl).catch(() => null) : null;
+  let auth: GitRemoteAuthInvocation | null;
+  try {
+    auth = resolveGitAuth ? await resolveGitAuth(remoteUrl) : null;
+  } catch {
+    // Provider failures must not fall back to a different ambient identity.
+    return [`Could not refresh base ref ${baseRef}: Git credential resolution failed. No fetch was attempted.`];
+  }
   try {
     await runGit([
       ...(auth?.configArgs ?? []),
