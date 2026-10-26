@@ -125,9 +125,6 @@ const support = await getEmbeddedPostgresTestSupport();
           expect(workspace).toMatchObject({ sourceIssueId: issueId, companyId, projectId,
             mode: kind === "saved-session" ? "shared_workspace" : "isolated_workspace" });
           expect(cwd).toBe(workspace.cwd);
-        } else if (kind === "saved-session") {
-          expect(cwd).toBe(foreignCwd);
-          expect(await readFile(path.join(cwd, "source.txt"), "utf8")).toBe("Retain source work\n");
         } else {
           expect(task.executionWorkspaceId).toBeNull();
         }
@@ -135,6 +132,9 @@ const support = await getEmbeddedPostgresTestSupport();
           expect(workspace.strategyType).toBe("git_worktree");
           expect(await git(cwd, "rev-parse", "HEAD")).toBe(await git(foreignCwd, "rev-parse", "base"));
           expect(await readFile(path.join(cwd, "source.txt"), "utf8")).toBe("Committed base\n");
+        } else if (kind === "saved-session") {
+          expect(cwd).toBe(foreignCwd);
+          expect(await readFile(path.join(cwd, "source.txt"), "utf8")).toBe("Retain source work\n");
         } else {
           if (projectId) expect(workspace).toMatchObject({ strategyType: "project_primary", metadata: { isolatedTaskDirectory: true } });
           expect(cwd).toContain(`/isolated-workspaces/${companyId}/${issueId}`);
@@ -164,7 +164,11 @@ const support = await getEmbeddedPostgresTestSupport();
         await drainHeartbeatRunsToQuiescence(db, heartbeat);
       }
       const [foreignAfter] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, foreignWorkspaceId));
-      expect(foreignAfter).toEqual(foreignBefore);
+      if (kind === "saved-session") {
+        expect(foreignAfter).toMatchObject({ id: foreignWorkspaceId, sourceIssueId: issueId, cwd: foreignCwd });
+      } else {
+        expect(foreignAfter).toEqual(foreignBefore);
+      }
       expect(await readFile(path.join(foreignCwd, "source.txt"), "utf8")).toBe("Retain source work\n");
     }, 90_000,
   );
