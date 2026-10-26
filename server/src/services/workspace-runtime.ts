@@ -1001,10 +1001,18 @@ async function refreshRemoteTrackingBaseRefWithDiagnostic(
     .catch(() => { diagnostic.remoteLookup = "failed"; return null; });
   if (!remoteUrl) return { warnings: [], diagnostic };
 
-  const auth = resolveGitAuth ? await resolveGitAuth(remoteUrl).then((value) => {
-    diagnostic.authLookup = value ? "resolved" : "unavailable";
-    return value;
-  }).catch(() => { diagnostic.authLookup = "failed"; return null; }) : null;
+  let auth: GitRemoteAuthInvocation | null;
+  try {
+    auth = resolveGitAuth ? await resolveGitAuth(remoteUrl) : null;
+    if (resolveGitAuth) diagnostic.authLookup = auth ? "resolved" : "unavailable";
+  } catch {
+    diagnostic.authLookup = "failed";
+    // Provider failures must not fall back to a different ambient identity.
+    return {
+      warnings: [`Could not refresh base ref ${baseRef}: Git credential resolution failed. No fetch was attempted.`],
+      diagnostic,
+    };
+  }
   try {
     await runGit([
       ...(auth?.configArgs ?? []),
@@ -3400,21 +3408,47 @@ export async function realizeExecutionWorkspace(input: {
   let branchName: string;
   if (requestedExistingBranch) {
     // Exact-branch mode: attach the requested pre-existing branch verbatim.
-    // The branch must already exist; realization never creates, renames, or
-    // resets it, and any mismatch below fails closed instead of falling back
-    // to a derived branch or the shared checkout.
-    const existingBranchSha = await runGit(
+    // A remote-only branch may acquire a local ref. Never move an existing
+    // local branch or fall back to a derived branch or the shared checkout.
+    const localRef = `refs/heads/${requestedExistingBranch}`;
+    const remoteRef = `refs/remotes/origin/${requestedExistingBranch}`;
+    const readLocalBranch = () => runGit(
       ["rev-parse", "--verify", "--quiet", `refs/heads/${requestedExistingBranch}`],
       repoRoot,
     ).catch(() => null);
+    let existingBranchSha = await readLocalBranch();
+    let fetchWarnings: string[] = [];
+    if (!existingBranchSha) {
+      const validBranch = await runGit(["check-ref-format", localRef], repoRoot)
+        .then(() => true).catch(() => false);
+      const originUrl = validBranch
+        ? await runGit(["remote", "get-url", "origin"], repoRoot).catch(() => null)
+        : null;
+      if (originUrl) {
+        fetchWarnings = await refreshRemoteTrackingBaseRef(repoRoot, remoteRef, input.resolveGitAuth);
+        // A failed fetch must not revive a stale remote-tracking ref.
+        if (fetchWarnings.length === 0 && await resolveBaseRefSha(repoRoot, remoteRef)) {
+          try {
+            await runGit(["branch", "--no-track", "--", requestedExistingBranch, remoteRef], repoRoot);
+          } catch (error) {
+            // Another realization may create the branch during the fetch.
+            if (!await readLocalBranch()) throw error;
+          }
+        }
+      }
+      existingBranchSha = await readLocalBranch();
+    }
     if (!existingBranchSha) {
       throw new WorkspaceRuntimeValidationFailure(
-        `Workspace strategy pins existing branch "${requestedExistingBranch}", but no local branch with that name exists in "${repoRoot}". Create or fetch the branch first, or remove workspaceStrategy.existingBranch; exact-branch realization never creates a branch.`,
+        `Workspace strategy pins existing branch "${requestedExistingBranch}", but local ref "${localRef}" is missing in "${repoRoot}". Remote ref "${remoteRef}" could not be fetched from origin. Check the branch and repository access.`,
         {
           workspaceValidation: {
             reason: "existing_branch_not_found",
             requestedExistingBranch,
             repoRoot,
+            localRef,
+            remoteRef,
+            fetchError: fetchWarnings[0] ?? null,
           },
         },
       );
