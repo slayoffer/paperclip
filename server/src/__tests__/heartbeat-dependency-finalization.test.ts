@@ -56,7 +56,7 @@ describeDatabase("heartbeat dependency finalization callback", () => {
     { status: "done", integrity: true, finalization: "succeeded", rechecks: 1 },
     { status: "cancelled", integrity: true, finalization: "succeeded", rechecks: 1 },
     { status: "done", integrity: false, finalization: "succeeded", rechecks: 1 },
-    { status: "cancelled", integrity: false, finalization: "succeeded", rechecks: 0 },
+    { status: "cancelled", integrity: false, finalization: "succeeded", rechecks: 1 },
     { status: "done", integrity: true, finalization: "failed", rechecks: 1 },
     { status: "cancelled", integrity: true, finalization: "failed", rechecks: 1 },
   ])("rechecks $status with integrity=$integrity and finalization=$finalization", async ({ status, integrity, finalization, rechecks }) => {
