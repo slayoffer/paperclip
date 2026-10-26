@@ -16375,7 +16375,7 @@ export function issueRoutes(
           heartbeat
             .wakeup(agentId, wakeup)
             .then((wakeRun) => {
-              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              if (!wakeRun || wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
               const payload =
                 wakeup.payload && typeof wakeup.payload === "object"
                   ? wakeup.payload
@@ -19860,7 +19860,7 @@ export function issueRoutes(
           heartbeat
             .wakeup(agentId, wakeup)
             .then((wakeRun) => {
-              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              if (!wakeRun || wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
               const payload =
                 wakeup.payload && typeof wakeup.payload === "object"
                   ? wakeup.payload
