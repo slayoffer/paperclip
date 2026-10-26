@@ -112,13 +112,52 @@ function buildContext(config: Record<string, unknown> = {}) {
       ...config,
     },
     context: {},
-    onLog: vi.fn(async () => {}),
+    onLog: vi.fn(async (_stream: "stdout" | "stderr", _line: string) => {}),
   };
 }
 
 describe("codex_local stderr fallback error derivation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("uses the default command once and records it when the configured command is missing", async () => {
+    const command = "/missing/codex-owner-apps";
+    ensureAdapterExecutionTargetCommandResolvable.mockRejectedValueOnce(
+      new Error(`Command is not executable: "${command}" (resolved: "${command}")`),
+    );
+    runAdapterExecutionTargetProcess.mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+      stderr: "", pid: 123, startedAt: new Date().toISOString(),
+    });
+    const ctx = buildContext({ command, extraArgs: ["--sandbox", "workspace-write"] });
+    const onMeta = vi.fn(async () => {});
+    const result = await execute({ ...ctx, onMeta } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    const invocation = runAdapterExecutionTargetProcess.mock.calls[0];
+    expect(invocation?.[2]).toBe("codex");
+    expect(invocation?.[3]).toContain("workspace-write");
+    expect(invocation?.[3]).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(onMeta).toHaveBeenCalledWith(expect.objectContaining({ command: "codex" }));
+    const warnings = ctx.onLog.mock.calls.filter(([, line]) => line.includes("Warning: Configured command"));
+    expect(warnings).toEqual([["stderr", expect.stringContaining('adapter default "codex"')]]);
+    expect(warnings[0]?.[1]).toContain(command);
+  });
+
+  it("preserves a nonzero exit from an existing configured command", async () => {
+    const command = "/installed/codex-owner-apps";
+    mockFailedProcess("wrapper failed");
+    const ctx = buildContext({ command });
+    const result = await execute(ctx as never);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toBe("wrapper failed");
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    expect(runAdapterExecutionTargetProcess.mock.calls[0]?.[2]).toBe(command);
+    expect(ctx.onLog.mock.calls.some(([, line]) => line.includes("Warning: Configured command"))).toBe(false);
   });
 
   it("skips the benign YOLO approvals warning and surfaces the real stderr error", async () => {
