@@ -17,7 +17,8 @@ import {
 } from "./helpers/embedded-postgres.ts";
 
 const support = await getEmbeddedPostgresTestSupport();
-const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE", "PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID"];
+const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT",
+  "PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE", "PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID"];
 
 (support.supported ? describe : describe.skip)("heartbeat issue token budget gate", () => {
   let db!: ReturnType<typeof createDb>;
@@ -89,7 +90,7 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     expect(outcome.run).toBeNull();
     expect(outcome.skipped).toMatchObject({
       reason: "issue.token_budget_exceeded",
-      error: expect.stringContaining("6000000 input tokens"),
+      error: expect.stringContaining("6000000 weighted input tokens"),
       details: { budget: { used: 6_000_000, limit: 5_000_000 } },
     });
     expect(await wake(heartbeat, agentId, issueId, "system")).toBeNull();
@@ -101,6 +102,33 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     const cards = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId));
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({ status: "pending", addresseeAgentId: cardAgentId });
+  });
+
+  it("shows the weighted usage and cached weight in the stop card and skipped receipt", async () => {
+    const { companyId, agentId, issueId } = await seed();
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT = "0.1";
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE = new Date(Date.now() - 3_600_000).toISOString();
+    await db.update(heartbeatRuns).set({ usageJson: { inputTokens: 18_000_000, cachedInputTokens: 12_000_000 } })
+      .where(eq(heartbeatRuns.companyId, companyId));
+    const outcome = await heartbeatService(db).wakeupWithDiagnostics(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_commented",
+      payload: { issueId }, contextSnapshot: { issueId, taskId: issueId }, requestedByActorType: "system",
+    });
+    expect(outcome.run).toBeNull();
+    expect(outcome.skipped).toMatchObject({
+      reason: "issue.token_budget_exceeded",
+      error: expect.stringContaining("7200000 weighted input tokens"),
+      details: { budget: { used: 7_200_000, limit: 5_000_000 } },
+    });
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(receipt.payload).toMatchObject({ issueTokenBudget: { used: 7_200_000, limit: 5_000_000, cachedWeight: 0.1 } });
+    expect(receipt.error).toContain("Cached tokens count at 0.1");
+    const [card] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId));
+    expect(card.summary).toContain("7.2M weighted input tokens");
+    expect(card.summary).toContain("Cached tokens count at 0.1");
+    expect(card.payload).toMatchObject({ prompt: expect.stringContaining("7.2M weighted input tokens") });
+    expect(card.payload).toMatchObject({ prompt: expect.stringContaining("Cached tokens count at 0.1") });
   });
 
   it("rejects caller-supplied diagnostics before a policy skip", async () => {

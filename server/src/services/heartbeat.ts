@@ -370,6 +370,7 @@ import {
   ISSUE_TOKEN_BUDGET_SKIP_REASON,
   ensureIssueTokenBudgetCard,
   issueTokenBudgetConfig,
+  issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
@@ -27208,14 +27209,8 @@ export function heartbeatService(
           logger.warn({ err, issueId }, "failed to raise issue token budget card");
           return false;
         });
-        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON, {
-          error: `Wake suppressed: this issue used ${budgetState.spent} input tokens since ` +
-            `${budgetState.windowStart.toISOString()} (budget ${issueTokenBudget.budget}).`,
-          payload: { ...payload, issueTokenBudget: {
-            used: budgetState.spent, limit: issueTokenBudget.budget,
-            windowStart: budgetState.windowStart.toISOString(),
-          } },
-        });
+        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON,
+          issueTokenBudgetSkipDetails(issueTokenBudget, budgetState, payload));
         logger.info({ issueId, agentId, spent: budgetState.spent, cardCreated }, "issue token budget reached; wake skipped");
         return null;
       }
