@@ -200,7 +200,7 @@ Core fields:
 - search (boolean, optional): run codex with --search
 - fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and passed through for manual model IDs
 - dangerouslyBypassApprovalsAndSandbox (boolean, optional): run with bypass flag
-- command (string, optional): defaults to "codex"
+- command (string, optional): CLI command. Defaults to "codex". If a configured command is absent in the execution environment, the CLI engine uses "codex" and logs one warning with both commands. Existing commands retain their normal failure path.
 - extraArgs (string[], optional): additional CLI args
 - env (object, optional): KEY=VALUE environment variables
 - workspaceStrategy (object, optional): execution workspace strategy; currently supports { type: "git_worktree", baseRef?, branchTemplate?, worktreeParentDir? }
