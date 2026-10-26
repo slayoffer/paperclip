@@ -1,6 +1,7 @@
-import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
-import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
+import { issueWipReason, isRunnableWipReason, isWaitingWipReason } from "./agent-wip-policy.js";
+import { logger } from "../middleware/logger.js";
 
 /**
  * Agent WIP limit (synthiq fork, Guild model v2 rule 2, 2026-10-17). With PAPERCLIP_AGENT_WIP_LIMIT=N, a NEW assignment
@@ -8,7 +9,8 @@ import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
  * assignment wake. An agent that moves its own backlog issue to an active status over the limit gets 409. Existing load
  * is untouched. A person in the board UI (browser session) is not limited, and a `critical` issue is never deferred. The promote step that moves the next backlog
  * issue to `todo` when a slot frees lives outside the server (the homelab watchdog).
- * PAPERCLIP_PULL_QUEUE_ENABLED uses execution and monitor state to count real work.
+ * Typed external waits do not consume work slots. Untyped blocked issues still count.
+ * PAPERCLIP_PULL_QUEUE_ENABLED also uses execution state to count real work.
  */
 export const WIP_ACTIVE_STATUSES = ["todo", "in_progress", "blocked"] as const;
 
@@ -33,20 +35,19 @@ export async function countAgentActiveIssues(
   input: { companyId: string; agentId: string; excludeIssueId?: string | null },
 ): Promise<number> {
   const rows = await db
-    .select({ n: sql<number>`count(*)::int` })
+    .select({ issueId: issues.id, reason: issueWipReason() })
     .from(issues)
     .where(and(
       eq(issues.companyId, input.companyId),
       eq(issues.assigneeAgentId, input.agentId),
-      isPullQueueEnabled() ? or(
-        eq(issues.status, "todo"),
-        and(eq(issues.status, "in_progress"), issueHasExecution()),
-        and(eq(issues.status, "blocked"), isNull(issues.monitorNextCheckAt)),
-      ) : inArray(issues.status, [...WIP_ACTIVE_STATUSES]),
-      isPullQueueEnabled() ? isNull(issues.conversationAgentId) : undefined,
+      inArray(issues.status, [...WIP_ACTIVE_STATUSES]),
       input.excludeIssueId ? ne(issues.id, input.excludeIssueId) : undefined,
     ));
-  return Number(rows[0]?.n ?? 0);
+  const runnable = rows.filter((row) => isRunnableWipReason(row.reason)).length;
+  const waiting = rows.filter((row) => isWaitingWipReason(row.reason)).length;
+  logger.info({ companyId: input.companyId, agentId: input.agentId, runnable, waiting, decisions: rows },
+    "WIP assessment: each issue has a reason.");
+  return runnable;
 }
 
 /** True when one more active issue for this agent would exceed the limit. */
@@ -59,14 +60,22 @@ export async function agentWipFull(
   },
 ): Promise<boolean> {
   const limit = agentWipLimit();
-  if (limit === null || !input.agentId || !isWipActiveStatus(input.status) || !wipLimitAppliesToActor(actor)) return false;
-  // Anton, 2026-10-17: a critical assignment bypasses WIP for any actor (the escape for urgent board-key work).
-  if (input.priority === "critical") return false;
+  const bypass = limit === null ? "limit_disabled" : !input.agentId ? "no_agent"
+    : !isWipActiveStatus(input.status) ? "inactive_status"
+      : !wipLimitAppliesToActor(actor) ? "board_exemption"
+        : input.priority === "critical" ? "critical_priority" : null;
+  if (bypass || limit === null || !input.agentId) {
+    logger.info({ ...input, limit, full: false, reason: bypass }, "WIP admission decision.");
+    return false;
+  }
   const active = await countAgentActiveIssues(db, { companyId: input.companyId, agentId: input.agentId, excludeIssueId: input.excludeIssueId });
-  return active + (input.pending ?? 0) >= limit;
+  const full = active + (input.pending ?? 0) >= limit;
+  logger.info({ ...input, limit, runnable: active, full, reason: full ? "runnable_limit_reached" : "runnable_slot_available" },
+    "WIP admission decision.");
+  return full;
 }
 
 export function wipPullRefusal(limit: number): string {
-  return `WIP limit reached: this agent already has ${limit} or more active issues (todo, in_progress, blocked). ` +
-    "Finish or hand off one of them first; the next backlog issue is promoted when a slot frees.";
+  return `WIP limit reached: this agent already has ${limit} or more runnable issues. ` +
+    "Complete one runnable issue first. The next backlog issue is promoted when a slot becomes available.";
 }
