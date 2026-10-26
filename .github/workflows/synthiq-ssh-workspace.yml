@@ -131,7 +131,8 @@ jobs:
   repository-verification:
     if: github.repository == 'slayoffer/paperclip'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Match fork-release-tests.yml. The complete serial suite takes about two hours.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -151,6 +152,7 @@ jobs:
       - name: Check all package types
         run: corepack pnpm -r typecheck
       - name: Run the repository test suite
+        timeout-minutes: 150
         run: corepack pnpm test:run
       - name: Build the repository
         run: corepack pnpm build
