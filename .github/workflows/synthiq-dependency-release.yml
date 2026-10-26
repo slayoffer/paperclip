@@ -11,6 +11,7 @@ on:
       - server/src/routes/issues.ts
       - server/src/modules/run-dispatch/**
       - server/src/__tests__/dependency-release.test.ts
+      - server/src/__tests__/dependency-wake-concurrency.test.ts
       - server/src/__tests__/dependency-recovery-sweep.test.ts
       - server/src/__tests__/issue-dependency-wakeup-release.test.ts
       - server/src/__tests__/heartbeat-dependency-scheduling.test.ts
@@ -68,6 +69,7 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --no-file-parallelism
           server/src/__tests__/dependency-release.test.ts
+          server/src/__tests__/dependency-wake-concurrency.test.ts
           server/src/__tests__/dependency-recovery-sweep.test.ts
           server/src/__tests__/issue-dependency-wakeup-release.test.ts
           server/src/__tests__/workspace-operations-reconciliation.test.ts
