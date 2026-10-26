@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maxRunningRunsCap } from "../services/heartbeat.js";
+import { maxRunningRunsCap } from "../services/instance-run-cap.js";
 
 describe("instance running-run cap", () => {
   it("is off unless a positive integer", () => {

@@ -1,4 +1,4 @@
-import type { ServerInfoSnapshot } from "@paperclipai/shared";
+import type { RuntimeCap, ServerInfoSnapshot } from "@paperclipai/shared";
 import { tenantSessionRecovery } from "@/lib/tenant-session-recovery";
 import { ApiError } from "./client";
 import { ApiUnavailableError, readApiJson } from "./response";
@@ -42,6 +42,7 @@ export type HealthStatus = {
     companyDeletionEnabled?: boolean;
   };
   serverInfo?: ServerInfoSnapshot;
+  runtimeCap?: RuntimeCap;
   devServer?: DevServerHealthStatus;
   cloud?: CloudInstanceHealthStatus;
   /**
