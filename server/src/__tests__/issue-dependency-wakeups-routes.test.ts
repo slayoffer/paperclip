@@ -8,7 +8,8 @@ import {
 // The route import needs additional time on a loaded test host.
 vi.setConfig({ testTimeout: 30000 });
 
-const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
+const mockWakeup = vi.hoisted(() => vi.fn(async (): Promise<{ id: string } | null> => null));
+const mockLogActivity = vi.hoisted(() => vi.fn(async (_db: unknown, _entry: Record<string, unknown>) => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
@@ -92,7 +93,7 @@ vi.mock("../services/index.js", () => ({
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   }),
   issueService: () => mockIssueService,
-  logActivity: vi.fn(async () => undefined),
+  logActivity: mockLogActivity,
   projectService: () => ({
     getById: vi.fn(),
     listByIds: vi.fn(async () => []),
@@ -426,6 +427,23 @@ describe("issue dependency wakeups in issue routes", () => {
       ...overrides,
     };
   }
+
+  it.each([false, true])("records dependency emission only after successful admission: %s", async admitted => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      { id: "issue-2", assigneeAgentId: "agent-2", blockerIssueIds: ["issue-1"] },
+    ]);
+    mockWakeup.mockResolvedValue(admitted ? { id: "admitted-run" } : null);
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => { expect(mockWakeup).toHaveBeenCalledTimes(1); });
+    // Let the completion callback finish before inspecting its activity rows.
+    await new Promise(resolve => setImmediate(resolve));
+    const emitted = mockLogActivity.mock.calls.filter(([, entry]) =>
+      (entry as { action: string }).action === "issue.blockers_resolved_wake_emitted");
+    expect(emitted).toHaveLength(admitted ? 1 : 0);
+  });
 
   it("wakes a Release-like dependent after a terminal reset using the current blocked cycle", async () => {
     const reviewIssueId = "11111111-1111-4111-8111-111111111111";
