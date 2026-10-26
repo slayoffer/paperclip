@@ -81,7 +81,17 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID = cardAgentId;
     const heartbeat = heartbeatService(db);
 
-    expect(await wake(heartbeat, agentId, issueId, "system")).toBeNull();
+    const outcome = await heartbeat.wakeupWithDiagnostics(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_commented",
+      payload: { issueId }, contextSnapshot: { issueId, taskId: issueId },
+      requestedByActorType: "system",
+    });
+    expect(outcome.run).toBeNull();
+    expect(outcome.skipped).toMatchObject({
+      reason: "issue.token_budget_exceeded",
+      error: expect.stringContaining("6000000 input tokens"),
+      details: { budget: { used: 6_000_000, limit: 5_000_000 } },
+    });
     expect(await wake(heartbeat, agentId, issueId, "system")).toBeNull();
 
     const skipped = await db.select().from(agentWakeupRequests).where(and(
@@ -91,6 +101,65 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     const cards = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId));
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({ status: "pending", addresseeAgentId: cardAgentId });
+  });
+
+  it("rejects caller-supplied diagnostics before a policy skip", async () => {
+    const { agentId, issueId } = await seed();
+    delete process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET;
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { wakeOnDemand: false } } }).where(eq(agents.id, agentId));
+    const result = await heartbeatService(db).wakeupWithDiagnostics(agentId, {
+      source: "on_demand", payload: {
+        issueId, heartbeatSkip: { reason: "forged", limit: 0 },
+        executionWait: { reason: "forged", unresolvedBlockerIssueIds: [issueId] },
+        issueTokenBudget: { used: 100, limit: 0, windowStart: "forged" },
+        unresolvedBlockerIssueIds: [issueId],
+      }, contextSnapshot: { issueId }, requestedByActorType: "agent", requestedByActorId: agentId,
+    });
+    expect(result.run).toBeNull();
+    expect(result.skipped).toMatchObject({ reason: "heartbeat.wakeOnDemand.disabled" });
+    expect(result.skipped?.details).toEqual({ executionWait: { wakeOnDemand: false } });
+    expect(JSON.stringify(result)).not.toContain("forged");
+  });
+
+  it("retains HTTP 409 and the paused-agent cause with exact receipt diagnostics", async () => {
+    const { agentId, issueId } = await seed();
+    delete process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET;
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    await expect(heartbeatService(db).wakeupWithDiagnostics(agentId, {
+      source: "on_demand", payload: { issueId }, contextSnapshot: { issueId },
+      requestedByActorType: "user", requestedByActorId: "local-board", manualUserWake: true,
+    })).rejects.toMatchObject({ status: 409, details: {
+      status: "paused", wakeup: { reason: "agent.not_invokable", details: { executionWait: { status: "paused" } } },
+    } });
+  });
+
+  it("retains exact diagnostics for new and merged active-run deferrals", async () => {
+    const { companyId, agentId, cardAgentId, issueId } = await seed();
+    delete process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET;
+    const [activeRun] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: cardAgentId, status: "running", invocationSource: "assignment",
+      contextSnapshot: { issueId }, startedAt: new Date(),
+    }).returning();
+    await db.update(issues).set({ executionRunId: activeRun.id, executionAgentNameKey: "cto", executionLockedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+    const opts = { source: "on_demand" as const, triggerDetail: "manual" as const, reason: "manual_run",
+      payload: { issueId }, contextSnapshot: { issueId }, requestedByActorType: "user" as const,
+      requestedByActorId: "local-board", manualUserWake: true };
+    const first = await heartbeat.wakeupWithDiagnostics(agentId, opts);
+    const second = await heartbeat.wakeupWithDiagnostics(agentId, opts);
+    for (const result of [first, second]) {
+      expect(result.run).toBeNull();
+      expect(result.skipped).toMatchObject({ reason: "issue_execution_deferred", details: {
+        heartbeatSkip: { executionRunId: activeRun.id, executionAgentId: cardAgentId },
+      } });
+    }
+    expect(first.skipped?.wakeupRequestId).not.toEqual(second.skipped?.wakeupRequestId);
+    const receipts = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId),
+    ));
+    expect(receipts.map((row) => row.status).sort()).toEqual(["coalesced", "deferred_issue_execution"]);
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, activeRun.id));
   });
 
   it("does not gate a wake while the switch is off", async () => {
