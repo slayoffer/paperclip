@@ -21,8 +21,9 @@ import { recoveryRunResultColumn } from "./run-result-read.js";
 import { readLegacyDispositionSource } from "./legacy-disposition-read.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
-import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./issue-token-budget.js";
+import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
 import { listExternalReviewWaits } from "../native-runtime/external-review-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -3962,6 +3963,8 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
+    if (await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
+
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
         ? legacyDispositionEpisode(latestRun) : undefined
@@ -4664,6 +4667,10 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
+        if (await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+          result.skipped += 1;
+          continue;
+        }
         if (issue.originKind === "chat_channel") {
           if (opts?.skipExternalConversationSettlement) {
 
