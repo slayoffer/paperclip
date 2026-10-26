@@ -5,7 +5,7 @@ import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createHeartbeatPullQueue } from "../services/pull-queue.js";
 import { issueService } from "../services/issues.js";
-import type { heartbeatService } from "../services/heartbeat.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 type WakeupOptions = NonNullable<Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]>;
 const support = await getEmbeddedPostgresTestSupport();
@@ -207,6 +207,45 @@ databaseTests("pull queue skip and parking regressions", () => {
     expect(wakeup).not.toHaveBeenCalled();
     await issueService(db).update(parked.id, { status: "todo" });
     await queue.notify(companyId);
+    expect(wakeup.mock.calls[0][1].payload?.issueId).toBe(parked.id);
+  });
+
+  it("rejects real admission when a selected backlog task is parked before its row lock", async () => {
+    const parked = await task();
+    await db.update(issues).set({ responsibleUserId: "queue-test-user" }).where(eq(issues.id, parked.id));
+    const heartbeat = heartbeatService(db);
+    const wakeup = vi.fn(async (owner: string, options: WakeupOptions) => {
+      // Selection has completed. Commit parking before real admission locks the row.
+      await issueService(db).update(parked.id, { status: "backlog" });
+      return heartbeat.wakeup(owner, options);
+    });
+    const queue = createHeartbeatPullQueue(db, { wakeup, isSuppressed: async () => ({ suppressed: false }) });
+    queues.push(queue);
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toEqual([]);
+    const receipts = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.reason, "issue_state_guard_mismatch"),
+    ));
+    expect(receipts).toHaveLength(1);
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
+  });
+
+  it("does not restore a parking receipt after an A to B to A assignment cycle", async () => {
+    const parked = await task();
+    await issueService(db).update(parked.id, { status: "backlog" });
+    const { queue, wakeup } = scheduler();
+    await queue.notify(companyId);
+    expect(wakeup).not.toHaveBeenCalled();
+    const newOwner = randomUUID();
+    await db.insert(agents).values({ id: newOwner, companyId, name: "Temporary owner", role: "engineer", status: "idle",
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await issueService(db).update(parked.id, { assigneeAgentId: newOwner });
+    await issueService(db).update(parked.id, { assigneeAgentId: agentId });
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
+    expect(wakeup.mock.calls[0][0]).toBe(agentId);
     expect(wakeup.mock.calls[0][1].payload?.issueId).toBe(parked.id);
   });
 

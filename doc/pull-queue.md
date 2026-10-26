@@ -36,6 +36,8 @@ An explicit move to `todo` or a new assignee also permits selection.
 Title edits, comments, and scheduler reconciliation do not resume the same parked issue.
 Existing backlog tasks with a recorded backlog disposition after an owner attempt receive one parking receipt on first selection.
 A prior attempt alone does not park a backlog task.
+Parking receipts include the monotonic status version. An ownership cycle cannot restore an earlier parking decision.
+An explicit backlog reassertion advances that version under the issue row lock. Admission rejects an earlier selection.
 These receipts affect automatic pull selection. Explicit wakes still pass through normal admission.
 
 With this switch enabled, both assignment admission and queue selection count real work:

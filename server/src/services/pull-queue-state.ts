@@ -24,7 +24,7 @@ function digest(value: unknown): string {
 }
 
 function waitFingerprint(issue: Issue) {
-  return digest([issue.assigneeAgentId, issue.unblockDescriptor, issue.executionPolicy,
+  return digest([issue.assigneeAgentId, issue.statusVersion, issue.unblockDescriptor, issue.executionPolicy,
     issue.executionState, issue.monitorNextCheckAt, issue.monitorNotes]);
 }
 
@@ -58,6 +58,17 @@ export async function recordPullQueueParking(
   const explicitPark = requestedStatus === "backlog";
   const waitChanged = previous.status === "backlog" && waitFingerprint(previous) !== waitFingerprint(next);
   if (!explicitPark && !waitChanged) return;
+  if (explicitPark && previous.status === "backlog") {
+    // The issue service holds this row lock. Commit the new admission version
+    // with the receipt, and return the current version to the service caller.
+    const [versioned] = await tx.update(issues).set({ statusVersion: sql`${issues.statusVersion} + 1` })
+      .where(and(eq(issues.companyId, next.companyId), eq(issues.id, next.id),
+        eq(issues.status, "backlog"), eq(issues.assigneeAgentId, next.assigneeAgentId),
+        eq(issues.statusVersion, next.statusVersion)))
+      .returning({ statusVersion: issues.statusVersion });
+    if (!versioned) return;
+    next.statusVersion = versioned.statusVersion;
+  }
   await tx.insert(agentWakeupRequests).values({ companyId: next.companyId, agentId: next.assigneeAgentId,
     source: "assignment", reason: PARKED, status: "skipped", requestedByActorType: "system",
     createdAt: sql`clock_timestamp()`, finishedAt: new Date(),
