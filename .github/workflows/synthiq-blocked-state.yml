@@ -14,6 +14,7 @@ on:
       - "server/src/__tests__/blocked-state-integrity.test.ts"
       - "server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts"
       - "server/src/__tests__/dependency-release-wakes.test.ts"
+      - "server/src/__tests__/heartbeat-dependency-finalization.test.ts"
       - "server/src/__tests__/dependency-release.test.ts"
       - "server/src/__tests__/issue-dependency-wakeup-release.test.ts"
       - "server/src/__tests__/issue-blocker*.test.ts"
@@ -77,6 +78,7 @@ jobs:
           server/src/__tests__/blocked-state-integrity.test.ts
           server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts
           server/src/__tests__/dependency-release-wakes.test.ts
+          server/src/__tests__/heartbeat-dependency-finalization.test.ts
           server/src/__tests__/dependency-release.test.ts
           server/src/__tests__/issue-dependency-wakeup-release.test.ts
           server/src/__tests__/issue-blocker-attention.test.ts
