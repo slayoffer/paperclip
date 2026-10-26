@@ -252,6 +252,24 @@ databaseTests("pull queue skip and parking regressions", () => {
     expect(wakeup).toHaveBeenCalledOnce();
   });
 
+  it("keeps a legacy parking decision after unwanted runs replayed it", async () => {
+    const issue = await task();
+    const now = Date.now();
+    await db.insert(heartbeatRuns).values([
+      { companyId, agentId, nativeIssueId: issue.id, invocationSource: "assignment", status: "succeeded",
+        createdAt: new Date(now - 60_000), finishedAt: new Date(now - 50_000) },
+      { companyId, agentId, nativeIssueId: issue.id, invocationSource: "assignment", status: "succeeded",
+        createdAt: new Date(now - 10_000), finishedAt: new Date(now - 1_000) },
+    ]);
+    await db.insert(activityLog).values({ companyId, actorType: "agent", actorId: agentId,
+      action: "issue.updated", entityType: "issue", entityId: issue.id, details: { status: "backlog" },
+      createdAt: new Date(now - 40_000) });
+    const { queue, wakeup } = scheduler();
+    await queue.notify(companyId);
+    await queue.notify(companyId);
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
   it("does not recreate a legacy parking stop after the stored wait changes", async () => {
     const issue = await task({ unblockDescriptor: { owner: "board", action: "Wait for the vendor" } });
     await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: issue.id,

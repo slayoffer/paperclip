@@ -81,15 +81,16 @@ export async function pullQueueCandidateBlocked(db: Db, issue: Issue, agent: Age
         .from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agent.id),
         sql`(${heartbeatRuns.nativeIssueId} = ${issue.id} or ${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id})`,
-      )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+      )).orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id)).limit(1);
       if (prior) {
-        const [decision] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
+        const [decision] = await db.select({ details: activityLog.details }).from(activityLog).where(and(
           eq(activityLog.companyId, issue.companyId), eq(activityLog.entityType, "issue"),
-          eq(activityLog.entityId, issue.id), eq(activityLog.action, "issue.updated"),
+          eq(activityLog.entityId, issue.id),
+          sql`${activityLog.action} in ('issue.updated', 'issue.status_decision_recorded')`,
           sql`${activityLog.createdAt} >= ${(prior.startedAt ?? prior.createdAt).toISOString()}::timestamptz`,
-          sql`(${activityLog.details}->>'status' = 'backlog' or ${activityLog.details}->>'toStatus' = 'backlog')`,
-        )).limit(1);
-        if (decision) {
+          sql`(${activityLog.details}->>'status' is not null or ${activityLog.details}->>'toStatus' is not null)`,
+        )).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(1);
+        if (decision?.details?.status === "backlog" || decision?.details?.toStatus === "backlog") {
           await recordPullQueueParking(db, issue, issue, "backlog");
           return true;
         }
