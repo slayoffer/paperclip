@@ -3,8 +3,29 @@
 `GET /api/companies/:companyId/run-stats` returns hourly counts from `heartbeat_runs`.
 The route enforces company access. Board users retain access.
 Agents require an explicit `stats:read` permission grant and active company membership.
-Use the existing member-permissions administration route to grant this permission.
 The route grants no permission to read run history or change data.
+
+Board operators can grant statistics access to an existing company agent:
+
+```http
+POST /api/companies/COMPANY_ID/agents/AGENT_ID/permission-grants
+Content-Type: application/json
+
+{"permissionKey":"stats:read"}
+```
+
+The caller needs board authentication, company access, and `users:manage_permissions` authorization.
+Agent callers cannot use this operation, including chief executive agents and the target agent itself.
+The strict request contract accepts only `permissionKey: "stats:read"` and no other fields.
+The agent must belong to that company and already have a company membership.
+The operation preserves membership role, status, and all existing grants, scopes, and audit fields.
+A suspended membership remains suspended and cannot read statistics.
+The response contains `companyId`, `agentId`, `permissionKey`, and `created`.
+Both a new grant and a repeated request return HTTP 200.
+Only a new grant returns `created: true` and records `agent.stats_read_granted` in the company activity log.
+The grant and its activity entry commit together. Concurrent requests create at most one of each.
+Missing or other-company agents return HTTP 404. A missing agent membership returns HTTP 409.
+This route cannot change human memberships. Existing human member protections remain in effect.
 
 Required query parameters are `from` and `to`, as ISO timestamps with a time-zone offset.
 The range includes `from` and excludes `to`. It uses `created_at`, rather than execution start time.

@@ -1350,6 +1350,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PUT /api/companies/{companyId}/observability",
   "DELETE /api/companies/{companyId}/observability",
   "POST /api/companies/{companyId}/observability/test",
+  "POST /api/companies/{companyId}/agents/{agentId}/permission-grants",
   ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
   "POST /api/companies/{companyId}/ai-connections",
