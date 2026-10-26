@@ -61,8 +61,9 @@ if (!SupertestTest.prototype.__paperclipLoopbackPatched) {
       throw new Error("Expected Supertest server to listen on a TCP port");
     }
 
+    // Default listeners accept both families. Use IPv4 on hosts without ::1.
     const host = listeningAddress.address === "::"
-      ? "[::1]"
+      ? "127.0.0.1"
       : listeningAddress.address === "0.0.0.0"
         ? "127.0.0.1"
         : listeningAddress.address;
