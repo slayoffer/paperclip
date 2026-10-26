@@ -1,7 +1,7 @@
 import pino from "pino";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Logger } from "pino";
-import { pinoHttp } from "pino-http";
+import { pinoHttp, startTime } from "pino-http";
 import { HTTP_LOG_REDACT_PATHS } from "./http-log-redaction.js";
 import {
   isPrivateWebhookHttpRequest,
@@ -148,14 +148,16 @@ export function createHttpLogger(baseLogger: Logger) {
     customLogLevel(_req, res, err) {
       if (err || (res as ServerResponse & { err?: unknown }).err || res.statusCode >= 500) return "error";
       if (_req.readableAborted || !res.writableFinished) return "warn";
+      if (Date.now() - res[startTime] > 2000) return "warn";
       if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
         return "silent";
       }
       if (res.statusCode >= 400) return "warn";
       return "info";
     },
-    customSuccessMessage(req, res) {
-      return abortedRequestMessage(req, res) ?? `${req.method} ${requestLogUrl(req)} ${res.statusCode}`;
+    customSuccessMessage(req, res, responseTime) {
+      const duration = responseTime > 2000 ? ` — slow request (${responseTime} ms)` : "";
+      return abortedRequestMessage(req, res) ?? `${req.method} ${requestLogUrl(req)} ${res.statusCode}${duration}`;
     },
     customErrorMessage(req, res, err) {
       const abortedMessage = abortedRequestMessage(req, res);
