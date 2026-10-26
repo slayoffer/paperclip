@@ -34,8 +34,8 @@ An explicit backlog update records a parking receipt in the same transaction.
 The issue stays parked until its saved unblock action, monitor condition, or execution policy changes.
 An explicit move to `todo` or a new assignee also permits selection.
 Title edits, comments, and scheduler reconciliation do not resume the same parked issue.
-Existing backlog tasks with a prior owner run receive one parking receipt on first selection.
-New assigned backlog tasks without a prior attempt remain eligible.
+Existing backlog tasks with a recorded backlog disposition after an owner attempt receive one parking receipt on first selection.
+A prior attempt alone does not park a backlog task.
 These receipts affect automatic pull selection. Explicit wakes still pass through normal admission.
 
 With this switch enabled, both assignment admission and queue selection count real work:

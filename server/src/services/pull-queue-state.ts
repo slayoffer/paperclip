@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
-import { agentWakeupRequests, heartbeatRuns, issues, type Db, agents, instanceSettings, projects,
+import { agentWakeupRequests, heartbeatRuns, issues, type Db, agents, instanceSettings, projects, activityLog,
   issueThreadInteractions, approvals, issueApprovals } from "@paperclipai/db";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { issueTokenBudgetConfig, loadIssueTokenBudgetState, ISSUE_TOKEN_BUDGET_SKIP_REASON } from "./issue-token-budget.js";
@@ -25,7 +25,7 @@ function digest(value: unknown): string {
 
 function waitFingerprint(issue: Issue) {
   return digest([issue.assigneeAgentId, issue.unblockDescriptor, issue.executionPolicy,
-    issue.monitorNextCheckAt, issue.monitorNotes]);
+    issue.executionState, issue.monitorNextCheckAt, issue.monitorNotes]);
 }
 
 export async function pullQueueFingerprint(db: Db, issue: Issue, agent: Agent) {
@@ -53,12 +53,17 @@ export async function pullQueueFingerprint(db: Db, issue: Issue, agent: Agent) {
 export async function recordPullQueueParking(
   tx: Db, previous: Issue, next: Issue, requestedStatus?: string,
 ) {
-  if (!isPullQueueEnabled() || requestedStatus !== "backlog" || next.conversationAgentId
+  if (!isPullQueueEnabled() || next.status !== "backlog" || next.conversationAgentId
     || !next.assigneeAgentId || previous.assigneeAgentId !== next.assigneeAgentId) return;
+  const explicitPark = requestedStatus === "backlog";
+  const waitChanged = previous.status === "backlog" && waitFingerprint(previous) !== waitFingerprint(next);
+  if (!explicitPark && !waitChanged) return;
   await tx.insert(agentWakeupRequests).values({ companyId: next.companyId, agentId: next.assigneeAgentId,
     source: "assignment", reason: PARKED, status: "skipped", requestedByActorType: "system",
     createdAt: sql`clock_timestamp()`, finishedAt: new Date(),
-    payload: { issueId: next.id, pullQueueWait: waitFingerprint(next) } });
+    // A changed wait resumes legacy work too. Save its old condition so the
+    // compatibility path cannot replace it with a new stop for the new wait.
+    payload: { issueId: next.id, pullQueueWait: waitFingerprint(explicitPark ? next : previous) } });
 }
 
 /** Selection receipts restrict automatic pulls only. Ordinary admission remains authoritative. */
@@ -69,16 +74,25 @@ export async function pullQueueCandidateBlocked(db: Db, issue: Issue, agent: Age
     const [park] = await db.select().from(agentWakeupRequests).where(and(scope,
       eq(agentWakeupRequests.reason, PARKED))).orderBy(desc(agentWakeupRequests.createdAt), desc(agentWakeupRequests.id)).limit(1);
     if (park?.payload?.pullQueueWait === waitFingerprint(issue)) return true;
-    // Existing parked tasks predate the receipt. Bootstrap one stop after the
-    // owner's completed attempt, rather than replaying that backlog forever.
+    // Old parking decisions predate these receipts. A prior run alone is not
+    // a parking decision: require recorded backlog intent after that run began.
     if (!park) {
-      const [prior] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      const [prior] = await db.select({ startedAt: heartbeatRuns.startedAt, createdAt: heartbeatRuns.createdAt })
+        .from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agent.id),
         sql`(${heartbeatRuns.nativeIssueId} = ${issue.id} or ${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id})`,
-      )).limit(1);
+      )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
       if (prior) {
-        await recordPullQueueParking(db, issue, issue, "backlog");
-        return true;
+        const [decision] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
+          eq(activityLog.companyId, issue.companyId), eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issue.id), eq(activityLog.action, "issue.updated"),
+          sql`${activityLog.createdAt} >= ${(prior.startedAt ?? prior.createdAt).toISOString()}::timestamptz`,
+          sql`(${activityLog.details}->>'status' = 'backlog' or ${activityLog.details}->>'toStatus' = 'backlog')`,
+        )).limit(1);
+        if (decision) {
+          await recordPullQueueParking(db, issue, issue, "backlog");
+          return true;
+        }
       }
     }
   }

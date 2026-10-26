@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, issueThreadInteractions, issueRelations } from "@paperclipai/db";
+import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, issueThreadInteractions, issueRelations, activityLog } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createHeartbeatPullQueue } from "../services/pull-queue.js";
 import { issueService } from "../services/issues.js";
@@ -222,10 +222,12 @@ databaseTests("pull queue skip and parking regressions", () => {
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toEqual([]);
   });
 
-  it("protects legacy backlog work after a completed run without blocking a new owner", async () => {
+  it("protects a recorded legacy backlog disposition without blocking a new owner", async () => {
     const parked = await task({ priority: "critical" });
     await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: parked.id,
       invocationSource: "assignment", status: "succeeded", finishedAt: new Date() });
+    await db.insert(activityLog).values({ companyId, actorType: "agent", actorId: agentId,
+      action: "issue.updated", entityType: "issue", entityId: parked.id, details: { status: "backlog" } });
     const { queue, wakeup } = scheduler();
     await queue.notify(companyId);
     await queue.notify(companyId);
@@ -239,6 +241,27 @@ databaseTests("pull queue skip and parking regressions", () => {
     await issueService(db).update(parked.id, { assigneeAgentId: newOwner });
     await queue.notify(companyId);
     expect(wakeup.mock.calls[0][0]).toBe(newOwner);
+  });
+
+  it("does not treat a prior attempt alone as a backlog parking decision", async () => {
+    const issue = await task();
+    await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: issue.id,
+      invocationSource: "assignment", status: "failed", finishedAt: new Date() });
+    const { queue, wakeup } = scheduler();
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
+  });
+
+  it("does not recreate a legacy parking stop after the stored wait changes", async () => {
+    const issue = await task({ unblockDescriptor: { owner: "board", action: "Wait for the vendor" } });
+    await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: issue.id,
+      invocationSource: "assignment", status: "succeeded", finishedAt: new Date() });
+    await db.insert(activityLog).values({ companyId, actorType: "agent", actorId: agentId,
+      action: "issue.updated", entityType: "issue", entityId: issue.id, details: { status: "backlog" } });
+    await issueService(db).update(issue.id, { unblockDescriptor: { owner: "board", action: "Vendor replied; check the result" } });
+    const { queue, wakeup } = scheduler();
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
   });
 
   it("does not suppress a timed skip after its deadline", async () => {
