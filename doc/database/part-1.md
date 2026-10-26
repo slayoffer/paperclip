@@ -278,6 +278,28 @@ for this lock during deployment. Rollback can retain the index safely.
 After deployment, check both query shapes with `EXPLAIN (ANALYZE, BUFFERS)`.
 Confirm that each lookup uses the index and takes less than 50 ms.
 
+## Heartbeat issue and recovery indexes
+
+Three expression indexes support company-scoped heartbeat lookups:
+
+- `heartbeat_runs_company_issue_coalesce_idx` selects the native issue before the snapshot issue.
+- `heartbeat_runs_company_recovery_action_idx` selects the snapshot recovery action.
+- `heartbeat_runs_company_issue_task_coalesce_idx` selects the snapshot issue, snapshot task, then native issue.
+
+The first two indexes also order rows by creation time, newest first.
+The startup migration creates all three inside one transaction.
+This operation scans existing snapshots and blocks table writes until commit.
+Schedule deployment for this lock. There is no data backfill.
+After deployment, check these expressions with `EXPLAIN (ANALYZE, BUFFERS)`.
+Homelab can remove equivalent temporary indexes after these indexes exist and serve the queries.
+Rollback can retain the indexes safely.
+
+Ownership projections reuse checks for the same company and issue within one second.
+Recovery reuses checks within one transaction pass.
+Execution admission always checks current process and lease ownership.
+Successful HTTP requests above two seconds produce warnings, including silent polling routes.
+The warning includes the method, sanitized path, status, and duration in milliseconds.
+
 ## Migration snapshots
 
 `drizzle-kit generate` diffs `packages/db/src/schema/` against the newest snapshot in `packages/db/src/migrations/meta/`. That snapshot must describe the schema that every migration produces when they run in order. A snapshot that drifts from the schema makes the *next* migration wrong, because `generate` folds the drift into it. The drift can add a column that an earlier migration already created, which makes that migration fail on a fresh database. It can also drop a column that the schema still uses.
