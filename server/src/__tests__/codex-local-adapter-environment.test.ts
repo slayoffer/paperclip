@@ -7,7 +7,7 @@ import { testEnvironment } from "@paperclipai/adapter-codex-local/server";
 const itWindows = process.platform === "win32" ? it : it.skip;
 const itPosix = process.platform === "win32" ? it.skip : it;
 
-async function runProbeFixture(options: { failCleanup?: boolean; error?: string; managedProvider?: boolean } = {}) {
+async function runProbeFixture(options: { failCleanup?: boolean; error?: string; managedProvider?: boolean; missingConfiguredCommand?: boolean } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-probe-result-"));
   const capture = path.join(root, "capture.json");
   const command = path.join(root, "codex");
@@ -32,7 +32,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   try {
     const result = await testEnvironment({
       companyId: "company-1", adapterType: "codex_local",
-      config: { engine: "cli", command, cwd: root, ...(options.managedProvider ? { managedAiConnection: { identity: "fixture" }, managedAiRouting: { kind: "openrouter" } } : {}), env: {
+      config: { engine: "cli", command: options.missingConfiguredCommand ? path.join(root, "codex-owner-apps") : command, cwd: root, ...(options.managedProvider ? { managedAiConnection: { identity: "fixture" }, managedAiRouting: { kind: "openrouter" } } : {}), env: {
         ...(options.managedProvider ? { CODEX_HOME: managedHome, PAPERCLIP_AI_PROVIDER_KEY: "gateway-fixture-key" } : {}),
         OPENAI_API_KEY: options.managedProvider ? "" : "fixture-key", PROBE_CAPTURE: capture,
         PROBE_ERROR: options.error ?? "", PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -61,6 +61,17 @@ describe("codex_local environment diagnostics", () => {
     expect(capture.providerKey).toBe("gateway-fixture-key");
     expect(capture.config).toContain('model_provider = "paperclip"');
     expect(result.checks).not.toContainEqual(expect.objectContaining({ code: "codex_openai_api_key_present" }));
+  });
+
+  itPosix("runs the hello probe with plain codex when the configured command is missing", async () => {
+    const { result } = await runProbeFixture({ missingConfiguredCommand: true });
+    expect(result.status).toBe("warn");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "codex_hello_probe_passed" }));
+    expect(result.checks).not.toContainEqual(expect.objectContaining({ code: "codex_command_unresolvable" }));
+    const warnings = result.checks.filter((check) => check.code === "codex_command_fallback");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain("codex-owner-apps");
+    expect(warnings[0]?.message).toContain('adapter default "codex"');
   });
 
   itPosix("preserves a successful hello when probe cleanup races a background writer", async () => {
