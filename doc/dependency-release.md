@@ -39,6 +39,16 @@ Relation-free settlement retains issue status and creates no dependency wake.
 Normal scheduling can then admit the issue through its existing guards.
 Repeated sweeps do not repeat settlement or dependency wakes.
 
+Wake admission checks dependency receipts again while it holds the company-scoped issue row lock.
+This check and the request insert use the same transaction.
+Concurrent finalize, route, and backstop producers can pass their earlier readiness checks.
+Only the first producer admits a request and records an emitted wake.
+Coalesced requests also cover the current ready state.
+Native status intents require admission before they cover that state.
+Route callbacks record an emitted wake only when admission returns a run.
+Failed, cancelled, and skipped requests permit another admission attempt.
+A later blocked cycle uses a different key.
+
 Homelab owns deployment and live verification.
 After deployment, its normal release event resolves false holds on the affected dependents.
 No database edit or agent call to the board-only recovery API is required.
