@@ -12,6 +12,7 @@ on:
       - "server/src/services/workspace-runtime*.ts"
       - "server/src/__tests__/execution-workspaces-service.test.ts"
       - "server/src/__tests__/terminal-workspace-sweep-report.test.ts"
+      - "server/src/__tests__/workspace-existing-branch-fetch.test.ts"
       - "packages/db/**"
       - "packages/shared/**"
       - "packages/adapter-utils/**"
@@ -51,3 +52,4 @@ jobs:
           corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000
           server/src/__tests__/execution-workspaces-service.test.ts
           server/src/__tests__/terminal-workspace-sweep-report.test.ts
+          server/src/__tests__/workspace-existing-branch-fetch.test.ts
