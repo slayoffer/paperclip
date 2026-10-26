@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { issues, issueRelations, issueThreadInteractions } from "@paperclipai/db";
+import { agents, companyMemberships, issues, issueRelations, issueThreadInteractions } from "@paperclipai/db";
 import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
 
 export type WipReason = "todo" | "in_progress" | "active_execution" | "untyped_blocked"
@@ -40,10 +40,15 @@ export function issueWipReason(pullQueue = isPullQueueEnabled()) {
       and btrim(${issues.unblockDescriptor}->>'action') <> ''
       and (${issues.unblockDescriptor}->>'owner' = 'board'
         or (jsonb_typeof(${issues.unblockDescriptor}->'owner'->'userId') = 'string'
-          and btrim(${issues.unblockDescriptor}->'owner'->>'userId') <> '')
+          and exists (select 1 from ${companyMemberships} member
+            where member.company_id = "issues"."company_id" and member.principal_type = 'user'
+              and member.principal_id = ${issues.unblockDescriptor}->'owner'->>'userId'
+              and member.status = 'active'))
         or (jsonb_typeof(${issues.unblockDescriptor}->'owner'->'agentId') = 'string'
-          and btrim(${issues.unblockDescriptor}->'owner'->>'agentId') <> ''
-          and ${issues.unblockDescriptor}->'owner'->>'agentId' <> ${issues.assigneeAgentId}::text))
+          and ${issues.unblockDescriptor}->'owner'->>'agentId' <> ${issues.assigneeAgentId}::text
+          and exists (select 1 from ${agents} owner_agent
+            where owner_agent.company_id = "issues"."company_id"
+              and owner_agent.id::text = ${issues.unblockDescriptor}->'owner'->>'agentId')))
       then 'named_external_wait'
     else 'untyped_blocked' end`;
 }

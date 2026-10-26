@@ -52,6 +52,7 @@ A blocked task releases its owner's work slot when company-scoped evidence ident
 - An unblock descriptor names the board, a user, or another agent and states the action that resumes work.
 
 The descriptor's action is its saved resume condition. Existing descriptor validation remains authoritative.
+The named agent must belong to the issue company. A named user must have an active company membership.
 An agent-addressed card, a self-owned blocker, or a self-owned descriptor does not qualify.
 A closed blocker or a resolved card does not qualify.
 A scheduled monitor alone does not qualify. Untyped blocked work still consumes a slot.

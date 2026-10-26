@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, issues, issueRelations, issueThreadInteractions } from "@paperclipai/db";
+import { agents, companies, companyMemberships, createDb, issues, issueRelations, issueThreadInteractions } from "@paperclipai/db";
 import { issueWipReason } from "./agent-wip-policy.js";
 import { companyFlowService } from "./company-flow.js";
 import { logger } from "../middleware/logger.js";
@@ -107,6 +107,12 @@ const support = await getEmbeddedPostgresTestSupport();
     const card = await create();
     const named = await create({ unblockDescriptor: { owner: "board", kind: "external",
       action: "Resume after the vendor response. deadline: 2026-10-27T00:00:00Z" } });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "wip-reviewer", status: "active" });
+    await create({ unblockDescriptor: { owner: { agentId: free }, action: "Resume after the other owner releases the dependency." } });
+    await create({ unblockDescriptor: { owner: { userId: "wip-reviewer" }, action: "Resume after the user confirms the result." } });
+    const userCard = await create();
+    await db.insert(issueThreadInteractions).values({ companyId, issueId: userCard.id, addresseeUserId: "wip-reviewer",
+      kind: "request_confirmation", payload: { version: 1, prompt: "Approve?" } });
     await db.insert(issueRelations).values({ companyId, issueId: externalBlocker.id, relatedIssueId: external.id, type: "blocks" });
     const [humanCard] = await db.insert(issueThreadInteractions).values({ companyId, issueId: card.id,
       kind: "request_confirmation", effectiveResolverPolicy: "human_only", payload: { version: 1, prompt: "Approve?" } }).returning();
@@ -118,9 +124,9 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(await countAgentActiveIssues(db, { companyId, agentId: owner })).toBe(0);
         expect(await agentWipFull(db, agentActor, { companyId, agentId: owner, status: "todo" })).toBe(false);
         const flow = await companyFlowService(db).report(companyId);
-        expect(flow.agents.find((agent) => agent.id === owner)).toMatchObject({ wip: 0, runnableWip: 0, waitingWip: 3, atWipLimit: false });
+        expect(flow.agents.find((agent) => agent.id === owner)).toMatchObject({ wip: 0, runnableWip: 0, waitingWip: 6, atWipLimit: false });
       }
-      expect(audit).toHaveBeenCalledWith(expect.objectContaining({ agentId: owner, runnable: 0, waiting: 3,
+      expect(audit).toHaveBeenCalledWith(expect.objectContaining({ agentId: owner, runnable: 0, waiting: 6,
         decisions: expect.arrayContaining([
           { issueId: external.id, reason: "external_blocker" },
           { issueId: card.id, reason: "human_card" },
@@ -139,12 +145,22 @@ const support = await getEmbeddedPostgresTestSupport();
   it("counts untyped, self-owned, stale, agent-card, and cross-company waits", async () => {
     const owner = randomUUID();
     const otherCompany = randomUUID();
+    const otherAgent = randomUUID();
     await db.insert(companies).values({ id: otherCompany, name: "Other company", issuePrefix: "OTHERWIP" });
     await db.insert(agents).values({ id: owner, companyId, name: "Untyped owner", role: "engineer", adapterType: "process" });
+    await db.insert(agents).values({ id: otherAgent, companyId: otherCompany, name: "Private owner", role: "engineer", adapterType: "process" });
+    await db.insert(companyMemberships).values([
+      { companyId: otherCompany, principalType: "user", principalId: "foreign-wip-user", status: "active" },
+      { companyId, principalType: "user", principalId: "inactive-wip-user", status: "inactive" },
+    ]);
     const [untyped, self, empty, agentCard, stale, crossCompany, ambiguousCard] = await db.insert(issues).values([
       { monitorNextCheckAt: new Date() },
       { unblockDescriptor: { owner: { agentId: owner }, action: "I will repair this." } },
       { unblockDescriptor: { owner: "board" as const, action: " " } }, {}, {}, {}, {},
+      { unblockDescriptor: { owner: { agentId: otherAgent }, action: "Resume after the private owner responds." } },
+      { unblockDescriptor: { owner: { agentId: randomUUID() }, action: "Resume after the missing owner responds." } },
+      { unblockDescriptor: { owner: { userId: "foreign-wip-user" }, action: "Resume after the private user responds." } },
+      { unblockDescriptor: { owner: { userId: "inactive-wip-user" }, action: "Resume after the inactive user responds." } },
     ].map((extra) => ({ companyId, title: "Own work", status: "blocked", assigneeAgentId: owner, ...extra }))).returning();
     const [closed, privateBlocker] = await db.insert(issues).values([
       { companyId, title: "Closed blocker", status: "cancelled", assigneeAgentId: free },
@@ -160,7 +176,7 @@ const support = await getEmbeddedPostgresTestSupport();
       { companyId: otherCompany, issueId: crossCompany.id, kind: "request_confirmation", effectiveResolverPolicy: "human_only", payload: { version: 1, prompt: "Approve?" } },
       { companyId, issueId: ambiguousCard.id, kind: "request_confirmation", payload: { version: 1, prompt: "Approve?" } },
     ]);
-    expect(await countAgentActiveIssues(db, { companyId, agentId: owner })).toBe(7);
+    expect(await countAgentActiveIssues(db, { companyId, agentId: owner })).toBe(11);
     const reasons = await db.select({ reason: issueWipReason() }).from(issues).where(eq(issues.assigneeAgentId, owner));
     expect(reasons.every(({ reason }) => reason === "untyped_blocked")).toBe(true);
     process.env.PAPERCLIP_AGENT_WIP_LIMIT = "3";
