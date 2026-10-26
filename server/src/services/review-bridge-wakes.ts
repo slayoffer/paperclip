@@ -5,6 +5,7 @@ import type { heartbeatService } from "./heartbeat.js";
 import { createDurableBridgeWakeupRequest } from "./durable-bridge-wakeup.js";
 import { BRIDGE_DISPATCH_ACTOR, BRIDGE_DISPATCH_PENDING, reconcileBridgeWaits } from "./review-bridge-waits.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
 import { logger } from "../middleware/logger.js";
 
 /** Only server-created receipts can enter bridge restart recovery. */
@@ -37,6 +38,10 @@ export async function dispatchBridgeWakes(db: Db, enqueue: ReturnType<typeof hea
   )).orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.id)).limit(500);
   let delivered = 0;
   for (const intent of intents) {
+    const payload = intent.payload!;
+    const issueId = String(payload.issueId);
+    const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, intent.companyId), eq(issues.id, issueId)));
+    if (issue && await isRecoveryIssueTokenBudgetBlocked(db, issue)) continue;
     const claimedAt = new Date();
     const [claimed] = await db.update(agentWakeupRequests).set({ status: "dispatching_bridge", updatedAt: claimedAt })
       .where(and(eq(agentWakeupRequests.id, intent.id), eligible)).returning();
@@ -44,10 +49,7 @@ export async function dispatchBridgeWakes(db: Db, enqueue: ReturnType<typeof hea
     const claim = and(eq(agentWakeupRequests.id, intent.id), eq(agentWakeupRequests.status, "dispatching_bridge"),
       eq(agentWakeupRequests.updatedAt, claimedAt));
     try {
-      const payload = intent.payload!;
-      const issueId = String(payload.issueId);
       const receiptId = String(payload.receiptId);
-      const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, intent.companyId), eq(issues.id, issueId)));
       if (!issue || issue.hiddenAt || issue.status !== "todo" || issue.assigneeAgentId !== intent.agentId
         || issue.statusVersion !== payload.statusVersion) {
         await db.update(agentWakeupRequests).set({ status: "cancelled", updatedAt: new Date() }).where(claim);

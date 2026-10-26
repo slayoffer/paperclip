@@ -1,5 +1,5 @@
-import { and, desc, eq, gte, like, sql } from "drizzle-orm";
-import { heartbeatRuns, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { and, desc, eq, gte, like, ne, or, sql } from "drizzle-orm";
+import { heartbeatRuns, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
 
 /**
  * Per-issue input-token budget (synthiq fork, Guild model v2 rule 5, 2026-10-17). With PAPERCLIP_ISSUE_TOKEN_BUDGET=N,
@@ -73,6 +73,37 @@ const millions = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
 
 /** Raise one budget card per issue and window. Returns true when a new card was created. */
 export async function ensureIssueTokenBudgetCard(
+  db: Db,
+  input: { companyId: string; issueId: string; config: IssueTokenBudgetConfig; state: IssueTokenBudgetState },
+): Promise<boolean> {
+  // Recovery and heartbeat admission share this lock. Rolling-window starts
+  // can differ between callers, so the exact idempotency key is insufficient.
+  return db.transaction(async (tx) => {
+    const [issue] = await tx.select({ id: issues.id }).from(issues)
+      .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
+      .for("update");
+    if (!issue) return false;
+    const client = tx as unknown as Db;
+    const state = await loadIssueTokenBudgetState(client, input);
+    if (!state.exceeded) return false;
+    const [stop] = await tx.select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .where(and(
+        eq(issueThreadInteractions.companyId, input.companyId),
+        eq(issueThreadInteractions.issueId, input.issueId),
+        like(issueThreadInteractions.idempotencyKey, `${ISSUE_TOKEN_BUDGET_CARD_KEY_PREFIX}%`),
+        ne(issueThreadInteractions.status, "accepted"),
+        or(
+          eq(issueThreadInteractions.idempotencyKey, `${ISSUE_TOKEN_BUDGET_CARD_KEY_PREFIX}${state.windowStart.toISOString()}`),
+          gte(issueThreadInteractions.createdAt, state.windowStart),
+        ),
+      )).limit(1);
+    if (stop) return false;
+    return insertIssueTokenBudgetCard(client, { ...input, state });
+  });
+}
+
+async function insertIssueTokenBudgetCard(
   db: Db,
   input: { companyId: string; issueId: string; config: IssueTokenBudgetConfig; state: IssueTokenBudgetState },
 ): Promise<boolean> {
