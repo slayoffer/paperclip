@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -17,6 +17,54 @@ const policy = {
   projectWorkspaceId: null,
   workspaceStrategies: [undefined, null, {}],
 };
+
+describe("unbound repository-free task selection", () => {
+  const unbound = {
+    issueId: "report-1",
+    mode: "shared_workspace",
+    hasProject: true,
+    hasProjectWorkspace: false,
+    hasPriorTaskSession: false,
+    isRecovery: false,
+    projectWorkspaceId: null,
+    requestedExecutionWorkspaceId: null,
+    existingWorkspace: null,
+    workspaceStrategies: [undefined, null, {}],
+  };
+
+  it.each(["shared_workspace", "isolated_workspace"])("uses a task directory for %s", (mode) => {
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...unbound, mode })).toBe(true);
+  });
+
+  it.each([
+    { mode: "operator_branch" }, { mode: "agent_default" }, { mode: "reuse_existing" },
+    { hasProject: false }, { hasPriorTaskSession: true }, { isRecovery: true },
+    { hasProjectWorkspace: true }, { projectWorkspaceId: "selected-repository" },
+    { requestedExecutionWorkspaceId: "explicit-workspace" },
+    { workspaceStrategies: [{ type: "git_worktree" }] },
+    { workspaceStrategies: [{ existingBranch: "approved-head" }] },
+    { workspaceStrategies: [{ baseRef: "release" }] },
+    { workspaceStrategies: [{ provisionCommand: "setup" }] },
+  ])("preserves explicit requirements: %j", (override) => {
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...unbound, ...override })).toBe(false);
+  });
+
+  it("resumes only the task's own directory binding", () => {
+    const bound = { ...unbound, requestedExecutionWorkspaceId: "directory-1",
+      existingWorkspace: { sourceIssueId: unbound.issueId, metadata: { isolatedTaskDirectory: true } } };
+    expect(shouldUseRepositoryFreeTaskDirectory(bound)).toBe(true);
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...bound, isRecovery: true, hasPriorTaskSession: true })).toBe(true);
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...bound,
+      existingWorkspace: { ...bound.existingWorkspace, sourceIssueId: "foreign-task" } })).toBe(false);
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...bound,
+      existingWorkspace: { ...bound.existingWorkspace, metadata: {} } })).toBe(false);
+  });
+
+  it("does not treat a native run-ID sentinel as a directory binding", () => {
+    expect(shouldUseRepositoryFreeTaskDirectory({ ...unbound, hasProject: false,
+      requestedExecutionWorkspaceId: "native-run-id", isRecovery: true })).toBe(false);
+  });
+});
 
 describe("repository-free low-trust workspace selection", () => {
   it("selects a private directory for sandbox tasks without a repository", () => {

@@ -356,7 +356,7 @@ import {
   nativeChatWorkspaceCwd,
   nativeChatWorkspaceMatches,
 } from "./native-runtime/native-chat-workspace.js";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import {
@@ -21092,7 +21092,23 @@ export function heartbeatService(
           issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
           config.workspaceStrategy, projectExecutionWorkspacePolicy?.workspaceStrategy],
       });
-      if (workspaceReuseFallback) requestedExecutionWorkspaceMode = "isolated_workspace";
+      const repositoryFreeTaskDirectory = issueRef !== null && !isConversation(issueContext)
+        && shouldUseRepositoryFreeTaskDirectory({
+          issueId: issueRef.id,
+          mode: requestedExecutionWorkspaceMode,
+          hasProject: projectContext !== null,
+          hasProjectWorkspace: projectContext?.hasWorkspace ?? false,
+          hasPriorTaskSession: taskSession !== null && !ownerSession,
+          isRecovery: Boolean(persistedNativeExecutionInput || runOptions.legacyRestartRecovery),
+          projectWorkspaceId: issueRef.projectWorkspaceId,
+          requestedExecutionWorkspaceId,
+          existingWorkspace: reusableExistingExecutionWorkspace,
+          workspaceStrategies: [config.workspaceStrategy,
+            issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
+            projectExecutionWorkspacePolicy?.workspaceStrategy,
+            environmentExecutionWorkspaceSettings?.workspaceStrategy],
+        });
+      if (workspaceReuseFallback || repositoryFreeTaskDirectory) requestedExecutionWorkspaceMode = "isolated_workspace";
       const requestedReusableExecutionWorkspaceConfig =
         reusableExistingExecutionWorkspace?.config ?? null;
       const localEnvironment = await environmentsSvc.ensureLocalEnvironment(
@@ -21361,7 +21377,7 @@ export function heartbeatService(
           );
         }
       }
-      const useIsolatedTaskDirectory = issueRef !== null && (Boolean(workspaceReuseFallback && !projectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
+      const useIsolatedTaskDirectory = issueRef !== null && (repositoryFreeTaskDirectory || Boolean(workspaceReuseFallback && !projectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
         trustPreset: trustPreset.kind,
         environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
         mode: requestedExecutionWorkspaceMode,
@@ -21737,6 +21753,11 @@ export function heartbeatService(
               companyId: agent.companyId,
               issueId: issueRef.id,
             });
+            if (persistedNativeExecutionInput && persistedNativeExecutionInput.workspace.cwd !== cwd) {
+              throw new WorkspaceValidationFailure("The native recovery directory differs from its admitted directory.", {
+                workspaceValidation: { reason: "isolated_task_directory_recovery_mismatch", issueId: issueRef.id },
+              });
+            }
             if (reusableExistingExecutionWorkspace && (
               reusableExistingExecutionWorkspace.companyId !== agent.companyId ||
               reusableExistingExecutionWorkspace.projectId !== issueRef.projectId ||
@@ -22195,6 +22216,7 @@ export function heartbeatService(
       const nextExecutionWorkspaceMetadata = {
         ...baseExecutionWorkspaceMetadata,
         ...(workspaceReuseFallback ? { workspaceReuseFallback } : {}),
+        ...(useIsolatedTaskDirectory ? { isolatedTaskDirectory: true } : {}),
         ...(separateTaskEnvironmentBinding ? {
           taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
           createdByRuntime: false,

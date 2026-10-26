@@ -3,6 +3,33 @@ import path from "node:path";
 import { parseObject } from "../adapters/utils.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 
+/** Unbound tasks without a repository must not inherit shared directory contents. */
+export function shouldUseRepositoryFreeTaskDirectory(input: {
+  issueId: string;
+  mode: string;
+  hasProject: boolean;
+  hasProjectWorkspace: boolean;
+  hasPriorTaskSession: boolean;
+  isRecovery: boolean;
+  projectWorkspaceId: string | null;
+  requestedExecutionWorkspaceId: string | null;
+  existingWorkspace: {
+    sourceIssueId: string | null;
+    metadata?: Record<string, unknown> | null;
+  } | null;
+  workspaceStrategies: unknown[];
+}): boolean {
+  if (input.mode !== "shared_workspace" && input.mode !== "isolated_workspace") return false;
+  if (!input.hasProject || input.hasProjectWorkspace || input.projectWorkspaceId) return false;
+  const ownsTaskDirectory = input.existingWorkspace?.sourceIssueId === input.issueId
+    && input.existingWorkspace.metadata?.isolatedTaskDirectory === true;
+  // Never move a saved session or a recovery input into a new empty directory.
+  if ((input.hasPriorTaskSession || input.isRecovery) && !ownsTaskDirectory) return false;
+  if (input.requestedExecutionWorkspaceId && !ownsTaskDirectory) return false;
+  // Exact branches, repository requirements, and setup hooks keep their original path.
+  return input.workspaceStrategies.every((value) => Object.keys(parseObject(value)).length === 0);
+}
+
 /** A repository-free sandbox task needs isolation, but has no Git base. */
 export function shouldUseIsolatedTaskDirectory(input: {
   trustPreset: string;
