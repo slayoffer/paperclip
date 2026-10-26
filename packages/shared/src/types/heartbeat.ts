@@ -282,6 +282,16 @@ export interface AgentWakeupSkipped {
   executionRunId: string | null;
   executionAgentId: string | null;
   executionAgentName: string | null;
+  /** The exact receipt for this request, when admission recorded one. */
+  wakeupRequestId?: string;
+  error?: string | null;
+  details?: {
+    heartbeatSkip?: Record<string, string | number | boolean | null | string[]>;
+    executionWait?: Record<string, string | number | boolean | null | string[]>;
+    unresolvedBlockerIssueIds?: string[];
+    unresolvedBlockers?: Array<{ id: string; identifier: string | null; status: string }>;
+    budget?: { used: number; limit: number; windowStart: string };
+  };
 }
 
 export type AgentWakeupResponse = HeartbeatRun | AgentWakeupSkipped;

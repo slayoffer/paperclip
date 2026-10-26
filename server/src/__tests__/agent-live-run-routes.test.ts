@@ -16,6 +16,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   getRunLogAccess: vi.fn(),
   readLog: vi.fn(),
   wakeup: vi.fn(),
+  wakeupWithDiagnostics: vi.fn(),
   getRun: vi.fn(),
 }));
 
@@ -366,6 +367,9 @@ describe("agent live run routes", () => {
       content: "chunk",
       nextOffset: 5,
     });
+    mockHeartbeatService.wakeupWithDiagnostics.mockImplementation(async (id, opts) => ({
+      run: await mockHeartbeatService.wakeup(id, opts), skipped: null,
+    }));
     mockHeartbeatService.wakeup.mockResolvedValue({
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       companyId: "company-1",
@@ -1569,6 +1573,33 @@ describe("agent live run routes", () => {
       }),
     );
   });
+
+  it.each(["issue.token_budget_exceeded", "issue_dependencies_blocked"])(
+    "returns stored diagnostics for %s without execution-state guesses", async (reason) => {
+      const skipped = { wakeupRequestId: "request-1", reason, error: "The wake cannot start.",
+        message: "The wake cannot start.", details: { heartbeatSkip: { observed: 5, limit: 3 } } };
+      mockHeartbeatService.wakeupWithDiagnostics.mockResolvedValueOnce({ run: null, skipped });
+      const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
+        .post(`/api/agents/${routeAgentId}/wakeup?companyId=company-1`)
+        .send({ source: "on_demand", payload: { issueId: "22222222-2222-4222-8222-222222222222" } }));
+      expect(res.status, JSON.stringify(res.body)).toBe(202);
+      expect(res.body).toMatchObject({ status: "skipped", ...skipped });
+      expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([123, { nested: "invalid" }, "  ", null])(
+    "normalizes an invalid skipped issue identifier: %j", async (issueId) => {
+      mockHeartbeatService.wakeupWithDiagnostics.mockResolvedValueOnce({
+        run: null, skipped: { reason: "heartbeat.wakeOnDemand.disabled", error: null, message: "Disabled.", details: {} },
+      });
+      const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
+        .post(`/api/agents/${routeAgentId}/wakeup?companyId=company-1`)
+        .send({ source: "on_demand", payload: { issueId } }));
+      expect(res.status, JSON.stringify(res.body)).toBe(202);
+      expect(res.body.issueId).toBeNull();
+    },
+  );
 
   it("marks traced re-runs as explicit resumes so terminal issue context can execute", async () => {
     const issueId = "22222222-2222-4222-8222-222222222222";
