@@ -58,3 +58,5 @@ Manual: Complete implementation under a review-required policy and confirm it wa
 - Use [questions and approvals](./questions-and-approvals.md) for decision forms and [recovery](./recovery.md) for interrupted work.
 
 Automated: [pull queue](../../server/src/__tests__/heartbeat-pull-queue.test.ts) checks guarded selection, real-work counts, ghost release, and monitor protection. Deployment latency requires a separate measurement.
+
+Automated: [queue skip and parking regressions](../../server/src/__tests__/heartbeat-pull-queue-gap.test.ts) checks progress past skipped heads and durable backlog stops.
