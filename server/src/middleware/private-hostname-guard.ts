@@ -2,7 +2,8 @@ import type { Request, RequestHandler } from "express";
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+  // URL.hostname retains brackets around IPv6 literals.
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
 
 function extractHostname(req: Request): string | null {

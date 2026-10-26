@@ -955,3 +955,4 @@ export * from "./skill-source.js";
 export * from "./agent-lifecycle.js";
 
 export * from "./task-workspace.js";
+export type { RuntimeCap } from "./runtime-cap.js";

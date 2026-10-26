@@ -1,4 +1,6 @@
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
+import { getProcessRunningRunsCap } from "../services/instance-run-cap.js";
+import { getRuntimeCap, type RuntimeCap } from "../services/runtime-cap.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
@@ -135,6 +137,7 @@ export function healthRoutes(
     companyDeletionEnabled: true,
   },
 ) {
+  getProcessRunningRunsCap();
   const router = Router();
 
   router.post("/dev-server/restart", async (req, res) => {
@@ -231,6 +234,30 @@ export function healthRoutes(
   });
 
   router.get("/", async (req, res) => {
+    let runtimeCap: RuntimeCap | undefined;
+    if (req.query.capNonce !== undefined) {
+      res.set("Cache-Control", "no-store");
+      // Use the socket peer, never proxy-derived req.ip or a supplied Host.
+      const peer = req.socket.remoteAddress;
+      const local = peer === "::1" || peer === "127.0.0.1" || peer === "::ffff:127.0.0.1";
+      const forwarded = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"]
+        .some((header) => req.headers[header] !== undefined);
+      if (!local || forwarded) {
+        res.status(403).json({ error: "runtime_cap_local_only" });
+        return;
+      }
+      const nonce = req.query.capNonce;
+      if (typeof nonce !== "string" || nonce.length < 1 || nonce.length > 128) {
+        res.status(400).json({ error: "invalid_cap_nonce" });
+        return;
+      }
+      try {
+        runtimeCap = getRuntimeCap(nonce);
+      } catch {
+        res.status(503).json({ error: "runtime_cap_unavailable" });
+        return;
+      }
+    }
     const actorType = "actor" in req ? req.actor?.type : null;
     const exposeFullDetails = shouldExposeFullHealthDetails(
       actorType,
@@ -280,6 +307,7 @@ export function healthRoutes(
               serverVersion: serverVersion,
               commit,
               serverInfo,
+              ...(runtimeCap ? { runtimeCap } : {}),
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
             }
@@ -287,6 +315,7 @@ export function healthRoutes(
               status: healthStatus,
               deploymentMode: opts.deploymentMode,
               commit,
+              ...(runtimeCap ? { runtimeCap } : {}),
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
             },
@@ -305,6 +334,7 @@ export function healthRoutes(
         deploymentExposure: opts.deploymentExposure,
         commit,
         warmStandby: true,
+        ...(runtimeCap ? { runtimeCap } : {}),
         ...(cloud ? { cloud } : {}),
         ...(hiddenSettings.length ? { hiddenSettings } : {}),
       });
@@ -327,6 +357,7 @@ export function healthRoutes(
         serverVersion,
         commit,
         error: "database_unreachable",
+        ...(runtimeCap ? { runtimeCap } : {}),
         ...(exposeFullDetails ? { serverInfo } : {}),
         ...(workspace ? { workspace } : {}),
         ...(cloud ? { cloud } : {}),
@@ -414,6 +445,7 @@ export function healthRoutes(
         commit,
         bootstrapStatus,
         bootstrapInviteActive,
+        ...(runtimeCap ? { runtimeCap } : {}),
         ...(redactedDatabaseBackup ? { databaseBackup: redactedDatabaseBackup } : {}),
         ...(redactedWarnings ? { warnings: redactedWarnings } : {}),
         ...(devServer ? { devServer } : {}),
@@ -444,6 +476,7 @@ export function healthRoutes(
       serverInfo,
       startupRecovery,
       nativeRecovery,
+      ...(runtimeCap ? { runtimeCap } : {}),
       ...(databaseBackup ? { databaseBackup } : {}),
       ...(warnings ? { warnings } : {}),
       ...(devServer ? { devServer } : {}),
