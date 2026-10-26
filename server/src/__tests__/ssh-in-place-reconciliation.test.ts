@@ -21,6 +21,7 @@ import { logger } from "../middleware/logger.js";
 import * as leaseServices from "../services/environments.js";
 import * as ownership from "../services/ssh-in-place-lock.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { registerAgentHomeOwnershipCases } from "./helpers/ssh-in-place-agent-home-cases.js";
 
 // Only secret resolution uses fixture authentication. SQL, SSH, remote process
 // checks, receipt persistence, ownership files, and realization remain real.
@@ -105,6 +106,7 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
   async function stored(id: string) {
     return (await db.select().from(environmentLeases).where(eq(environmentLeases.id, id)))[0] as EnvironmentLease;
   }
+  registerAgentHomeOwnershipCases({ db: () => db, owner, stored });
   it.each([false, true])("recovers terminal ownership with saved tracking %s and logs the next realization in place", async tracking => {
     const f = await owner({ tracking }); await stoppedWriter(f);
     if (tracking) await db.update(environmentLeases).set({ status: "active", releasedAt: null })
