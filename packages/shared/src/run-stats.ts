@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+export const grantAgentStatsReadSchema = z.object({
+  permissionKey: z.literal("stats:read"),
+}).strict();
+export type GrantAgentStatsRead = z.infer<typeof grantAgentStatsReadSchema>;
+
 export const RUN_STATS_MAX_RANGE_MS = 14 * 24 * 60 * 60 * 1000;
 export const runStatsQuerySchema = z.object({
   from: z.string().datetime({ offset: true }),
