@@ -136,13 +136,16 @@ suite("connection health isolation", () => {
     expect((await f.stored()).healthStatus).toBe("ok");
   });
 
-  it.each(["protocol", "transport"])("marks %s failures unhealthy", async kind => {
+  it.each([
+    ["protocol", "error", "remote_mcp_error"],
+    ["transport", "ok", "mcp_remote_fetch_failed"],
+  ])("records %s failures with connection health %s", async (kind, healthStatus, reasonCode) => {
     const f = await fixture();
     await expect(f.execute(id => {
       if (kind === "transport") throw new TypeError("fetch failed");
-      return new Response(kind === "invalid-json" ? "not json" : kind === "malformed" ? JSON.stringify({ jsonrpc: "2.0", id }) : JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message: "invalid request" } }));
-    })).rejects.toMatchObject({ status: 502 });
-    expect((await f.stored()).healthStatus).toBe("error");
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message: "invalid request" } }));
+    })).rejects.toMatchObject({ status: 502, reasonCode });
+    expect((await f.stored()).healthStatus).toBe(healthStatus);
   });
 
   // Synthiq fork: only a manual credential change requires a new health test.

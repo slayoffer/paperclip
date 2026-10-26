@@ -15,6 +15,9 @@ on:
       - server/src/services/secrets.ts
       - server/src/services/tool-gateway-errors.ts
       - server/src/services/tool-gateway.ts
+      - server/src/services/tool-connection-discovery.ts
+      - server/src/services/heartbeat.ts
+      - server/src/__tests__/tool-gateway-shared-connection-failure.test.ts
       - server/src/services/mcp-http.ts
       - server/src/services/connection-credentials.ts
       - server/src/__tests__/connection-health-isolation.test.ts
@@ -71,6 +74,7 @@ jobs:
         run: >-
           corepack pnpm exec vitest run --project @paperclipai/server
           server/src/__tests__/connection-health-isolation.test.ts
+          server/src/__tests__/tool-gateway-shared-connection-failure.test.ts
           server/src/__tests__/connection-intents-service.test.ts
           server/src/__tests__/tool-gateway-service.test.ts
           server/src/__tests__/secrets-service.test.ts
