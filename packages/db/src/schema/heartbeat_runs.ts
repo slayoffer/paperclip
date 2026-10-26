@@ -182,6 +182,20 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       table.createdAt.desc(),
     ),
+    companyIssueCoalesceIdx: index("heartbeat_runs_company_issue_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.nativeIssueId}::text, ${table.contextSnapshot}->>'issueId'))`,
+      table.createdAt.desc(),
+    ),
+    companyRecoveryActionIdx: index("heartbeat_runs_company_recovery_action_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot}->>'recoveryActionId')`,
+      table.createdAt.desc(),
+    ),
+    companyIssueTaskCoalesceIdx: index("heartbeat_runs_company_issue_task_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.contextSnapshot}->>'issueId', ${table.contextSnapshot}->>'taskId', ${table.nativeIssueId}::text))`,
+    ),
     companyCtxIssueCreatedIdx: index("heartbeat_runs_company_ctx_issue_created_idx").on(
       table.companyId,
       sql`(${table.contextSnapshot} ->> 'issueId')`,
