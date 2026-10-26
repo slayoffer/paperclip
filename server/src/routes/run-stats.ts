@@ -6,9 +6,11 @@ import { forbidden } from "../errors.js";
 import { accessService } from "../services/access.js";
 import { runStatsService } from "../services/run-stats.js";
 import { assertCompanyAccess } from "./authz.js";
+import { agentStatsGrantRoutes } from "./agent-stats-grants.js";
 
 export function runStatsRoutes(db: Db) {
   const router = Router();
+  router.use(agentStatsGrantRoutes(db));
   const access = accessService(db);
   const stats = runStatsService(db);
   router.get("/companies/:companyId/run-stats", async (req, res) => {

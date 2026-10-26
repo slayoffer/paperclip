@@ -9,6 +9,7 @@ export const apiPrefixes: Record<string, string> = {
   "agent-commentary.ts": "/api",
   "agent-avatars.ts": "/api",
   "agent-profile-avatar.ts": "/api",
+  "agent-stats-grants.ts": "/api",
   "announcements.ts": "/api",
   "ai-connections.ts": "/api",
   "decision-models.ts": "/api",
