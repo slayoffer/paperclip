@@ -22,7 +22,6 @@ import {
   adapterExecutionTargetSessionMatches,
   adapterExecutionTargetUsesPaperclipBridge,
   describeAdapterExecutionTarget,
-  ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
   adapterExecutionTargetDuplexObservabilityRecorder,
@@ -97,6 +96,7 @@ import {
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
+import { DEFAULT_CODEX_COMMAND, resolveCodexCommand } from "./command.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
   CODEX_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
@@ -603,7 +603,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
-  const command = asString(config.command, "codex");
+  const configuredCommand = asString(config.command, DEFAULT_CODEX_COMMAND);
   const model = asString(config.model, "");
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -837,7 +837,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             runtimeRootDir: resolveAdapterExecutionTargetInPlaceRuntimeRootDir(executionTarget, "codex"),
             providerSessionRoot: ownerSession?.providerSessionRoot,
             installCommand: SANDBOX_INSTALL_COMMAND,
-            detectCommand: command,
+            detectCommand: configuredCommand,
             onProgress: (line) => onLog("stdout", line),
             onRuntimeProgress: ctx.onRuntimeProgress,
             assets: [
@@ -1061,8 +1061,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onLog,
     });
-    await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
-    const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
+    const command = await resolveCodexCommand({
+      runId,
+      command: configuredCommand,
+      target: runtimeExecutionTarget,
+      cwd: effectiveExecutionCwd,
+      env: executionTargetIsRemote ? env : runtimeEnv,
+      onLog,
+    });
+    const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, runtimeExecutionTarget, effectiveExecutionCwd, runtimeEnv);
     const loggedEnv = buildInvocationEnvForLogs(env, {
       runtimeEnv,
       includeRuntimeKeys: ["HOME"],
