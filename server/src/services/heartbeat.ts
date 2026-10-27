@@ -1,3 +1,4 @@
+import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
@@ -22596,11 +22597,13 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
-        const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
+        const ownerParkingBlock = issueId ? await issueOwnerParkingReason(db,
+          { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
+        const repairBlock = ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
+            error: ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
@@ -27078,15 +27081,7 @@ export function heartbeatService(
     };
 
     const schedulingSuppression = await getSchedulingSuppression();
-    // A task drain holds ADMISSION, not the request. The drain is a
-    // persistent admission hold, so a wake that arrives while it is
-    // active still names real work that must run once the process comes
-    // back: leave it in the durable queue and let the dispatch-side checks
-    // (startNextQueuedRunForAgent / executeRun) keep it from starting until
-    // the lease expires or its owner releases it. Writing it as `skipped`
-    // here dropped the wake permanently — an accepted plan whose
-    // continuation wake landed mid-drain left its issue in `todo` with no
-    // run and no path until a person noticed.
+    // A task drain retains durable wakes. Dispatch checks its persistent admission hold.
     if (
       schedulingSuppression.suppressed &&
       schedulingSuppression.reason !== "task_drain"
@@ -27119,8 +27114,12 @@ export function heartbeatService(
       return null;
     }
 
-    // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
-    // Retry in the board UI passes (Anton, 2026-10-17): board keys act in his name, so "user" is not enough.
+    if (issueId && isUuidLike(issueId)) {
+      const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
+      if (parked) { await writeSkippedRequest(parked); return null; }
+    }
+
+    // Issue budgets require the board UI override. A board API key alone cannot bypass this stop.
     const issueTokenBudget = issueId && isUuidLike(issueId) && opts.issueBudgetOverride !== true
       ? issueTokenBudgetConfig()
       : null;

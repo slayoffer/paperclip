@@ -1,11 +1,5 @@
-// Pure decision rules for two heartbeat run-dispatch gates:
-//   - the scheduled-retry promotion gate (decideScheduledRetryGate)
-//   - the queued-run staleness check (decideQueuedRunStaleness)
-// The caller reads the database, the clock, and the agent's invokability,
-// then packs the result into a facts object. This file only branches on
-// that facts object; it never queries a database or reads the clock.
+// Pure rules for retry promotion and queued dispatch. Callers supply current authority facts.
 
-/** The retry reason a run carries, reduced to the kinds a gate cares about. */
 export type RetryReasonKind =
   | "max_turn_continuation"
   | "disposition_repair"
@@ -52,6 +46,7 @@ export type ScheduledRetryGateErrorCode =
   | "agent_not_invokable"
   | "heartbeat_wake_on_demand_disabled"
   | "budget_blocked"
+  | "issue_owner_parked"
   | "issue_not_found"
   | "issue_reassigned"
   | "issue_cancelled"
@@ -90,6 +85,7 @@ export type ScheduledRetryFacts = {
 
   heartbeatWakeOnDemandEnabled: boolean;
 
+  ownerParkingReason?: string | null;
   issueFound: boolean;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
@@ -110,6 +106,7 @@ export type ScheduledRetryFacts = {
 export type QueuedRunStalenessErrorCode =
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
+  | "issue_owner_parked"
   | "issue_not_found"
   | "issue_assignee_changed"
   | "issue_terminal_status"
@@ -136,6 +133,7 @@ export type QueuedRunFacts = {
   issueId: string;
   retryReasonKind: RetryReasonKind;
 
+  ownerParkingReason?: string | null;
   issueFound: boolean;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
@@ -253,11 +251,7 @@ function decideReviewParticipant(
   return "participant_changed";
 }
 
-/**
- * Decides whether a due scheduled retry may promote to a queued run. The
- * caller passes now for signature symmetry with future clock-dependent
- * rules; today's rules need no clock read.
- */
+/** Check current authority before retry promotion. */
 export function decideScheduledRetryGate(
   facts: ScheduledRetryFacts,
   _now: Date,
@@ -300,6 +294,8 @@ export function decideScheduledRetryGate(
   }
 
   if (!facts.issueId) return { allowed: true };
+  if (facts.ownerParkingReason) return { allowed: false, reason: facts.ownerParkingReason,
+    errorCode: "issue_owner_parked", issueId: facts.issueId, details: { issueId: facts.issueId } };
 
   if (!facts.issueFound) {
     return {
@@ -489,15 +485,13 @@ export function decideScheduledRetryGate(
   return { allowed: true };
 }
 
-/**
- * Decides whether a queued run has gone stale before it could start. The
- * caller passes now for signature symmetry with future clock-dependent
- * rules; today's rules need no clock read.
- */
+/** Check current authority before provider dispatch. */
 export function decideQueuedRunStaleness(
   facts: QueuedRunFacts,
   _now: Date,
 ): StalenessDecision {
+  if (facts.ownerParkingReason) return { stale: true, reason: facts.ownerParkingReason,
+    errorCode: "issue_owner_parked", details: { issueId: facts.issueId } };
   if (!facts.issueFound) {
     return {
       stale: true,

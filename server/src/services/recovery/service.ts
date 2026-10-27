@@ -8,6 +8,7 @@ import { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDE
 export { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "./failure-classification.js";
 export type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
 import { createResolvedDependencyWakeBackstop } from "./resolved-dependency-backstop.js";
+import { issueOwnerParkingReason } from "../issue-owner-parking.js";
 import { isRecoveryIssueTokenBudgetBlocked } from "./issue-token-budget.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -548,13 +549,7 @@ export function recoveryService(
     ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
     /** Settle retained explicit retry claims through the queue-first release policy. */
     settleExplicitContinuationRetry?: (run: typeof heartbeatRuns.$inferSelect) => Promise<void>;
-    /**
-     * Whether a failed or interrupted run has consumed every bounded
-     * transient retry, so `scheduleRecoveryRetry` can no longer produce a
-     * successor for it. Lets the sweeper tell "no retry because the budget
-     * is spent" (escalate) from "no retry because something else owns the
-     * run" (leave alone).
-     */
+    /** Distinguish exhausted retry budgets from runs owned by another lifecycle. */
     transientRetryBudgetSpent?: (
       run: typeof heartbeatRuns.$inferSelect,
     ) => boolean;
@@ -3119,6 +3114,8 @@ export function recoveryService(
           continue;
         }
 
+        if (await issueOwnerParkingReason(db, issue, "recovery.active")) { result.skipped += 1; continue; }
+
         // A queued comment or healthy child cannot establish what the stopped
         // provider already did. Only execution reconciliation can clear this hold.
         if (requiresExecutionReconciliation(action.cause)
@@ -3136,11 +3133,7 @@ export function recoveryService(
             healthyOpenChildIssues(issue),
             sourceHasNewPathOutsideRecoveryAction(action),
           ]);
-        // A healthy child that already waits on the source (for example, it
-        // waits for the parent's PR) does not move the source forward, and
-        // the source cannot wait on it without a blocking cycle. Count only
-        // the other children. With none left, the action takes the
-        // no-healthy-child path below and stays for its owner or the board.
+        // Exclude children waiting on the source to prevent a blocking cycle.
         const {
           blockable: healthyChildren,
           dependent: dependentHealthyChildren,
@@ -3497,7 +3490,8 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
-    if (await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
+    if (await issueOwnerParkingReason(db, current, "recovery.disposition") ||
+        await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
 
     if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
       await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
@@ -4117,7 +4111,8 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
-        if (await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+        if (await issueOwnerParkingReason(db, issue, "recovery.stranded") ||
+            await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
           result.skipped += 1;
           continue;
         }

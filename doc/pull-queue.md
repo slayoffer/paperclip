@@ -44,6 +44,19 @@ Parking receipts include the monotonic status version. An ownership cycle cannot
 An explicit backlog reassertion advances that version under the issue row lock. Admission rejects an earlier selection.
 These receipts affect automatic pull selection. Explicit wakes still pass through normal admission.
 
+Owner labels provide a separate execution stop, independent of the pull-queue switch.
+Either `owner:stopped` or `owner:local-session` prevents issue-bound agent wakes.
+Assignment, status promotion, disposition repair, recovery, and pull selection respect this stop.
+Admission records `issue.owner_parked` in a skipped wake receipt.
+Queue and recovery checks log that reason before requesting a wake.
+Retry promotion and queued dispatch recheck current labels and cancel with `issue_owner_parked`.
+Remove both labels before agent execution can resume. A status or assignee change does not override these labels.
+
+Changing the assignee on a blocked issue preserves `blocked` and does not wake the new assignee.
+An attached comment alone does not resume that assignment change.
+The same PATCH must explicitly set status or use `resume: true` to request continuation.
+Resume still requires a comment and the existing authority and dependency checks.
+
 With this switch enabled, both assignment admission and queue selection count real work:
 
 - Every `todo` task counts.

@@ -17,6 +17,7 @@ import {
 import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON } from "@paperclipai/shared";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+import { issueOwnerParkingReason } from "../../../services/issue-owner-parking.js";
 import { budgetService } from "../../../services/budgets.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
@@ -273,17 +274,7 @@ export function createPostgresRunDispatchAdapter(
     const issueId = readNonEmptyString(input.contextSnapshot.issueId);
     const retryReasonKind = classifyRetryReasonKind(retryReason);
 
-    // Facts fill in through the same rule order `decideScheduledRetryGate`
-    // evaluates. A field still awaiting its own read keeps a value that
-    // rule never blocks on, EXCEPT `issueFound`, which starts unresolved
-    // and gets an explicit early check once the issue read lands — a
-    // false default there would look exactly like "the issue is gone" the
-    // moment `issueId` is set, before the read that would prove it. Once a
-    // group of fields is real, this calls the gate on the facts gathered
-    // so far, so a rule an earlier read already decided stops the run
-    // before it pays for a later, unrelated read — a sweep of many due
-    // retries must not query pause holds or dependencies for a retry a
-    // budget block or a stale assignment already suppresses.
+    // Read facts in gate order. Stop before unrelated reads when a gate rejects execution.
     const facts: ScheduledRetryFacts = {
       runId: input.runId,
       runAgentId: input.agentId,
@@ -344,6 +335,8 @@ export function createPostgresRunDispatchAdapter(
     facts.issueFound = issue !== null;
     if (!facts.issueFound) return { agentFound: true, facts };
 
+    facts.ownerParkingReason = await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "retry.promotion");
+    if (facts.ownerParkingReason) return { agentFound: true, facts };
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
     facts.issueExecutionRunId = issue.executionRunId;
@@ -585,6 +578,8 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
+      ownerParkingReason: issue ? await issueOwnerParkingReason(dbOrTx,
+        { companyId: input.companyId, id: issueId }, "run.dispatch") : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
