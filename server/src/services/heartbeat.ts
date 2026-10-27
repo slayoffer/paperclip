@@ -1,3 +1,4 @@
+import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { buildOwnerRecoveryWake } from "./recovery/owner-resume.js";
 import { isolatedWorkspaceReuseConfig, shouldKeepWorkspaceReuseIsolation } from "./workspace-reuse-fallback.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
@@ -3594,11 +3595,13 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
-        const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
+        const ownerParkingBlock = issueId ? await issueOwnerParkingReason(db,
+          { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
+        const repairBlock = ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
+            error: ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
