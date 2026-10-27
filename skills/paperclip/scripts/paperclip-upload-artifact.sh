@@ -169,6 +169,7 @@ upload_file() {
       "$url" \
       -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
       -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+      -H "X-Paperclip-Upload-Operation-Id: $upload_operation_id" \
       -F "file=@\"${escaped_path}\";type=${content_type}"
   )" || curl_status=$?
 
@@ -464,6 +465,22 @@ if [[ -z "$attachment" && -f "$unknown_upload_marker" && "$retry_unknown_upload"
 fi
 
 if [[ -z "$attachment" ]]; then
+  if command -v uuidgen >/dev/null 2>&1; then
+    upload_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+    upload_operation_id="$(cat /proc/sys/kernel/random/uuid)"
+  else
+    printf '%s\n' 'Cannot create an upload operation identity. Install uuidgen.' >&2
+    exit 1
+  fi
+  # Save each attempt before curl. Keep prior attempts when an operator permits a retry.
+  operation_receipt="$operation_state_root/$operation_key.$upload_operation_id.operation.json"
+  jq -n --arg operationId "$upload_operation_id" --arg companyId "$company_id" \
+    --arg issueId "$issue_id" --arg runId "$PAPERCLIP_RUN_ID" --arg sha256 "$file_sha256" \
+    --arg originalFilename "$original_filename" \
+    '{version: 1, operationId: $operationId, companyId: $companyId, issueId: $issueId, runId: $runId,
+      sha256: $sha256, originalFilename: $originalFilename}' >"$operation_receipt"
+  printf 'Upload operation: %s. Local receipt: %s\n' "$upload_operation_id" "$operation_receipt" >&2
   rm -f "$unknown_upload_marker"
   : >"$unknown_upload_marker"
   upload_status=0

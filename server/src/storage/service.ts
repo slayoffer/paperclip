@@ -100,7 +100,13 @@ export function createStorageService(provider: StorageProvider): StorageService 
       const objectKey = buildObjectKey(input.companyId, input.namespace, input.originalFilename);
       const byteSize = "byteSize" in input ? input.byteSize : input.body.length;
       const contentType = input.contentType.trim().toLowerCase();
+      const planned: PutFileResult = {
+        provider: provider.id, objectKey, contentType, byteSize,
+        sha256: "sha256" in input ? input.sha256 : hashBuffer(input.body),
+        originalFilename: input.originalFilename,
+      };
       try {
+        await input.beforePut?.(planned);
         await provider.putObject({
           objectKey,
           body: input.body,
@@ -108,25 +114,18 @@ export function createStorageService(provider: StorageProvider): StorageService 
           contentLength: byteSize,
         });
       } catch (error) {
-        await provider.deleteObject({ objectKey }).catch(() => {});
+        if (!input.preserveOnError) await provider.deleteObject({ objectKey }).catch(() => {});
         throw error;
       } finally {
         if (input.body instanceof Readable) input.body.destroy();
       }
 
-      return {
-        provider: provider.id,
-        objectKey,
-        contentType,
-        byteSize,
-        sha256: "sha256" in input ? input.sha256 : hashBuffer(input.body),
-        originalFilename: input.originalFilename,
-      };
+      return planned;
     },
 
     async getObject(companyId: string, objectKey: string, options) {
       ensureCompanyPrefix(companyId, objectKey);
-      return provider.getObject({ objectKey, range: options?.range });
+      return provider.getObject({ objectKey, range: options?.range, signal: options?.signal });
     },
 
     async headObject(companyId: string, objectKey: string) {

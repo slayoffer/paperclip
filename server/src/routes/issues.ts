@@ -1,4 +1,6 @@
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
+import { registerUploadCorrelation } from "./upload-correlation.js";
+import { uploadReceiptService } from "../services/upload-receipts.js";
 import { releaseBridgeWait } from "../services/review-bridge-waits.js";
 import { isReviewBridgeWait, parseBridgeEvent } from "../services/review-bridge-contract.js";
 import { getRestoredBlockedDependencyWake } from "../services/restored-dependency-wake.js";
@@ -17795,6 +17797,12 @@ export function issueRoutes(
     },
   );
 
+  registerUploadCorrelation(router, {
+    db, storage,
+    getIssue: (req, res) => getAccessibleResource(req, res, svc.getById(req.params.issueId as string), "Issue not found"),
+    authorize: assertIssueReadAllowed,
+  });
+
   router.get("/issues/:id/attachments", async (req, res) => {
     const issueId = req.params.id as string;
     const issue = await getAccessibleResource(
@@ -17882,47 +17890,34 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      const operationId = z.string().uuid().parse(req.header("X-Paperclip-Upload-Operation-Id") ?? randomUUID());
+      res.setHeader("X-Paperclip-Upload-Operation-Id", operationId);
       const stored = await storage.putFile({
         companyId,
         namespace: `issues/${issueId}`,
         originalFilename: file.originalname || null,
         contentType,
         body: file.buffer,
+        beforePut: uploadReceiptService(db).beforePut({
+          companyId, issueId, operationId, actorType: actor.actorType, actorId: actor.actorId,
+          agentId: actor.agentId, runId: actor.runId, storage,
+        }),
+        preserveOnError: true,
       });
 
-      let attachment: Awaited<ReturnType<typeof svc.createAttachment>>;
-      try {
-        attachment = await svc.createAttachment({
-          issueId,
-          issueCommentId: parsedMeta.data.issueCommentId ?? null,
-          provider: stored.provider,
-          objectKey: stored.objectKey,
-          contentType: stored.contentType,
-          byteSize: stored.byteSize,
-          sha256: stored.sha256,
-          originalFilename: stored.originalFilename,
-          createdByAgentId: actor.agentId,
-          createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-          createdByRunId: actor.runId,
-        });
-      } catch (err) {
-        // A known 4xx means the registration transaction definitely rejected
-        // the request, so the just-written object is orphaned and safe to
-        // remove. An unexpected/database error is ambiguous: COMMIT may have
-        // succeeded even if the response was lost, and deleting the object in
-        // that case would corrupt a durable attachment row.
-        if (err instanceof HttpError && err.status >= 400 && err.status < 500) {
-          try {
-            await storage.deleteObject(companyId, stored.objectKey);
-          } catch (cleanupErr) {
-            logger.warn(
-              { cleanupErr, companyId, issueId },
-              "failed to remove stored object after attachment registration was rejected",
-            );
-          }
-        }
-        throw err;
-      }
+      const attachment = await svc.createAttachment({
+        issueId,
+        issueCommentId: parsedMeta.data.issueCommentId ?? null,
+        provider: stored.provider,
+        objectKey: stored.objectKey,
+        contentType: stored.contentType,
+        byteSize: stored.byteSize,
+        sha256: stored.sha256,
+        originalFilename: stored.originalFilename,
+        createdByAgentId: actor.agentId,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+        createdByRunId: actor.runId,
+      });
 
       await logActivity(db, {
         companyId,
@@ -17966,7 +17961,7 @@ export function issueRoutes(
         artifactWorkProductId: _artifactWorkProductId,
         ...attachmentResponse
       } = attachment;
-      res.status(201).json(withContentPath(attachmentResponse));
+      res.status(201).json({ ...withContentPath(attachmentResponse), uploadOperationId: operationId });
     },
   );
 
