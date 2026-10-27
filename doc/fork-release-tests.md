@@ -2,7 +2,8 @@
 
 The Guild fork tests pull requests that target `synthiq/*` with
 `.github/workflows/fork-release-tests.yml`.
-The workflow executes the fork's source on one GitHub-hosted `ubuntu-24.04` runner.
+The workflow tests the fork's source on six GitHub-hosted `ubuntu-24.04` runners.
+One summary job retains the required check name `Fork release checks`.
 Its token has only `contents: read`. Checkout does not retain credentials.
 The workflow uses no repository secrets or upstream reusable workflows.
 Keep the inherited PR workflows disabled in the fork.
@@ -22,28 +23,40 @@ Then it executes these commands from the repository root:
 
 ```sh
 pnpm -r typecheck
-pnpm test:run
+pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-parallelism --maxWorkers=1 --pool=forks --isolate
 pnpm build
 ```
 
 Each check runs after a successful install, even when an earlier check fails.
 A failed check fails the job. The workflow does not suppress command exit codes.
 Typecheck and build each have a 20-minute limit. Tests have a 150-minute limit.
-The whole job has a 180-minute limit, including installation.
+Each shard has a 180-minute limit, including installation.
+The summary job has a five-minute limit and requires all six shards.
+It runs after failed or cancelled shards and fails unless their combined result is `success`.
+The matrix uses `fail-fast: false`, so one failure does not cancel other shards.
+Every shard retains the existing installation, typecheck, and build steps.
 The first workflow run exceeded the original 30-minute test limit during its first group.
 Its typecheck and build passed. No test assertion failure appeared before the timeout.
 The recorded server timings total about 85 minutes across general and serialized suites.
 See `scripts/general-server-shard-durations.json` and `scripts/serialized-shard-durations.json`.
 These records omit newer suites and workspace checks, so the full command needs more time.
-The test runner executes all groups in order on this single runner.
-The larger limits retain finite execution bounds and leave coverage unchanged.
-The contract check rejects the original limits and an incorrect summary limit.
+The matrix sets `TEST_SHARD` to `1/6` through `6/6`.
+Vitest partitions the root configuration's source test files across these runners.
+The workflow calls Vitest directly because `pnpm test:run` uses a wrapper
+that accepts group-specific shard options rather than a repository-wide `--shard` option.
+This also includes configured projects that the wrapper's explicit project list omits.
+Each shard uses a fresh temporary home, config path, instance ID, and temporary directory.
+Files run one at a time, in isolated fork workers, to preserve port and process-state isolation.
+Separate hosted machines isolate fixed ports and temporary paths across shards.
+No suite needs a separate dedicated job.
+The finite limits remain unchanged for test execution.
+The contract check also tests failure, cancellation, skipped, and absent summary results.
 A newer test event for the same pull request cancels its previous run.
 Ignored label events use separate concurrency groups and cannot cancel tests.
 These limits bound configured execution time. They do not guarantee a billing cap.
 Browser suites and live provider tests remain outside this workflow.
 
-The job summary records the pull request head, target branch, base commit,
+Each shard summary records its index, pull request head, target branch, base commit,
 tested merge commit, run URL, and each command's outcome.
 The merge commit includes the target branch and the pull request head.
 A successful contract check alone does not prove the repository checks passed.
