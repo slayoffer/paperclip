@@ -9,6 +9,7 @@ import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
 import { logger } from "../middleware/logger.js";
 import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
+import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
 import { issueWipReason, isRunnableWipReason, isWaitingWipReason } from "./agent-wip-policy.js";
 import { pullQueueCandidateBlocked, pullQueueFingerprint, pullQueueWakeWasSkipped } from "./pull-queue-state.js";
@@ -81,6 +82,7 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
           if (stopped || (await dependencies.isSuppressed()).suppressed) return;
           if (waiting.has(issue.id) || !readiness.get(issue.id)?.isDependencyReady) continue;
           const client = tx as unknown as Db;
+          if (await issueOwnerParkingReason(client, issue, "pull_queue")) continue;
           const fingerprint = await pullQueueFingerprint(client, issue, agent);
           if (await pullQueueCandidateBlocked(client, issue, agent, fingerprint)) continue;
           const admitted = await dependencies.wakeup(agent.id, {

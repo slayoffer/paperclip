@@ -52,6 +52,7 @@ export type ScheduledRetryGateErrorCode =
   | "agent_not_invokable"
   | "heartbeat_wake_on_demand_disabled"
   | "budget_blocked"
+  | "issue_owner_parked"
   | "issue_not_found"
   | "issue_reassigned"
   | "issue_cancelled"
@@ -90,6 +91,7 @@ export type ScheduledRetryFacts = {
 
   heartbeatWakeOnDemandEnabled: boolean;
 
+  ownerParkingReason?: string | null;
   issueFound: boolean;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
@@ -111,6 +113,7 @@ export type QueuedRunStalenessErrorCode =
   | "issue_waiting_for_response"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
+  | "issue_owner_parked"
   | "issue_not_found"
   | "issue_assignee_changed"
   | "issue_terminal_status"
@@ -138,6 +141,7 @@ export type QueuedRunFacts = {
   issueId: string;
   retryReasonKind: RetryReasonKind;
 
+  ownerParkingReason?: string | null;
   issueFound: boolean;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
@@ -302,6 +306,8 @@ export function decideScheduledRetryGate(
   }
 
   if (!facts.issueId) return { allowed: true };
+  if (facts.ownerParkingReason) return { allowed: false, reason: facts.ownerParkingReason,
+    errorCode: "issue_owner_parked", issueId: facts.issueId, details: { issueId: facts.issueId } };
 
   if (!facts.issueFound) {
     return {
@@ -500,6 +506,8 @@ export function decideQueuedRunStaleness(
   facts: QueuedRunFacts,
   _now: Date,
 ): StalenessDecision {
+  if (facts.ownerParkingReason) return { stale: true, reason: facts.ownerParkingReason,
+    errorCode: "issue_owner_parked", details: { issueId: facts.issueId } };
   if (!facts.issueFound) {
     return {
       stale: true,
