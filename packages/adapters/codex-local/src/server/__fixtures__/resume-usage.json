@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/openai/codex/blob/7a078f6bb4ce0dc2a81408b334ce52979d92c603/codex-rs/exec/src/event_processor_with_jsonl_output.rs",
+  "provenance": "Synthetic values for the Codex 0.162.1 JSONL contract. usage_from_last_total copies ThreadTokenUsage.total on TurnCompleted.",
+  "turns": [
+    { "type": "turn.completed", "usage": { "input_tokens": 550000, "cached_input_tokens": 400000, "output_tokens": 1000 } },
+    { "type": "turn.completed", "usage": { "input_tokens": 1100000, "cached_input_tokens": 900000, "output_tokens": 2000 } },
+    { "type": "turn.completed", "usage": { "input_tokens": 2190000, "cached_input_tokens": 1800000, "output_tokens": 3000 } },
+    { "type": "turn.completed", "usage": { "input_tokens": 3360000, "cached_input_tokens": 3000000, "output_tokens": 4000 } }
+  ]
+}

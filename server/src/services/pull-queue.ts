@@ -11,6 +11,7 @@ import { logger } from "../middleware/logger.js";
 import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
 import { issueWipReason, isRunnableWipReason, isWaitingWipReason } from "./agent-wip-policy.js";
+import { pullQueueCandidateBlocked, pullQueueFingerprint, pullQueueWakeWasSkipped } from "./pull-queue-state.js";
 
 type WakeupOptions = NonNullable<Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]>;
 
@@ -76,14 +77,32 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
             eq(issueThreadInteractions.status, "pending")));
         const waiting = new Set(cards.map((card) => card.issueId));
         const readiness = await svc.listDependencyReadiness(companyId, ids, tx);
-        const selected = candidates.find(({ issue }) => !waiting.has(issue.id) && readiness.get(issue.id)?.isDependencyReady);
-        if (!selected) return;
-        const { issue } = selected;
-        await dependencies.wakeup(agent.id, {
-          source: "assignment", reason: "issue_assigned", requestedByActorType: "system",
-          payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id, source: "pull_queue" },
-          issueStateGuard: { statuses: [issue.status], statusVersion: issue.statusVersion, assigneeAgentId: agent.id },
-        });
+        for (const { issue } of candidates) {
+          if (stopped || (await dependencies.isSuppressed()).suppressed) return;
+          if (waiting.has(issue.id) || !readiness.get(issue.id)?.isDependencyReady) continue;
+          const client = tx as unknown as Db;
+          const fingerprint = await pullQueueFingerprint(client, issue, agent);
+          if (await pullQueueCandidateBlocked(client, issue, agent, fingerprint)) continue;
+          const admitted = await dependencies.wakeup(agent.id, {
+            source: "assignment", reason: "issue_assigned", requestedByActorType: "system",
+            payload: { issueId: issue.id, pullQueueFingerprint: fingerprint },
+            contextSnapshot: { issueId: issue.id, source: "pull_queue" },
+            issueStateGuard: { statuses: [issue.status], statusVersion: issue.statusVersion, assigneeAgentId: agent.id },
+          }).catch(async (err) => {
+            if (!await pullQueueWakeWasSkipped(client, issue, agent, fingerprint)) throw err;
+            return null;
+          });
+          if (admitted) return;
+          // A null result can also mean deferred or coalesced admission. Check
+          // its durable work before attempting another issue for this owner.
+          const [busy] = await tx.execute<{ busy: boolean }>(sql`select exists (select 1 from ${heartbeatRuns}
+            where company_id = ${companyId} and agent_id = ${agent.id}
+              and status in ('queued', 'running', 'scheduled_retry'))
+            or exists (select 1 from ${agentWakeupRequests}
+              where company_id = ${companyId} and agent_id = ${agent.id}
+                and status in ('queued', 'deferred_issue_execution')) as busy`);
+          if (busy?.busy) return;
+        }
       }).catch((err) => {
         logger.error({ err, companyId, agentId: agent.id },
           "Pull queue selection failed for this owner. The next reconciliation will retry.");

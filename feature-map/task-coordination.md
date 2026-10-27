@@ -32,6 +32,8 @@ Automated: [dependency wakeups](../server/src/__tests__/issue-dependency-wakeups
 
 Automated: [pull queue](../server/src/__tests__/heartbeat-pull-queue.test.ts) checks guarded selection, real-work counts, ghost release, and monitor protection. Deployment latency requires a separate measurement.
 
+Automated: [queue skip and parking regressions](../server/src/__tests__/heartbeat-pull-queue-gap.test.ts) checks progress past skipped heads and durable backlog stops.
+
 Manual: Block one task on another, finish the prerequisite, and observe the dependent task’s eligible continuation. Follow parent/child links back to the source request. Verify no duplicate run or false parent completion occurs.
 
 ### `review-and-controls`
