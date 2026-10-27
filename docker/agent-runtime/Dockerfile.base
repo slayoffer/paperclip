@@ -26,10 +26,10 @@ ARG NODE_VERSION
 # budget on every agent run. The root repo Dockerfile already ships rg; this
 # restores parity for the agent-runtime image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git tini gnupg ripgrep \
+      ca-certificates curl git tini gnupg ripgrep libbrotli1=1.0.9-2ubuntu0.1 libbrotli1=1.0.9-2ubuntu0.1 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs=24.22.1-1nodesource1=24.22.1-1nodesource1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 paperclip \
