@@ -22,6 +22,8 @@ afterEach(async () => {
 });
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "repository-object-cache-")); roots.push(root);
+  vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
+  vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "home"));
   const source = path.join(root, "source"); await fs.mkdir(source);
   const git = async (cwd: string, ...args: string[]) => (await execFile("git", ["-C", cwd, ...args])).stdout.trim();

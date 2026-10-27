@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 
@@ -88,6 +88,12 @@ const originalPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 const originalCodexHome = process.env.CODEX_HOME;
 const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
 
+beforeEach(() => {
+  // Subscription fixtures must not inherit the developer's API-key auth mode.
+  vi.stubEnv("OPENAI_API_KEY", "");
+  vi.stubEnv("CODEX_API_KEY", "");
+});
+
 // Older/newer ISO timestamps for the copy-back monotonic (strictly-newer)
 // decision predicate, plus a subscription-shaped auth.json fixture matching the
 // predicate's parseAuth contract (tokens.account_id + token material +
@@ -130,6 +136,7 @@ function setNodeVersion(version: string): void {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   setNodeVersion(originalNodeVersion);
   if (originalPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
   else process.env.PAPERCLIP_HOME = originalPaperclipHome;
