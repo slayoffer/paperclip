@@ -12592,6 +12592,8 @@ export function issueRoutes(
         normalizedAssigneeAgentId === undefined
           ? existing.assigneeAgentId
           : normalizedAssigneeAgentId;
+      const preserveBlockedAssignment = isBlocked && req.body.status === undefined && resumeRequested !== true &&
+        (normalizedAssigneeAgentId !== undefined || req.body.assigneeUserId !== undefined);
       const explicitMoveToTodoRequested =
         reopenRequested || resumeRequested === true;
       const recoveryRelevantSourceMutationRequested =
@@ -12659,7 +12661,7 @@ export function issueRoutes(
           actorId: actor.actorId,
         });
       const effectiveMoveToTodoRequested =
-        !assigneeSelfCommentOnTerminal &&
+        !preserveBlockedAssignment && !assigneeSelfCommentOnTerminal &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
             !isReviewBridgeWait(existing.unblockDescriptor) &&
@@ -12875,6 +12877,7 @@ export function issueRoutes(
         };
       }
       Object.assign(updateFields, transition.patch);
+      if (preserveBlockedAssignment) delete updateFields.status;
 
       // Guild model v2 rule 2: a new agent assignment over the WIP limit waits in backlog; pulling own backlog work
       // into an active status over the limit is refused. Reopen, resume and review returns are not new work.
@@ -14111,6 +14114,7 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
+          if (preserveBlockedAssignment && wakeIssueId === issue.id && agentId === issue.assigneeAgentId) return;
           // Board messages resume the task session.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
