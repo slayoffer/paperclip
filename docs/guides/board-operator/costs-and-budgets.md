@@ -48,6 +48,17 @@ Paperclip enforces budgets automatically:
 
 An auto-paused agent can be resumed by increasing its budget or waiting for the next calendar month.
 
+## Issue Token Budget
+
+The optional issue gate uses `PAPERCLIP_ISSUE_TOKEN_BUDGET`, separately from monthly cost budgets.
+It counts uncached input at full weight and cached input at `PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT`.
+The cached weight defaults to `0.1` and accepts numbers from `0` to `1`.
+Each run contributes `max(inputTokens - cachedInputTokens, 0) + cachedInputTokens * W`.
+A missing cached count leaves all input at full weight.
+Budget cards and skipped wakes show this weighted count and the cached weight.
+Accepting the budget card starts a fresh window and retries pending interaction deliveries.
+See the [environment reference](../../deploy/environment-variables.md#issue-token-budget) for configuration and fallback behavior.
+
 ## Viewing Costs
 
 ### Dashboard

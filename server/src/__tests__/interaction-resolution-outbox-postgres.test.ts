@@ -145,7 +145,8 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
       const [pending] = await db.select().from(interactionResolutionOutbox)
         .where(eq(interactionResolutionOutbox.interactionId, f.interaction.id));
       expect(pending.deliveredAt).toBeNull();
-      await outbox.interactionResolutionOutboxService(db, { wakeup: f.wakeup }).sweepPending();
+      await outbox.interactionResolutionOutboxService(db, { wakeup: f.wakeup },
+        { now: () => new Date(Date.now() + 60_000) }).sweepPending();
       expect(await f.wakeRows()).toHaveLength(1); expect(await f.auditRows()).toHaveLength(1);
     } finally { await f.close(); }
   });
@@ -155,7 +156,8 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
     f.wakeup.mockResolvedValueOnce(null);
     try {
       expect((await f.post()).status).toBe(200);
-      const worker = outbox.interactionResolutionOutboxService(db, { wakeup: f.wakeup });
+      const worker = outbox.interactionResolutionOutboxService(db, { wakeup: f.wakeup },
+        { now: () => new Date(Date.now() + 60_000) });
       await Promise.all([f.post(), worker.sweepPending(), worker.deliver(f.interaction.id)]);
       expect(await f.wakeRows()).toHaveLength(1); expect(await f.auditRows()).toHaveLength(1);
     } finally { await f.close(); }
@@ -189,7 +191,8 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
         idempotencyKey: key }).onConflictDoNothing();
       return null;
     });
-    const worker = outbox.interactionResolutionOutboxService(db, { wakeup });
+    let clock = new Date();
+    const worker = outbox.interactionResolutionOutboxService(db, { wakeup }, { now: () => clock });
     await worker.sweepPending();
     await worker.sweepPending();
     expect(attempted.size).toBe(51);
@@ -198,6 +201,7 @@ databaseTests("durable interaction route effects with PostgreSQL", () => {
     expect(entries.filter((row) => row.deliveredAt === null)).toHaveLength(50);
     // Wrap to older rows after the cursor reaches the end. Preserve their intents.
     suppress = false;
+    clock = new Date(clock.getTime() + 60_000);
     await worker.sweepPending();
     expect(await db.select().from(interactionResolutionOutbox).where(and(
       eq(interactionResolutionOutbox.companyId, companyId), isNull(interactionResolutionOutbox.deliveredAt)))).toHaveLength(0);

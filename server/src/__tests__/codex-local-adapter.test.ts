@@ -15,8 +15,9 @@ describe("codex_local parser", () => {
     const parsed = parseCodexJsonl(stdout);
     expect(parsed.sessionId).toBe("thread-123");
     expect(parsed.summary).toBe("hello");
+    // Synthiq fork: Codex keeps raw thread totals, so input includes cached input.
     expect(parsed.usage).toEqual({
-      inputTokens: 8,
+      inputTokens: 10,
       cachedInputTokens: 2,
       outputTokens: 4,
     });
