@@ -1,5 +1,5 @@
-# The callback gateway generator retains the merged progress policy and shrinks from the release base.
-packages/adapter-utils/src/sandbox-callback-bridge.ts
 # Existing service coordinators need small intake-check calls. Policy lives in its own module.
 server/src/services/issues.ts
 server/src/services/heartbeat.ts
+# The callback gateway generator retains the merged progress policy and shrinks from the release base.
+packages/adapter-utils/src/sandbox-callback-bridge.ts
