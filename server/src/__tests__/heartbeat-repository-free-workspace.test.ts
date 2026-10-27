@@ -49,7 +49,9 @@ const support = await getEmbeddedPostgresTestSupport();
     if (root) await rm(root, { recursive: true, force: true });
   });
 
-  it.each(["report-default", "report-isolated", "manual-no-project", "code-project", "saved-session"])(
+  // The default case protects against cross_issue_workspace_not_clean with a foreign source issue.
+  // The default-dir case protects against git_worktree_base_not_git_checkout without a foreign binding.
+  it.each(["report-default", "report-isolated", "report-isolated-default-dir", "manual-no-project", "code-project", "saved-session"])(
     "binds %s to its own context and preserves source files",
     async (kind) => {
       const companyId = randomUUID();
@@ -81,13 +83,15 @@ const support = await getEmbeddedPostgresTestSupport();
       }
       await writeFile(path.join(foreignCwd, "source.txt"), "Retain source work\n");
       await db.insert(issues).values({ id: sourceIssueId, companyId, projectId: sourceProjectId, title: "Source", status: "done" });
-      await db.insert(executionWorkspaces).values({ id: foreignWorkspaceId, companyId, projectId: sourceProjectId,
-        sourceIssueId, name: "Foreign directory", status: "active", mode: "shared_workspace",
-        strategyType: "project_primary", cwd: foreignCwd, providerType: "local", providerRef: foreignCwd });
+      if (kind !== "report-isolated-default-dir") {
+        await db.insert(executionWorkspaces).values({ id: foreignWorkspaceId, companyId, projectId: sourceProjectId,
+          sourceIssueId, name: "Foreign directory", status: "active", mode: "shared_workspace",
+          strategyType: "project_primary", cwd: foreignCwd, providerType: "local", providerRef: foreignCwd });
+      }
       await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Current task",
         identifier: `${prefix}-2`, status: "in_progress", assigneeAgentId: agentId,
         originKind: kind.startsWith("report") ? "routine_execution" : "manual",
-        ...(kind === "report-isolated" || kind === "code-project"
+        ...(kind.startsWith("report-isolated") || kind === "code-project"
           ? { executionWorkspaceSettings: { mode: "isolated_workspace" } } : {}),
       });
       if (kind === "saved-session") {
@@ -96,18 +100,24 @@ const support = await getEmbeddedPostgresTestSupport();
           taskKey: issueId, sessionParamsJson: { sessionId: randomUUID(), cwd: foreignCwd } });
       }
       const [foreignBefore] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, foreignWorkspaceId));
+      const [taskBefore] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(taskBefore.executionWorkspaceId).toBeNull();
       if (!projectId) {
-        const callsBefore = execute.mock.calls.length;
+        execute.mockImplementationOnce(async (input) => {
+          expect(input.context.paperclipWorkspace.cwd).toBe(foreignCwd);
+          await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+          return { exitCode: 0, signal: null, timedOut: false, summary: "Kept projectless agent home" };
+        });
         const run = await heartbeat.wakeup(agentId, { source: "on_demand", triggerDetail: "manual",
           contextSnapshot: { issueId, taskId: issueId } });
         await vi.waitFor(async () => {
           const latest = await heartbeat.getRun(run!.id);
-          expect(latest?.status).toBe("failed");
-          expect(latest?.resultJson).toMatchObject({ workspaceValidation: {
-            reason: "cross_issue_workspace_not_clean", sourceIssueId, cleanliness: "unknown",
-          } });
+          expect({ status: latest?.status, error: latest?.error }).toEqual({ status: "succeeded", error: null });
         }, { timeout: 30_000 });
-        expect(execute.mock.calls.length).toBe(callsBefore);
+        await drainHeartbeatRunsToQuiescence(db, heartbeat);
+        expect(execute.mock.calls.filter(([input]) => input.runId === run!.id)).toHaveLength(1);
+        const [taskAfter] = await db.select().from(issues).where(eq(issues.id, issueId));
+        expect(taskAfter.executionWorkspaceId).toBeNull();
         const [foreignAfter] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, foreignWorkspaceId));
         expect(foreignAfter).toEqual(foreignBefore);
         expect(await readFile(path.join(foreignCwd, "source.txt"), "utf8")).toBe("Retain source work\n");
@@ -163,7 +173,9 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(run).not.toBeNull();
         await vi.waitFor(async () => {
           const latest = await heartbeat.getRun(run!.id);
-          expect({ status: latest?.status, error: latest?.error }).toEqual({ status: "succeeded", error: null });
+          expect({ status: latest?.status, error: latest?.error,
+            validation: latest?.resultJson?.workspaceValidation ?? null,
+          }).toEqual({ status: "succeeded", error: null, validation: null });
         }, { timeout: 30_000 });
         await drainHeartbeatRunsToQuiescence(db, heartbeat);
       }

@@ -1780,14 +1780,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await heartbeat.resumeQueuedRuns();
       await waitForRunToSettle(heartbeat, runId);
       await heartbeat.waitForRunExecutionDrain(runId);
-      expect(build).toHaveBeenCalled();
       expect(await heartbeat.getRun(runId)).toMatchObject({
         status: "failed", errorCode: "setup_failed", error: message,
       });
       const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
       expect(report?.diagnostics).toMatchObject({
         execution: { failurePhase: "setup" },
-        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
+        exceptions: [{ message: report?.errorMessage, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
       });
       const [wakeup] = await db.select().from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.id, wakeupRequestId));

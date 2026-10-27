@@ -792,15 +792,7 @@ that file, not as the main completion path for deliverables.
 
 ## Default Agent Workspaces
 
-New ordinary tasks in projects without a configured workspace use a private directory when their mode is shared or isolated. These directories need no Git repository. Each task retains its files across turns and agent reassignment:
-
-- `~/.paperclip/instances/default/isolated-workspaces/<company-id>/<issue-id>`
-
-Explicit workspace bindings, repository strategies, branch requests, setup hooks, and recovery bindings retain their existing checks. An explicit `agent_default` mode retains adapter workspace selection. Code tasks still need their authorized repository configured. Paperclip does not infer a repository from task prose.
-
-Existing task sessions retain their previous selection path. This change does not migrate their files. Projectless tasks retain their existing workspace checks, including native run-ID bindings and legacy restart checkpoints without workspace IDs.
-
-Other local runs without a resolved project/session workspace fall back to an agent home workspace under the instance root:
+See [task directory rules](../docs/guides/board-operator/repository-free-task-workspaces.md). Other unresolved local runs use:
 
 - `~/.paperclip/instances/default/workspaces/<agent-id>`
 
