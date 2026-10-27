@@ -30,8 +30,10 @@ function resolveWithin(baseDir: string, objectKey: string): string {
 async function statOrNull(filePath: string) {
   try {
     return await fs.stat(filePath);
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 

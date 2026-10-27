@@ -1,4 +1,5 @@
 import { loadConfig, type Config } from "../config.js";
+import { createHash } from "node:crypto";
 import { createStorageProviderFromConfig } from "./provider-registry.js";
 import { createStorageService } from "./service.js";
 import type { StorageService } from "./types.js";
@@ -19,7 +20,9 @@ function signatureForConfig(config: Config): string {
 }
 
 export function createStorageServiceFromConfig(config: Config): StorageService {
-  return createStorageService(createStorageProviderFromConfig(config));
+  const service = createStorageService(createStorageProviderFromConfig(config));
+  service.bindingId = createHash("sha256").update(signatureForConfig(config)).digest("hex");
+  return service;
 }
 
 export function getStorageService(): StorageService {

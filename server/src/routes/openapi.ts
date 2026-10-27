@@ -5,6 +5,7 @@ import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.j
 import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
 import { registerTaskDrainPaths } from "./openapi-task-drain.js";
 import { registerRunStatsPaths } from "./openapi-run-stats.js";
+import { registerUploadCorrelationPaths } from "./openapi-upload-correlation.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
@@ -1350,6 +1351,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PUT /api/companies/{companyId}/observability",
   "DELETE /api/companies/{companyId}/observability",
   "POST /api/companies/{companyId}/observability/test",
+  "GET /api/companies/{companyId}/issues/{issueId}/attachment-upload-correlation",
   "POST /api/companies/{companyId}/agents/{agentId}/permission-grants",
   ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
@@ -6855,6 +6857,7 @@ registry.registerPath({
 
 registerTaskDrainPaths(registry, r);
 registerRunStatsPaths(registry, r);
+registerUploadCorrelationPaths(registry, r);
 
 registry.registerPath({
   method: "get",
