@@ -31,6 +31,9 @@ const mockAccessService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 
 function registerRouteMocks() {
+  vi.doMock("../services/upload-receipts.js", () => ({
+    uploadReceiptService: () => ({ beforePut: () => async () => undefined }),
+  }));
   vi.doMock("@paperclipai/shared/telemetry", () => ({
     trackAgentTaskCompleted: vi.fn(),
     trackErrorHandlerCrash: vi.fn(),
@@ -292,7 +295,7 @@ describe("issue attachment routes", () => {
     expect(res.body.contentType).toBe("application/zip");
   });
 
-  it("removes a newly stored object when attachment registration is rejected", async () => {
+  it("preserves a recorded object when attachment registration is rejected", async () => {
     const storage = createStorageService();
     const { HttpError } = await vi.importActual<
       typeof import("../errors.js")
@@ -318,10 +321,7 @@ describe("issue attachment routes", () => {
       error: "Attachment selection limit reached",
       details: { code: "chat_attachment_selection_limit_exceeded" },
     });
-    expect(storage.deleteObject).toHaveBeenCalledWith(
-      "company-1",
-      "issues/11111111-1111-4111-8111-111111111111/overflow.txt",
-    );
+    expect(storage.deleteObject).not.toHaveBeenCalled();
   });
 
   it("retains a stored object when attachment registration has an ambiguous server error", async () => {

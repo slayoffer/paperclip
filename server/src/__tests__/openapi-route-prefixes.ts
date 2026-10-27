@@ -75,5 +75,6 @@ export const apiPrefixes: Record<string, string> = {
   "tool-access.ts": "/api",
   "voice-sessions.ts": "/api",
   "tool-gateway.ts": "/api",
+  "upload-correlation.ts": "/api",
   "user-profiles.ts": "/api",
 };

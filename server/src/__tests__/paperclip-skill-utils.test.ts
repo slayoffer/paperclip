@@ -29,6 +29,7 @@ async function makeArtifactHelperHarness(
     dropWithoutCommit?: boolean;
     existingOriginatingRunId?: string;
     malformedSuccessAfterCommit?: boolean;
+    registrationRejected?: boolean;
     uploadDelaySeconds?: string;
   } = {},
 ) {
@@ -64,7 +65,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -o) output_file="$2"; shift 2 ;;
-    -w|-H|-F|--data-binary) shift 2 ;;
+    -H)
+      case "$2" in
+        X-Paperclip-Upload-Operation-Id:*) printf '%s\\n' "$2" >>"$FAKE_CURL_STATE_DIR/operation-headers" ;;
+      esac
+      shift 2 ;;
+    -w|-F|--data-binary) shift 2 ;;
     -sS) shift ;;
     http://*|https://*) url="$1"; shift ;;
     *) shift ;;
@@ -134,6 +140,10 @@ if [[ "$method" == "POST" && "$url" == */attachments ]]; then
   [[ -f "$FAKE_CURL_STATE_DIR/upload-count" ]] && count="$(<"$FAKE_CURL_STATE_DIR/upload-count")"
   count=$((count + 1))
   printf '%s' "$count" >"$FAKE_CURL_STATE_DIR/upload-count"
+  if [[ "\${FAKE_CURL_REGISTRATION_REJECTED:-0}" == "1" ]]; then
+    respond '{"error":"attachment registration rejected after storage"}' 422
+    exit 0
+  fi
   if [[ -n "\${FAKE_CURL_COMMIT_AFTER_DROP_DELAY:-}" && ! -f "$FAKE_CURL_STATE_DIR/upload-drop-used" ]]; then
     : >"$FAKE_CURL_STATE_DIR/upload-drop-used"
     (
@@ -203,6 +213,7 @@ exit 2
     FAKE_CURL_STATE_DIR: stateDir,
     FAKE_CURL_DROP_FIRST_UPLOAD: options.dropFirstUpload ? "1" : "0",
     FAKE_CURL_DROP_WITHOUT_COMMIT: options.dropWithoutCommit ? "1" : "0",
+    FAKE_CURL_REGISTRATION_REJECTED: options.registrationRejected ? "1" : "0",
     FAKE_CURL_MALFORMED_SUCCESS: options.malformedSuccessAfterCommit
       ? "1"
       : "0",
@@ -340,6 +351,12 @@ describe("paperclip skill utils", () => {
 
     await expect(harness.run("Here is the stable result.")).rejects.toThrow();
     expect(await fs.readFile(path.join(harness.stateDir, "upload-count"), "utf8")).toBe("1");
+    const receiptFiles = (await fs.readdir(harness.lockDir)).filter((name) => name.endsWith(".operation.json"));
+    expect(receiptFiles).toHaveLength(1);
+    const receipt = JSON.parse(await fs.readFile(path.join(harness.lockDir, receiptFiles[0]), "utf8"));
+    expect(receipt).toMatchObject({ companyId: "company-1", issueId: "issue-1", originalFilename: "result.txt" });
+    expect(receipt.operationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await fs.readFile(path.join(harness.stateDir, "operation-headers"), "utf8")).toBe(`X-Paperclip-Upload-Operation-Id: ${receipt.operationId}\n`);
 
     const retry = await harness.run("Here is the stable result.");
     expect(retry.stdout).toContain("Reused matching artifact from this run");
@@ -347,6 +364,16 @@ describe("paperclip skill utils", () => {
       "External publication requires an authorized active chat origin",
     );
     expect(await fs.readFile(path.join(harness.stateDir, "upload-count"), "utf8")).toBe("1");
+    expect((await fs.readdir(harness.lockDir)).filter((name) => name.endsWith(".operation.json"))).toHaveLength(1);
+  });
+
+  it("does not repeat an upload after storage succeeds but registration returns 422", async () => {
+    const harness = await makeArtifactHelperHarness(cleanupDirs, { registrationRejected: true });
+    await expect(harness.run()).rejects.toThrow();
+    expect((await fs.readdir(harness.lockDir)).some((name) => name.endsWith(".uncertain"))).toBe(true);
+    await expect(harness.run()).rejects.toThrow();
+    expect(await fs.readFile(path.join(harness.stateDir, "upload-count"), "utf8")).toBe("1");
+    expect((await fs.readdir(harness.lockDir)).filter((name) => name.endsWith(".operation.json"))).toHaveLength(1);
   });
 
   it.each(["408", "409", "502"] as const)(

@@ -3,6 +3,7 @@ import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.j
 import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
 import { registerTaskDrainPaths } from "./openapi-task-drain.js";
 import { registerRunStatsPaths } from "./openapi-run-stats.js";
+import { registerUploadCorrelationPaths } from "./openapi-upload-correlation.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
@@ -1320,6 +1321,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/decision-model",
   "PUT /api/companies/{companyId}/decision-model",
   "POST /api/companies/{companyId}/decision-model/test",
+  "GET /api/companies/{companyId}/issues/{issueId}/attachment-upload-correlation",
   "POST /api/companies/{companyId}/agents/{agentId}/permission-grants",
   ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
@@ -6699,6 +6701,7 @@ registry.registerPath({
 
 registerTaskDrainPaths(registry, r);
 registerRunStatsPaths(registry, r);
+registerUploadCorrelationPaths(registry, r);
 
 registry.registerPath({
   method: "get",
