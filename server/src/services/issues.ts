@@ -15,6 +15,7 @@ import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+import { issueIntakeCheck } from "./issue-intake-check.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -10884,6 +10885,12 @@ export function issueService(db: Db) {
       await assertAssignableAgent(db, issueCompany.companyId, agentId, {
         kind: "work",
       });
+
+      if (await issueIntakeCheck(db, { companyId: issueCompany.companyId, issueId: id, source: "issue.checkout" })) {
+        throw conflict("Issue intake check refused pickup. Add the missing sections named in the issue comment.", {
+          code: "issue.intake_missing_sections", issueId: id,
+        });
+      }
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(

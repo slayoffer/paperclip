@@ -1,4 +1,5 @@
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
+import { issueIntakeCheck } from "./issue-intake-check.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
@@ -17244,6 +17245,11 @@ export function heartbeatService(
       if (settlingOwner) return null;
     }
     if (issueId) {
+      if (await issueIntakeCheck(db, { companyId: run.companyId, issueId, source: "heartbeat.claim_queued_run" })) {
+        throw conflict("Issue intake check refused pickup", {
+          code: "issue.intake_missing_sections",
+        });
+      }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         run.companyId,
         issueId,
@@ -19694,11 +19700,10 @@ export function heartbeatService(
     }
   }
 
-  // A 403 from claimQueuedRun comes from the run's own persisted identity
-  // (an unverifiable interrupt receipt, a manual wake with no user). Those rows
-  // do not change, so the claim fails the same way on every pass and restart.
+  // Identity denials cannot clear on retry. Intake refusals require a fresh pickup
+  // after the description changes. Settle both after releasing the agent start lock.
   function isPermanentClaimRejection(err: unknown): err is HttpError {
-    return err instanceof HttpError && err.status === 403;
+    return err instanceof HttpError && (err.status === 403 || parseObject(err.details).code === "issue.intake_missing_sections");
   }
 
   // Other 4xx rejections can clear later (a responsible user gets assigned, a
@@ -19722,7 +19727,8 @@ export function heartbeatService(
         await cancelRunInternal(
           run.id,
           `Cancelled because the queued run cannot be claimed: ${err.message}`,
-          { errorCode: "queued_run_claim_rejected" },
+          { errorCode: "queued_run_claim_rejected",
+            suppressImmediateRecovery: parseObject(err.details).code === "issue.intake_missing_sections" },
         );
       } catch (cancelErr) {
         logger.error(
@@ -22599,11 +22605,14 @@ export function heartbeatService(
           return { dispatched: false };
         const ownerParkingBlock = issueId ? await issueOwnerParkingReason(db,
           { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
-        const repairBlock = ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
+        const intakeBlock = !ownerParkingBlock && issueId ? await issueIntakeCheck(db,
+          { companyId: run.companyId, issueId, source: "provider.dispatch" }) : null;
+        const repairBlock = ownerParkingBlock ?? intakeBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
-            error: ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked"
+              : intakeBlock ? "issue_intake_missing_sections" : "legacy_disposition_repair_suppressed",
+            error: ownerParkingBlock ?? intakeBlock ?? `Disposition repair suppressed: ${repairBlock}`,
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
@@ -27125,6 +27134,8 @@ export function heartbeatService(
     if (issueId && isUuidLike(issueId)) {
       const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
       if (parked) { await writeSkippedRequest(parked); return null; }
+      const intake = await issueIntakeCheck(db, { companyId: agent.companyId, issueId, source: "heartbeat.admission" });
+      if (intake) { await writeSkippedRequest(intake); return null; }
     }
 
     // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
