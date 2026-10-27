@@ -17,7 +17,8 @@ This contract covers the Synthiq fork on `synthiq/2026.1012.0`, not an upstream 
 4. **What means done?** Merge the approved PR to `synthiq/2026.1012.0`, then check its live behavior.
    [synthiq-image.yml](../.github/workflows/synthiq-image.yml) builds and publishes an image after the branch push.
    [Publication evidence](synthiq-image-publication.md) identifies its revision, configuration digest, and immutable manifest digest.
-   Publication alone does not deploy. Homelab's standing release window and drift trigger release merged fork code without another card.
+   Publication alone does not deploy. The drift trigger releases it within about 1 h of the merge (homelab `release-window.py`, q-126/q-192).
+   The standing release approval covers this path without another card.
    [release-window.py](https://github.com/slayoffer/homelab/blob/main/paperclip/release/release-window.py) waits for zero live runs before the guarded image switch.
    It uses `deploy-image.sh` and its rollback and storage guards under the [release-window rules](https://github.com/slayoffer/homelab/blob/main/docs/paperclip-release-window.md).
    Check the running revision, `/api/health`, and the changed behavior. Record the deploy receipt and merge SHA.
