@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { issueLabels, labels, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 
@@ -14,7 +14,7 @@ export async function issueOwnerParkingReason(
   const [park] = await db.select({ name: labels.name }).from(issueLabels)
     .innerJoin(labels, and(eq(labels.id, issueLabels.labelId), eq(labels.companyId, issueLabels.companyId)))
     .where(and(eq(issueLabels.companyId, issue.companyId), eq(issueLabels.issueId, issue.id),
-      inArray(labels.name, [...OWNER_PARKING_LABELS])))
+      inArray(sql`lower(${labels.name})`, [...OWNER_PARKING_LABELS])))
     .orderBy(asc(labels.name)).limit(1);
   if (!park) return null;
   logger.info({ companyId: issue.companyId, issueId: issue.id, source,

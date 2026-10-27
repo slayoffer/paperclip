@@ -27081,7 +27081,15 @@ export function heartbeatService(
     };
 
     const schedulingSuppression = await getSchedulingSuppression();
-    // A task drain retains durable wakes. Dispatch checks its persistent admission hold.
+    // A task drain holds ADMISSION, not the request. The drain is a
+    // persistent admission hold, so a wake that arrives while it is
+    // active still names real work that must run once the process comes
+    // back: leave it in the durable queue and let the dispatch-side checks
+    // (startNextQueuedRunForAgent / executeRun) keep it from starting until
+    // the lease expires or its owner releases it. Writing it as `skipped`
+    // here dropped the wake permanently — an accepted plan whose
+    // continuation wake landed mid-drain left its issue in `todo` with no
+    // run and no path until a person noticed.
     if (
       schedulingSuppression.suppressed &&
       schedulingSuppression.reason !== "task_drain"
@@ -27119,7 +27127,8 @@ export function heartbeatService(
       if (parked) { await writeSkippedRequest(parked); return null; }
     }
 
-    // Issue budgets require the board UI override. A board API key alone cannot bypass this stop.
+    // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
+    // Retry in the board UI passes (Anton, 2026-10-17): board keys act in his name, so "user" is not enough.
     const issueTokenBudget = issueId && isUuidLike(issueId) && opts.issueBudgetOverride !== true
       ? issueTokenBudgetConfig()
       : null;

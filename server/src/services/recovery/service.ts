@@ -549,7 +549,13 @@ export function recoveryService(
     ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
     /** Settle retained explicit retry claims through the queue-first release policy. */
     settleExplicitContinuationRetry?: (run: typeof heartbeatRuns.$inferSelect) => Promise<void>;
-    /** Distinguish exhausted retry budgets from runs owned by another lifecycle. */
+    /**
+     * Whether a failed or interrupted run has consumed every bounded
+     * transient retry, so `scheduleRecoveryRetry` can no longer produce a
+     * successor for it. Lets the sweeper tell "no retry because the budget
+     * is spent" (escalate) from "no retry because something else owns the
+     * run" (leave alone).
+     */
     transientRetryBudgetSpent?: (
       run: typeof heartbeatRuns.$inferSelect,
     ) => boolean;
@@ -3133,7 +3139,11 @@ export function recoveryService(
             healthyOpenChildIssues(issue),
             sourceHasNewPathOutsideRecoveryAction(action),
           ]);
-        // Exclude children waiting on the source to prevent a blocking cycle.
+        // A healthy child that already waits on the source (for example, it
+        // waits for the parent's PR) does not move the source forward, and
+        // the source cannot wait on it without a blocking cycle. Count only
+        // the other children. With none left, the action takes the
+        // no-healthy-child path below and stays for its owner or the board.
         const {
           blockable: healthyChildren,
           dependent: dependentHealthyChildren,

@@ -1,5 +1,11 @@
-// Pure rules for retry promotion and queued dispatch. Callers supply current authority facts.
+// Pure decision rules for two heartbeat run-dispatch gates:
+//   - the scheduled-retry promotion gate (decideScheduledRetryGate)
+//   - the queued-run staleness check (decideQueuedRunStaleness)
+// The caller reads the database, the clock, and the agent's invokability,
+// then packs the result into a facts object. This file only branches on
+// that facts object; it never queries a database or reads the clock.
 
+/** The retry reason a run carries, reduced to the kinds a gate cares about. */
 export type RetryReasonKind =
   | "max_turn_continuation"
   | "disposition_repair"
@@ -251,7 +257,11 @@ function decideReviewParticipant(
   return "participant_changed";
 }
 
-/** Check current authority before retry promotion. */
+/**
+ * Decides whether a due scheduled retry may promote to a queued run. The
+ * caller passes now for signature symmetry with future clock-dependent
+ * rules; today's rules need no clock read.
+ */
 export function decideScheduledRetryGate(
   facts: ScheduledRetryFacts,
   _now: Date,
@@ -485,7 +495,11 @@ export function decideScheduledRetryGate(
   return { allowed: true };
 }
 
-/** Check current authority before provider dispatch. */
+/**
+ * Decides whether a queued run has gone stale before it could start. The
+ * caller passes now for signature symmetry with future clock-dependent
+ * rules; today's rules need no clock read.
+ */
 export function decideQueuedRunStaleness(
   facts: QueuedRunFacts,
   _now: Date,

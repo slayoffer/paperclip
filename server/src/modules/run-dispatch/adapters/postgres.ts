@@ -274,7 +274,17 @@ export function createPostgresRunDispatchAdapter(
     const issueId = readNonEmptyString(input.contextSnapshot.issueId);
     const retryReasonKind = classifyRetryReasonKind(retryReason);
 
-    // Read facts in gate order. Stop before unrelated reads when a gate rejects execution.
+    // Facts fill in through the same rule order `decideScheduledRetryGate`
+    // evaluates. A field still awaiting its own read keeps a value that
+    // rule never blocks on, EXCEPT `issueFound`, which starts unresolved
+    // and gets an explicit early check once the issue read lands — a
+    // false default there would look exactly like "the issue is gone" the
+    // moment `issueId` is set, before the read that would prove it. Once a
+    // group of fields is real, this calls the gate on the facts gathered
+    // so far, so a rule an earlier read already decided stops the run
+    // before it pays for a later, unrelated read — a sweep of many due
+    // retries must not query pause holds or dependencies for a retry a
+    // budget block or a stale assignment already suppresses.
     const facts: ScheduledRetryFacts = {
       runId: input.runId,
       runAgentId: input.agentId,

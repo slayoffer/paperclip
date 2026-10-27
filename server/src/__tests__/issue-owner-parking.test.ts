@@ -50,7 +50,7 @@ describe("owner parking execution authority", () => {
     return row;
   }
 
-  describe.each(OWNER_PARKING_LABELS)("%s", label => {
+  describe.each([...OWNER_PARKING_LABELS, "Owner:Stopped", "OWNER:LOCAL-SESSION"])("%s", label => {
     it.each(["issue_disposition_repair", "issue_assignment_recovery", "issue_status_changed", "issue_assigned"])(
       "records an admission skip for %s without starting a run", async reason => {
         const f = await fixture(label);

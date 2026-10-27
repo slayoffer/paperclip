@@ -12893,6 +12893,7 @@ export function issueRoutes(
             priority: updateFields.priority ?? existing.priority,
           })) updateFields.status = "backlog";
         } else if (
+          // Only an agent pulling its own backlog is limited; a board move (watchdog promote, coordinator) passes.
           req.actor.type === "agent" &&
           existing.status === "backlog" &&
           existing.assigneeAgentId &&
@@ -13004,7 +13005,8 @@ export function issueRoutes(
         }
       }
 
-      // Bind self-stopping mutations to this request.
+      // Only this request may finish a mutation that intentionally stops its
+      // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
       if (assigneeWillChange && existing.assigneeAgentId) {
         await stopRunnerGoalForOwnershipChange({
@@ -14113,6 +14115,7 @@ export function issueRoutes(
               ? wakeup.payload.issueId
               : issue.id;
           if (preserveBlockedAssignment && wakeIssueId === issue.id && agentId === issue.assigneeAgentId) return;
+          // Board messages resume the task session.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
           }
@@ -14138,6 +14141,8 @@ export function issueRoutes(
           assigneeChanged &&
           issue.assigneeAgentId &&
           issue.status !== "backlog" &&
+          // Restoring an assignee on completed work is not a reopen request.
+          // Explicit reopen/resume transitions are already reflected in issue.status.
           !isClosedIssueStatus(issue.status) &&
           deferWakeForGoal !== true
         ) {
