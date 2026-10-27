@@ -28,6 +28,18 @@ The check covers persisted bindings and registered worktrees selected by branch.
 Owner selection compares canonical paths within the company, including saved and candidate symbolic-link paths.
 Company and project access checks still apply.
 
+## Existing branch selection
+
+For `git_worktree`, `workspaceStrategy.existingBranch` selects an exact branch.
+An existing local branch keeps its current commit and worktree.
+If the local branch is missing, preparation fetches that branch from `origin` through the existing credential provider.
+A successful fetch creates a local branch at the fetched commit before worktree validation.
+The branch remains operator-owned, so workspace cleanup does not delete it.
+A failed fetch cannot use a stale remote-tracking ref.
+If the credential provider fails, preparation refuses the fetch instead of using ambient credentials.
+The refusal names the local and remote refs when the branch remains unavailable.
+Source edits and workspace reuse checks still apply.
+
 ## Task environment selection
 
 `executionWorkspaceSettings.environmentId` selects an environment for one task.

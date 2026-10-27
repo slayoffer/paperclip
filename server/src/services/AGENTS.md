@@ -14,3 +14,24 @@ Do not terminalize these runs from the stale-lock sweeper because their provider
 An expired lease permits a restart claim. It does not permit the sweeper to remove the task locks.
 Check new ownership evidence in the terminal write as well as the initial read.
 Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.
+
+## Pull queue stops
+
+Record an explicit backlog disposition with its parking receipt in the issue transaction.
+Keep parking conditions separate from general issue recency. Comments and title edits do not resume a parked issue.
+Skip receipts restrict automatic selection only. Normal admission always checks current authority.
+Recheck budget, dependency, pause, and recovery gates before reusing an old skip.
+
+## Interaction outbox budget stops
+
+Check the current issue token budget before question delivery claims and resolution wake admission.
+A stopped issue keeps pending intents without new wake receipts or question delivery attempts.
+Budget acceptance retries both outboxes after commit. Keep acceptance replay protection in that path.
+Known admission holds from the exact wake invocation preserve the answer without an error retry.
+Use `wakeupForOutbox` for admission reasons without skipped receipts. The outbox is the durable retry record.
+Persist a 30-second exponential delay, capped at 30 minutes, for known holds in both outboxes.
+Check the deadline in direct delivery and sweep selection. A terminated assignee ends delivery with its reason.
+Only unexplained null wakes consume the bounded error retry limit. Old skipped receipts are not current diagnostics.
+Advance the pending-answer cursor past budget-held rows. Reuse budget checks only within the current page.
+After a budget acceptance commits, clear pending retry deadlines, catch each row failure, and continue.
+Catch each question sweep row failure so later answers can proceed.
