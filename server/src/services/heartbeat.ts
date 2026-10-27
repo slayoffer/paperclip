@@ -1,3 +1,4 @@
+import { continueRunTokenCap, ownsRunTokenCapContinuation, runTokenCapBaseline } from "./run-token-cap.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
@@ -374,7 +375,7 @@ import {
   issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
-import { readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
+import { getLatestRunForSession, readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import {
   resolveDefaultAgentWorkspaceDir,
@@ -10998,30 +10999,6 @@ export function heartbeatService(
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getLatestRunForSession(
-    agentId: string,
-    sessionId: string,
-    opts?: { excludeRunId?: string | null },
-  ) {
-    const conditions = [
-      eq(heartbeatRuns.agentId, agentId),
-      eq(heartbeatRuns.sessionIdAfter, sessionId),
-    ];
-    if (opts?.excludeRunId) {
-      conditions.push(sql`${heartbeatRuns.id} <> ${opts.excludeRunId}`);
-    }
-    return db
-      .select({
-        id: heartbeatRuns.id,
-        usageJson: heartbeatRuns.usageJson,
-      })
-      .from(heartbeatRuns)
-      .where(and(...conditions))
-      .orderBy(desc(heartbeatRuns.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-  }
-
   const issueMonitorDispatchColumns = {
     id: issues.id,
     companyId: issues.companyId,
@@ -11889,7 +11866,7 @@ export function heartbeatService(
     if (usageBasis === "session_cumulative") return resolveCumulativeSessionUsage(db, {
       agentId, runId, sessionId, rawUsage,
     });
-    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(db, agentId, sessionId, {
       excludeRunId: runId,
     }))?.usageJson);
     return {
@@ -14138,7 +14115,7 @@ export function heartbeatService(
     const contextSnapshot = parseObject(run.contextSnapshot);
     // The explicit receipt admitted one turn. A prose-only follow-up cannot
     // reuse it or renew it under the separate transient-failure retry policy.
-    if (readNonEmptyString(contextSnapshot.goalControlRequestId) || contextSnapshot.explicitUserContinuation) {
+    if (ownsRunTokenCapContinuation(run) || readNonEmptyString(contextSnapshot.goalControlRequestId) || contextSnapshot.explicitUserContinuation) {
       if (run.issueCommentStatus !== "not_applicable") {
         await patchRunIssueCommentStatus(run.id, {
           issueCommentStatus: "not_applicable",
@@ -24780,6 +24757,7 @@ export function heartbeatService(
             // heartbeat run snapshot.
             const adapterContext: Record<string, unknown> = {
               ...context,
+              ...await runTokenCapBaseline(db, { agentId: agent.id, runId: run.id, adapterType: agent.adapterType, runtime: runtimeForAdapter }),
               ...(legacyQuestionResponse
                 ? {
                     [PAPERCLIP_WAKE_PAYLOAD_KEY]: {
@@ -25798,7 +25776,7 @@ export function heartbeatService(
               parseObject(livenessRun.contextSnapshot)
                 .resumeSessionGoalHeartbeat === true,
           });
-          if (!conversationSettled) {
+          if (!conversationSettled && !ownsRunTokenCapContinuation(livenessRun)) {
             await handleIssueReviewPathDisposition(livenessRun);
             if (livenessRun.runtimeMode !== "native") {
               await recovery.reconcileLegacyContinuation(livenessRun.id);
@@ -25890,6 +25868,7 @@ export function heartbeatService(
             }
           }
         }
+        if (finalizedRun) await continueRunTokenCap(db, finalizedRun, enqueueWakeup);
         await finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
           keepIdleOnFailure:
             outcome === "failed" &&
@@ -26783,7 +26762,7 @@ export function heartbeatService(
         now: new Date(),
         // A durable authentication card owns recovery. This covers the review path,
         // while continuation classification blocks periodic generic retries.
-        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source),
+        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source) || ownsRunTokenCapContinuation(source),
       });
       await applyWakeQueuePostCommitEffects(postCommitEffects);
       const completed = await getRun(run.id);

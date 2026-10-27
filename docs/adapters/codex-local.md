@@ -3,7 +3,7 @@ title: Codex
 summary: OpenAI Codex local adapter setup and configuration
 ---
 
-The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session persistence via `previous_response_id` chaining and skills injection through the global Codex skills directory.
+The `codex_local` adapter runs OpenAI's Codex CLI locally. It resumes saved Codex threads and injects Paperclip skills.
 
 ## Prerequisites
 
@@ -29,7 +29,11 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 
 ## Session Persistence
 
-Codex uses `previous_response_id` for session continuity. The adapter serializes and restores this across heartbeats, allowing the agent to maintain conversation context.
+The exec adapter stores the Codex thread ID and resumes that thread across heartbeats.
+
+The fork also offers an optional [per-run soft token cap](../../doc/run-token-cap.md).
+It is off by default. It acts after `turn.completed` and a clean exec process exit.
+It preserves the session and stores a handoff before one continuation wake.
 
 ## Skills Injection
 
