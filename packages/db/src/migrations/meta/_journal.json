@@ -2374,6 +2374,13 @@
       "when": 1792967951765,
       "tag": "0340_curly_squirrel_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 341,
+      "version": "7",
+      "when": 1793058290067,
+      "tag": "0341_last_meteorite",
+      "breakpoints": true
     }
   ]
 }
