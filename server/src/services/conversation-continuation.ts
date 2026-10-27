@@ -140,3 +140,34 @@ export async function getConversationOwnershipBlocker(db: Db, companyId: string,
   }
   return null;
 }
+
+/** Reuse checks only within one caller-owned pass. Never reuse this reader for dispatch. */
+export function createConversationOwnershipReader(db: Db) {
+  const checks = new Map<string, ReturnType<typeof getConversationOwnershipBlocker>>();
+  return (companyId: string, issueId: string) => {
+    const key = `${companyId}:${issueId}`;
+    let check = checks.get(key);
+    if (!check) {
+      check = getConversationOwnershipBlocker(db, companyId, issueId);
+      checks.set(key, check);
+      void check.catch(() => checks.delete(key));
+    }
+    return check;
+  };
+}
+
+// Polling projections can lag by one second. Execution admission always uses
+// getConversationOwnershipBlocker directly, with current process and lease state.
+const projectionReaders = new WeakMap<Db, {
+  tick: number;
+  read: ReturnType<typeof createConversationOwnershipReader>;
+}>();
+export function getConversationOwnershipBlockerForRead(db: Db, companyId: string, issueId: string) {
+  const tick = Math.floor(Date.now() / 1000);
+  let reader = projectionReaders.get(db);
+  if (!reader || reader.tick !== tick) {
+    reader = { tick, read: createConversationOwnershipReader(db) };
+    projectionReaders.set(db, reader);
+  }
+  return reader.read(companyId, issueId);
+}

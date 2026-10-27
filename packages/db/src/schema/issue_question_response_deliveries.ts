@@ -36,8 +36,10 @@ export const issueQuestionResponseDeliveries = pgTable(
     deliveryMode: text("delivery_mode"),
     /** Monotonic claim generation used to fence stale workers. */
     attemptCount: integer("attempt_count").notNull().default(0),
-    /** Actual side-effect failures; scheduling suppression does not consume this budget. */
+    /** Delivery errors and unexplained null wakes. Known admission holds do not consume this budget. */
     errorCount: integer("error_count").notNull().default(0),
+    holdCount: integer("hold_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),

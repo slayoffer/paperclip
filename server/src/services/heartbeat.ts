@@ -1,4 +1,5 @@
 import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
+import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
   provisionExecutionWorkspaceForFreshnessDecision,
@@ -9,7 +10,7 @@ import { resolveWorkspaceReuseSelection, isolatedWorkspaceReuseConfig, shouldKee
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, readLatestUsageSample, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
+import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -65,6 +66,7 @@ import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompati
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
+import { createDiagnosticWakeup, createOutboxWakeup } from "./wakeup-diagnostics.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispatch.js";
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
@@ -141,7 +143,6 @@ import {
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
   envBindingSchema,
   isEnvironmentDriverSupportedForAdapter,
-  isToolConnectionAttentionHealth,
   type BillingType,
   type ChatProvider,
   type CostStatus,
@@ -370,8 +371,10 @@ import {
   ISSUE_TOKEN_BUDGET_SKIP_REASON,
   ensureIssueTokenBudgetCard,
   issueTokenBudgetConfig,
+  issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
+import { readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import {
   resolveDefaultAgentWorkspaceDir,
@@ -464,8 +467,9 @@ import {
 } from "./authorization.js";
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
+import { canDeliverRuntimeMcpConnection } from "./tool-connection-discovery.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import { hasAdmittedDependencyWake, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -3813,12 +3817,7 @@ function redactInlineBase64ImageData(chunk: string) {
   );
 }
 
-export function maxRunningRunsCap(env: NodeJS.ProcessEnv = process.env): number | null {
-  const raw = env.PAPERCLIP_MAX_RUNNING_RUNS?.trim();
-  if (!raw || !/^\d+$/.test(raw)) return null;
-  const n = Number(raw);
-  return n >= 1 ? n : null;
-}
+export { maxRunningRunsCap } from "./instance-run-cap.js";
 
 export function compactRunLogChunk(
   chunk: string,
@@ -4779,8 +4778,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       ((Boolean(runIdentity?.activeIdentityContextId) &&
         (connection.config?.sourceTemplateKey === "github" ||
           connection.transportConfig?.sourceTemplateKey === "github")) ||
-        connection.credentialPolicy === "per_user" ||
-        !isToolConnectionAttentionHealth(connection.healthStatus)) &&
+        canDeliverRuntimeMcpConnection(connection)) &&
       (connection.transport === "mcp_remote" ||
         connection.transport === "local_stdio" || isBrowserUseConnection(connection) || githubBotConnectionIds.has(connection.id)),
   );
@@ -5606,70 +5604,6 @@ function normalizeUsageTotals(
       Math.floor(asNumber(usage.cachedInputTokens, 0)),
     ),
     outputTokens: Math.max(0, Math.floor(asNumber(usage.outputTokens, 0))),
-  };
-}
-
-function readRawUsageTotals(usageJson: unknown): UsageTotals | null {
-  const parsed = parseObject(usageJson);
-  if (Object.keys(parsed).length === 0) return null;
-
-  const inputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(parsed.rawInputTokens, asNumber(parsed.inputTokens, 0)),
-    ),
-  );
-  const cachedInputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(
-        parsed.rawCachedInputTokens,
-        asNumber(parsed.cachedInputTokens, 0),
-      ),
-    ),
-  );
-  const outputTokens = Math.max(
-    0,
-    Math.floor(
-      asNumber(parsed.rawOutputTokens, asNumber(parsed.outputTokens, 0)),
-    ),
-  );
-
-  if (inputTokens <= 0 && cachedInputTokens <= 0 && outputTokens <= 0) {
-    return null;
-  }
-
-  return {
-    inputTokens,
-    cachedInputTokens,
-    outputTokens,
-  };
-}
-
-function deriveNormalizedUsageDelta(
-  current: UsageTotals | null,
-  previous: UsageTotals | null,
-): UsageTotals | null {
-  if (!current) return null;
-  if (!previous) return { ...current };
-
-  const inputTokens =
-    current.inputTokens >= previous.inputTokens
-      ? current.inputTokens - previous.inputTokens
-      : current.inputTokens;
-  const cachedInputTokens =
-    current.cachedInputTokens >= previous.cachedInputTokens
-      ? current.cachedInputTokens - previous.cachedInputTokens
-      : current.cachedInputTokens;
-  const outputTokens =
-    current.outputTokens >= previous.outputTokens
-      ? current.outputTokens - previous.outputTokens
-      : current.outputTokens;
-
-  return {
-    inputTokens: Math.max(0, inputTokens),
-    cachedInputTokens: Math.max(0, cachedInputTokens),
-    outputTokens: Math.max(0, outputTokens),
   };
 }
 
@@ -11952,11 +11886,12 @@ export function heartbeatService(
       };
     }
 
-    const previousRawUsage = usageBasis === "session_cumulative"
-      ? await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals)
-      : readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
-        excludeRunId: runId,
-      }))?.usageJson);
+    if (usageBasis === "session_cumulative") return resolveCumulativeSessionUsage(db, {
+      agentId, runId, sessionId, rawUsage,
+    });
+    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+      excludeRunId: runId,
+    }))?.usageJson);
     return {
       normalizedUsage: deriveNormalizedUsageDelta(rawUsage, previousRawUsage),
       previousRawUsage,
@@ -19830,7 +19765,7 @@ export function heartbeatService(
       // Synthiq fork (2026-10-17, Guild slim-down): PAPERCLIP_MAX_RUNNING_RUNS caps running runs instance-wide. A queued
       // run stays queued and the periodic sweep starts it when a slot frees. Agent start locks are per agent, so two
       // agents starting at the same moment can briefly exceed the cap by one or two.
-      const instanceCap = maxRunningRunsCap();
+      const instanceCap = getProcessRunningRunsCap();
       if (instanceCap !== null && availableSlots > 0) {
         const instanceRunning = Number((await db
           .select({ n: sql<number>`count(*)::int` })
@@ -20048,8 +19983,10 @@ export function heartbeatService(
   function trackWakeup(
     agentId: string,
     opts: WakeupOptions = {},
+    diagnosticRequestId?: string,
+    onSkip?: (reason: string) => void,
   ): ReturnType<typeof enqueueWakeup> {
-    const promise = enqueueWakeup(agentId, opts);
+    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId, onSkip);
     activeWakeupPromises.add(promise);
     void promise
       .catch(() => {})
@@ -20058,6 +19995,10 @@ export function heartbeatService(
       });
     return promise;
   }
+
+  const diagnosticWakeup = createDiagnosticWakeup(db, getAgent, trackWakeup);
+  const wakeupWithDiagnostics = (agentId: string, opts: WakeupOptions = {}) => diagnosticWakeup(agentId, opts);
+  const wakeupForOutbox = createOutboxWakeup(trackWakeup);
 
   async function executeRun(...args: Parameters<typeof executeRunInner>) {
     return withRunExecutionEvidence(db, { id: args[0] }, () => executeRunInner(...args), false);
@@ -26875,7 +26816,7 @@ export function heartbeatService(
     }
   }
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false) {
+  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string, onSkip?: (reason: string) => void) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -26888,6 +26829,13 @@ export function heartbeatService(
     if (payload) {
       delete payload.queuedCommentInterrupt;
       delete payload.manualUserWake;
+      if (diagnosticRequestId) {
+        delete payload.heartbeatSkip;
+        delete payload.executionWait;
+        delete payload.issueTokenBudget;
+        delete payload.unresolvedBlockerIssueIds;
+        delete payload.coalescedIntoWakeupRequestId;
+      }
     }
     if (opts.manualUserWake) {
       if (opts.requestedByActorType !== "user" || !opts.requestedByActorId || opts.failedRunId) {
@@ -26916,13 +26864,28 @@ export function heartbeatService(
     payload = { ...payload, [DEFERRED_WAKE_CONTEXT_KEY]: { ...enrichedContextSnapshot } };
     let issueId =
       readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
-    if (executionReconciliationWake && !issueId) return null;
-
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    const diagnosticCompanyId = agent.companyId;
+    const skipWithoutReceipt = async (skipReason: string, message: string) => {
+      if (onSkip) { onSkip(skipReason); return null; }
+      // API diagnostics must also identify gates that do not normally create receipts.
+      if (diagnosticRequestId) await db.insert(agentWakeupRequests).values({
+        id: diagnosticRequestId, companyId: diagnosticCompanyId, agentId, source, triggerDetail,
+        reason: skipReason, error: message, payload: { issueId }, status: "skipped",
+        requestedByActorType: opts.requestedByActorType ?? null,
+        requestedByActorId: opts.requestedByActorId ?? null, finishedAt: new Date(),
+      });
+      return null;
+    };
+    if (executionReconciliationWake && !issueId) {
+      return skipWithoutReceipt("execution_reconciliation_issue_required", "Execution reconciliation requires a task.");
+    }
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.
-    if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") return null;
+    if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") {
+      return skipWithoutReceipt("issue_comment_mention_ignored", "A mention does not start a run.");
+    }
     if (issueId) {
       const conversation = await getIssueExecutionContext(agent.companyId, issueId);
       if (reason === "issue_children_completed" && conversation?.originKind === "onboarding_first_task") enrichedContextSnapshot.onboardingCompletion = true;
@@ -26930,10 +26893,18 @@ export function heartbeatService(
         if (opts.manualUserWake && conversation!.conversationUserId !== opts.requestedByActorId) {
           throw new HttpError(403, "Only the conversation owner can start a chat run");
         }
-        if (isConversationExecutionWake(conversation, reason ?? readNonEmptyString(enrichedContextSnapshot.wakeReason))) return null;
-        if (agent.id !== conversation!.conversationAgentId) return null;
-        if (!(await instanceSettings.getExperimental()).enableAgentChat) return null;
-        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot) && reason !== CHAT_COMPLETION_WAKE_REASON) return null;
+        if (isConversationExecutionWake(conversation, reason ?? readNonEmptyString(enrichedContextSnapshot.wakeReason))) {
+          return skipWithoutReceipt("conversation_execution_wake_ignored", "This execution event does not start a chat run.");
+        }
+        if (agent.id !== conversation!.conversationAgentId) {
+          return skipWithoutReceipt("conversation_agent_mismatch", "This agent does not own the conversation.");
+        }
+        if (!(await instanceSettings.getExperimental()).enableAgentChat) {
+          return skipWithoutReceipt("conversation_chat_disabled", "Agent chat is disabled.");
+        }
+        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot) && reason !== CHAT_COMPLETION_WAKE_REASON) {
+          return skipWithoutReceipt("conversation_waiting_for_input", "The conversation requires new input.");
+        }
       }
     }
     if (agent.adapterType === "paperclip_runner") {
@@ -27012,7 +26983,7 @@ export function heartbeatService(
     }
     const durableReceiptFields = durableRequest
       ? { id: durableRequest.id, requestedAt: durableRequest.requestedAt }
-      : {};
+      : diagnosticRequestId ? { id: diagnosticRequestId } : {};
     const existingDurableReceipt = async (queryDb: Db) => {
       if (!durableRequest) return null;
       const receipt = await queryDb
@@ -27054,6 +27025,7 @@ export function heartbeatService(
     const coalesceExecutionWait =
       opts.requestedByActorType === "system" &&
       !durableRequest &&
+      !diagnosticRequestId &&
       !wakeCommentId &&
       queuedCommentIdsFromRunContext(enrichedContextSnapshot).length === 0 &&
       !isInteractionResolutionWakePayload(payload ?? {}) &&
@@ -27063,6 +27035,7 @@ export function heartbeatService(
       patch: Partial<typeof agentWakeupRequests.$inferInsert> = {},
       waitCondition?: Record<string, unknown>,
     ) => {
+      if (onSkip) { onSkip(skipReason); return { created: false }; }
       if (executionWaitRequestId) {
         await db.update(agentWakeupRequests).set({
           payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}',
@@ -27174,10 +27147,8 @@ export function heartbeatService(
           logger.warn({ err, issueId }, "failed to raise issue token budget card");
           return false;
         });
-        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON, {
-          error: `Wake suppressed: this issue used ${budgetState.spent} input tokens since ` +
-            `${budgetState.windowStart.toISOString()} (budget ${issueTokenBudget.budget}).`,
-        });
+        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON,
+          issueTokenBudgetSkipDetails(issueTokenBudget, budgetState, payload));
         logger.info({ issueId, agentId, spent: budgetState.spent, cardCreated }, "issue token budget reached; wake skipped");
         return null;
       }
@@ -27363,7 +27334,7 @@ export function heartbeatService(
 
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
-      if (opts.requestedByActorType !== "user" || executionWaitRequestId) {
+      if (opts.requestedByActorType !== "user" || executionWaitRequestId || diagnosticRequestId) {
         await writeSkippedRequest("agent.not_invokable", {
           error: invokability.message,
         }, { status: agent.status, reason: invokability.reason });
@@ -27477,6 +27448,12 @@ export function heartbeatService(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          // Producers can race after their optimistic readiness checks. The
+          // issue lock makes this receipt check atomic with wake insertion.
+          if (!executionWaitRequestId && await hasAdmittedDependencyWake(
+            tx, agent.companyId, opts.idempotencyKey,
+          )) return { kind: "skipped" as const };
+
           if (executionWaitRequestId) {
             const pending = await readDeferredWakeForAdmission(tx as unknown as Db, {
               companyId: agent.companyId, issueId, agentId, requestId: executionWaitRequestId,
@@ -27561,6 +27538,7 @@ export function heartbeatService(
               await tx
                 .insert(agentWakeupRequests)
                 .values({
+                  ...durableReceiptFields,
                   companyId: agent.companyId,
                   agentId,
                   source,
@@ -28264,6 +28242,7 @@ export function heartbeatService(
                 source,
                 triggerDetail,
                 reason: "issue_dependencies_blocked",
+                error: "Wake suppressed because this issue has unresolved dependencies.",
                 payload: {
                   ...(payload ?? {}),
                   issueId,
@@ -28448,6 +28427,9 @@ export function heartbeatService(
                   wakeupRequestId: activeExecutionRun.wakeupRequestId,
                 },
                 allowRunCoalescing: isConversation(issue) ? false : opts.allowRunCoalescing,
+                diagnosticReceipt: diagnosticRequestId
+                  ? { id: diagnosticRequestId, requestedAt: new Date() }
+                  : undefined,
                 durableReceipt: durableRequest
                   ? {
                       id: durableRequest.id,
@@ -30331,6 +30313,8 @@ export function heartbeatService(
       }),
 
     wakeup: trackWakeup,
+    wakeupWithDiagnostics,
+    wakeupForOutbox,
     dispatchPendingNativeStatusWakeups,
     triggerIssueMonitor,
 

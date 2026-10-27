@@ -5,6 +5,7 @@ import {
 } from "@paperclipai/db";
 import { notFound } from "../errors.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
+import { issueWipReason } from "./agent-wip-policy.js";
 import { buildCompanyFlowReport } from "./company-flow-model.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { listIssueDependencyReadinessMap } from "./issue-dependency-readiness.js";
@@ -22,6 +23,7 @@ export function companyFlowService(db: Db) {
           priority: issues.priority, parentId: issues.parentId, assigneeAgentId: issues.assigneeAgentId,
           assigneeUserId: issues.assigneeUserId, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId,
           createdAt: issues.createdAt, updatedAt: issues.updatedAt,
+          wipReason: issueWipReason(),
           executionVisible: sql<boolean>`${executionIssueCondition()}`,
         }).from(issues).where(eq(issues.companyId, companyId)),
         tx.select({ id: agents.id, name: agents.name, status: agents.status })

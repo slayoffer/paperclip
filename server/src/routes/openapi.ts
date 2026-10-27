@@ -2,6 +2,8 @@ import { commonOpenApiResponses } from "./openapi-responses.js";
 import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
 import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
 import { registerTaskDrainPaths } from "./openapi-task-drain.js";
+import { registerRunStatsPaths } from "./openapi-run-stats.js";
+import { registerUploadCorrelationPaths } from "./openapi-upload-correlation.js";
 import { forkReadApiPaths } from "./fork-read-api.js";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import {
@@ -1286,6 +1288,8 @@ const browserUseOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/issues/{issueId}/attachment-upload-correlation",
+  "POST /api/companies/{companyId}/agents/{agentId}/permission-grants",
   ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
   "POST /api/companies/{companyId}/ai-connections",
@@ -3660,7 +3664,7 @@ registry.registerPath({
   tags: ["agents"],
   summary: "Wake up an agent",
   description:
-    "Board failed-run retries supply failedRunId with reason retry_failed_run. Paperclip derives the exact request and current authorization; a chat retry may return a durable queued/deferred receipt before a run exists. Caller task/comment markers and fresh-session overrides do not authorize replay.",
+    "Skipped wakes include the exact receipt reason, error text, and safe details. Budget skips include usage and limits. Dependency skips include company-scoped blocker identifiers and status. Existing HTTP 409 refusals retain their status and add recorded diagnostics under details.wakeup. Board failed-run retries supply failedRunId with reason retry_failed_run. Paperclip derives the exact request and current authorization; a chat retry may return a durable queued/deferred receipt before a run exists. Caller task/comment markers and fresh-session overrides do not authorize replay.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(wakeAgentSchema),
@@ -6261,6 +6265,8 @@ registry.registerPath({
 });
 
 registerTaskDrainPaths(registry, r);
+registerRunStatsPaths(registry, r);
+registerUploadCorrelationPaths(registry, r);
 
 registry.registerPath({
   method: "get",

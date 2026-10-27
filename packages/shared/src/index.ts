@@ -13,3 +13,5 @@ export * from "./exports/part-7.js";
 export * from "./validators/credential-transfers.js";
 
 export { reviewBridgeTargetSchema } from "./validators/issue-unblock.js";
+export type { RuntimeCap } from "./types/runtime-cap.js";
+export * from "./validators/upload-correlation.js";

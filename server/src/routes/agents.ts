@@ -6293,7 +6293,7 @@ export function agentRoutes(
         ),
       );
     }
-    const run = await heartbeat.wakeup(id, {
+    const { run, skipped } = await heartbeat.wakeupWithDiagnostics(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
       ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
@@ -6331,7 +6331,19 @@ export function agentRoutes(
     });
 
     if (!run) {
-      res.status(202).json(await opts.skippedResponse(agent, wakePayload));
+      res.status(202).json(skipped
+        ? {
+            status: "skipped",
+            issueId: typeof wakePayload?.issueId === "string" && wakePayload.issueId.trim()
+              ? wakePayload.issueId : null,
+            executionRunId: typeof skipped.details?.heartbeatSkip?.executionRunId === "string"
+              ? skipped.details.heartbeatSkip.executionRunId : null,
+            executionAgentId: typeof skipped.details?.heartbeatSkip?.executionAgentId === "string"
+              ? skipped.details.heartbeatSkip.executionAgentId : null,
+            executionAgentName: null,
+            ...skipped,
+          }
+        : await opts.skippedResponse(agent, wakePayload));
       return;
     }
 

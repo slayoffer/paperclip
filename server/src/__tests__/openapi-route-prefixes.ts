@@ -7,6 +7,7 @@ export const apiPrefixes: Record<string, string> = {
   "adapters.ts": "/api",
   "agents.ts": "/api",
   "agent-avatars.ts": "/api",
+  "agent-stats-grants.ts": "/api",
   "announcements.ts": "/api",
   "ai-connections.ts": "/api",
   "attention.ts": "/api",
@@ -57,6 +58,7 @@ export const apiPrefixes: Record<string, string> = {
   "resource-memberships.ts": "/api",
   "remote-agent-profiles.ts": "/api",
   "routines.ts": "/api",
+  "run-stats.ts": "/api",
   "secrets.ts": "/api",
   "sidebar-badges.ts": "/api",
   "sidebar-preferences.ts": "/api",
@@ -65,5 +67,6 @@ export const apiPrefixes: Record<string, string> = {
   "teams-catalog.ts": "/api",
   "tool-access.ts": "/api",
   "tool-gateway.ts": "/api",
+  "upload-correlation.ts": "/api",
   "user-profiles.ts": "/api",
 };

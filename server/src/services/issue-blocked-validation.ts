@@ -7,6 +7,7 @@ import { SELF_BLOCK_REFUSAL, selfBlockGuardEnabled } from "./self-block-guard.js
 import { blockedStateIntegrityEnabled, blockedWaitFacts } from "./blocked-state-integrity.js";
 import { assertReviewBridgeWait } from "./review-bridge-contract.js";
 import { hasSavedReviewWait } from "./review-wait.js";
+import { assertAssigneeExternalWait } from "./external-wait.js";
 
 export async function assertBlockedIssueUpdate(input: {
   db: Db;
@@ -38,7 +39,9 @@ export async function assertBlockedIssueUpdate(input: {
   }
   if (updateFields.unblockDescriptor && descriptor && typeof descriptor === "object") {
     const owner = descriptor.owner;
-    if (
+    if (actor.type === "agent" && descriptor.kind === "external" && owner === "board") {
+      assertAssigneeExternalWait(existing, actor.agentId, updateFields, descriptor);
+    } else if (
       actor.type === "agent" &&
       (owner === "board" || "userId" in owner) &&
       !(await hasSavedReviewWait(db, {

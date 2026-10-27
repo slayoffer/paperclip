@@ -1063,6 +1063,41 @@ describe("admitWakeBehindIssueExecution", () => {
     expect(writer.insertNewDeferredWake).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves coalescing policy when a wake carries only a diagnostic receipt", async () => {
+    const writer = createFakeAdmissionWriter();
+    const reader = createFakeAdmissionReader({ matchesActiveWakeActor: vi.fn(async () => false) });
+    const admit = createAdmitWakeBehindIssueExecution({ reader, writer, helpers: createFakeAdmissionHelpers() });
+    const diagnosticReceipt = { id: "diagnostic-1", requestedAt: new Date() };
+    expect(await admit(SCOPE, admissionInput({ diagnosticReceipt }))).toEqual({
+      kind: "coalesced", run: { id: "merged-run-1" },
+    });
+    expect(reader.matchesActiveWakeActor).not.toHaveBeenCalled();
+    expect(writer.coalesceIntoActiveExecutionRun).toHaveBeenCalledWith(SCOPE,
+      expect.objectContaining({ durableReceipt: diagnosticReceipt }));
+  });
+
+  it("retains each diagnostic receipt when an existing deferred wake absorbs it", async () => {
+    const writer = createFakeAdmissionWriter();
+    const reader = createFakeAdmissionReader({
+      findExistingDeferredWake: vi.fn(async () => ({
+        id: "existing-deferred", payload: {}, deferredContext: {}, coalescedCount: 1, runId: null,
+      })),
+    });
+    const helpers = createFakeAdmissionHelpers({ shouldDeferFollowupWakeForSameIssue: vi.fn(() => true) });
+    const admit = createAdmitWakeBehindIssueExecution({ reader, writer, helpers });
+    const diagnosticReceipt = { id: "diagnostic-2", requestedAt: new Date() };
+    expect(await admit(SCOPE, admissionInput({ diagnosticReceipt }))).toEqual({ kind: "deferred" });
+    expect(writer.mergeIntoExistingDeferredWake).toHaveBeenCalledWith(SCOPE, expect.objectContaining({
+      coalescedReceipt: expect.objectContaining({
+        id: diagnosticReceipt.id, reason: "issue_execution_deferred",
+        payload: expect.objectContaining({ heartbeatSkip: expect.objectContaining({ executionRunId: expect.any(String) }) }),
+      }),
+    }));
+    expect(reader.findExistingDeferredWake).toHaveBeenCalledWith(SCOPE, {
+      companyId: "company-1", agentId: "wake-agent", issueId: "issue-1",
+    });
+  });
+
   it("keeps ordinary non-durable coalescing independent of durable actor lookup", async () => {
     const writer = createFakeAdmissionWriter();
     const reader = createFakeAdmissionReader({

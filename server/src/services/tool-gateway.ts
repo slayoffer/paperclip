@@ -1,3 +1,4 @@
+import { connectedMcpConnectionFilter } from "./tool-connection-discovery.js";
 import { validateTransferGatewayOperation } from "./credential-transfer-gateway-operation.js";
 import { type CredentialTransferOperation } from "@paperclipai/shared";
 import { isInteractionResolutionReplay } from "./interaction-revision.js";
@@ -1140,26 +1141,6 @@ export function createToolGatewayService(
     return [...BUILTIN_TOOLS, ...pluginTools()];
   }
 
-  function connectedMcpConnectionFilter(companyId: string) {
-    return and(
-      eq(toolConnections.companyId, companyId),
-      inArray(toolConnections.transport, ["mcp_remote", "local_stdio", "rest_api"]),
-      eq(toolConnections.status, "active"),
-      eq(toolConnections.enabled, true),
-      // A personal connection has no company-level credential to probe. A
-      // credential-less health sweep can therefore mark it as errored even
-      // while the responsible user's grant is valid. Keep its cached active
-      // catalog discoverable; execution resolves and validates that user's
-      // grant, and a successful call restores the shared health indicator.
-      or(
-        inArray(toolConnections.healthStatus, ["ok", "healthy"]),
-        eq(toolConnections.credentialPolicy, "per_user"),
-      ),
-      eq(toolApplications.companyId, companyId),
-      inArray(toolApplications.type, ["mcp_http", "mcp_stdio", "rest_api"]),
-      eq(toolApplications.status, "active"),
-    );
-  }
 
   async function connectedMcpToolsForCompany(
     companyId: string,
@@ -5748,6 +5729,13 @@ export function createToolGatewayService(
       session,
       tool,
     );
+    if (useDefaultTimeout && connection.transport === "mcp_remote") {
+      ms = timeoutMs(
+        typeof connection.config.toolTimeoutMs === "number"
+          ? connection.config.toolTimeoutMs
+          : undefined,
+      );
+    }
     // Recheck immediately before dispatch, including previously approved calls
     // and connections whose stored grant/catalog predates scope reduction.
     assertGoogleChatToolArgumentsSupported(connection, entry.toolName, parameters);
@@ -5789,7 +5777,8 @@ export function createToolGatewayService(
       },
     };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ms);
+    let responseBudgetMs = ms;
+    let timer = setTimeout(() => controller.abort(), ms);
     timer.unref?.();
     try {
       const dispatchRemote = (target: string, init: RequestInit) =>
@@ -5800,7 +5789,7 @@ export function createToolGatewayService(
               // This call site owns a caller-set budget that can exceed the
               // transport's default response deadline, so hand it down rather than
               // letting the tighter default cut a legitimately slow tool short.
-              responseTimeoutMs: ms,
+              responseTimeoutMs: responseBudgetMs,
             });
       if (isRailwayEndpoint(connection.config.url) && normalizeRailwayToolName(entry.toolName).startsWith(RAILWAY_TOOL_PREFIX)) {
         if (!isRailwayConnection(connection) || connection.config.railwayApiStatus !== "available") {
@@ -5833,6 +5822,11 @@ export function createToolGatewayService(
       }
       let requestHeaders = headers;
       if (connection.config.mcpSessionRequired === true) {
+        // Session setup has its own budget, including both protocol messages.
+        clearTimeout(timer);
+        responseBudgetMs = DEFAULT_TOOL_TIMEOUT_MS;
+        timer = setTimeout(() => controller.abort(), responseBudgetMs);
+        timer.unref?.();
         requestHeaders = await getMcpHttpSession({
           scope: `${connection.id}:grant:${grant.id}:actor:${session.agentId}:${endpoint}`,
           send: (init) =>
@@ -5844,6 +5838,10 @@ export function createToolGatewayService(
           headers,
           requestId,
         });
+        clearTimeout(timer);
+        responseBudgetMs = ms;
+        timer = setTimeout(() => controller.abort(), ms);
+        timer.unref?.();
       }
       // The guard runs inside this call and the connection is pinned to the
       // address it approved, so an operator-supplied hostname cannot be rebound
@@ -6123,6 +6121,23 @@ export function createToolGatewayService(
       );
       return { result, headerSummary, execution };
     } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        await markRemoteConnectionHealth(
+          connection,
+          "error",
+          "Remote MCP tool call timed out.",
+        );
+        throw new ToolGatewayHttpError(
+          504,
+          "Remote MCP tool call timed out",
+          "tool_timeout",
+          {
+            connectionId: connection.id,
+            catalogEntryId: entry.id,
+            execution,
+          },
+        );
+      }
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
           : error.reason === "malformed_response" ? malformedRemoteMcpResponse()
@@ -6148,23 +6163,6 @@ export function createToolGatewayService(
           {
             ...error.details,
             execution: error.details.execution ?? execution,
-          },
-        );
-      }
-      if (error instanceof Error && error.name === "AbortError") {
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP tool call timed out.",
-        );
-        throw new ToolGatewayHttpError(
-          504,
-          "Remote MCP tool call timed out",
-          "tool_timeout",
-          {
-            connectionId: connection.id,
-            catalogEntryId: entry.id,
-            execution,
           },
         );
       }

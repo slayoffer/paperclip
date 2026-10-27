@@ -19,11 +19,36 @@ A database advisory lock prevents duplicate selection across server processes.
 The admission path retains its run limits, budget checks, execution holds, and governance checks.
 Selection does not approve a card or a review.
 
+Selection checks the current issue token budget before requesting a wake.
+An exhausted issue keeps one budget card and does not create repeated skipped wakes.
+Question responses and resolution continuations also check this budget before requesting a wake.
+They remain pending during the stop. Accepting the budget card retries that issue's pending outboxes.
+Other outbox holds use a saved exponential retry delay, from 30 seconds up to 30 minutes,
+and do not create skipped wake receipts. A terminated assignee ends that delivery with a failure reason.
+Selection continues to the next candidate after a skipped admission.
+A null admission result with queued or deferred work still reserves the owner.
+
+A skipped pull records a condition fingerprint in its existing wake receipt.
+The queue skips that issue while its admission conditions remain unchanged.
+Task execution settings, owner configuration, project policy, instance settings, cards, and approvals contribute to this fingerprint.
+Budget stops and subtree pauses use current gate state rather than the old receipt.
+Timed skips become eligible at their recorded deadline. Daily caps reset at the normal day boundary.
+
+An explicit backlog update records a parking receipt in the same transaction.
+The issue stays parked until its saved unblock action, monitor condition, or execution policy changes.
+An explicit move to `todo` or a new assignee also permits selection.
+Title edits, comments, and scheduler reconciliation do not resume the same parked issue.
+Existing backlog tasks with a recorded backlog disposition after an owner attempt receive one parking receipt on first selection.
+A prior attempt alone does not park a backlog task.
+Parking receipts include the monotonic status version. An ownership cycle cannot restore an earlier parking decision.
+An explicit backlog reassertion advances that version under the issue row lock. Admission rejects an earlier selection.
+These receipts affect automatic pull selection. Explicit wakes still pass through normal admission.
+
 With this switch enabled, both assignment admission and queue selection count real work:
 
 - Every `todo` task counts.
 - An `in_progress` task counts when it has a live run or queued wake.
-- A `blocked` task counts when it has no scheduled monitor.
+- A `blocked` task counts unless it has a typed external wait.
 - Conversation tasks and other statuses do not count.
 
 Live runs include queued runs and scheduled retries.
@@ -40,7 +65,28 @@ The update clears stale execution locks and adds a system comment and activity r
 A status change that would discard a scheduled monitor returns HTTP `409`.
 The error code is `scheduled_monitor_status_conflict`.
 Remove the monitor explicitly before such a status change.
-With the switch off, the prior counting, dependency, and monitor behavior remains active.
+With the switch off, the prior execution and monitor behavior remains active.
+The release branch resolves cancelled blockers independently of this switch.
+Typed external waits release WIP slots with either switch setting.
+
+## Typed external waits
+
+A blocked task releases its owner's work slot when company-scoped evidence identifies an outside wait:
+
+- An open blocker belongs to another agent or a human user.
+- A pending interaction requires a human resolver or names a human addressee.
+- An unblock descriptor names the board, a user, or another agent and states the action that resumes work.
+
+The descriptor's action is its saved resume condition. Existing descriptor validation remains authoritative.
+The named agent must belong to the issue company. A named user must have an active company membership.
+An agent-addressed card, a self-owned blocker, or a self-owned descriptor does not qualify.
+A closed blocker or a resolved card does not qualify.
+A scheduled monitor alone does not qualify. Untyped blocked work still consumes a slot.
+This classification changes no run cap, approval gate, or wake authority.
+
+Admission and queue logs record the owner, counts, issue identifiers, and reason for each classification.
+The company flow report exposes `runnableWip` and `waitingWip` for each agent.
+Its existing `wip` field equals `runnableWip` and determines `atWipLimit`.
 
 ## Verification and qualification
 
@@ -48,9 +94,11 @@ Run the focused regression suite:
 
 ```sh
 pnpm exec vitest run server/src/__tests__/heartbeat-pull-queue.test.ts --maxWorkers=1
+pnpm exec vitest run server/src/__tests__/heartbeat-pull-queue-gap.test.ts --maxWorkers=1
 ```
 
-The suite covers selection order, completed dependencies, pending cards, work counts, duplicate selection, ghost release, and monitor protection.
+The suites cover selection order, completed dependencies, pending cards, work counts, duplicate selection, ghost release, and monitor protection.
+They also cover skipped heads, budget grants, durable parking, transaction rollback, owner changes, and timed retry eligibility.
 It uses a temporary PostgreSQL database. It does not prove deployment latency.
 
 After deployment, record a terminal run time and the next ready task's run start time for the same owner.
