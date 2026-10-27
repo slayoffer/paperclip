@@ -51,6 +51,9 @@ export type PutFileInput = {
   namespace: string;
   originalFilename: string | null;
   contentType: string;
+  // Persist the exact binding before the provider can receive bytes.
+  beforePut?: (planned: PutFileResult) => Promise<void>;
+  preserveOnError?: boolean;
 } & ({ body: Buffer } | { body: Readable; byteSize: number; sha256: string });
 
 export interface PutFileResult {
@@ -64,8 +67,9 @@ export interface PutFileResult {
 
 export interface StorageService {
   provider: StorageProviderId;
+  bindingId?: string;
   putFile(input: PutFileInput): Promise<PutFileResult>;
-  getObject(companyId: string, objectKey: string, options?: Pick<GetObjectInput, "range">): Promise<GetObjectResult>;
+  getObject(companyId: string, objectKey: string, options?: Pick<GetObjectInput, "range" | "signal">): Promise<GetObjectResult>;
   headObject(companyId: string, objectKey: string): Promise<HeadObjectResult>;
   deleteObject(companyId: string, objectKey: string): Promise<void>;
 }
