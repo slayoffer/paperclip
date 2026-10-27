@@ -8106,11 +8106,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .where(eq(agents.id, agentId));
       const heartbeat = heartbeatService(db);
       await heartbeat.resumeQueuedRuns();
-      const running = await waitForValue(async () =>
-        runningProcesses.get(runId),
-      );
-      expect(running?.child.pid).toBeTruthy();
       await ready;
+      const running = runningProcesses.get(runId);
+      expect(running?.child.pid).toBeTruthy();
       const cancellation = heartbeat
         .cancelRun(runId, "Stopped by test operator")
         .then(
