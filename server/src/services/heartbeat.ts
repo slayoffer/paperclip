@@ -1364,6 +1364,7 @@ export function heartbeatService(
     withChatControlRecoveryGate,
     trackWakeup,
     wakeupWithDiagnostics,
+    wakeupForOutbox,
     resumeQueuedRuns,
     parseHeartbeatPolicy,
     nextTimerHeartbeatAt,
@@ -4442,6 +4443,7 @@ export function heartbeatService(
 
     wakeup: trackWakeup,
     wakeupWithDiagnostics,
+    wakeupForOutbox,
     dispatchPendingNativeStatusWakeups,
     triggerIssueMonitor,
 

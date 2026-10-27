@@ -205,6 +205,23 @@ These are set automatically by the server when invoking agents:
 | `PAPERCLIP_APPROVAL_STATUS` | Approval decision |
 | `PAPERCLIP_LINKED_ISSUE_IDS` | Comma-separated linked issue IDs |
 
+## Issue Token Budget
+
+These variables control the per-issue input-token gate, separately from monthly cost budgets.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERCLIP_ISSUE_TOKEN_BUDGET` | (unset, disabled) | Positive integer limit for weighted issue input tokens. |
+| `PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT` | `0.1` | Cached-input weight from `0` to `1`. Invalid values use `0.1` and log one warning per server process. |
+| `PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE` | (rolling 24 hours) | Start of the usage window. A later accepted budget card starts a fresh window. |
+| `PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID` | (board) | Valid agent UUID for the budget confirmation card. |
+
+The meter sums `max(inputTokens - cachedInputTokens, 0) + cachedInputTokens * W` for each run in the issue window.
+Missing or invalid cached counts leave valid input tokens at full weight. The meter retains fractional totals.
+Weight `1` preserves the previous count for valid usage where cached tokens do not exceed input tokens.
+The card and skipped-wake payload report weighted usage and the cached weight.
+Budget grants, explicit overrides, and outbox admission retain their existing rules.
+
 ## LLM Provider Keys (for adapters)
 
 | Variable | Description |

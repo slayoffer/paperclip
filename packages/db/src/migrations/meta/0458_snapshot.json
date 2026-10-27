@@ -1,6 +1,6 @@
 {
-  "id": "91503b93-ae9e-44b9-99c6-19d5ee109cb2",
-  "prevId": "5044d02a-dff9-467e-aa1d-5741a0e240b4",
+  "id": "7b5c9f8d-ef96-4a93-bae3-743ebbf6a100",
+  "prevId": "8a02d214-fff8-4f08-99c7-96e1022331ba",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3874,6 +3874,27 @@
             },
             {
               "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_wakeup_requests_company_idempotency_idx": {
+          "name": "agent_wakeup_requests_company_idempotency_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -35289,6 +35310,56 @@
           "primaryKey": false,
           "notNull": false
         },
+        "context_task_identity": {
+          "name": "context_task_identity",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "coalesce(nullif(context_snapshot -> 'issueId', 'null'::jsonb), nullif(context_snapshot -> 'taskId', 'null'::jsonb) )",
+            "type": "stored"
+          }
+        },
+        "writes_revoked": {
+          "name": "writes_revoked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "status = 'cancelled' or coalesce(jsonb_typeof(result_json -> 'executionCancellation') = 'object' and result_json -> 'executionCancellation' -> 'state' = '\"requested\"'::jsonb, false)",
+            "type": "stored"
+          }
+        },
+        "conversation_mode": {
+          "name": "conversation_mode",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "coalesce(context_snapshot -> 'conversationMode' = 'true'::jsonb, false)",
+            "type": "stored"
+          }
+        },
+        "context_issue_id": {
+          "name": "context_issue_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "context_snapshot ->> 'issueId'",
+            "type": "stored"
+          }
+        },
+        "context_task_id": {
+          "name": "context_task_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "context_snapshot ->> 'taskId'",
+            "type": "stored"
+          }
+        },
         "context_snapshot": {
           "name": "context_snapshot",
           "type": "jsonb",
@@ -35535,6 +35606,45 @@
           "method": "btree",
           "with": {}
         },
+        "heartbeat_runs_company_agent_activity_idx": {
+          "name": "heartbeat_runs_company_agent_activity_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "context_issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "context_task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "heartbeat_runs_company_agent_started_idx": {
           "name": "heartbeat_runs_company_agent_started_idx",
           "columns": [
@@ -35710,6 +35820,81 @@
               "expression": "created_at",
               "isExpression": false,
               "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "heartbeat_runs_company_issue_coalesce_idx": {
+          "name": "heartbeat_runs_company_issue_coalesce_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "(coalesce(\"native_issue_id\"::text, \"context_snapshot\"->>'issueId'))",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "heartbeat_runs_company_recovery_action_idx": {
+          "name": "heartbeat_runs_company_recovery_action_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "(\"context_snapshot\"->>'recoveryActionId')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "heartbeat_runs_company_issue_task_coalesce_idx": {
+          "name": "heartbeat_runs_company_issue_task_coalesce_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "(coalesce(\"context_snapshot\"->>'issueId', \"context_snapshot\"->>'taskId', \"native_issue_id\"::text))",
+              "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
@@ -37227,6 +37412,149 @@
         }
       },
       "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.interaction_resolution_outbox": {
+      "name": "interaction_resolution_outbox",
+      "schema": "",
+      "columns": {
+        "interaction_id": {
+          "name": "interaction_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "wakes": {
+          "name": "wakes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorization_context": {
+          "name": "authorization_context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "hold_count": {
+          "name": "hold_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failed_at": {
+          "name": "failed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_code": {
+          "name": "last_error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "delivered_at": {
+          "name": "delivered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "interaction_resolution_outbox_pending_idx": {
+          "name": "interaction_resolution_outbox_pending_idx",
+          "columns": [
+            {
+              "expression": "delivered_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "interaction_resolution_outbox_interaction_id_issue_thread_interactions_id_fk": {
+          "name": "interaction_resolution_outbox_interaction_id_issue_thread_interactions_id_fk",
+          "tableFrom": "interaction_resolution_outbox",
+          "tableTo": "issue_thread_interactions",
+          "columnsFrom": [
+            "interaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "interaction_resolution_outbox_company_id_companies_id_fk": {
+          "name": "interaction_resolution_outbox_company_id_companies_id_fk",
+          "tableFrom": "interaction_resolution_outbox",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "interaction_resolution_outbox_issue_id_issues_id_fk": {
+          "name": "interaction_resolution_outbox_issue_id_issues_id_fk",
+          "tableFrom": "interaction_resolution_outbox",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -39543,6 +39871,19 @@
           "notNull": true,
           "default": 0
         },
+        "hold_count": {
+          "name": "hold_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "last_attempt_at": {
           "name": "last_attempt_at",
           "type": "timestamp with time zone",
@@ -40986,6 +41327,19 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
+        },
+        "revision": {
+          "name": "revision",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "resolution_request": {
+          "name": "resolution_request",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "company_id": {
           "name": "company_id",

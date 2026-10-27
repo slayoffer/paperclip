@@ -251,6 +251,7 @@ import { ContextCompactionError, contextCompactionService } from "../services/co
 import { issueContextUsage } from "../services/issue-context-usage.js";
 import { queueLiveRunnerPrpCommand } from "../realtime/runner-prp-ws.js";
 import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
+import { deliverAcceptedInteractionOutboxes } from "../services/accepted-interaction-outboxes.js";
 import { emitAgentTaskRunById } from "../services/agent-task-run-telemetry.js";
 import {
   createQueuedCommentQueue,
@@ -17689,33 +17690,14 @@ export function issueRoutes(
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
         }, mutationOptions);
-      if (isInteractionResolutionReplay(interaction)) {
-        await resolutionOutbox.deliver(interaction.id);
-        if (interaction.kind === "ask_user_questions") await questionResponseDeliveries.deliver(interaction.id);
-        res.json(await interactionSvc.getById(interaction.id)); return;
-      }
-      if (durableEffects) {
-        for (const publication of publications) publishActivity(publication);
-        await resolutionOutbox.deliver(interaction.id);
+      if (isInteractionResolutionReplay(interaction) || durableEffects) {
+        if (!isInteractionResolutionReplay(interaction)) for (const publication of publications) publishActivity(publication);
+        await deliverAcceptedInteractionOutboxes(db, interaction, resolutionOutbox, questionResponseDeliveries);
         res.json(await interactionSvc.getById(interaction.id));
         return;
       }
-      const toolAction =
-        interaction.payload && typeof interaction.payload === "object"
-          ? (
-              interaction.payload as {
-                toolAction?: { actionRequestId?: unknown };
-              }
-            ).toolAction
-          : null;
-      const secretProposal =
-        interaction.payload && typeof interaction.payload === "object"
-          ? (
-              interaction.payload as {
-                secretProposal?: { proposalId?: unknown; configPath?: unknown };
-              }
-            ).secretProposal
-          : null;
+      const toolAction = readObject(readObject(interaction.payload).toolAction);
+      const secretProposal = readObject(readObject(interaction.payload).secretProposal);
       let continuationInteraction = interaction;
       if (
         interaction.kind === "request_confirmation" &&
@@ -17848,7 +17830,7 @@ export function issueRoutes(
         }
       }
       await persistEffects(db, { interaction: continuationInteraction, createdIssues, continuationIssue }, heartbeat);
-
+      await deliverAcceptedInteractionOutboxes(db, interaction, resolutionOutbox, questionResponseDeliveries, false);
       res.json(continuationInteraction);
     },
   );

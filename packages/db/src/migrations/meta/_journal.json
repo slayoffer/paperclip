@@ -3193,6 +3193,13 @@
       "when": 1792967951765,
       "tag": "0457_curly_squirrel_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 458,
+      "version": "7",
+      "when": 1793058290067,
+      "tag": "0458_last_meteorite",
+      "breakpoints": true
     }
   ]
 }

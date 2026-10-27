@@ -1,9 +1,12 @@
-import { and, asc, eq, sql, notInArray, isNull } from "drizzle-orm";
+import { outboxBackoff } from "./outbox-backoff.js";
+import type { heartbeatService } from "./heartbeat.js";
+import { and, asc, eq, sql, notInArray, isNull, lte, or } from "drizzle-orm";
 import { agentWakeupRequests, interactionResolutionOutbox, issueThreadInteractions, type Db } from "@paperclipai/db";
 import type { IssueThreadInteraction } from "@paperclipai/shared";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logger } from "../middleware/logger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
 import { readObject, readSecretProposalContinuationContext } from "../routes/interaction-continuation-context.js";
 
 import { resumeAcceptedBinding } from "./interaction-binding-execution.js";
@@ -37,14 +40,18 @@ export async function persistInteractionResolutionWakes(
   }
 }
 
-export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssignmentWakeupDeps) {
+export function interactionResolutionOutboxService(db: Db,
+  heartbeat: IssueAssignmentWakeupDeps & Partial<Pick<ReturnType<typeof heartbeatService>, "wakeupForOutbox">>,
+  options: { now?: () => Date } = {},
+) {
+  const now = options.now ?? (() => new Date());
   let cursor: string | undefined;
   let sweeping: Promise<void> | undefined;
 
   async function deliver(interactionId: string) {
     const [entry] = await db.select().from(interactionResolutionOutbox)
-      .where(and(eq(interactionResolutionOutbox.interactionId, interactionId), isNull(interactionResolutionOutbox.deliveredAt)));
-    if (!entry) return;
+      .where(and(eq(interactionResolutionOutbox.interactionId, interactionId), isNull(interactionResolutionOutbox.deliveredAt), isNull(interactionResolutionOutbox.failedAt)));
+    if (!entry || (entry.nextAttemptAt && entry.nextAttemptAt > now())) return;
     await resumeAcceptedBinding(db, entry);
     const [interaction] = await db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.id, entry.interactionId), eq(issueThreadInteractions.companyId, entry.companyId),
@@ -69,23 +76,40 @@ export function interactionResolutionOutboxService(db: Db, heartbeat: IssueAssig
         notInArray(agentWakeupRequests.status, ["skipped", "failed", "cancelled"]),
       )).limit(1);
       if (!(await existing()).length) {
+        const targetIssueId = readObject(options.payload).issueId;
+        if (await isRecoveryIssueTokenBudgetBlocked(db, {
+          companyId: entry.companyId,
+          id: typeof targetIssueId === "string" ? targetIssueId : entry.issueId,
+        })) return;
+        let suppression: string | null = null;
         try {
-          await heartbeat.wakeup(wake.agentId, options as Parameters<IssueAssignmentWakeupDeps["wakeup"]>[1]);
+          const opts = options as Parameters<IssueAssignmentWakeupDeps["wakeup"]>[1];
+          if (heartbeat.wakeupForOutbox) {
+            suppression = (await heartbeat.wakeupForOutbox(wake.agentId, opts)).suppression;
+          } else await heartbeat.wakeup(wake.agentId, opts);
         } catch (error) {
           if (!(await existing()).length) throw error;
         }
         // A null return can mean suppressed admission. Keep the intent pending
         // unless the queue actually saved a durable receipt.
-        if (!(await existing()).length) return;
+        if (!(await existing()).length) {
+          await db.update(interactionResolutionOutbox).set({
+            ...(suppression === "agent.terminated" ? { failedAt: now() } : outboxBackoff(entry.holdCount, now())),
+            lastErrorCode: suppression ?? "interaction_resolution_wake_skipped",
+          }).where(and(eq(interactionResolutionOutbox.interactionId, interactionId),
+            isNull(interactionResolutionOutbox.deliveredAt), isNull(interactionResolutionOutbox.failedAt)));
+          return;
+        }
       }
     }
-    await db.update(interactionResolutionOutbox).set({ deliveredAt: new Date() })
+    await db.update(interactionResolutionOutbox).set({ deliveredAt: now(), nextAttemptAt: null })
       .where(and(eq(interactionResolutionOutbox.interactionId, interactionId), isNull(interactionResolutionOutbox.deliveredAt)));
   }
 
   async function sweepPage(limit: number) {
     const page = () => db.select({ interactionId: interactionResolutionOutbox.interactionId })
-      .from(interactionResolutionOutbox).where(and(isNull(interactionResolutionOutbox.deliveredAt),
+      .from(interactionResolutionOutbox).where(and(isNull(interactionResolutionOutbox.deliveredAt), isNull(interactionResolutionOutbox.failedAt),
+        or(isNull(interactionResolutionOutbox.nextAttemptAt), lte(interactionResolutionOutbox.nextAttemptAt, now())),
         // Read the cursor timestamp inside PostgreSQL. A JavaScript Date loses
         // microseconds and can repeat the same full page forever.
         cursor ? sql`(${interactionResolutionOutbox.createdAt}, ${interactionResolutionOutbox.interactionId}) >
