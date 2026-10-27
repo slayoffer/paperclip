@@ -50,7 +50,8 @@ export async function correlateUpload(input: {
   if (!receipt) return result;
   if (receipt.companyId !== input.companyId || receipt.issueId !== input.issueId || receipt.runId !== query.runId
     || receipt.operationId !== query.operationId || (query.objectKey && query.objectKey !== receipt.objectKey)
-    || !receipt.objectKey.startsWith(`${input.companyId}/issues/${input.issueId}/`) || receipt.objectKey.includes("..")) return deny();
+    || !receipt.objectKey.startsWith(`${input.companyId}/issues/${input.issueId}/`)
+    || receipt.objectKey.split(/[\\/]/).some((part) => part === "." || part === "..")) return deny();
 
   result.objectBinding = { provider: receipt.provider, bindingId: receipt.bindingId, objectKey: receipt.objectKey };
   result.expectedByteSize = receipt.byteSize;
@@ -71,36 +72,56 @@ export async function correlateUpload(input: {
 
   const controller = new AbortController();
   let stream: Readable | undefined;
+  let rejectDeadline: (reason: Error) => void = () => {};
+  const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; });
   const timer = setTimeout(() => {
     controller.abort();
     stream?.destroy(new Error("Upload comparison deadline reached"));
+    rejectDeadline(new Error("Upload comparison deadline reached"));
   }, 30_000);
   timer.unref();
   try {
-    const object = await storage.getObject(input.companyId, receipt.objectKey, { signal: controller.signal });
-    stream = object.stream;
-    if (controller.signal.aborted) throw new Error("Upload comparison deadline reached");
-    let actualByteSize = 0;
-    const hash = createHash("sha256");
-    for await (const chunk of stream) {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      actualByteSize += bytes.length;
-      if (actualByteSize > receipt.byteSize || actualByteSize > MAX_ATTACHMENT_BYTES) {
-        return { ...result, reason: "Object exceeds the recorded length" };
+    const comparison = async () => {
+      const object = await storage.getObject(input.companyId, receipt.objectKey, { signal: controller.signal }).then((opened) => {
+        if (controller.signal.aborted) {
+          opened.stream.destroy();
+          throw new Error("Upload comparison deadline reached");
+        }
+        return opened;
+      });
+      stream = object.stream;
+      if (controller.signal.aborted) {
+        stream.destroy();
+        throw new Error("Upload comparison deadline reached");
       }
-      hash.update(bytes);
-    }
-    result.actualByteSize = actualByteSize;
-    result.actualSha256 = hash.digest("hex");
-    if (actualByteSize !== receipt.byteSize || result.actualSha256 !== receipt.sha256) {
-      return { ...result, reason: "Complete bytes differ from the receipt" };
-    }
-    return { ...result, outcome: "verified_bytes", reason: "Complete bytes match the exact operation receipt" };
+      let actualByteSize = 0;
+      const hash = createHash("sha256");
+      for await (const chunk of stream) {
+        if (controller.signal.aborted) throw new Error("Upload comparison deadline reached");
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        actualByteSize += bytes.length;
+        if (actualByteSize > receipt.byteSize || actualByteSize > MAX_ATTACHMENT_BYTES) {
+          return { ...result, reason: "Object exceeds the recorded length" };
+        }
+        hash.update(bytes);
+      }
+      result.actualByteSize = actualByteSize;
+      result.actualSha256 = hash.digest("hex");
+      if (actualByteSize !== receipt.byteSize || result.actualSha256 !== receipt.sha256) {
+        return { ...result, reason: "Complete bytes differ from the receipt" };
+      }
+      return { ...result, outcome: "verified_bytes" as const, reason: "Complete bytes match the exact operation receipt" };
+    };
+    return await Promise.race([comparison(), deadline]);
   } catch (error) {
-    const status = (error as { status?: number; $metadata?: { httpStatusCode?: number } }).status
-      ?? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
-    return { ...result, outcome: status === 403 || status === 401 ? "access_denied" : "incomplete_evidence",
-      reason: status === 403 || status === 401 ? "The storage provider denied access" : "Complete object bytes are unavailable" };
+    const failure = (error && typeof error === "object" ? error : {}) as {
+      status?: number; code?: string; $metadata?: { httpStatusCode?: number };
+    };
+    const status = failure.status ?? failure.$metadata?.httpStatusCode;
+    const code = failure.code;
+    const denied = status === 403 || status === 401 || code === "EACCES" || code === "EPERM";
+    return { ...result, outcome: denied ? "access_denied" : "incomplete_evidence",
+      reason: denied ? "The storage provider denied access" : "Complete object bytes are unavailable" };
   } finally {
     clearTimeout(timer);
     controller.abort();

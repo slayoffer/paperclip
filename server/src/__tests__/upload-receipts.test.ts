@@ -39,7 +39,7 @@ describeDatabase("durable upload receipts", () => {
     await db.insert(issues).values({ id: issueId, companyId, title: "Upload recovery" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Writer", role: "engineer", adapterType: "codex_local" });
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, invocationSource: "on_demand",
-      triggerDetail: "manual", status: "succeeded", contextSnapshot: { issueId } });
+      triggerDetail: "manual", status: "running", contextSnapshot: { issueId } });
   }, 30_000);
 
   afterAll(async () => { await tempDb?.cleanup(); });
@@ -81,6 +81,28 @@ describeDatabase("durable upload receipts", () => {
     expect(await service.runBelongsToIssue(companyId, randomUUID(), runId)).toBe(false);
     expect(await service.runBelongsToIssue(randomUUID(), issueId, runId)).toBe(false);
     expect(await service.runBelongsToIssue(companyId, issueId, randomUUID())).toBe(false);
+  });
+
+  it.each(["agent", "issue", "company", "terminal", "board"])("rejects upload attribution to an unauthorized %s scope", async (mismatch) => {
+    const operationId = randomUUID();
+    const service = uploadReceiptService(db);
+    const otherRunId = randomUUID();
+    if (mismatch === "terminal") {
+      await db.insert(heartbeatRuns).values({ id: otherRunId, companyId, agentId, invocationSource: "on_demand",
+        triggerDetail: "manual", status: "succeeded", contextSnapshot: { issueId } });
+    }
+    const beforePut = service.beforePut({
+      companyId: mismatch === "company" ? randomUUID() : companyId,
+      issueId: mismatch === "issue" ? randomUUID() : issueId,
+      agentId: mismatch === "agent" ? randomUUID() : agentId,
+      actorType: mismatch === "board" ? "user" : "agent", actorId: agentId,
+      runId: mismatch === "terminal" ? otherRunId : runId, operationId, storage,
+    });
+    const previousCalls = calls;
+    await expect(storage.putFile({ companyId, namespace: `issues/${issueId}`, originalFilename: "manifest.gz",
+      contentType: "application/gzip", body: bytes, beforePut, preserveOnError: true })).rejects.toMatchObject({ status: 403 });
+    expect(calls).toBe(previousCalls);
+    expect(await service.findReceipt(companyId, operationId)).toBeNull();
   });
 
   it("recovers registration after a response loss without a replacement attachment", async () => {

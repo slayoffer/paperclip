@@ -112,6 +112,20 @@ describe("bounded upload correlation", () => {
     expect(storage.getObject).not.toHaveBeenCalled();
   });
 
+  it("accepts a recorded filename with embedded dots", async () => {
+    const { input, repository } = fixture();
+    const objectKey = "company-a/issues/issue-a/report..final.txt";
+    repository.findReceipt.mockResolvedValue({ ...receipt, objectKey });
+    expect(await correlateUpload({ ...input, query: { ...input.query, objectKey } })).toMatchObject({ outcome: "verified_bytes" });
+  });
+
+  it.each(["EACCES", "EPERM"])("reports filesystem %s as access denial", async (code) => {
+    const { input, storage } = fixture();
+    storage.getObject.mockRejectedValue(Object.assign(new Error("read denied"), { code }));
+    expect(await correlateUpload(input)).toMatchObject({ outcome: "access_denied" });
+    expect(storage.deleteObject).not.toHaveBeenCalled();
+  });
+
   it.each([403, 404, 500])("reports storage status %s without claiming operation absence", async (status) => {
     const { input, storage } = fixture();
     storage.getObject.mockRejectedValue(new HttpError(status, "storage response"));
@@ -152,6 +166,22 @@ describe("bounded upload correlation", () => {
       await vi.advanceTimersByTimeAsync(30_001);
       expect(await pending).toMatchObject({ outcome: "incomplete_evidence", actualSha256: null });
       expect(stream.destroyed).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("bounds a stalled open even when the provider ignores cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      const { input, storage } = fixture();
+      let open: (object: { stream: Readable }) => void = () => {};
+      storage.getObject.mockImplementation(() => new Promise((resolve) => { open = resolve; }));
+      const pending = correlateUpload(input);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await pending).toMatchObject({ outcome: "incomplete_evidence", actualSha256: null });
+      const lateStream = Readable.from([bytes]);
+      open({ stream: lateStream });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lateStream.destroyed).toBe(true);
     } finally { vi.useRealTimers(); }
   });
 });

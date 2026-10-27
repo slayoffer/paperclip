@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { activityLog, assets, heartbeatRuns, issueAttachments, type Db } from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
 import type { PutFileResult, StorageService } from "../storage/types.js";
 import type { UploadReceipt, UploadCorrelationRepository } from "./upload-correlation.js";
-import { conflict } from "../errors.js";
+import { conflict, forbidden } from "../errors.js";
 
 const ENTITY = "attachment_upload";
 const PREPARED = "attachment.upload_prepared";
 const NOT_STARTED = "attachment.upload_not_started";
+
+function runIssueScope(companyId: string, issueId: string, runId: string) {
+  return and(
+    eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId),
+    sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.contextSnapshot}->'paperclipIssue'->>'id') = ${issueId}`,
+  );
+}
 
 export function uploadReceiptService(db: Db): UploadCorrelationRepository & {
   beforePut(input: {
@@ -19,6 +27,16 @@ export function uploadReceiptService(db: Db): UploadCorrelationRepository & {
   return {
     beforePut(input) {
       return async (planned) => {
+        if (input.actorType === "agent") {
+          if (!input.agentId || !input.runId || !isUuidLike(input.runId)) throw forbidden("Agent uploads require their active issue run");
+          const [run] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            runIssueScope(input.companyId, input.issueId, input.runId),
+            eq(heartbeatRuns.agentId, input.agentId), eq(heartbeatRuns.status, "running"),
+          )).limit(1);
+          if (!run) throw forbidden("Upload run must belong to the agent and exact issue");
+        } else if (input.runId) {
+          throw forbidden("Board uploads cannot attribute an agent run");
+        }
         // The primary key reserves the identity. A duplicate never sends more bytes.
         const rows = await db.insert(activityLog).values({
           id: input.operationId, companyId: input.companyId,
@@ -41,10 +59,8 @@ export function uploadReceiptService(db: Db): UploadCorrelationRepository & {
       };
     },
     async runBelongsToIssue(companyId, issueId, runId) {
-      const [run] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-        eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId),
-        sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.contextSnapshot}->'paperclipIssue'->>'id') = ${issueId}`,
-      )).limit(1);
+      const [run] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+        .where(runIssueScope(companyId, issueId, runId)).limit(1);
       return Boolean(run);
     },
     async findReceipt(companyId, operationId) {

@@ -14,6 +14,7 @@ This conflict never retries the upload or repairs a reference.
 The artifact helper saves each future attempt's identity before its request.
 It stores a separate `.operation.json` file under its helper state directory.
 Its existing unknown-result marker continues to prevent automatic upload retries.
+Every failed HTTP upload keeps that marker, including a registration rejection after storage succeeds.
 Historical helper markers cannot reconstruct an absent operation identity.
 
 ## Correlation API
@@ -24,6 +25,8 @@ The endpoint requires board access, company access, issue visibility, and separa
 Local operators and instance administrators retain their existing audit authority.
 Agent keys receive no new access.
 The original run must belong to the exact company and issue.
+Agent uploads require a running run that belongs to that agent and issue.
+Board uploads cannot attribute an agent run through a caller-supplied header.
 
 Query fields:
 

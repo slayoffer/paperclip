@@ -49,7 +49,7 @@ function ensureCompanyPrefix(companyId: string, objectKey: string): void {
   if (!objectKey.startsWith(expectedPrefix)) {
     throw forbidden("Object does not belong to company");
   }
-  if (objectKey.includes("..")) {
+  if (objectKey.split(/[\\/]/).some((part) => part === "." || part === "..")) {
     throw badRequest("Invalid object key");
   }
 }
