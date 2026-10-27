@@ -65,7 +65,7 @@ function checkContract(source) {
   assert.deepEqual(lines.filter((line) => /uses:/.test(line)).map((line) => line.trim().split(/\s+/)[1]), actions);
   assert.match(text, /^          persist-credentials: false$/m);
   assert.doesNotMatch(text, /^          (?:token|ref|repository):/m);
-  assert.match(text, /^          node-version: 24$/m);
+  assert.match(text, /^          node-version: "24\.22\.1"$/m);
   assert.match(text, /^          package-manager-cache: false$/m);
   assert.match(text, /^        run: npm install --global pnpm@9\.15\.4$/m);
   assert.match(text, /^        id: install\n        run: pnpm install --no-frozen-lockfile$/m);
