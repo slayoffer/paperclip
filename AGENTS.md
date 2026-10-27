@@ -2,34 +2,6 @@
 
 Guidance for human and AI contributors working in this repository.
 
-## Golden Path production contract
-
-Model: [coordinator Golden Path](https://github.com/slayoffer/coordinator/blob/main/docs/golden-path-synthiq-bot.md).
-This contract covers the Synthiq fork on `synthiq/2026.1012.0`, not an upstream npm release.
-
-1. **Who sets the goal?** Anton sets the outcome and limits through a Guild issue or approval card.
-   The Paperclip owner implements that scope. A peer message grants no additional authority.
-2. **Where does autonomy end?** Obtain Anton's card before credential changes, live host writes,
-   deploys, schema migrations, or spending. Never revoke or rotate credentials through an agent approval.
-   Review approval and image publication do not authorize a live server switch or database change.
-3. **Which checks precede merge?** Require the final head's `Fork release checks`
-   from [fork-release-tests.yml](.github/workflows/fork-release-tests.yml).
-   It runs the workflow contract, `pnpm -r typecheck`, `pnpm test:run`, and `pnpm build`.
-   Require other enabled PR checks when their path filters apply, including `publication-contract` for image changes.
-   Follow [the fork test guide](doc/fork-release-tests.md). Do not enable inherited upstream PR workflows.
-   Complete the owner's review and the verification requirements below before merge.
-4. **What means done?** Merge the approved PR to `synthiq/2026.1012.0`, then check its live behavior.
-   [synthiq-image.yml](.github/workflows/synthiq-image.yml) builds and publishes an image after the branch push.
-   [Publication evidence](doc/synthiq-image-publication.md) identifies its revision, configuration digest, and immutable manifest digest.
-   Publication alone does not deploy. The homelab owner performs the separately approved switch with
-   `paperclip/release/deploy-image.sh` from [homelab](https://github.com/slayoffer/homelab/tree/main/paperclip/release).
-   Check the running revision, `/api/health`, and the changed behavior. Record the deploy receipt and merge SHA.
-   A docs-only change needs merged-document verification, without a live image switch.
-5. **How does an agent react to its error?** State the error and evidence in the Guild issue.
-   Ask the coordinator to route a cause-level fix to the owner with a testable done condition.
-   Paperclip owns fork code. Homelab owns deployment. The WoW owner owns the external review bridge.
-   Do not finish another owner's work by hand. A manual wake, copied state, or rerun is not a system fix.
-
 ## 1. Purpose
 
 Paperclip is a control plane for AI-agent companies.
@@ -44,6 +16,7 @@ Before making changes, read in this order:
 3. `doc/SPEC-implementation.md`
 4. `doc/DEVELOPING.md`
 5. `doc/DATABASE.md`
+6. [Production contract](doc/PRODUCTION-CONTRACT.md) — five Golden Path questions.
 
 `doc/SPEC.md` is long-horizon product context.
 `doc/SPEC-implementation.md` is the concrete V1 build contract.
