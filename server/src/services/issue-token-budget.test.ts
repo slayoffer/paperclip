@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issueThreadInteractions, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -12,8 +12,10 @@ import {
   issueTokenBudgetWindowStart,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
+import { logger } from "../middleware/logger.js";
 
 describe("issue token budget config", () => {
+  afterEach(() => vi.restoreAllMocks());
   it("is off without a positive budget", () => {
     expect(issueTokenBudgetConfig({})).toBeNull();
     expect(issueTokenBudgetConfig({ PAPERCLIP_ISSUE_TOKEN_BUDGET: "0" })).toBeNull();
@@ -26,17 +28,39 @@ describe("issue token budget config", () => {
       PAPERCLIP_ISSUE_TOKEN_BUDGET: "5000000",
       PAPERCLIP_ISSUE_TOKEN_BUDGET_SINCE: "2026-10-17T06:00:00Z",
       PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID: agent,
-    })).toEqual({ budget: 5_000_000, since: new Date("2026-10-17T06:00:00Z"), cardAgentId: agent });
+    })).toEqual({ budget: 5_000_000, cachedWeight: 0.1, since: new Date("2026-10-17T06:00:00Z"), cardAgentId: agent });
     expect(issueTokenBudgetConfig({ PAPERCLIP_ISSUE_TOKEN_BUDGET: "5", PAPERCLIP_ISSUE_TOKEN_BUDGET_CARD_AGENT_ID: "cto" })?.cardAgentId).toBeNull();
+  });
+
+  it.each(["0", "0.1", "0.5", "1"])("accepts cached weight %s", (value) => {
+    expect(issueTokenBudgetConfig({ PAPERCLIP_ISSUE_TOKEN_BUDGET: "50",
+      PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT: value })?.cachedWeight).toBe(Number(value));
+  });
+
+  it("defaults to 0.1 without warning when the weight is unset", () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    expect(issueTokenBudgetConfig({ PAPERCLIP_ISSUE_TOKEN_BUDGET: "50000000" }))
+      .toMatchObject({ budget: 50_000_000, cachedWeight: 0.1 });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("uses 0.1 for invalid weights and warns only once across repeated reads", () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    for (const value of ["bad", "bad", "", " ", "-0.1", "1.1", "Infinity", "NaN"]) {
+      expect(issueTokenBudgetConfig({ PAPERCLIP_ISSUE_TOKEN_BUDGET: "50",
+        PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT: value })?.cachedWeight).toBe(0.1);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("PAPERCLIP_ISSUE_TOKEN_BUDGET_CACHED_WEIGHT"));
   });
 
   it("starts the window at go-live, a later grant, or 24 hours back", () => {
     const now = new Date("2026-10-18T00:00:00Z");
     const since = new Date("2026-10-17T06:00:00Z");
-    expect(issueTokenBudgetWindowStart({ budget: 1, since, cardAgentId: null }, null, now)).toEqual(since);
-    expect(issueTokenBudgetWindowStart({ budget: 1, since, cardAgentId: null }, new Date("2026-10-17T09:00:00Z"), now))
+    expect(issueTokenBudgetWindowStart({ budget: 1, cachedWeight: 0.1, since, cardAgentId: null }, null, now)).toEqual(since);
+    expect(issueTokenBudgetWindowStart({ budget: 1, cachedWeight: 0.1, since, cardAgentId: null }, new Date("2026-10-17T09:00:00Z"), now))
       .toEqual(new Date("2026-10-17T09:00:00Z"));
-    expect(issueTokenBudgetWindowStart({ budget: 1, since: null, cardAgentId: null }, null, now))
+    expect(issueTokenBudgetWindowStart({ budget: 1, cachedWeight: 0.1, since: null, cardAgentId: null }, null, now))
       .toEqual(new Date("2026-10-17T00:00:00Z"));
   });
 });
@@ -48,7 +72,7 @@ const support = await getEmbeddedPostgresTestSupport();
   const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
   const since = new Date("2026-10-17T06:00:00Z");
   const now = new Date("2026-10-17T12:00:00Z");
-  const config = { budget: 5_000_000, since, cardAgentId: null as string | null };
+  const config = { budget: 5_000_000, cachedWeight: 0.1, since, cardAgentId: null as string | null };
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-token-budget-");
@@ -71,6 +95,43 @@ const support = await getEmbeddedPostgresTestSupport();
   it("counts only runs since go-live and stays under the budget", async () => {
     const state = await loadIssueTokenBudgetState(db, { companyId, issueId, config, now });
     expect(state).toEqual({ spent: 4_500_000, windowStart: since, exceeded: false });
+  });
+
+  async function weightedState(usage: Record<string, unknown>[], cachedWeight = 0.1) {
+    const id = randomUUID();
+    await db.insert(issues).values({ id, companyId, title: "Weighted usage", status: "todo" });
+    await db.insert(heartbeatRuns).values(usage.map((usageJson) => ({
+      companyId, agentId, status: "succeeded", contextSnapshot: { issueId: id }, usageJson,
+      createdAt: new Date("2026-10-17T07:00:00Z"),
+    })));
+    return loadIssueTokenBudgetState(db, {
+      companyId, issueId: id, config: { ...config, budget: 40, cachedWeight }, now,
+    });
+  }
+
+  it.each([{ weight: 0.1, expected: 38.1, exceeded: false },
+    { weight: 0, expected: 30, exceeded: false },
+    { weight: 1, expected: 111, exceeded: true }])(
+    "counts cached input at $weight, with full-weight uncached and missing-cache input", async ({ weight, expected, exceeded }) => {
+      const state = await weightedState([
+        { inputTokens: 100, cachedInputTokens: 80 }, { inputTokens: 10 },
+        { inputTokens: 1, cachedInputTokens: 1 },
+      ], weight);
+      expect(state.spent).toBeCloseTo(expected);
+      expect(state.exceeded).toBe(exceeded);
+    },
+  );
+
+  it("clamps the uncached portion at zero", async () => {
+    expect((await weightedState([{ inputTokens: 8, cachedInputTokens: 20 }])).spent).toBe(2);
+  });
+
+  it.each([null, "bad", -1])("counts all input when cached input is invalid (%s)", async (cachedInputTokens) => {
+    expect((await weightedState([{ inputTokens: 10, cachedInputTokens }])).spent).toBe(10);
+  });
+
+  it("ignores invalid input even when cached input is present", async () => {
+    expect((await weightedState([{ inputTokens: "bad", cachedInputTokens: 100 }])).spent).toBe(0);
   });
 
   it("raises exactly one card per window once exceeded, and a granted card opens a new window", async () => {

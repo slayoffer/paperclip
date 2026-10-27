@@ -21,6 +21,10 @@ Selection does not approve a card or a review.
 
 Selection checks the current issue token budget before requesting a wake.
 An exhausted issue keeps one budget card and does not create repeated skipped wakes.
+Question responses and resolution continuations also check this budget before requesting a wake.
+They remain pending during the stop. Accepting the budget card retries that issue's pending outboxes.
+Other outbox holds use a saved exponential retry delay, from 30 seconds up to 30 minutes,
+and do not create skipped wake receipts. A terminated assignee ends that delivery with a failure reason.
 Selection continues to the next candidate after a skipped admission.
 A null admission result with queued or deferred work still reserves the owner.
 

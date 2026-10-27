@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { releaseQuestionResponseForRetry } from "./question-response-retry.js";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  agentWakeupRequests,
   agents,
   chatPublications,
   heartbeatRuns,
@@ -15,7 +15,9 @@ import { isUniqueViolation } from "../db-errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
-import type { heartbeatService } from "./heartbeat.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
+import { findDurableQuestionResponseWake, wakeQuestionResponse, type QuestionResponseHeartbeat } from "./question-response-wake.js";
+import { createQuestionResponseSweep } from "./question-response-sweep.js";
 import { hydrateQuestionInteraction, questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
 export { questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
 export { isRetiredExternalChatQuestionSource } from "./question-response-source-retirement.js";
@@ -44,24 +46,9 @@ class DeliveryClaimUnavailableError extends Error {
     this.name = "DeliveryClaimUnavailableError";
   }
 }
-const DURABLE_WAKE_REQUEST_STATUSES = [
-  "queued",
-  "claimed",
-  "running",
-  "succeeded",
-  "completed",
-  "coalesced",
-  "deferred_issue_execution",
-  "retrying",
-  "scheduled_retry",
-] as const;
-
 type QuestionInteractionRow = typeof issueThreadInteractions.$inferSelect;
 type DeliveryRow = typeof issueQuestionResponseDeliveries.$inferSelect;
-type Heartbeat = Pick<
-  ReturnType<typeof heartbeatService>,
-  "wakeup" | "cancelRun"
->;
+type Heartbeat = QuestionResponseHeartbeat;
 type QuestionResponseSteer = (input: {
   runId: string;
   message: string;
@@ -183,7 +170,8 @@ export function questionResponseDeliveryService(
         .then((rows) => rows[0] ?? null);
       if (
         !current ||
-        ["delivered", "fallback_queued", "failed"].includes(current.status)
+        ["delivered", "fallback_queued", "failed"].includes(current.status) ||
+        (current.nextAttemptAt && current.nextAttemptAt > claimAt)
       )
         return null;
       if (
@@ -320,35 +308,8 @@ export function questionResponseDeliveryService(
     };
   }
 
-  async function releaseForRetry(
-    delivery: DeliveryRow,
-    errorCode: string,
-    options: { bounded: boolean } = { bounded: true },
-  ) {
-    const at = now();
-    const nextErrorCount = delivery.errorCount + (options.bounded ? 1 : 0);
-    const exhausted =
-      options.bounded && nextErrorCount >= MAX_DELIVERY_ATTEMPTS;
-    await db
-      .update(issueQuestionResponseDeliveries)
-      .set({
-        // Keep an exhausted claim owned until recordTerminal commits its outcome.
-        status: exhausted ? "delivering" : "pending",
-        ...(options.bounded ? { errorCount: nextErrorCount } : {}),
-        lastErrorCode: errorCode,
-        updatedAt: at,
-      })
-      .where(
-        and(
-          eq(issueQuestionResponseDeliveries.id, delivery.id),
-          eq(issueQuestionResponseDeliveries.status, "delivering"),
-          eq(
-            issueQuestionResponseDeliveries.attemptCount,
-            delivery.attemptCount,
-          ),
-        ),
-      );
-    return exhausted;
+  function releaseForRetry(delivery: DeliveryRow, errorCode: string, options = { bounded: true }) {
+    return releaseQuestionResponseForRetry(db, delivery, errorCode, options, now(), MAX_DELIVERY_ATTEMPTS);
   }
 
   async function withClaimLease<T>(
@@ -439,45 +400,18 @@ export function questionResponseDeliveryService(
     companyId: string;
     idempotencyKey: string;
   }) {
-    const request = await db
-      .select({
-        agentId: agentWakeupRequests.agentId,
-        id: agentWakeupRequests.id,
-        runId: agentWakeupRequests.runId,
-        status: agentWakeupRequests.status,
-      })
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, input.companyId),
-          eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
-          inArray(agentWakeupRequests.status, [
-            ...DURABLE_WAKE_REQUEST_STATUSES,
-          ]),
-        ),
-      )
-      .orderBy(desc(agentWakeupRequests.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (!request?.runId) return request ? { request, run: null } : null;
-    const run = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.id, request.runId),
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.agentId, request.agentId),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    return { request, run };
+    return findDurableQuestionResponseWake(db, input);
   }
 
   async function deliver(
     interactionId: string,
+    checkBudget = (issue: { companyId: string; id: string }) => isRecoveryIssueTokenBudgetBlocked(db, issue),
   ): Promise<QuestionResponseDeliveryOutcome | null> {
+    const [pending] = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.interactionId, interactionId)).limit(1);
+    // Check before claiming: a budget stop consumes neither a claim nor an error retry.
+    if (pending && ["pending", "delivering"].includes(pending.status) &&
+      await checkBudget({ companyId: pending.companyId, id: pending.issueId })) return null;
     const claimed = await claim(interactionId);
     if (!claimed) return terminalOutcome(interactionId);
 
@@ -892,12 +826,13 @@ export function questionResponseDeliveryService(
         companyId: interaction.companyId,
         idempotencyKey: wakeIdempotencyKey,
       });
+      let suppression: string | null = null;
       const wakeRun =
         existingWake?.run ??
         (existingWake
           ? null
           : await withClaimLease(claimed, () =>
-              options.heartbeat.wakeup(assigneeAgentId, {
+              wakeQuestionResponse(options.heartbeat, assigneeAgentId, {
                 source: "automation",
                 triggerDetail: "system",
                 reason: "issue_commented",
@@ -939,7 +874,7 @@ export function questionResponseDeliveryService(
                   wakeReason: "issue_commented",
                   source: "issue.interaction.respond",
                 },
-              }),
+              }).then((result) => { suppression = result.suppression; return result.run; }),
             ));
       const durableWake =
         existingWake ??
@@ -950,12 +885,11 @@ export function questionResponseDeliveryService(
               idempotencyKey: wakeIdempotencyKey,
             }));
       if (!wakeRun && !durableWake) {
-        const errorCode = "question_response_wake_skipped";
-        // Scheduling suppression is an availability state, not a delivery
-        // failure. Keep the durable receipt retryable until the suppression is
-        // lifted; the bounded limit remains reserved for actual wake errors.
-        await releaseForRetry(claimed, errorCode, { bounded: false });
-        return null;
+        const errorCode = suppression ?? "question_response_wake_skipped";
+        if (suppression !== "agent.terminated" &&
+            !await releaseForRetry(claimed, errorCode, { bounded: !suppression })) return null;
+        return recordTerminal({ delivery: claimed, interaction, status: "failed",
+          mode: null, targetRunId: null, adapter, errorCode });
       }
       const eligibleQueuedSuccessor = externalChatBoundary
         ? null
@@ -1036,47 +970,7 @@ export function questionResponseDeliveryService(
     }
   }
 
-  async function sweepPending(limit = 50) {
-    const sweepAt = now();
-    const staleAt = new Date(sweepAt.getTime() - claimStaleMs);
-    await db
-      .update(issueQuestionResponseDeliveries)
-      .set({
-        status: "pending",
-        updatedAt: sweepAt,
-      })
-      .where(
-        and(
-          eq(issueQuestionResponseDeliveries.status, "delivering"),
-          or(
-            isNull(issueQuestionResponseDeliveries.lastAttemptAt),
-            lte(issueQuestionResponseDeliveries.lastAttemptAt, staleAt),
-          ),
-        ),
-      );
-    const ids = await db
-      .select({ interactionId: issueQuestionResponseDeliveries.interactionId })
-      .from(issueQuestionResponseDeliveries)
-      .where(eq(issueQuestionResponseDeliveries.status, "pending"))
-      .orderBy(asc(issueQuestionResponseDeliveries.createdAt))
-      .limit(limit)
-      .then((rows) => rows.map((row) => row.interactionId));
-    const counts = {
-      scanned: ids.length,
-      steered: 0,
-      coalesced: 0,
-      wakeFallback: 0,
-      failed: 0,
-    };
-    for (const id of ids) {
-      const outcome = await deliver(id);
-      if (outcome?.mode === "steered") counts.steered += 1;
-      else if (outcome?.mode === "coalesced") counts.coalesced += 1;
-      else if (outcome?.mode === "wake_fallback") counts.wakeFallback += 1;
-      else if (outcome?.status === "failed") counts.failed += 1;
-    }
-    return counts;
-  }
+  const sweepPending = createQuestionResponseSweep(db, deliver, now, claimStaleMs);
 
   return { deliver, sweepPending };
 }

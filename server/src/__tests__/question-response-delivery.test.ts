@@ -500,60 +500,14 @@ describeEmbeddedPostgres("question response delivery", () => {
     });
   });
 
-  it("delivers after wake suppression outlasts the bounded error retry limit", async () => {
+  it("counts unexplained wakes and errors toward the retry limit", async () => {
     const seeded = await seed({ sourceStatus: "running" });
     const fallbackRunId = randomUUID();
     let wakeAttempts = 0;
     const wakeup = vi.fn().mockImplementation(async () => {
       wakeAttempts += 1;
-      if (wakeAttempts <= 5) return null;
-      return db
-        .insert(heartbeatRuns)
-        .values({
-          id: fallbackRunId,
-          companyId: seeded.companyId,
-          agentId: seeded.agentId,
-          invocationSource: "automation",
-          status: "queued",
-          runtimeMode: "legacy",
-          driverKind: "codex",
-          contextSnapshot: { issueId: seeded.issueId },
-        })
-        .returning()
-        .then((rows) => rows[0]!);
-    });
-    const service = questionResponseDeliveryService(db, {
-      heartbeat: { wakeup } as never,
-      steer: vi.fn(),
-    });
-
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
-    }
-    const delivered = await service.deliver(seeded.interaction.id);
-
-    expect(delivered).toMatchObject({
-      status: "fallback_queued",
-      mode: "wake_fallback",
-      targetRunId: fallbackRunId,
-    });
-    const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
-    expect(delivery).toMatchObject({
-      status: "fallback_queued",
-      attemptCount: 6,
-      errorCount: 0,
-      targetRunId: fallbackRunId,
-    });
-  });
-
-  it("preserves the actual-error retry budget after prolonged wake suppression", async () => {
-    const seeded = await seed({ sourceStatus: "running" });
-    const fallbackRunId = randomUUID();
-    let wakeAttempts = 0;
-    const wakeup = vi.fn().mockImplementation(async () => {
-      wakeAttempts += 1;
-      if (wakeAttempts <= 5) return null;
-      if (wakeAttempts === 6)
+      if (wakeAttempts <= 2) return null;
+      if (wakeAttempts === 3)
         throw new Error("scheduler temporarily unavailable");
       return db
         .insert(heartbeatRuns)
@@ -575,7 +529,7 @@ describeEmbeddedPostgres("question response delivery", () => {
       steer: vi.fn(),
     });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
     }
     await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
@@ -584,8 +538,8 @@ describeEmbeddedPostgres("question response delivery", () => {
       .from(issueQuestionResponseDeliveries);
     expect(afterError).toMatchObject({
       status: "pending",
-      attemptCount: 6,
-      errorCount: 1,
+      attemptCount: 3,
+      errorCount: 3,
       lastErrorCode: "scheduler temporarily unavailable",
     });
 
@@ -598,8 +552,8 @@ describeEmbeddedPostgres("question response delivery", () => {
     const [delivered] = await db.select().from(issueQuestionResponseDeliveries);
     expect(delivered).toMatchObject({
       status: "fallback_queued",
-      attemptCount: 7,
-      errorCount: 1,
+      attemptCount: 4,
+      errorCount: 3,
       targetRunId: fallbackRunId,
     });
   });
