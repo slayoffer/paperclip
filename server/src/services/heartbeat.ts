@@ -1,4 +1,5 @@
 import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
+import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
@@ -22606,11 +22607,13 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
-        const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
+        const ownerParkingBlock = issueId ? await issueOwnerParkingReason(db,
+          { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
+        const repairBlock = ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
+            error: ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
@@ -27129,6 +27132,11 @@ export function heartbeatService(
         error: `Wake suppressed because company status is ${companyStatus}`,
       }, { companyStatus });
       return null;
+    }
+
+    if (issueId && isUuidLike(issueId)) {
+      const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
+      if (parked) { await writeSkippedRequest(parked); return null; }
     }
 
     // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /
