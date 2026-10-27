@@ -17,6 +17,8 @@ export interface FlowAgent {
   name: string;
   status: string;
   wip: number;
+  runnableWip: number;
+  waitingWip: number;
   wipLimit: number | null;
   atWipLimit: boolean;
 }

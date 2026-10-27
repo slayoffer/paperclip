@@ -5,9 +5,12 @@ import {
 } from "@paperclipai/db";
 import { notFound } from "../errors.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
+import { issueWipReason } from "./agent-wip-policy.js";
 import { buildCompanyFlowReport } from "./company-flow-model.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { listIssueDependencyReadinessMap } from "./issue-dependency-readiness.js";
+
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 
 export function companyFlowService(db: Db) {
   return {
@@ -22,6 +25,7 @@ export function companyFlowService(db: Db) {
           priority: issues.priority, parentId: issues.parentId, assigneeAgentId: issues.assigneeAgentId,
           assigneeUserId: issues.assigneeUserId, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId,
           createdAt: issues.createdAt, updatedAt: issues.updatedAt,
+          wipReason: issueWipReason(),
           executionVisible: sql<boolean>`${executionIssueCondition()}`,
         }).from(issues).where(eq(issues.companyId, companyId)),
         tx.select({ id: agents.id, name: agents.name, status: agents.status })
@@ -35,8 +39,7 @@ export function companyFlowService(db: Db) {
           .where(and(eq(issueApprovals.companyId, companyId), inArray(approvals.status, ["pending", "revision_requested"]))),
         tx.select({
           id: heartbeatRuns.id, agentId: heartbeatRuns.agentId,
-          issueId: sql<string | null>`coalesce(${heartbeatRuns.nativeIssueId}::text,
-            ${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId')`,
+          issueId: boundRunIssueIdSql(),
         }).from(heartbeatRuns).where(and(
           eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ["queued", "running"]), isNull(heartbeatRuns.finishedAt),
         )),
