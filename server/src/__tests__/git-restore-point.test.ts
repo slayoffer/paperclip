@@ -37,8 +37,11 @@ describe("git restore points", () => {
   let root: string;
   let remote: string;
   let work: string;
+  let previousUmask: number;
 
   beforeEach(async () => {
+    // Git applies standard executable modes through the process umask.
+    previousUmask = process.umask(0o022);
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
     root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-restore-point-test-"));
     remote = path.join(root, "remote.git");
@@ -55,6 +58,7 @@ describe("git restore points", () => {
   });
 
   afterEach(async () => {
+    process.umask(previousUmask);
     vi.unstubAllEnvs();
     await fs.rm(root, { recursive: true, force: true });
   });

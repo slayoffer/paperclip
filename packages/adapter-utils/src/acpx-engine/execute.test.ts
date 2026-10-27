@@ -1922,6 +1922,8 @@ describe("shared ACPX engine runtime behavior", () => {
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
     try {
+      vi.stubEnv("OPENAI_API_KEY", "");
+      vi.stubEnv("CODEX_API_KEY", "");
       process.env.CODEX_HOME = sourceCodexHome;
       process.env.PAPERCLIP_HOME = paperclipHome;
       process.env.PAPERCLIP_INSTANCE_ID = paperclipInstanceId;
@@ -1932,6 +1934,7 @@ describe("shared ACPX engine runtime behavior", () => {
         paperclipSkillSync: { desiredSkills: [] },
       });
     } finally {
+      vi.unstubAllEnvs();
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
       if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
