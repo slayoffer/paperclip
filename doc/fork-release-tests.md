@@ -49,6 +49,10 @@ Each shard uses a fresh temporary home, config path, instance ID, and temporary 
 Files run one at a time, in isolated fork workers, to preserve port and process-state isolation.
 Separate hosted machines isolate fixed ports and temporary paths across shards.
 No suite needs a separate dedicated job.
+The first matrix run found a Cursor fixture outside the old wrapper's project list.
+Its fake sandbox runner dropped standard input during archive upload.
+The fixture now forwards standard input, as its adjacent runner fixture already does.
+This corrects the test runner without changing adapter runtime behavior.
 The finite limits remain unchanged for test execution.
 The contract check also tests failure, cancellation, skipped, and absent summary results.
 A newer test event for the same pull request cancels its previous run.
