@@ -13,7 +13,8 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (original) => ({
 type Execute = (context: AdapterExecutionContext) => Promise<AdapterExecutionResult>;
 const cases: Array<{ name: string; execute: () => Promise<Execute>; event: unknown; tokens?: { inputTokens: number; outputTokens: number; cachedInputTokens: number }; price: number | null }> = [
   { name: "codex", execute: async () => (await import("../../../packages/adapters/codex-local/src/server/execute.js")).execute,
-    event: { type: "turn.completed", usage: { input_tokens: 120, cached_input_tokens: 100, output_tokens: 10 } }, tokens: { inputTokens: 20, cachedInputTokens: 100, outputTokens: 10 }, price: null },
+    // Synthiq fork: Codex keeps raw thread totals, so input includes cached input.
+    event: { type: "turn.completed", usage: { input_tokens: 120, cached_input_tokens: 100, output_tokens: 10 } }, tokens: { inputTokens: 120, cachedInputTokens: 100, outputTokens: 10 }, price: null },
   { name: "claude", execute: async () => (await import("../../../packages/adapters/claude-local/src/server/execute.js")).execute,
     event: { type: "assistant", message: { id: "m1", usage: { input_tokens: 20, cache_read_input_tokens: 100, output_tokens: 10 }, content: [] } }, tokens: { inputTokens: 20, cachedInputTokens: 100, outputTokens: 10 }, price: null },
   { name: "opencode", execute: async () => (await import("../../../packages/adapters/opencode-local/src/server/execute.js")).execute,

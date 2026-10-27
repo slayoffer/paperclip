@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { HttpError } from "../errors.js";
 import { and, eq, inArray } from "drizzle-orm";
 import { agentWakeupRequests, issues, type Db } from "@paperclipai/db";
 import { isUuidLike, type AgentWakeupSkipped } from "@paperclipai/shared";
@@ -88,4 +90,47 @@ export async function readWakeupDiagnostics(
     ?? (typeof heartbeatSkip.reason === "string" ? heartbeatSkip.reason : null)
     ?? `Wakeup was skipped (${reason}).`;
   return { wakeupRequestId: receipt.id, reason, error, message, details };
+}
+
+/** Outbox state is the retry receipt. Return gate reasons without adding skipped rows. */
+export function createOutboxWakeup<Options, Run>(
+  track: (agentId: string, options: Options, requestId?: string, onSkip?: (reason: string) => void) => Promise<Run>,
+) {
+  return async (agentId: string, options: Options) => {
+    let suppression: string | null = null;
+    try {
+      const run = await track(agentId, options, randomUUID(), (reason) => { suppression = reason; });
+      return { run, suppression };
+    } catch (error) {
+      if (!suppression || !(error instanceof HttpError) || error.status !== 409) throw error;
+      if (suppression === "agent.not_invokable" && record(error.details).status === "terminated") {
+        suppression = "agent.terminated";
+      }
+      return { run: null, suppression };
+    }
+  };
+}
+
+export function createDiagnosticWakeup<Options, Run>(
+  db: Db,
+  getAgent: (id: string) => Promise<{ companyId: string } | null>,
+  track: (agentId: string, options: Options, requestId?: string) => Promise<Run>,
+) {
+  return async (agentId: string, options: Options) => {
+    const requestId = randomUUID();
+    const read = async () => {
+      const agent = await getAgent(agentId);
+      return agent ? readWakeupDiagnostics(db, { companyId: agent.companyId, agentId, requestId }) : null;
+    };
+    try {
+      const run = await track(agentId, options, requestId);
+      return { run, skipped: run ? null : await read() };
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 409) {
+        const skipped = await read();
+        if (skipped) error.details = { ...record(error.details), wakeup: skipped };
+      }
+      throw error;
+    }
+  };
 }

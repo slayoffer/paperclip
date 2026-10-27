@@ -1,5 +1,6 @@
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "../session-compaction-decision.js";
-import { ownerSessionsEnabled, ownerSessionInputLimit, readOwnerSessionInputTokens, readLatestUsageSample, ownerSessionKeyForIssueReset } from "../owner-sessions.js";
+import { ownerSessionsEnabled, ownerSessionInputLimit, readOwnerSessionInputTokens, ownerSessionKeyForIssueReset } from "../owner-sessions.js";
+import { resolveCumulativeSessionUsage } from "../session-usage.js";
 import { deriveTaskKey } from "./run-preparation.js";
 import { retryIdempotentDatabaseOperation } from "../../database-retry.js";
 import { isConversation } from "../agent-conversations.js";
@@ -1231,12 +1232,7 @@ export function createHeartbeatRunState(db: Db) {
 
     // Synthiq owner sessions: an owner thread spans issues, so read the
     // newest usage sample of the session itself.
-    const previousRawUsage = await readLatestUsageSample(db, { agentId, sessionId, excludeRunId: runId }, readRawUsageTotals);
-    return {
-      normalizedUsage: normalizeAdapterRunUsage(rawUsage, previousRawUsage, usageBasis),
-      previousRawUsage,
-      derivedFromSessionTotals: previousRawUsage !== null,
-    };
+    return resolveCumulativeSessionUsage(db, { agentId, runId, sessionId, rawUsage });
   }
 
   async function evaluateSessionCompaction(input: {

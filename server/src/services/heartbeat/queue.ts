@@ -41,7 +41,7 @@ import { canRetryStoppedRun } from "../cancelled-native-startup.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { isConversationAdapter } from "../conversation-continuation.js";
 import { recordExecutionWait } from "../execution-wait.js";
-import { readWakeupDiagnostics } from "../wakeup-diagnostics.js";
+import { createDiagnosticWakeup, createOutboxWakeup } from "../wakeup-diagnostics.js";
 import {
   getNativeReviewAssignment,
   readNativeReviewAssignmentContext,
@@ -106,6 +106,7 @@ import {
   ISSUE_TOKEN_BUDGET_SKIP_REASON,
   ensureIssueTokenBudgetCard,
   issueTokenBudgetConfig,
+  issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "../issue-token-budget.js";
 import { publishLiveEvent } from "../live-events.js";
@@ -1934,8 +1935,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     agentId: string,
     opts: WakeupOptions = {},
     diagnosticRequestId?: string,
+    onSkip?: (reason: string) => void,
   ): ReturnType<typeof enqueueWakeup> {
-    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId);
+    const promise = enqueueWakeup(agentId, opts, undefined, false, diagnosticRequestId, onSkip);
     activeWakeupPromises.add(promise);
     void promise
       .catch(() => {})
@@ -1945,26 +1947,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     return promise;
   }
 
-  async function wakeupWithDiagnostics(agentId: string, opts: WakeupOptions = {}) {
-    const requestId = randomUUID();
-    const readDiagnostics = async () => {
-      const agent = await getAgent(agentId);
-      return agent ? readWakeupDiagnostics(db, { companyId: agent.companyId, agentId, requestId }) : null;
-    };
-    try {
-      const run = await trackWakeup(agentId, opts, requestId);
-      return { run, skipped: run ? null : await readDiagnostics() };
-    } catch (error) {
-      // Preserve existing HTTP conflict behavior for paused agents and budget gates.
-      if (error instanceof HttpError && error.status === 409) {
-        const skipped = await readDiagnostics();
-        if (skipped) error.details = { ...parseObject(error.details), wakeup: skipped };
-      }
-      throw error;
-    }
-  }
+  const diagnosticWakeup = createDiagnosticWakeup(db, getAgent, trackWakeup);
+  const wakeupWithDiagnostics = (agentId: string, opts: WakeupOptions = {}) => diagnosticWakeup(agentId, opts);
+  const wakeupForOutbox = createOutboxWakeup(trackWakeup);
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string) {
+  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string, bridgeReceiptRecovery = false, diagnosticRequestId?: string, onSkip?: (reason: string) => void) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -2016,6 +2003,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     if (!agent) throw notFound("Agent not found");
     const diagnosticCompanyId = agent.companyId;
     const skipWithoutReceipt = async (skipReason: string, message: string) => {
+      if (onSkip) { onSkip(skipReason); return null; }
       // API diagnostics must also identify gates that do not normally create receipts.
       if (diagnosticRequestId) await db.insert(agentWakeupRequests).values({
         id: diagnosticRequestId, companyId: diagnosticCompanyId, agentId, source, triggerDetail,
@@ -2199,6 +2187,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       patch: Partial<typeof agentWakeupRequests.$inferInsert> = {},
       waitCondition?: Record<string, unknown>,
     ) => {
+      if (onSkip) { onSkip(skipReason); return { created: false }; }
       if (executionWaitRequestId) {
         await db.update(agentWakeupRequests).set({
           payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}',
@@ -2310,14 +2299,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           logger.warn({ err, issueId }, "failed to raise issue token budget card");
           return false;
         });
-        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON, {
-          error: `Wake suppressed: this issue used ${budgetState.spent} input tokens since ` +
-            `${budgetState.windowStart.toISOString()} (budget ${issueTokenBudget.budget}).`,
-          payload: { ...payload, issueTokenBudget: {
-            used: budgetState.spent, limit: issueTokenBudget.budget,
-            windowStart: budgetState.windowStart.toISOString(),
-          } },
-        });
+        await writeSkippedRequest(ISSUE_TOKEN_BUDGET_SKIP_REASON,
+          issueTokenBudgetSkipDetails(issueTokenBudget, budgetState, payload));
         logger.info({ issueId, agentId, spent: budgetState.spent, cardCreated }, "issue token budget reached; wake skipped");
         return null;
       }
@@ -4602,6 +4585,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     withChatControlRecoveryGate,
     trackWakeup,
     wakeupWithDiagnostics,
+    wakeupForOutbox,
     resumeQueuedRuns,
     parseHeartbeatPolicy,
     claimDueTimerHeartbeat,
