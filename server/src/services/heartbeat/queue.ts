@@ -2,6 +2,7 @@ import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
+import { issueOwnerParkingReason } from "../issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "../instance-run-cap.js";
 import { ownerRecoveryResumeEnabled } from "../recovery/owner-resume.js";
 import { ownerSessionsEnabled } from "../owner-sessions.js";
@@ -2403,6 +2404,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         error: `Wake suppressed because company status is ${companyStatus}`,
       }, { companyStatus });
       return null;
+    }
+
+    if (issueId && isUuidLike(issueId)) {
+      const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
+      if (parked) { await writeSkippedRequest(parked); return null; }
     }
 
     // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /

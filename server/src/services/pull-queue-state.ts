@@ -1,3 +1,4 @@
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, issues, type Db, agents, instanceSettings, projects, activityLog,
@@ -10,6 +11,7 @@ import { issueTreeControlService } from "./issue-tree-control.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "./heartbeat-policy.js";
+import { OWNER_PARKING_SKIP_REASON } from "./issue-owner-parking.js";
 
 type Issue = typeof issues.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -91,7 +93,7 @@ export async function pullQueueCandidateBlocked(db: Db, issue: Issue, agent: Age
       const [prior] = await db.select({ startedAt: heartbeatRuns.startedAt, createdAt: heartbeatRuns.createdAt })
         .from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agent.id),
-        sql`(${heartbeatRuns.nativeIssueId} = ${issue.id} or ${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id})`,
+        eq(boundRunIssueIdSql(), issue.id),
       )).orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id)).limit(1);
       if (prior) {
         const [decision] = await db.select({ details: activityLog.details }).from(activityLog).where(and(
@@ -130,7 +132,7 @@ export async function pullQueueCandidateBlocked(db: Db, issue: Issue, agent: Age
   if (last.reason === "agent.not_invokable") return !(await evaluateAgentInvokabilityFromDb(db, agent)).invokable;
   if (last.reason === "heartbeat.wakeOnDemand.disabled") return !isHeartbeatWakeOnDemandEnabled(agent);
   // The selector already rechecked these gates. Their old receipt is stale.
-  if (["issue_dependencies_blocked", "company.inactive", "heartbeat.scheduling_suppressed"].includes(last.reason ?? "")) return false;
+  if (["issue_dependencies_blocked", "company.inactive", "heartbeat.scheduling_suppressed", OWNER_PARKING_SKIP_REASON].includes(last.reason ?? "")) return false;
   if (last.payload?.pullQueueFingerprint !== fingerprint) return false;
   const skip = last.payload?.heartbeatSkip as Record<string, unknown> | undefined;
   if (typeof skip?.nextAllowedAt === "string") return Date.parse(skip.nextAllowedAt) > Date.now();

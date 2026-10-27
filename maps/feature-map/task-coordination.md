@@ -43,6 +43,9 @@ creates a hold; it does not change task statuses to a paused status.
 
 Automated: [dependency wakeups](../../server/src/__tests__/issue-dependency-wakeups-routes.test.ts) checks server behavior; visual relationship navigation remains a manual check.
 
+Automated: [owner parking](../../server/src/__tests__/issue-owner-parking.test.ts) checks label stops at admission, recovery, selection, retry promotion, and dispatch.
+The [assignment route tests](../../server/src/__tests__/issue-assignee-invokability-routes.test.ts) check blocked reassignment without an implicit resume.
+
 Manual: Block one task on another, finish the prerequisite, and observe the dependent task’s eligible continuation. Follow parent/child links back to the source request. Verify no duplicate run or false parent completion occurs.
 
 ### `review-and-controls`

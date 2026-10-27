@@ -25,6 +25,7 @@ import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
+import { issueOwnerParkingReason } from "../../../services/issue-owner-parking.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
@@ -376,6 +377,8 @@ export function createPostgresRunDispatchAdapter(
     facts.issueFound = issue !== null;
     if (!facts.issueFound) return { agentFound: true, facts };
 
+    facts.ownerParkingReason = await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "retry.promotion");
+    if (facts.ownerParkingReason) return { agentFound: true, facts };
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
     facts.issueExecutionRunId = issue.executionRunId;
@@ -613,6 +616,8 @@ export function createPostgresRunDispatchAdapter(
       pendingResponse: issue && (input.conversationContinuation || context.connectionIntentResolution === "existing_connection")
         ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
         : null,
+      ownerParkingReason: issue ? await issueOwnerParkingReason(dbOrTx,
+        { companyId: input.companyId, id: issueId }, "run.dispatch") : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,

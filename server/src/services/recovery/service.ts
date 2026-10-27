@@ -11,6 +11,7 @@ export { classifyAdapterFailureForRecovery, classifyContinuationFailure, PROVIDE
 export type { AdapterFailureRecoveryClassification } from "./failure-classification.js";
 import { createResolvedDependencyWakeBackstop } from "./resolved-dependency-backstop.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
+import { issueOwnerParkingReason } from "../issue-owner-parking.js";
 import { isRecoveryIssueTokenBudgetBlocked } from "./issue-token-budget.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
@@ -3183,6 +3184,8 @@ export function recoveryService(
           continue;
         }
 
+        if (await issueOwnerParkingReason(db, issue, "recovery.active")) { result.skipped += 1; continue; }
+
         // A queued comment or healthy child cannot establish what the stopped
         // provider already did. Only execution reconciliation can clear this hold.
         if (requiresExecutionReconciliation(action.cause)
@@ -3562,7 +3565,8 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
-    if (await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
+    if (await issueOwnerParkingReason(db, current, "recovery.disposition") ||
+        await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
 
     if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
       await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
@@ -4261,7 +4265,8 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
-        if (await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+        if (await issueOwnerParkingReason(db, issue, "recovery.stranded") ||
+            await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
           result.skipped += 1;
           continue;
         }
