@@ -715,9 +715,13 @@ const recoveryFakeCodex = resolve(
   30_000,
 );
 
+// Synthiq fork CI sets PAPERCLIP_TEST_NO_USERNS_SANDBOX=1 only on a runner that denies
+// unprivileged user/network namespaces: Codex's bwrap sandbox then fails with
+// "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" (upstream too).
 (embeddedSupport.supported &&
   existsSync(defaultCapabilityRunnerdBinary()) &&
-  existsSync(recoveryFakeCodex)
+  existsSync(recoveryFakeCodex) &&
+  process.env.PAPERCLIP_TEST_NO_USERNS_SANDBOX !== "1"
   ? it
   : it.skip)(
   "archives a damaged prior epoch before completing guarded same-task replacement with real runnerd",

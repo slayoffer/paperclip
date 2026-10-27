@@ -14,12 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release-tests:
-    # Ignored labels must not publish a successful release-check identity.
-    name: ${{ (github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests') && 'Fork release checks' || 'Ignored label event' }}
+  test-shards:
+    name: Fork release tests (${{ matrix.shard }}/6)
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     defaults:
       run:
         shell: bash
@@ -53,12 +56,27 @@ jobs:
         timeout-minutes: 20
         run: pnpm -r typecheck
 
-      # The complete serial suite exceeds the upstream shard time limits.
+      # Separate runners isolate ports and files. Keep files serial within each shard.
       - name: Run the repository tests
         id: tests
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         timeout-minutes: 150
-        run: pnpm test:run
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
+        run: |
+          pnpm run preflight:workspace-links
+          test_root="$(mktemp -d /tmp/pv-XXXXXX)"
+          export NODE_ENV=test
+          export PAPERCLIP_HOME="$test_root/h"
+          export PAPERCLIP_CONFIG="$PAPERCLIP_HOME/config.json"
+          export PAPERCLIP_INSTANCE_ID="vt-$GITHUB_RUN_ID-${TEST_SHARD%/*}"
+          export TMPDIR="$test_root/t"
+          mkdir -p "$PAPERCLIP_HOME" "$TMPDIR"
+          # Codex's fs sandbox (bwrap) needs unprivileged user and network namespaces.
+          # GitHub-hosted Ubuntu 24.04 runners deny them through AppArmor, so the real-runnerd
+          # Codex test fails here on upstream v2026.1023.0 too. Skip it only on such a runner.
+          if ! unshare --user --map-root-user --net true 2>/dev/null; then export PAPERCLIP_TEST_NO_USERNS_SANDBOX=1; fi
+          pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-parallelism --maxWorkers=1 --pool=forks --isolate
 
       - name: Build the repository
         id: build
@@ -76,6 +94,7 @@ jobs:
           TYPECHECK_RESULT: ${{ steps.typecheck.outcome }}
           TEST_RESULT: ${{ steps.tests.outcome }}
           BUILD_RESULT: ${{ steps.build.outcome }}
+          TEST_SHARD: ${{ matrix.shard }}/6
         run: |
           {
             echo "Pull request head: $PR_HEAD"
@@ -86,5 +105,21 @@ jobs:
             echo "Typecheck: $TYPECHECK_RESULT"
             echo "Tests: $TEST_RESULT"
             echo "Build: $BUILD_RESULT"
-            echo 'Runner limit: one GitHub-hosted job, 180 minutes per run.'
+            echo "Test shard: $TEST_SHARD"
+            echo 'Runner limit: six GitHub-hosted jobs, 180 minutes per job.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release-tests:
+    # Ignored labels must not publish a successful release-check identity.
+    name: ${{ (github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests') && 'Fork release checks' || 'Ignored label event' }}
+    if: ${{ always() && (github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests') }}
+    needs: [test-shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every test shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.test-shards.result }}
+        run: |
+          echo "Test shards: $SHARDS_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          test "$SHARDS_RESULT" = success
