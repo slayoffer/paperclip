@@ -13,3 +13,11 @@ Only unexplained null wakes consume the bounded error retry limit. Old skipped r
 Advance the pending-answer cursor past budget-held rows. Reuse budget checks only within the current page.
 After a budget acceptance commits, clear pending retry deadlines, catch each row failure, and continue.
 Catch each question sweep row failure so later answers can proceed.
+
+## Restart recovery ownership
+
+The orphan reaper owns process-loss recovery for legacy runs with a controller or checkpoint.
+Do not terminalize these runs from the stale-lock sweeper because their provider stopped.
+An expired lease permits a restart claim. It does not permit the sweeper to remove the task locks.
+Check new ownership evidence in the terminal write as well as the initial read.
+Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.

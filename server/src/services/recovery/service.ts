@@ -6299,11 +6299,15 @@ export function recoveryService(
       else if (issueStatus === "cancelled") issueTerminalStatus = "cancelled";
     }
 
-    // Process-death authority. The run is live while either its adapter process
-    // or the enclosing heartbeat execution/finalization still owns it. Check
-    // that full in-process lifecycle first, then the recorded pid and process
-    // group. Require recorded process metadata, so this authority never fires
-    // on a run that has not yet stored its pid.
+    // The orphan reaper owns restart claims and process-loss retries. A stopped
+    // provider is expected after shutdown. Never terminalize its retained run
+    // or clear its issue locks before the reaper can claim the session.
+    if (!issueTerminalStatus && run.runtimeMode === "legacy" &&
+        (run.controllerBootId || run.resultJson?.restartCheckpoint)) {
+      return { terminalized: false, status: run.status };
+    }
+
+    // Unmanaged historical runs retain the process-death backstop.
     let processGone = false;
     let legacyHostFallback = false;
     const hasLiveExecution =
@@ -6386,6 +6390,10 @@ export function recoveryService(
         // controller's run, even if that controller's lease later expires.
         run.runtimeMode === "legacy"
           ? and(
+              !issueTerminalStatus ? and(
+                isNull(heartbeatRuns.controllerBootId),
+                sql`${heartbeatRuns.resultJson}->'restartCheckpoint' is null`,
+              ) : undefined,
               run.controllerBootId
                 ? eq(heartbeatRuns.controllerBootId, run.controllerBootId)
                 : isNull(heartbeatRuns.controllerBootId),
