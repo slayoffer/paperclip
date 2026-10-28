@@ -7101,6 +7101,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/heartbeat-runs/{runId}/execution-evidence",
+  tags: ["runs"],
+  summary: "Reconcile complete local stop and SSH phase evidence for a run",
+  request: { params: z.object({ runId: heartbeatRunIdParamSchema }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/heartbeat-runs/{runId}/events",
   tags: ["runs"],
   summary: "Get events for a heartbeat run",
