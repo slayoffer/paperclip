@@ -12,6 +12,7 @@ import {
   isCodexAuthCacheEnabled,
   resolveCodexAuthCacheEntryPath,
   selectVendCredential,
+  vendPromotedHomeCredential,
 } from "./codex-auth-cache.js";
 import {
   adapterExecutionTargetIsRemote,
@@ -67,6 +68,7 @@ import {
 import {
   parseCodexJsonl, createCodexJsonlParser,
   classifyCodexAuthRefreshFailure,
+  describeCodexAuthRefreshFailure,
   extractCodexRetryNotBefore,
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
@@ -704,6 +706,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       void error;
     });
   }
+  // The same vend for a promoted managed-home `auth.json`. The seed keeps that
+  // file when its identity differs from the shared source, so nothing else
+  // refreshes it from its identity's cache slot after a run rotated the token.
+  if (!config.managedAiConnection && isCodexAuthCacheEnabled(process.env)) {
+    const promotedHome = configuredHomeIsManaged && configuredCodexHome && !connectorSkillDigest
+      ? configuredCodexHome
+      : configuredCodexHome == null
+        ? resolveManagedCodexHomeDir(process.env, agent.companyId)
+        : null;
+    if (promotedHome) {
+      await vendPromotedHomeCredential(
+        promotedHome,
+        (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
+        (line) => onLog("stdout", `${line}\n`),
+      ).catch(async () => {
+        await onLog(
+          "stderr",
+          `[paperclip] Codex auth cache: promoted-home vend skipped after an error; using the promoted credential as-is.\n`,
+        );
+      });
+    }
+  }
   if (configuredCodexHome == null || (connectorSkillDigest && connectorSourceHome == null)) {
     await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
       apiKey: configuredOpenAiApiKey,
@@ -865,6 +889,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                     readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
                     hostAuthPath: path.join(config.managedAiConnection ? effectiveCodexHome : resolveSharedCodexHomeDir(process.env), "auth.json"),
                     log: (line) => onLog("stdout", `${line}\n`),
+                    promotedAuthPath: config.managedAiConnection ? undefined : path.join(effectiveCodexHome, "auth.json"),
                     // Additive cache write (sandbox to host): also cache the
                     // sandbox subscription credential in its per-identity slot,
                     // keyed by the real `account_id`. Company-scoped root; the
@@ -1576,6 +1601,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorMessage:
           (attempt.proc.exitCode ?? 0) === 0
             ? null
+            : authRefreshFailure
+            ? describeCodexAuthRefreshFailure(authRefreshFailure, fallbackErrorMessage)
             : fallbackErrorMessage,
         errorCode:
           // Forward the transport-level error code from the run-disposition
