@@ -1,3 +1,4 @@
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
@@ -1159,147 +1160,150 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         restartSuspendedRunIds.push(run.id);
         return;
       }
-      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess, now.toISOString())) {
         restartSuspendedRunIds.push(run.id);
         return;
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
-      const running = runningProcesses.get(run.id);
-      const control = run.runtimeMode === "legacy" ? adapterExecutionControls.get(run.id) : undefined;
-      if (control) await beginLegacyShutdownWorkspaceSettlement(db, run, settlementDeadline);
-      try {
-        if (run.runtimeMode === "native") {
-          await cancelHeartbeatNativeRun({
-            db,
-            runId: run.id,
-            reason: message,
-            runtimeMode: run.runtimeMode,
-          });
+      await withStopRequestEvidence({ db, run, requestedAt: now.toISOString(), reason: message,
+        source: "shutdown" }, async () => {
+        const running = runningProcesses.get(run.id);
+        const control = run.runtimeMode === "legacy" ? adapterExecutionControls.get(run.id) : undefined;
+        if (control) await beginLegacyShutdownWorkspaceSettlement(db, run, settlementDeadline);
+        try {
+          if (run.runtimeMode === "native") {
+            await cancelHeartbeatNativeRun({
+              db,
+              runId: run.id,
+              reason: message,
+              runtimeMode: run.runtimeMode,
+            });
+          }
+          if (running && !control) {
+            await terminateHeartbeatRunProcess({
+              pid: running.child.pid,
+              processGroupId: running.processGroupId,
+              graceMs: Math.max(1, running.graceSec) * 1000,
+            });
+          }
+        } finally {
+          if (!control && runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
         }
-        if (running && !control) {
-          await terminateHeartbeatRunProcess({
-            pid: running.child.pid,
-            processGroupId: running.processGroupId,
-            graceMs: Math.max(1, running.graceSec) * 1000,
-          });
-        }
-      } finally {
-        if (!control && runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
-      }
 
-      const persistedCancellationResult =
-        run.runtimeMode === "native"
-          ? await getRun(run.id).then((current) =>
-              parseObject(current?.resultJson),
-            )
-          : parseObject(run.resultJson);
+        const persistedCancellationResult =
+          run.runtimeMode === "native"
+            ? await getRun(run.id).then((current) =>
+                parseObject(current?.resultJson),
+              )
+            : parseObject(run.resultJson);
 
-      const interruptedStatus = await setRunStatusIfRunning(
-        run.id,
-        "interrupted",
-        {
-          finishedAt: now,
-          error: message,
-          errorCode: "server_shutdown_interrupted",
-          signal,
-          resultJson: mergeRunStopMetadataForAgent(agent, "interrupted", {
-            conversationContinuationEligible: await runUsedConversationAdapter(db, run),
-            resultJson: persistedCancellationResult,
+        const interruptedStatus = await setRunStatusIfRunning(
+          run.id,
+          "interrupted",
+          {
+            finishedAt: now,
+            error: message,
             errorCode: "server_shutdown_interrupted",
-            errorMessage: message,
-          }),
-        },
-      );
-      if (!interruptedStatus.updated || !interruptedStatus.run) {
-        // A competing terminal write does not prove the owned adapter settled.
+            signal,
+            resultJson: mergeRunStopMetadataForAgent(agent, "interrupted", {
+              conversationContinuationEligible: await runUsedConversationAdapter(db, run),
+              resultJson: persistedCancellationResult,
+              errorCode: "server_shutdown_interrupted",
+              errorMessage: message,
+            }),
+          },
+        );
+        if (!interruptedStatus.updated || !interruptedStatus.run) {
+          // A competing terminal write does not prove the owned adapter settled.
+          if (control) {
+            control.controller.abort(new Error(message));
+            try {
+              await waitForAdapterStop(control.settled, Math.max(1, settlementDeadline.getTime() - Date.now()));
+              await finishLegacyShutdownWorkspaceSettlement(db, run);
+              const current = await getRun(run.id, { includeExecutionEvidence: true });
+              if (current && HEARTBEAT_RUN_TERMINAL_STATUSES.some(status => status === current.status)) {
+                await releaseEnvironmentLeasesForRun({ runId: current.id, companyId: current.companyId,
+                  agentId: current.agentId, status: current.status, failureReason: current.error ?? undefined });
+              }
+            } catch { /* The durable fence retains this source after controller loss. */ }
+          }
+          return;
+        }
+        let interrupted = interruptedStatus.run;
         if (control) {
+          // Keep the exact lease open while its adapter stops the provider and
+          // copies files back. Provider release closes command admission and
+          // must not race the adapter's git export or instruction collection.
           control.controller.abort(new Error(message));
           try {
-            await waitForAdapterStop(control.settled, Math.max(1, settlementDeadline.getTime() - Date.now()));
+            await waitForAdapterStop(control.settled, Math.max(1, settlementDeadline.getTime() - Date.now()), {
+              runId: run.id, adapterType: agent.adapterType, runtimeMode: run.runtimeMode,
+              abortRequested: true,
+            }, control);
             await finishLegacyShutdownWorkspaceSettlement(db, run);
-            const current = await getRun(run.id, { includeExecutionEvidence: true });
-            if (current && HEARTBEAT_RUN_TERMINAL_STATUSES.some(status => status === current.status)) {
-              await releaseEnvironmentLeasesForRun({ runId: current.id, companyId: current.companyId,
-                agentId: current.agentId, status: current.status, failureReason: current.error ?? undefined });
+          } catch {
+            logger.warn({ runId: run.id }, "Shutdown adapter settlement timed out; retaining the sandbox through normal cleanup");
+            const sources = await db.select().from(environmentLeases).where(and(
+              eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
+              sql`${environmentLeases.metadata}->'legacyShutdownWorkspaceSettlement'->>'state' = 'pending'`,
+            ));
+            // Stop-only settlement can already have released the source. Claim
+            // its current fence and pin recovery before classifying or retrying.
+            for (const source of sources) await allowLegacyShutdownWorkspaceCleanup(db, source,
+              new Date(Math.max(Date.now(), settlementDeadline.getTime())));
+            if (runningProcesses.get(run.id) === running && running) {
+              await terminateHeartbeatRunProcess({ pid: running.child.pid, processGroupId: running.processGroupId,
+                graceMs: Math.max(1, running.graceSec) * 1000 });
+              if (runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
             }
-          } catch { /* The durable fence retains this source after controller loss. */ }
-        }
-        return;
-      }
-      let interrupted = interruptedStatus.run;
-      if (control) {
-        // Keep the exact lease open while its adapter stops the provider and
-        // copies files back. Provider release closes command admission and
-        // must not race the adapter's git export or instruction collection.
-        control.controller.abort(new Error(message));
-        try {
-          await waitForAdapterStop(control.settled, Math.max(1, settlementDeadline.getTime() - Date.now()), {
-            runId: run.id, adapterType: agent.adapterType, runtimeMode: run.runtimeMode,
-            abortRequested: true,
-          }, control);
-          await finishLegacyShutdownWorkspaceSettlement(db, run);
-        } catch {
-          logger.warn({ runId: run.id }, "Shutdown adapter settlement timed out; retaining the sandbox through normal cleanup");
-          const sources = await db.select().from(environmentLeases).where(and(
-            eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
-            sql`${environmentLeases.metadata}->'legacyShutdownWorkspaceSettlement'->>'state' = 'pending'`,
-          ));
-          // Stop-only settlement can already have released the source. Claim
-          // its current fence and pin recovery before classifying or retrying.
-          for (const source of sources) await allowLegacyShutdownWorkspaceCleanup(db, source,
-            new Date(Math.max(Date.now(), settlementDeadline.getTime())));
-          if (runningProcesses.get(run.id) === running && running) {
-            await terminateHeartbeatRunProcess({ pid: running.child.pid, processGroupId: running.processGroupId,
-              graceMs: Math.max(1, running.graceSec) * 1000 });
-            if (runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
           }
+          // Settlement can save restore-failure evidence after the shutdown CAS.
+          // Classification and retry must use the current row, not its snapshot.
+          interrupted = (await getRun(run.id, { includeExecutionEvidence: true })) ?? interrupted;
         }
-        // Settlement can save restore-failure evidence after the shutdown CAS.
-        // Classification and retry must use the current row, not its snapshot.
-        interrupted = (await getRun(run.id, { includeExecutionEvidence: true })) ?? interrupted;
-      }
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: now,
-        error: null,
-      });
-      interrupted =
-        (await classifyAndPersistRunLiveness(
-          interrupted,
-          parseObject(interrupted.resultJson),
-        )) ?? interrupted;
+        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+          finishedAt: now,
+          error: null,
+        });
+        interrupted =
+          (await classifyAndPersistRunLiveness(
+            interrupted,
+            parseObject(interrupted.resultJson),
+          )) ?? interrupted;
 
-      await releaseEnvironmentLeasesForRun({
-        runId: interrupted.id,
-        companyId: interrupted.companyId,
-        agentId: interrupted.agentId,
-        status: interrupted.status,
-        failureReason: interrupted.error ?? undefined,
-      });
+        await releaseEnvironmentLeasesForRun({
+          runId: interrupted.id,
+          companyId: interrupted.companyId,
+          agentId: interrupted.agentId,
+          status: interrupted.status,
+          failureReason: interrupted.error ?? undefined,
+        });
 
-      const retry = await enqueueProcessLossRetry(interrupted, agent, now);
-      if (!retry) {
-        await releaseIssueExecutionAndPromote(interrupted);
-      } else {
-        retryRunIds.push(retry.id);
-      }
+        const retry = await enqueueProcessLossRetry(interrupted, agent, now);
+        if (!retry) {
+          await releaseIssueExecutionAndPromote(interrupted);
+        } else {
+          retryRunIds.push(retry.id);
+        }
 
-      await appendRunEvent(interrupted, {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "warn",
-        message,
-        payload: {
-          signal,
-          ...(run.processPid ? { processPid: run.processPid } : {}),
-          ...(run.processGroupId ? { processGroupId: run.processGroupId } : {}),
-          ...(retry ? { retryRunId: retry.id } : {}),
-        },
-      });
+        await appendRunEvent(interrupted, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message,
+          payload: {
+            signal,
+            ...(run.processPid ? { processPid: run.processPid } : {}),
+            ...(run.processGroupId ? { processGroupId: run.processGroupId } : {}),
+            ...(retry ? { retryRunId: retry.id } : {}),
+          },
+        });
 
-      await finalizeAgentStatus(run.agentId, "interrupted", message, {
-        wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+        await finalizeAgentStatus(run.agentId, "interrupted", message, {
+          wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+        });
+        interruptedRunIds.push(interrupted.id);
       });
-      interruptedRunIds.push(interrupted.id);
     }));
     for (const [index, settlement] of settlements.entries()) {
       if (settlement.status === "rejected") logger.warn({ runId: activeRuns[index]!.run.id,

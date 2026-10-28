@@ -952,4 +952,5 @@ export type { AgentInstructionCandidate } from "./agent.js";
 export * from "./skill-source.js";
 
 export * from "./agent-lifecycle.js";
+export type { RunExecutionEvidenceReport } from "./execution-evidence.js";
 export type { RuntimeCap } from "./runtime-cap.js";

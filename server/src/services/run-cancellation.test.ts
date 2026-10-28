@@ -22,6 +22,7 @@ describe("cancellation provenance", () => {
   it("requires positive provider evidence and a complete empty tool inventory for saved input", () => {
     const resultJson = cancellationResultJson(run, "cancelled", { status: "cancelled", acpToolInventoryComplete: true, acpPendingToolCount: 0 });
     expect(resultJson?.cancellation).toMatchObject({ source: "provider", expected: false });
+    expect(resultJson?.cancellation).toHaveProperty("requestedAt", null);
     expect(canContinueCancelledRun({ ...run, resultJson })).toBe(true);
     expect(canContinueCancelledRun({ ...run, resultJson: { ...resultJson, acpPendingToolCount: 1 } })).toBe(false);
     expect(canContinueCancelledRun({ ...run, resultJson: { ...resultJson, acpToolInventoryComplete: false } })).toBe(false);
@@ -30,5 +31,13 @@ describe("cancellation provenance", () => {
     expect(isUnexpectedRunCancellation({ ...run, resultJson: {
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
     } })).toBe(false);
+  });
+  it("never promotes terminal reconciliation time into request-time evidence", () => {
+    expect(cancellationResultJson(run, "interrupted", {}, "server_shutdown_interrupted")?.cancellation)
+      .toMatchObject({ source: "shutdown", requestedAt: null });
+    const request = requestedRunCancellation({ cancelledByActorType: "agent", cancelledByAgentId: "agent" }, "Stop");
+    expect(request.requestedAt).toBe(request.recordedAt);
+    expect(cancellationResultJson({ ...run, resultJson: { cancellation: request } }, "cancelled")?.cancellation)
+      .toEqual(request);
   });
 });

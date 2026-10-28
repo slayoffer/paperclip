@@ -10,6 +10,7 @@ import {
   nativeRetryCancellationCommitCondition,
   claimCancellationRequest,
 } from "../native-runtime/native-cancellation-request.js";
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 import {
   canContinueCancelledRun,
   readRunCancellation,
@@ -227,6 +228,7 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 export type CancelRunOptions = {
+    requestedAt?: string;
     budgetEnforcement?: BudgetEnforcementScope;
     /** Optional board request identity, atomically reserved for native Stop. */
     cancellationRequestId?: string;
@@ -240,6 +242,8 @@ export type CancelRunOptions = {
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
   };
+
+export type StopRequestContext = Pick<CancelRunOptions, "requestedAt" | "resultJson">;
 
 /** Run control binds cancellation, resource release, and saved-input resumption. */
 export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunControlDependencies) {
@@ -871,7 +875,13 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     return Math.max(100, Math.min(30_000, Math.trunc(requestedGraceMs)));
   }
 
-  async function cancelRunInternal(
+  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
+    const request = { ...options, requestedAt: options.requestedAt ?? new Date().toISOString() };
+    return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: request.requestedAt,
+      reason, metadata: request.resultJson }, () => cancelRunInternalImpl(runId, reason, request));
+  }
+
+  async function cancelRunInternalImpl(
     runId: string,
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
@@ -908,7 +918,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       return run;
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
-    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
+    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason, options.requestedAt);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -1198,7 +1208,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    context: StopRequestContext = {},
   ) {
+    const requestedAt = context.requestedAt ?? new Date().toISOString();
     const runs = await db
       .select()
       .from(heartbeatRuns)
@@ -1209,7 +1221,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         ),
       );
 
-    for (const run of runs) await cancelRunInternal(run.id, reason, { errorCode });
+    for (const run of runs) {
+      await withStopRequestEvidence({ db, run, requestedAt, reason, metadata: context.resultJson },
+        () => cancelRunInternal(run.id, reason, { ...context, requestedAt, errorCode }));
+    }
 
     return runs.length;
   }
@@ -1257,13 +1272,15 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   async function cancelInvocationsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    context: StopRequestContext = {},
   ) {
+    const request = { ...context, requestedAt: context.requestedAt ?? new Date().toISOString() };
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
     );
     let runsCancelled = 0;
     for (const agentId of uniqueAgentIds) {
-      runsCancelled += await cancelActiveForAgentInternal(agentId, reason);
+      runsCancelled += await cancelActiveForAgentInternal(agentId, reason, "cancelled", request);
     }
     const wakeupsCancelled = await cancelPendingWakeupsForAgentsInternal(
       uniqueAgentIds,
@@ -1277,6 +1294,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   }
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
+    const request = { requestedAt: new Date().toISOString() };
     const runIds = scope.scopeType === "project"
       ? await listProjectScopedRunIds(scope.companyId, scope.scopeId, scope.createdBefore)
       : await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
@@ -1285,7 +1303,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         scope.createdBefore ? lt(heartbeatRuns.createdAt, scope.createdBefore) : undefined,
         inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
       )).then((rows) => rows.map((row) => row.id));
-    for (const runId of runIds) await cancelRunInternal(runId, "Cancelled due to budget pause", { budgetEnforcement: scope });
+    for (const runId of runIds) await cancelRunInternal(runId, "Cancelled due to budget pause", { ...request, budgetEnforcement: scope });
     await cancelPendingWakeupsForBudgetScope(scope);
   }
 

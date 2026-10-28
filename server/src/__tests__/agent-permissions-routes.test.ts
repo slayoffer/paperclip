@@ -1659,6 +1659,9 @@ describe("agent permission routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentService.terminate).toHaveBeenCalledWith(agentId);
+    expect(mockHeartbeatService.cancelInvocationsForAgents).toHaveBeenCalledWith(expect.arrayContaining([agentId]), expect.any(String), {
+      requestedAt: expect.any(String), resultJson: { cancelledByActorType: "user", cancelledByUserId: "board-user" },
+    });
     expect(mockApprovalService.findOpenHireApprovalForAgent).not.toHaveBeenCalled();
     expect(mockApprovalService.rejectHire).not.toHaveBeenCalled();
   });

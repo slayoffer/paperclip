@@ -5258,10 +5258,14 @@ function cancellationDb(options?: {
       ? options.coordinator
       : { runId: execution.binding.runId, assessmentId: null };
   let forUpdateCount = 0;
+  let eventLockCount = 0;
+  let nextEventSeq = 1;
+  const eventUpdates: Array<Record<string, unknown>> = [];
+  const events: Array<Record<string, unknown>> = [];
   let resultJsonUpdateCount = 0;
   const updates: Array<{ table: unknown; values: Record<string, unknown> }> =
     [];
-  const select = vi.fn(() => ({
+  const select = vi.fn((fields?: Record<string, unknown>) => ({
     from: (table: unknown) => {
       const rows =
         table === heartbeatRuns
@@ -5281,7 +5285,9 @@ function cancellationDb(options?: {
       Object.assign(query, {
         where: () => query,
         for: () => {
-          forUpdateCount += 1;
+          // Evidence locks allocate log sequences. Cancellation locks protect authority.
+          if (fields && "resultJson" in fields) forUpdateCount += 1;
+          else eventLockCount += 1;
           return query;
         },
         limit: () => result,
@@ -5292,6 +5298,11 @@ function cancellationDb(options?: {
   const update = vi.fn((table: unknown) => ({
     set: (values: Record<string, unknown>) => ({
       where: () => {
+        if (table === heartbeatRuns && "nextEventSeq" in values) {
+          eventUpdates.push(values);
+          nextEventSeq += 1;
+          return { returning: async () => [{ nextEventSeq }] };
+        }
         updates.push({ table, values });
         if (table === nativeRunFinalizations && coordinator) Object.assign(coordinator, values);
         const updatesResultJson = "resultJson" in values;
@@ -5313,7 +5324,16 @@ function cancellationDb(options?: {
       },
     }),
   }));
-  const tx = { select, update };
+  const insert = (table: unknown) => ({
+    values: (values: Record<string, unknown>) => ({
+      returning: async () => {
+        if (table !== heartbeatRunEvents) throw new Error("unexpected_cancellation_insert");
+        events.push(values);
+        return [{ id: `event-${events.length}`, ...values }];
+      },
+    }),
+  });
+  const tx = { select, update, insert };
   const db = {
     select,
     update,
@@ -5323,11 +5343,36 @@ function cancellationDb(options?: {
   return {
     db,
     updates,
+    events,
+    eventUpdates,
     getForUpdateCount: () => forUpdateCount,
+    getEventLockCount: () => eventLockCount,
     getResultJson: () => currentResultJson,
     getResultJsonUpdateCount: () => resultJsonUpdateCount,
     tx,
   };
+}
+
+function expectCancellationEvidence(persistence: ReturnType<typeof cancellationDb>, outcome: "returned" | "failed") {
+  expect(persistence.getEventLockCount()).toBe(4);
+  expect(persistence.eventUpdates).toHaveLength(4);
+  for (const update of persistence.eventUpdates) {
+    expect(Object.keys(update).sort()).toEqual(["nextEventSeq", "updatedAt"]);
+  }
+  expect(persistence.events).toMatchObject([
+    { seq: 1, payload: { kind: "scope_started", scope: "stop" } },
+    { seq: 2, payload: { kind: "stop_request", requestedAt: expect.any(String) } },
+    { seq: 3, payload: { kind: "stop_result", outcome } },
+    { seq: 4, payload: { kind: "scope_finished", expectedRecords: 4, failedWrites: 0 } },
+  ]);
+  for (const event of persistence.events) {
+    expect(event).toMatchObject({
+      companyId: execution.binding.companyId,
+      agentId: execution.binding.agentId,
+      runId: execution.binding.runId,
+      eventType: "execution.evidence",
+    });
+  }
 }
 
 describe("native startup cancellation fence", () => {
@@ -6166,6 +6211,7 @@ describe("native session cancellation", () => {
       }),
     );
     expect(state.publishActivity).toHaveBeenCalledTimes(2);
+    expectCancellationEvidence(persistence, "returned");
   });
 
   it.each(["terminal_failure", "observed", "committed"])("rejects retry phase %s that changed after caller reservation, before any native effect", async phase => {
@@ -6312,6 +6358,9 @@ describe("native session cancellation", () => {
     ).rejects.toThrow("native_cancellation_coordinator_missing");
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expect(state.cancel).not.toHaveBeenCalled();
+    expectCancellationEvidence(persistence, "failed");
   });
 
   it("does not acknowledge an unverified retained runner as cancelled without an authenticated session", async () => {
@@ -6329,6 +6378,8 @@ describe("native session cancellation", () => {
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
     expect(state.cancel).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expectCancellationEvidence(persistence, "failed");
   });
 });
 
