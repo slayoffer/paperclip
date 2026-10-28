@@ -1,0 +1,43 @@
+name: Scratch native session resume
+
+# Scratch-only probe: does native-session-resume pass on GitHub-hosted runners at this commit?
+on:
+  push:
+    branches: ["scratch/native-resume-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-resume:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: "24.22.1"
+          package-manager-cache: false
+      - run: npm install --global pnpm@9.15.4
+      - run: pnpm install --no-frozen-lockfile
+      - name: Record the runner sandbox facts
+        run: |
+          uname -a
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "no apparmor userns sysctl"
+          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "no userns_clone sysctl"
+          command -v bwrap || echo "no bwrap"
+          unshare --user --map-root-user true && echo "userns ok" || echo "userns denied"
+      - name: Run native-session-resume
+        run: |
+          pnpm run preflight:workspace-links
+          test_root="$(mktemp -d /tmp/pv-XXXXXX)"
+          export NODE_ENV=test PAPERCLIP_HOME="$test_root/h" PAPERCLIP_CONFIG="$test_root/h/config.json"
+          export PAPERCLIP_INSTANCE_ID="vt-$GITHUB_RUN_ID" TMPDIR="$test_root/t"
+          mkdir -p "$PAPERCLIP_HOME" "$TMPDIR"
+          pnpm exec vitest run server/src/services/native-runtime/native-session-resume.test.ts --maxWorkers=1 --pool=forks
