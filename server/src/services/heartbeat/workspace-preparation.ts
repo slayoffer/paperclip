@@ -28,6 +28,7 @@ import { logger } from "../../middleware/logger.js";
 import { createGitRemoteAuthProvider } from "../git-credentials.js";
 import { readNativeWorkspaceSyncReference } from "../native-runtime/index.js";
 import { parseObject } from "../../adapters/utils.js";
+import { isolatedWorkspaceReuseConfig } from "../workspace-reuse-fallback.js";
 import { materializeNativeChatTaskRoot } from "../native-runtime/native-chat-workspace.js";
 import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import {
@@ -581,6 +582,31 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
           recorder: workspaceOperationRecorder,
           resolveGitAuth: workspaceGitAuthProvider,
         }),
+      realizeIsolatedWorkspace: issueRef
+        ? () =>
+            realizeExecutionWorkspace({
+              db,
+              base: executionWorkspaceBase,
+              config: {
+                ...hostExecutionWorkspaceConfig,
+                ...isolatedWorkspaceReuseConfig({
+                  config: hostExecutionWorkspaceConfig,
+                  issueId: issueRef.id,
+                  issueIdentifier: issueRef.identifier,
+                }),
+              },
+              issue: issueRef,
+              agent: { id: agent.id, name: agent.name, companyId: agent.companyId },
+              recordedBranchOwnership: null,
+              heartbeatRunId: run.id,
+              enableWorkspaceBranchReconcileForward:
+                resolvedInstanceSettings.experimental.enableWorkspaceBranchReconcileForward,
+              enableWorkspaceDirtyQuarantineRepair:
+                resolvedInstanceSettings.experimental.enableWorkspaceDirtyQuarantineRepair,
+              recorder: workspaceOperationRecorder,
+              resolveGitAuth: workspaceGitAuthProvider,
+            })
+        : null,
     },
   );
   const resolvedProjectId =

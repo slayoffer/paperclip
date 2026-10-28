@@ -16,6 +16,7 @@ import {
   mergeDirectoryWithBaseline,
 } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import fs from "node:fs/promises";
+import { isCrossIssueWorkspaceNotCleanError } from "../workspace-reuse-safety.js";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
@@ -2479,6 +2480,11 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
   workspaceConfigFreshness: ExecutionWorkspaceConfigFreshnessDecision;
   restoreExistingWorkspace?: (() => Promise<T | null>) | null;
   realizeWorkspace: () => Promise<T>;
+  /**
+   * Realizes a new isolated workspace. Used once, when the normal realization
+   * lands on another issue's workspace that is not clean (the reuse guard).
+   */
+  realizeIsolatedWorkspace?: (() => Promise<T>) | null;
 }): Promise<{
   executionWorkspace: T;
   reusedExecutionWorkspace: T | null;
@@ -2490,7 +2496,17 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
   });
 
   if (!policy.shouldRestoreExistingWorkspace) {
-    const executionWorkspace = await input.realizeWorkspace();
+    let executionWorkspace: T;
+    try {
+      executionWorkspace = await input.realizeWorkspace();
+    } catch (error) {
+      if (!input.realizeIsolatedWorkspace || !isCrossIssueWorkspaceNotCleanError(error)) throw error;
+      executionWorkspace = await input.realizeIsolatedWorkspace();
+      executionWorkspace.warnings = [
+        ...(executionWorkspace.warnings ?? []),
+        "The workspace chosen for this issue belongs to another issue and is not clean. This run uses a separate issue workspace.",
+      ];
+    }
     return {
       executionWorkspace,
       reusedExecutionWorkspace: null,
