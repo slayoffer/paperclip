@@ -33,6 +33,10 @@ jobs:
           cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "no userns_clone sysctl"
           command -v bwrap || echo "no bwrap"
           unshare --user --map-root-user true && echo "userns ok" || echo "userns denied"
+      - name: Build the runnerd binary (the test skips without it)
+        run: pnpm --filter @paperclipai/paperclip-runner run build:binary
+      - name: Require the runnerd binary
+        run: ls -la packages/paperclip-runner/dist/bin/ && test -x packages/paperclip-runner/dist/bin/paperclip-runnerd
       - name: Run native-session-resume
         run: |
           pnpm run preflight:workspace-links
@@ -40,4 +44,4 @@ jobs:
           export NODE_ENV=test PAPERCLIP_HOME="$test_root/h" PAPERCLIP_CONFIG="$test_root/h/config.json"
           export PAPERCLIP_INSTANCE_ID="vt-$GITHUB_RUN_ID" TMPDIR="$test_root/t"
           mkdir -p "$PAPERCLIP_HOME" "$TMPDIR"
-          pnpm exec vitest run server/src/services/native-runtime/native-session-resume.test.ts --maxWorkers=1 --pool=forks
+          pnpm exec vitest run server/src/services/native-runtime/native-session-resume.test.ts --maxWorkers=1 --pool=forks --reporter=verbose
