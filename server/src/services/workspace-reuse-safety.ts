@@ -119,3 +119,10 @@ export async function assertWorkspaceReuseIsSafe(input: {
     } },
   });
 }
+
+/** True for the reuse guard's own failure, so callers can pick a separate workspace. */
+export function isCrossIssueWorkspaceNotCleanError(error: unknown): boolean {
+  const failure = error as { code?: unknown; resultJson?: { workspaceValidation?: { reason?: unknown } } } | null;
+  return failure?.code === "workspace_validation_failed"
+    && failure.resultJson?.workspaceValidation?.reason === "cross_issue_workspace_not_clean";
+}
