@@ -44,11 +44,25 @@ Parking receipts include the monotonic status version. An ownership cycle cannot
 An explicit backlog reassertion advances that version under the issue row lock. Admission rejects an earlier selection.
 These receipts affect automatic pull selection. Explicit wakes still pass through normal admission.
 
+Owner labels provide a separate execution stop, independent of the pull-queue switch.
+Either `owner:stopped` or `owner:local-session` prevents issue-bound agent wakes.
+Label matching ignores letter case, so `Owner:Stopped` also prevents execution.
+Assignment, status promotion, disposition repair, recovery, and pull selection respect this stop.
+Admission records `issue.owner_parked` in a skipped wake receipt.
+Queue and recovery checks log that reason before requesting a wake.
+Retry promotion and queued dispatch recheck current labels and cancel with `issue_owner_parked`.
+Remove both labels before agent execution can resume. A status or assignee change does not override these labels.
+
+Changing the assignee on a blocked issue preserves `blocked` and does not wake the new assignee.
+An attached comment alone does not resume that assignment change.
+The same PATCH must explicitly set status or use `resume: true` to request continuation.
+Resume still requires a comment and the existing authority and dependency checks.
+
 With this switch enabled, both assignment admission and queue selection count real work:
 
 - Every `todo` task counts.
 - An `in_progress` task counts when it has a live run or queued wake.
-- A `blocked` task counts when it has no scheduled monitor.
+- A `blocked` task counts unless it has a typed external wait.
 - Conversation tasks and other statuses do not count.
 
 Live runs include queued runs and scheduled retries.
@@ -65,8 +79,28 @@ The update clears stale execution locks and adds a system comment and activity r
 A status change that would discard a scheduled monitor returns HTTP `409`.
 The error code is `scheduled_monitor_status_conflict`.
 Remove the monitor explicitly before such a status change.
-With the switch off, the prior counting and monitor behavior remains active.
+With the switch off, the prior execution and monitor behavior remains active.
 The release branch resolves cancelled blockers independently of this switch.
+Typed external waits release WIP slots with either switch setting.
+
+## Typed external waits
+
+A blocked task releases its owner's work slot when company-scoped evidence identifies an outside wait:
+
+- An open blocker belongs to another agent or a human user.
+- A pending interaction requires a human resolver or names a human addressee.
+- An unblock descriptor names the board, a user, or another agent and states the action that resumes work.
+
+The descriptor's action is its saved resume condition. Existing descriptor validation remains authoritative.
+The named agent must belong to the issue company. A named user must have an active company membership.
+An agent-addressed card, a self-owned blocker, or a self-owned descriptor does not qualify.
+A closed blocker or a resolved card does not qualify.
+A scheduled monitor alone does not qualify. Untyped blocked work still consumes a slot.
+This classification changes no run cap, approval gate, or wake authority.
+
+Admission and queue logs record the owner, counts, issue identifiers, and reason for each classification.
+The company flow report exposes `runnableWip` and `waitingWip` for each agent.
+Its existing `wip` field equals `runnableWip` and determines `atWipLimit`.
 
 ## Verification and qualification
 

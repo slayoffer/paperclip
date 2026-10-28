@@ -131,6 +131,10 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({}),
 }));
 
+vi.mock("../services/external-objects.js", () => ({
+  externalObjectService: () => ({ syncIssueSafely: async () => undefined, syncCommentSafely: async () => undefined }),
+}));
+
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 
@@ -160,11 +164,13 @@ function agentActor(): Actor {
 // Run containment is mocked because this suite targets assignee invokability.
 function stubDb(): any {
   const query: any = {};
-  for (const method of ["select", "from", "where", "innerJoin", "leftJoin", "orderBy", "limit", "groupBy", "for"]) {
+  for (const method of ["select", "from", "where", "innerJoin", "leftJoin", "orderBy", "limit", "groupBy", "for", "update", "set", "insert", "values", "returning", "onConflictDoNothing"]) {
     query[method] = () => query;
   }
   query.then = (resolve: (rows: unknown[]) => unknown) => Promise.resolve(resolve([]));
-  return { select: () => query };
+  const database = { select: () => query, update: () => query,
+    transaction: async (callback: (tx: unknown) => unknown) => callback(database) };
+  return database;
 }
 
 function createApp(actor: Actor) {
@@ -255,7 +261,7 @@ describe("issue assignee invokability guard", () => {
       .patch(`/api/issues/${existing.id}`)
       .send({ assigneeAgentId: IDLE_AGENT_ID });
 
-    expect(res.status).toBe(200);
+    expect(res.status, res.text).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalled();
   });
 
@@ -269,8 +275,57 @@ describe("issue assignee invokability guard", () => {
       .patch(`/api/issues/${existing.id}`)
       .send({ assigneeAgentId: PAUSED_AGENT_ID });
 
-    expect(res.status).toBe(200);
+    expect(res.status, res.text).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalled();
+  });
+
+  it.each([
+    { assigneeAgentId: null, assigneeUserId: "local-board" },
+    { assigneeAgentId: AGENT_ACTOR_ID, assigneeUserId: null },
+  ])("keeps blocked assignment changes quiet from $assigneeUserId / $assigneeAgentId", async previous => {
+    const existing = makeIssue({ ...previous, status: "blocked" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id, patch) => ({ ...existing, ...patch }));
+    const res = await request(createApp(boardActor()))
+      .patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: IDLE_AGENT_ID, assigneeUserId: null });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(res.status, res.text).toBe(200);
+    expect(res.body).toMatchObject({ status: "blocked", assigneeAgentId: IDLE_AGENT_ID });
+    expect(mockIssueService.update.mock.calls[0][1].status).toBeUndefined();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("wakes the new assignee when the blocked PATCH explicitly sets todo", async () => {
+    const existing = makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "local-board" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id, patch) => ({ ...existing, ...patch }));
+    const res = await request(createApp(boardActor()))
+      .patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: IDLE_AGENT_ID, assigneeUserId: null, status: "todo" });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(res.status, res.text).toBe(200);
+    expect(res.body.status).toBe("todo");
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(IDLE_AGENT_ID,
+      expect.objectContaining({ reason: "issue_assigned" }));
+  });
+
+  it.each([false, true])("requires explicit resume for reassignment with a comment (resume=%s)", async resume => {
+    const existing = makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "local-board" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id, patch) => ({ ...existing, ...patch }));
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1", issueId: existing.id,
+      companyId: existing.companyId, body: "Assignment context" });
+    const res = await request(createApp(boardActor()))
+      .patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: IDLE_AGENT_ID, assigneeUserId: null, comment: "Assignment context", resume });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(res.status, res.text).toBe(200);
+    expect(res.body.status).toBe(resume ? "todo" : "blocked");
+    if (resume) {
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(IDLE_AGENT_ID,
+        expect.objectContaining({ payload: expect.objectContaining({ resumeIntent: true }) }));
+    } else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 });
 

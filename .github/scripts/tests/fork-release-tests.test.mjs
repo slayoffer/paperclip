@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
 const workflow = readFileSync(new URL("../../workflows/fork-release-tests.yml", import.meta.url), "utf8");
-const commands = ["pnpm -r typecheck", "pnpm test:run", "pnpm build"];
+const testCommand = `pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-parallelism --maxWorkers=1 --pool=forks --isolate`;
+const commands = ["pnpm -r typecheck", testCommand, "pnpm build"];
 const guard = "${{ !cancelled() && steps.install.outcome == 'success' }}";
 const actions = [
   "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
@@ -29,6 +32,7 @@ function evaluate(value, action, label) {
   const expression = value.slice(3, -2).trim();
   return runInNewContext(expression, {
     github: { event: { action, label: { name: label } } },
+    always: () => true,
   }, { timeout: 100 });
 }
 
@@ -53,19 +57,20 @@ function checkContract(source) {
   assert.match(text, /^permissions:\n  contents: read\n/m);
   assert.equal(lines.filter((line) => /\bpermissions:/.test(line)).length, 1);
   assert.doesNotMatch(text, /\b(write|write-all|read-all|secrets|environment|pull_request_target|workflow_run)\b/);
-  assert.equal(lines.filter((line) => /^  [\w-]+:$/.test(line) && text.indexOf(line) > text.indexOf("jobs:")).length, 1);
-  assert.match(text, /^    runs-on: ubuntu-24\.04$/m);
+  assert.equal(lines.filter((line) => /^  [\w-]+:$/.test(line) && text.indexOf(line) > text.indexOf("jobs:")).length, 2);
+  assert.deepEqual(lines.filter((line) => line.startsWith("    runs-on:")),
+    ["    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04"]);
   assert.match(text, /^    timeout-minutes: 180$/m);
   assert.match(text, /^  cancel-in-progress: true$/m);
   assert.ok(lines.includes("  group: fork-release-tests-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'fork-release-tests' && github.run_id || 'checks' }}"));
-  assert.doesNotMatch(text, /continue-on-error:|working-directory:|needs:|strategy:|container:|services:/);
+  assert.doesNotMatch(text, /continue-on-error:|working-directory:|container:|services:/);
   assert.doesNotMatch(text, /\|\|\s*(?:true|:)|set \+e|exit 0/);
   assert.doesNotMatch(text, /^    uses:/m);
   assert.ok(lines.includes("    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests' }}"));
   assert.deepEqual(lines.filter((line) => /uses:/.test(line)).map((line) => line.trim().split(/\s+/)[1]), actions);
   assert.match(text, /^          persist-credentials: false$/m);
   assert.doesNotMatch(text, /^          (?:token|ref|repository):/m);
-  assert.match(text, /^          node-version: 24$/m);
+  assert.match(text, /^          node-version: "24\.22\.1"$/m);
   assert.match(text, /^          package-manager-cache: false$/m);
   assert.match(text, /^        run: npm install --global pnpm@9\.15\.4$/m);
   assert.match(text, /^        id: install\n        run: pnpm install --no-frozen-lockfile$/m);
@@ -73,10 +78,10 @@ function checkContract(source) {
   for (const event of releaseEvents) checkIdentity(text, ...event);
   const steps = text.split(/^      - name: /m).slice(1);
   for (const command of commands) {
-    const step = steps.find((step) => step.split("\n").includes(`        run: ${command}`));
+    const step = steps.find((step) => step.includes(command));
     assert.ok(step, `Missing command: ${command}`);
     assert.ok(step.split("\n").includes(`        if: ${guard}`), `Unsafe check condition: ${command}`);
-    const timeout = command === "pnpm test:run" ? 150 : 20;
+    const timeout = command === testCommand ? 150 : 20;
     assert.ok(step.split("\n").includes(`        timeout-minutes: ${timeout}`), `Incorrect time limit: ${command}`);
     assert.equal(step.split("\n").filter((line) => line.trimStart().startsWith("run:")).length, 1);
   }
@@ -85,11 +90,24 @@ function checkContract(source) {
   assert.match(text, /\$GITHUB_SERVER_URL\/\$GITHUB_REPOSITORY\/actions\/runs\/\$GITHUB_RUN_ID/);
   assert.match(text, /TYPECHECK_RESULT: \$\{\{ steps.typecheck.outcome \}\}/);
   assert.match(text, /TEST_RESULT: \$\{\{ steps.tests.outcome \}\}/);
-  assert.match(text, /Runner limit: one GitHub-hosted job, 180 minutes per run\./);
+  assert.match(text, /Runner limit: six GitHub-hosted jobs, 180 minutes per job\./);
   assert.match(text, /BUILD_RESULT: \$\{\{ steps.build.outcome \}\}/);
+  assert.match(text, /^    name: Fork release tests \(\$\{\{ matrix.shard \}\}\/6\)$/m);
+  assert.match(text, /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2, 3, 4, 5, 6\]$/m);
+  assert.match(text, /TEST_SHARD: \$\{\{ matrix.shard \}\}\/6/);
+  assert.match(text, /export PAPERCLIP_HOME="\$test_root\/h"/);
+  assert.match(text, /export PAPERCLIP_CONFIG="\$PAPERCLIP_HOME\/config.json"/);
+  assert.match(text, /export TMPDIR="\$test_root\/t"/);
+  const summary = text.split("  release-tests:\n")[1];
+  assert.match(summary, /^    needs: \[test-shards\]$/m);
+  assert.match(summary, /^    timeout-minutes: 5$/m);
+  assert.ok(summary.includes("if: ${{ always() && (github.event.action != 'labeled' || github.event.label.name == 'fork-release-tests') }}"));
+  assert.match(summary, /SHARDS_RESULT: \$\{\{ needs.test-shards.result \}\}/);
+  assert.ok(summary.includes('test "$SHARDS_RESULT" = success'));
+  assert.doesNotMatch(summary, /uses:|checkout|pnpm/);
   // Event data enters shell commands through environment variables.
   for (const step of steps) {
-    const script = step.split(/^        run: /m)[1];
+    const script = step.split(/^        run: /m)[1]?.split(/^  \S/m)[0];
     if (script) assert.doesNotMatch(script, /\$\{\{/);
   }
 }
@@ -104,11 +122,11 @@ for (const [action, label, shouldRun] of releaseEvents) {
 
 for (const command of commands) {
   test(`reject a missing executable command: ${command}`, () => {
-    assert.throws(() => checkContract(workflow.replace(`        run: ${command}\n`, `        # run: ${command}\n`)));
+    assert.throws(() => checkContract(workflow.replace(command, "false")));
   });
 }
 
-const checkName = workflow.match(/^    name: (.+)$/m)?.[1];
+const checkName = workflow.split("  release-tests:\n")[1].match(/^    name: (.+)$/m)?.[1];
 for (const [name, before, after] of [
   ["a release-check name on ignored labels", `    name: ${checkName}`, "    name: Fork release checks"],
   ["an ignored name on release events", `    name: ${checkName}`, "    name: Ignored label event"],
@@ -124,14 +142,19 @@ for (const [name, before, after] of [
   ["the old job limit", "    timeout-minutes: 180\n", "    timeout-minutes: 60\n"],
   ["the old test limit", "        timeout-minutes: 150\n", "        timeout-minutes: 30\n"],
   ["an unlimited test step", "        timeout-minutes: 150\n", ""],
-  ["an incorrect limit summary", "180 minutes per run.", "60 minutes per run."],
+  ["an incorrect limit summary", "180 minutes per job.", "60 minutes per job."],
+  ["matrix fail-fast", "fail-fast: false", "fail-fast: true"],
+  ["an omitted shard", "shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"],
+  ["a summary without dependencies", "needs: [test-shards]", "needs: []"],
+  ["a summary skipped after failure", "always() && (github.event.action", "success() && (github.event.action"],
+  ["a summary that accepts failure", 'test "$SHARDS_RESULT" = success', 'test "$SHARDS_RESULT" != skipped'],
   ["a mutable action", actions[0], "actions/checkout@main"],
   ["an upstream workflow", "    steps:", "    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master\n    steps:"],
   ["an additional action", "    steps:", "    steps:\n      - uses: other/action@" + "a".repeat(40)],
   ["persisted credentials", "persist-credentials: false", "persist-credentials: true"],
   ["a moving checkout", "          persist-credentials: false", "          ref: master\n          persist-credentials: false"],
   ["an ignored check failure", "        id: tests", "        continue-on-error: true\n        id: tests"],
-  ["a masked exit status", "run: pnpm test:run", "run: pnpm test:run || true"],
+  ["a masked exit status", testCommand, `${testCommand} || true`],
   ["a check skipped after failure", `if: ${guard}`, "if: ${{ success() }}"],
   ["an unconditional check", `if: ${guard}`, "if: ${{ always() }}"],
   ["a changed working directory", "    steps:", "    working-directory: unrelated\n    steps:"],
@@ -140,5 +163,17 @@ for (const [name, before, after] of [
   test(`reject ${name}`, () => {
     assert.notEqual(workflow.replace(before, after), workflow, "Mutation must change the fixture");
     assert.throws(() => checkContract(workflow.replace(before, after)));
+  });
+}
+
+for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
+  test(`summary accepts only success: ${result || "absent"}`, () => {
+    const summary = workflow.split("  release-tests:\n")[1];
+    const script = summary.split("        run: |\n")[1];
+    const run = spawnSync("bash", ["-e", "-c", script], {
+      env: { ...process.env, SHARDS_RESULT: result, GITHUB_STEP_SUMMARY: "/dev/null" },
+      cwd: tmpdir(),
+    });
+    assert.equal(run.status, result === "success" ? 0 : 1, run.stderr?.toString());
   });
 }

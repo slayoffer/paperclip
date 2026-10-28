@@ -17,6 +17,7 @@ import {
 import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON } from "@paperclipai/shared";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+import { issueOwnerParkingReason } from "../../../services/issue-owner-parking.js";
 import { budgetService } from "../../../services/budgets.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
@@ -344,6 +345,8 @@ export function createPostgresRunDispatchAdapter(
     facts.issueFound = issue !== null;
     if (!facts.issueFound) return { agentFound: true, facts };
 
+    facts.ownerParkingReason = await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "retry.promotion");
+    if (facts.ownerParkingReason) return { agentFound: true, facts };
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
     facts.issueExecutionRunId = issue.executionRunId;
@@ -585,6 +588,8 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
+      ownerParkingReason: issue ? await issueOwnerParkingReason(dbOrTx,
+        { companyId: input.companyId, id: issueId }, "run.dispatch") : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,

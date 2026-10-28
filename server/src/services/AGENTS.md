@@ -15,12 +15,27 @@ Recover their lock path from the saved `in_place` realization with matching leas
 A terminal run and released lease still require remote termination proof before lock removal.
 Observed on 2026-10-26 (VLAT): a sweep that used only execution-workspace rows skipped these locks.
 
+## Restart recovery ownership
+
+The orphan reaper owns process-loss recovery for legacy runs with a controller or checkpoint.
+Do not terminalize these runs from the stale-lock sweeper because their provider stopped.
+An expired lease permits a restart claim. It does not permit the sweeper to remove the task locks.
+Check new ownership evidence in the terminal write as well as the initial read.
+Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.
+
 ## Pull queue stops
 
 Record an explicit backlog disposition with its parking receipt in the issue transaction.
 Keep parking conditions separate from general issue recency. Comments and title edits do not resume a parked issue.
 Skip receipts restrict automatic selection only. Normal admission always checks current authority.
 Recheck budget, dependency, pause, and recovery gates before reusing an old skip.
+
+## Owner parking
+
+`owner:stopped` and `owner:local-session` are execution stops, not descriptive labels.
+Read current company-scoped labels at wake admission, retry promotion, and queued dispatch.
+Check before recovery actions and pull selection. Record `issue.owner_parked` when skipping.
+A status or assignee change cannot override these labels. Remove both labels to resume agent execution.
 
 ## Interaction outbox budget stops
 

@@ -390,3 +390,9 @@ retries cleanup. This event preserves the run outcome and does not claim a file
 save; `instruction_save` remains authoritative for collection. The event contains
 no raw exception, host path, file contents, or lock-owner metadata. Failure to
 write the warning must not replace the provider outcome or stop lease release.
+
+## Local stop requests and SSH phases
+
+`execution.evidence` records retain local request boundaries and SSH attempt boundaries.
+They use ordered scope manifests and explicit storage failure receipts.
+See [Local execution evidence](execution-evidence.md) for fields, retention, and company-scoped reconciliation.
