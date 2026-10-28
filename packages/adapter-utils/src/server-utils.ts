@@ -1,6 +1,7 @@
 import { normalizePaperclipWakeRecovery, type PaperclipWakeRecovery } from "./wake-recovery.js";
 export { checkpointSessionOutput, RESTART_RESUME_PROMPT } from "./restart-session.js";
 import { RestartSessionCheckpointError } from "./restart-session.js";
+import { beginLocalStopEvidence } from "./local-execution-evidence.js";
 import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -4788,6 +4789,7 @@ export async function runChildProcess(
         });
 
         let timedOut = false;
+        const stopEvidence: Array<() => void> = [];
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
@@ -4800,6 +4802,7 @@ export async function runChildProcess(
           }
           checkpointFailure ??= error;
           if (child.exitCode === null && child.signalCode === null && !checkpointKillTimer) {
+            stopEvidence.push(beginLocalStopEvidence("checkpoint_failure"));
             signalRunningProcess({ child, processGroupId }, "SIGTERM");
             checkpointKillTimer = setTimeout(() => {
               signalRunningProcess({ child, processGroupId }, "SIGKILL");
@@ -4866,6 +4869,7 @@ export async function runChildProcess(
             terminalCleanupTimer = null;
             if (terminalCleanupStarted || timedOut) return;
             terminalCleanupStarted = true;
+            stopEvidence.push(beginLocalStopEvidence("terminal_cleanup"));
             terminalCleanupSignal = "SIGTERM";
             signalRunningProcess({ child, processGroupId }, "SIGTERM");
             terminalCleanupKillTimer = setTimeout(
@@ -4884,6 +4888,7 @@ export async function runChildProcess(
           opts.timeoutSec > 0
             ? setTimeout(() => {
                 timedOut = true;
+                stopEvidence.push(beginLocalStopEvidence("timeout"));
                 clearTerminalCleanupTimers();
                 signalRunningProcess({ child, processGroupId }, "SIGTERM");
                 setTimeout(
@@ -4962,6 +4967,7 @@ export async function runChildProcess(
         child.on(
           "close",
           (code: number | null, signal: NodeJS.Signals | null) => {
+            for (const finish of stopEvidence) finish();
             if (checkpointKillTimer) clearTimeout(checkpointKillTimer);
             if (timeout) clearTimeout(timeout);
             clearTerminalCleanupTimers();

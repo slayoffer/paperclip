@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
+import { randomUUID } from "node:crypto";
+import { emitLocalExecutionEvidence } from "./local-execution-evidence.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
 
 /** Preparation and restore share a process-wide first-in, first-out queue. */
@@ -57,11 +59,25 @@ export async function scheduleSshWorkspaceOperation<T>(
   phase: "prepare" | "restore",
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (sshWorkspaceOperations.ownsCurrentSlot()) return operation();
+  const attemptId = randomUUID();
+  const boundary = (boundary: "queued" | "started" | "ended", outcome?: "succeeded" | "failed") =>
+    emitLocalExecutionEvidence({ kind: "ssh_phase", attemptId, phase, boundary, at: new Date().toISOString(),
+      ...(outcome ? { outcome } : {}) });
+  await boundary("queued");
+  const measured = async () => {
+    await boundary("started");
+    let outcome: "succeeded" | "failed" = "failed";
+    try {
+      const result = await operation();
+      outcome = "succeeded";
+      return result;
+    } finally { await boundary("ended", outcome); }
+  };
+  if (sshWorkspaceOperations.ownsCurrentSlot()) return measured();
   const queued = performance.now();
   await sink?.(`[paperclip] SSH workspace ${phase} queued.\n`);
   return sshWorkspaceOperations.run(async () => {
     await sink?.(`[paperclip] SSH workspace ${phase} admitted after ${Math.round(performance.now() - queued)} ms.\n`);
-    return timeWorkspaceStep(sink, `SSH workspace ${phase}`, operation);
+    return timeWorkspaceStep(sink, `SSH workspace ${phase}`, measured);
   });
 }

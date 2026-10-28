@@ -380,7 +380,7 @@ describe("openapi routes", () => {
     expect(wake.description).toContain("durable queued/deferred receipt");
   });
   it("advertises the guarded prepared-task promotion contract to API clients", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const patch = res.body.paths["/api/issues/{id}"].patch;
     expect(patch.requestBody.content["application/json"].schema.properties.expectedStatusVersion)
       .toMatchObject({ type: "integer", minimum: 0 });
@@ -1212,6 +1212,6 @@ describe("heartbeat run ID OpenAPI contract", () => {
         checked++;
       }
     }
-    expect(checked).toBe(12);
+    expect(checked).toBe(13);
   });
 });

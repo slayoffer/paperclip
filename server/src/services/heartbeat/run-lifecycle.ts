@@ -240,6 +240,7 @@ const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
 ];
 
 const LIVENESS_BOOKKEEPING_EVENT_TYPES = [
+  "execution.evidence",
   "lifecycle",
   "adapter.invoke",
   "error",

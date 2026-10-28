@@ -13,6 +13,7 @@ import { nativeCaseHandoffResult } from "./native-case-handoff.js";
 import { assertExternalNativeRunAuthority } from "./external-native-authority.js";
 import { stageRemoteLaunchAssets } from "./remote-launch-assets.js";
 import { createRunPreparationTiming } from "../execution-preparation-timing.js";
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
 import { agents } from "@paperclipai/db";
@@ -222,6 +223,7 @@ import {
 } from "./native-restart-recovery.js";
 
 type ActiveNativeSession = {
+  evidenceDb: Db;
   session: NativeSession;
   cancelRequested: boolean;
   restartDetach?: Promise<void>;
@@ -258,6 +260,7 @@ const nativeRunsDetachingForRestart = new Set<string>();
 // runner state and authenticating its replacement. Keep the startup owner
 // alive until onSession can detach it, or until startup itself has settled.
 type NativeSessionStartup = {
+  evidenceDb: Db;
   promise: Promise<ActiveNativeSession | null>;
   resolve: (session: ActiveNativeSession | null) => void;
   stopRequested?: boolean;
@@ -6910,6 +6913,30 @@ export async function cancelNativeSession(
       auditId: string | null;
     }
 > {
+  const db = options?.db ?? nativeSessionStartups.get(runId)?.evidenceDb ?? activeNativeSessions.get(runId)?.evidenceDb;
+  if (!db) return cancelNativeSessionInternal(runId, reason, options);
+  return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: new Date().toISOString(), reason },
+    () => cancelNativeSessionInternal(runId, reason, options));
+}
+
+async function cancelNativeSessionInternal(
+  runId: string,
+  reason: string,
+  options?: {
+    db: Db;
+    scope?: "turn" | "run" | "issue";
+    replacementAccepted?: boolean;
+    cancellationRequestId?: string;
+  },
+): Promise<
+  | boolean
+  | {
+      dispatched: boolean;
+      decision: NativeStatusDecision | null;
+      decisionId: string | null;
+      auditId: string | null;
+    }
+> {
   const runStop = (options?.scope ?? "run") === "run";
   let decision: NativeStatusDecision | null = null;
   let decisionContext: {
@@ -7658,6 +7685,7 @@ export async function executePaperclipNativeSession(input: {
   let resolveStartup!: (session: ActiveNativeSession | null) => void;
   let settle!: () => void;
   const startup: NativeSessionStartup = {
+    evidenceDb: input.db,
     settled: new Promise<void>(resolve => { settle = resolve; }),
     settle: () => settle(),
     promise: new Promise<ActiveNativeSession | null>(resolve => { resolveStartup = resolve; }),
@@ -9135,7 +9163,7 @@ async function executePaperclipNativeSessionWithinScope(
                 }
               }
               if (session) {
-                const active: ActiveNativeSession = { session, cancelRequested: false };
+                const active: ActiveNativeSession = { evidenceDb: input.db, session, cancelRequested: false };
                 activeNativeSessions.set(input.execution.binding.runId, active);
                 const startup = nativeSessionStartups.get(input.execution.binding.runId);
                 startup?.resolve(active);
