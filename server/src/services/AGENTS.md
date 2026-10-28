@@ -22,6 +22,13 @@ Keep parking conditions separate from general issue recency. Comments and title 
 Skip receipts restrict automatic selection only. Normal admission always checks current authority.
 Recheck budget, dependency, pause, and recovery gates before reusing an old skip.
 
+## Owner parking
+
+`owner:stopped` and `owner:local-session` are execution stops, not descriptive labels.
+Read current company-scoped labels at wake admission, retry promotion, and queued dispatch.
+Check before recovery actions and pull selection. Record `issue.owner_parked` when skipping.
+A status or assignee change cannot override these labels. Remove both labels to resume agent execution.
+
 ## Interaction outbox budget stops
 
 Check the current issue token budget before question delivery claims and resolution wake admission.

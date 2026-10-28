@@ -34,6 +34,9 @@ Automated: [pull queue](../server/src/__tests__/heartbeat-pull-queue.test.ts) ch
 
 Automated: [queue skip and parking regressions](../server/src/__tests__/heartbeat-pull-queue-gap.test.ts) checks progress past skipped heads and durable backlog stops.
 
+Automated: [owner parking](../server/src/__tests__/issue-owner-parking.test.ts) checks label stops at admission, recovery, selection, retry promotion, and dispatch.
+The [assignment route tests](../server/src/__tests__/issue-assignee-invokability-routes.test.ts) check blocked reassignment without an implicit resume.
+
 Manual: Block one task on another, finish the prerequisite, and observe the dependent task’s eligible continuation. Follow parent/child links back to the source request. Verify no duplicate run or false parent completion occurs.
 
 ### `review-and-controls`

@@ -1,5 +1,6 @@
 import type { CompanyFlowReport, FlowAgent, FlowCounts, FlowIssue, FlowStallReason } from "@paperclipai/shared/types/company-flow";
 import { isWipActiveStatus } from "./agent-wip-limit.js";
+import { isRunnableWipReason, isWaitingWipReason, type WipReason } from "./agent-wip-policy.js";
 
 export interface FlowIssueRow {
   id: string;
@@ -15,6 +16,7 @@ export interface FlowIssueRow {
   createdAt: Date;
   updatedAt: Date;
   executionVisible: boolean;
+  wipReason?: WipReason;
 }
 
 export interface FlowSnapshot {
@@ -60,14 +62,22 @@ export function buildCompanyFlowReport(
     dependents.get(source.id)!.add(target.id);
   }
   const wip = new Map<string, number>();
+  const waiting = new Map<string, number>();
+  const runnable = (row: FlowIssueRow) => row.wipReason === undefined
+    ? isWipActiveStatus(row.status) : isRunnableWipReason(row.wipReason);
   for (const row of snapshot.issues) {
-    if (row.assigneeAgentId && isWipActiveStatus(row.status)) {
+    if (row.assigneeAgentId && runnable(row)) {
       wip.set(row.assigneeAgentId, (wip.get(row.assigneeAgentId) ?? 0) + 1);
+    }
+    if (row.assigneeAgentId && row.wipReason && isWaitingWipReason(row.wipReason)) {
+      waiting.set(row.assigneeAgentId, (waiting.get(row.assigneeAgentId) ?? 0) + 1);
     }
   }
   const agents: FlowAgent[] = snapshot.agents.map((agent) => ({
     ...agent,
     wip: wip.get(agent.id) ?? 0,
+    runnableWip: wip.get(agent.id) ?? 0,
+    waitingWip: waiting.get(agent.id) ?? 0,
     wipLimit,
     atWipLimit: wipLimit !== null && (wip.get(agent.id) ?? 0) >= wipLimit,
   })).sort((a, b) => a.id.localeCompare(b.id));
@@ -161,7 +171,7 @@ export function buildCompanyFlowReport(
     readyTodo: readyQueues.reduce((sum, queue) => sum + queue.todo.filter(include).length, 0),
     readyBacklog: readyQueues.reduce((sum, queue) => sum + queue.backlog.filter(include).length, 0),
     chainRoots: chainRoots.filter((root) => include(root.issue)).length,
-    wip: snapshot.issues.filter((row) => include(row) && isWipActiveStatus(row.status)).length,
+    wip: snapshot.issues.filter((row) => include(row) && runnable(row)).length,
     inProgressWithoutRun: ghosts.inProgressWithoutRun.filter(include).length,
     blockedWithClosedLinks: ghosts.blockedWithClosedLinks.filter(include).length,
     reviewHoldsWithoutRound: ghosts.reviewHoldsWithoutRound.filter(include).length,
