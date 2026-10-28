@@ -176,6 +176,25 @@ export function classifyCodexAuthRefreshFailure(input: {
   return null;
 }
 
+/**
+ * Run error text for a failed Codex login refresh. The Codex CLI can print a
+ * misleading line for these failures (for example "workspace routing discovery
+ * unauthorized (401)"). Name the real cause first and keep the original line.
+ */
+export function describeCodexAuthRefreshFailure(
+  failure: CodexAuthRefreshFailureClass,
+  originalMessage: string,
+): string {
+  const cause =
+    failure === "refresh_token_reused"
+      ? "the stored refresh token was already used (refresh_token_reused)"
+      : failure === "refresh_token_expired"
+      ? "the stored refresh token expired (refresh_token_expired)"
+      : "the stored login is no longer valid (refresh_token_invalidated)";
+  const original = originalMessage.trim();
+  return `Codex login refresh failed: ${cause}. This is not a workspace routing problem.${original ? ` Codex reported: ${original}` : ""}`;
+}
+
 function readTimeZoneParts(date: Date, timeZone: string) {
   const values = new Map(
     new Intl.DateTimeFormat("en-US", {

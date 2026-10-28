@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   classifyCodexAuthRefreshFailure,
+  describeCodexAuthRefreshFailure,
   extractCodexRetryNotBefore,
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
@@ -275,5 +276,18 @@ describe("isCodexTransientUpstreamError", () => {
         ].join("\n"),
       }),
     ).toBe(false);
+  });
+});
+
+describe("describeCodexAuthRefreshFailure", () => {
+  it("names the login refresh as the cause and keeps the original line", () => {
+    const message = describeCodexAuthRefreshFailure(
+      "refresh_token_reused",
+      "workspace routing discovery unauthorized (401)",
+    );
+    expect(message).toContain("Codex login refresh failed");
+    expect(message).toContain("refresh_token_reused");
+    expect(message).toContain("not a workspace routing problem");
+    expect(message).toContain("workspace routing discovery unauthorized (401)");
   });
 });
