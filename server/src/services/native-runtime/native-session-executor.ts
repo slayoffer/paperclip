@@ -69,6 +69,7 @@ import {
   isKnownNativeSessionRootEntry,
 } from "./native-session-root-entries.js";
 import { createRunPreparationTiming } from "../execution-preparation-timing.js";
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 import { configuredEnvironment, PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index.js";
 import { parseProviderPerformanceSpans } from "../../vendor/paperclip-runner/index.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
@@ -332,6 +333,7 @@ import {
 } from "./native-restart-recovery.js";
 
 type ActiveNativeSession = {
+  evidenceDb: Db;
   session: NativeSession;
   cancelRequested: boolean;
   cancellationSettled?: Promise<void>;
@@ -389,6 +391,7 @@ const nativeRunRecoveryFlushers = new Map<string, () => void>();
 // runner state and authenticating its replacement. Keep the startup owner
 // alive until onSession can detach it, or until startup itself has settled.
 type NativeSessionStartup = {
+  evidenceDb: Db;
   promise: Promise<ActiveNativeSession | null>;
   resolve: (session: ActiveNativeSession | null) => void;
   stopRequested?: boolean;
@@ -8624,16 +8627,20 @@ export async function cancelNativeSession(
       auditId: string | null;
     }
 > {
-  // HTTP and the overlap command worker can observe the same durable intent.
-  // Join the entire cleanup/ACK lifetime before re-reading that intent, rather
-  // than treating cancelRequested as proof that provider cleanup has finished.
-  while (nativeCancellationsInFlight.has(runId)) {
-    await nativeCancellationsInFlight.get(runId)!.catch(() => undefined);
-  }
-  const pending = performNativeCancellation(runId, reason, options);
-  nativeCancellationsInFlight.set(runId, pending);
-  try { return await pending; }
-  finally { nativeCancellationsInFlight.delete(runId); }
+  const db = options?.db ?? nativeSessionStartups.get(runId)?.evidenceDb ?? activeNativeSessions.get(runId)?.evidenceDb;
+  const cancel = async () => {
+    // HTTP and the overlap command worker can observe the same durable intent.
+    // Join its cleanup and acknowledgement before checking authority again.
+    while (nativeCancellationsInFlight.has(runId)) {
+      await nativeCancellationsInFlight.get(runId)!.catch(() => undefined);
+    }
+    const pending = performNativeCancellation(runId, reason, options);
+    nativeCancellationsInFlight.set(runId, pending);
+    try { return await pending; }
+    finally { nativeCancellationsInFlight.delete(runId); }
+  };
+  return db ? withStopRequestEvidence({ db, run: { id: runId }, requestedAt: new Date().toISOString(), reason }, cancel)
+    : cancel();
 }
 
 async function performNativeCancellation(
@@ -9351,6 +9358,7 @@ export async function executePaperclipNativeSession(input: {
     providerPackSourceAbort: new AbortController(),
     priorRestartDetach: nativeRunsDetachingForRestart.get(runId),
     providerWorkMayPrecede: Boolean(input.restartRecovery),
+    evidenceDb: input.db,
     settled: new Promise<void>(resolve => { settle = resolve; }),
     settle: () => settle(),
     promise: new Promise<ActiveNativeSession | null>(resolve => { resolveStartup = resolve; }),
@@ -11386,7 +11394,7 @@ async function executePaperclipNativeSessionAttempt(
                 }
               }
               if (session) {
-                const active: ActiveNativeSession = { session, cancelRequested: false };
+                const active: ActiveNativeSession = { evidenceDb: input.db, session, cancelRequested: false };
                 activeNativeSessions.set(input.execution.binding.runId, active);
                 const startup = nativeSessionStartups.get(input.execution.binding.runId);
                 const stopBeforeProviderTurn = startup?.stopRequested === true && startup.sessionPublished !== true

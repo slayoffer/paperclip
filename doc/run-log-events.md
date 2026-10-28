@@ -941,3 +941,9 @@ references in Postgres. Local-disk instances remain local. Raw provider
 traces have their own restricted, encrypted object path. See
 [run evidence storage](run-evidence-storage.md) for batching, durability,
 configuration, migration, retention, and qualification boundaries.
+
+## Local stop requests and SSH phases
+
+`execution.evidence` records retain local request boundaries and SSH attempt boundaries.
+They use ordered scope manifests and explicit storage failure receipts.
+See [Local execution evidence](execution-evidence.md) for fields, retention, and company-scoped reconciliation.

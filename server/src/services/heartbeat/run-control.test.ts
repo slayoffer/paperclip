@@ -30,6 +30,7 @@ import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { acknowledgedNativeApiStopExecutionHasStopped } from "../acknowledged-native-stop.js";
 import { nativeSha256 } from "../native-runtime/canonical.js";
 import { callbacks, runControlPostgresSupport, setupRunControlDatabase } from "./__tests__/run-control-fixtures.js";
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 vi.mock("../acknowledged-native-stop.js", async (importOriginal) => {
@@ -48,6 +49,12 @@ vi.mock("../local-service-supervisor.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../local-service-supervisor.js")>(),
   terminateLocalService: vi.fn(async () => undefined),
 }));
+// Stop evidence has its own tests (stop-request-evidence.test.ts). The boundary
+// test below replaces it once, so it checks only run-control database access.
+vi.mock("../run-execution-evidence.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../run-execution-evidence.js")>();
+  return { ...actual, withStopRequestEvidence: vi.fn(actual.withStopRequestEvidence) };
+});
 
 type Run = typeof heartbeatRuns.$inferSelect;
 function guardedDatabase() {
@@ -73,7 +80,9 @@ describe("heartbeat run-control module boundary", () => {
     const deps = callbacks(database.db);
     const run = { id: "finished", status: "succeeded", runtimeMode: "legacy" } as Run;
     deps.getRun.mockResolvedValue(run);
+    vi.mocked(withStopRequestEvidence).mockImplementationOnce(async (_input, operation) => operation());
     expect(await createHeartbeatRunControl(database.db, deps).cancelRunInternal(run.id)).toBe(run);
+    expect(withStopRequestEvidence).toHaveBeenCalledWith(expect.objectContaining({ run: { id: run.id } }), expect.any(Function));
     expect(database.access).not.toHaveBeenCalled();
     expect(deps.getAgent).not.toHaveBeenCalled();
     expect(deps.appendRunEvent).not.toHaveBeenCalled();

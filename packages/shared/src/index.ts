@@ -1,6 +1,7 @@
 export type { RuntimeCap } from "./types/runtime-cap.js";
 export * from "./slack-app-manifest.js";
 export type { LightIssue } from "./types/issue-light.js";
+export type { RunExecutionEvidenceReport } from "./types/execution-evidence.js";
 export * from "./interaction-exports.js";
 // Public exports retain their declaration order across these modules.
 export * from "./exports/part-1.js";

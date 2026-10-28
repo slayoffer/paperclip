@@ -7471,6 +7471,7 @@ function cancellationDb(options?: {
       ? options.coordinator
       : { runId: initialRun.id, assessmentId: null };
   let forUpdateCount = 0;
+  const events: Array<Record<string, unknown>> = [];
   let resultJsonUpdateCount = 0;
   const updates: Array<{ table: unknown; values: Record<string, unknown> }> =
     [];
@@ -7533,14 +7534,48 @@ function cancellationDb(options?: {
     transaction: async (operation: (transaction: Db) => Promise<unknown>) =>
       operation(tx as unknown as Db),
   } as unknown as Db;
+  // The real-DB evidence suite tests atomic event allocation. This cancellation
+  // unit fixture records the writer boundary without reproducing its SQL CTE.
+  const append = runEventWriter.appendHeartbeatRunEvent;
+  const writer = vi.spyOn(runEventWriter, "appendHeartbeatRunEvent").mockImplementation(async (target, input) => {
+    if (target !== db) return append(target, input);
+    const row: typeof heartbeatRunEvents.$inferSelect = {
+      ...input, id: events.length + 1, seq: events.length + 1, createdAt: new Date(),
+      stream: input.stream ?? null, level: input.level ?? null, color: input.color ?? null,
+      message: input.message ?? null, payload: input.payload ?? null,
+      sourceInstanceId: null, sourceEventId: null, sourceSeq: null,
+      sourcePayloadSha256: null, protocolSchemaVersion: null,
+    };
+    events.push(row);
+    return { row, disposition: "committed", highestContiguousSourceSeq: 0 };
+  });
+  onTestFinished(() => writer.mockRestore());
   return {
     db,
     updates,
+    events,
     getForUpdateCount: () => forUpdateCount,
     getResultJson: () => currentResultJson,
     getResultJsonUpdateCount: () => resultJsonUpdateCount,
     tx,
   };
+}
+
+function expectCancellationEvidence(persistence: ReturnType<typeof cancellationDb>, outcome: "returned" | "failed") {
+  expect(persistence.events).toMatchObject([
+    { seq: 1, payload: { kind: "scope_started", scope: "stop" } },
+    { seq: 2, payload: { kind: "stop_request", requestedAt: expect.any(String) } },
+    { seq: 3, payload: { kind: "stop_result", outcome } },
+    { seq: 4, payload: { kind: "scope_finished", expectedRecords: 4, failedWrites: 0 } },
+  ]);
+  for (const event of persistence.events) {
+    expect(event).toMatchObject({
+      companyId: execution.binding.companyId,
+      agentId: execution.binding.agentId,
+      runId: execution.binding.runId,
+      eventType: "execution.evidence",
+    });
+  }
 }
 
 describe("native startup cancellation fence", () => {
@@ -9515,6 +9550,7 @@ describe("native session cancellation", () => {
       }),
     );
     expect(state.publishActivity).toHaveBeenCalledTimes(2);
+    expectCancellationEvidence(persistence, "returned");
   });
 
   it.each(["terminal_failure", "observed", "committed"])("rejects retry phase %s that changed after caller reservation, before any native effect", async phase => {
@@ -9720,6 +9756,9 @@ describe("native session cancellation", () => {
     ).rejects.toThrow("native_cancellation_coordinator_missing");
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expect(state.cancel).not.toHaveBeenCalled();
+    expectCancellationEvidence(persistence, "failed");
   });
 
   it("does not acknowledge an unverified retained runner as cancelled without an authenticated session", async () => {
@@ -9737,6 +9776,8 @@ describe("native session cancellation", () => {
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
     expect(state.cancel).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expectCancellationEvidence(persistence, "failed");
   });
 });
 

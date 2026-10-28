@@ -10,6 +10,8 @@ import { prepareRuntimeSettingsPatch } from "../services/agent-runtime-settings.
 import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
 import { connectionManagementService, continuingConnectionManagement } from "../services/connection-management.js";
 import { connectionManagementGuard, connectionRequestContext, connectionRequestUserId, aiLoginUserAction } from "./connection-management-authz.js";
+import { readRunExecutionEvidence } from "../services/run-execution-evidence.js";
+import { reconcileExecutionEvidence } from "../services/reconcile-execution-evidence.js";
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
 import { agentHarnessType, isEnvironmentDriverSupportedForAdapter, normalizeClaudeRunnerOptions, type AgentConfigurationWarning, type AgentRunnerChoice } from "@paperclipai/shared";
 import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-selection.js";
@@ -5872,6 +5874,9 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -5884,7 +5889,7 @@ export function agentRoutes(
       return;
     }
 
-    await heartbeat.cancelActiveForAgent(id);
+    await heartbeat.cancelActiveForAgent(id, undefined, stopRequest);
 
     await logActivity(db, {
       companyId: agent.companyId,
@@ -6003,6 +6008,9 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/terminate", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) {
@@ -6032,6 +6040,7 @@ export function agentRoutes(
     const cancellation = await heartbeat.cancelInvocationsForAgents(
       [id, ...invalidOrgChainDescendantIds],
       "Cancelled because the agent was terminated or became invalid-org-chain under a terminated manager",
+      stopRequest,
     );
 
     await logActivity(db, {
@@ -7293,6 +7302,9 @@ export function agentRoutes(
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const runId = readHeartbeatRunId(req);
     const existing = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
@@ -7303,11 +7315,8 @@ export function agentRoutes(
     // Recovery reads this to stand down instead of classifying the cancelled
     // run as agent stranding and re-waking the agent the operator just stopped.
     const run = await heartbeat.cancelRun(runId, "Cancelled by a board operator", {
+      ...stopRequest,
       ...(requestId ? { cancellationRequestId: requestId, cancellationRequestedByUserId: req.actor.userId ?? null } : {}),
-      resultJson: {
-        cancelledByActorType: "user",
-        cancelledByUserId: req.actor.userId ?? null,
-      },
     });
 
     if (run) {
@@ -7758,6 +7767,17 @@ export function agentRoutes(
       details: { traceId: removed.id, recoverable: false },
     });
     res.json({ ok: true });
+  });
+
+  router.get("/heartbeat-runs/:runId/execution-evidence", async (req, res) => {
+    const runId = readHeartbeatRunId(req);
+    const run = await getAccessibleResource(req, res, heartbeat.getRunReadAccess(runId), "Heartbeat run not found");
+    if (!run) return;
+    if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
+    if (!(await assertRunReadAllowed(req, res, run))) return;
+    const evidence = await readRunExecutionEvidence(db, run);
+    const report = reconcileExecutionEvidence(evidence);
+    res.json(await runRedactions.redactForRun(run.companyId, run.id, { ...report, collectedAt: evidence.collectedAt }));
   });
 
   router.get("/heartbeat-runs/:runId/events", async (req, res) => {

@@ -86,6 +86,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   listTaskSessions: vi.fn(),
   resetRuntimeSession: vi.fn(),
   getRun: vi.fn(),
+  getRunReadAccess: vi.fn(),
   cancelRun: vi.fn(),
   cancelInvocationsForAgents: vi.fn(),
   cancelActiveForAgent: vi.fn(),
@@ -339,6 +340,7 @@ describe("agent permission routes", () => {
     mockHeartbeatService.listTaskSessions.mockReset();
     mockHeartbeatService.resetRuntimeSession.mockReset();
     mockHeartbeatService.getRun.mockReset();
+    mockHeartbeatService.getRunReadAccess.mockReset();
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelInvocationsForAgents.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
@@ -1935,6 +1937,9 @@ describe("agent permission routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentService.terminate).toHaveBeenCalledWith(agentId);
+    expect(mockHeartbeatService.cancelInvocationsForAgents).toHaveBeenCalledWith(expect.arrayContaining([agentId]), expect.any(String), {
+      requestedAt: expect.any(String), resultJson: { cancelledByActorType: "user", cancelledByUserId: "board-user" },
+    });
     expect(mockApprovalService.findOpenHireApprovalForAgent).not.toHaveBeenCalled();
     expect(mockApprovalService.rejectHire).not.toHaveBeenCalled();
   });
@@ -2663,6 +2668,30 @@ describe("agent permission routes", () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("Heartbeat run not found");
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects execution evidence reads outside the caller company scope", async () => {
+    const runId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    mockHeartbeatService.getRunReadAccess.mockResolvedValue({
+      id: runId,
+      companyId: "33333333-3333-4333-8333-333333333333",
+      agentId,
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get(`/api/heartbeat-runs/${runId}/execution-evidence`));
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Heartbeat run not found");
+    expect(mockHeartbeatService.getRunReadAccess).toHaveBeenCalledWith(runId);
+    expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
   });
 });
 

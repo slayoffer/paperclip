@@ -805,6 +805,7 @@ describePostgres("heartbeat recovery module ownership", () => {
       control.finish();
       adapterExecutionControls.delete(run.id);
       await drain;
+      await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
       await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     }
   });
@@ -826,7 +827,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     } finally {
       controls.forEach(control => control.finish());
       await drain;
-      for (const run of runs) { adapterExecutionControls.delete(run.id); await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)); }
+      for (const run of runs) { adapterExecutionControls.delete(run.id); await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id)); await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)); }
     }
   });
 
@@ -861,6 +862,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     } finally {
       await db.delete(environmentLeases).where(eq(environmentLeases.id, lease.id));
       await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, run.issueId!));
+      await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
       await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     }
   });
@@ -876,6 +878,7 @@ describePostgres("heartbeat recovery module ownership", () => {
   async function deleteShutdownSource(f: Awaited<ReturnType<typeof seedShutdownSource>>) {
     await db.delete(environmentLeases).where(eq(environmentLeases.id, f.lease.id));
     await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.run.issueId!));
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, f.run.id));
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, f.run.id));
     adapterExecutionControls.delete(f.run.id);
   }
@@ -1223,6 +1226,7 @@ describePostgres("heartbeat recovery module ownership", () => {
       await Promise.all([...deps.activeRunExecutionPromises]);
       await db.delete(environmentLeases).where(eq(environmentLeases.id, lease.id));
       await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, run.issueId!));
+      await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
       await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     }
   });
@@ -1238,6 +1242,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     expect(deps.setRunStatusFromLive).not.toHaveBeenCalled();
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].status).toBe("running");
     await Promise.all([...deps.activeRunExecutionPromises]);
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
   });
 
@@ -1491,6 +1496,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     expect(deps.executeRun).not.toHaveBeenCalled();
     await Promise.all([...deps.activeRunExecutionPromises]);
     await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, run.id));
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
   });
 

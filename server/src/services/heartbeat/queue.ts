@@ -161,8 +161,8 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../activity-log.js";
-import { hasAdmittedDependencyWake, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "../issue-dependency-wakeups.js";
 import {
+  hasAdmittedDependencyWake,
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   isDependencyResolvedWakePayload,
   dependencyResolvedWakePayloadSql,
