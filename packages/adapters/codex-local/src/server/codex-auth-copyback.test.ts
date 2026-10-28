@@ -614,4 +614,52 @@ describe("copyBackCodexAuth identity-keyed cache write", () => {
     // The cache-failure diagnostic was attempted even though the sink rejected.
     expect(logs.some((line) => line.includes("additive cache write failed (EACCES)"))).toBe(true);
   });
+
+  describe("promoted managed-home auth.json", () => {
+    async function makeHostDir(): Promise<string> {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-promoted-"));
+      cleanupDirs.push(dir);
+      return dir;
+    }
+
+    async function runWithPromoted(input: { sandboxAuth: string; promotedAuth: string }) {
+      const hostDir = await makeHostDir();
+      const hostAuthPath = path.join(hostDir, "auth.json");
+      await writeFile(hostAuthPath, apiKeyAuth("host"), { mode: 0o600 });
+      const homeDir = await makeHostDir();
+      const promotedAuthPath = path.join(homeDir, "auth.json");
+      await writeFile(promotedAuthPath, input.promotedAuth, { mode: 0o644 });
+      await copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(input.sandboxAuth, "utf8"),
+        hostAuthPath,
+        promotedAuthPath,
+        log: () => undefined,
+        env: { PAPERCLIP_CODEX_AUTH_CACHE: "off" },
+      });
+      return { final: await readFile(promotedAuthPath, "utf8"), mode: (await stat(promotedAuthPath)).mode & 0o777 };
+    }
+
+    it("updates the promoted file when the sandbox copy is strictly newer for the same identity", async () => {
+      const { final, mode } = await runWithPromoted({
+        sandboxAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" }),
+        promotedAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "promoted" }),
+      });
+      expect(final).toContain("refresh-token-sandbox");
+      expect(mode).toBe(0o600);
+    });
+
+    it("keeps the promoted file for a different identity or a not-newer copy", async () => {
+      const promoted = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "promoted" });
+      const other = await runWithPromoted({
+        sandboxAuth: subscriptionAuth({ accountId: "acct-y", lastRefresh: "2026-07-10T00:00:00Z", marker: "other" }),
+        promotedAuth: promoted,
+      });
+      expect(other.final).toBe(promoted);
+      const tie = await runWithPromoted({
+        sandboxAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox" }),
+        promotedAuth: promoted,
+      });
+      expect(tie.final).toBe(promoted);
+    });
+  });
 });
