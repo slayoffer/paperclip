@@ -6,6 +6,7 @@ import pino from "pino";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import { credentialTransferRoutes } from "../routes/credential-transfers.js";
+import { credentialTransferServiceFactory } from "../services/credential-transfer-providers.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { isSecretSensitiveHttpRequest } from "../middleware/http-log-policy.js";
 import { createHttpLogger } from "../middleware/logger.js";
@@ -81,6 +82,25 @@ describe("credential transfer route", () => {
     const s = await setup("disabled");
     await s.send().expect(503);
     expect(s.f.trace).toEqual([]);
+  });
+  it("refuses every transfer through the production factory while provider guarantees are unqualified", async () => {
+    const f = transferFixture();
+    const gateway = { authorizeCredentialTransfer: vi.fn() };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.actor = { type: "agent", source: "agent_jwt", agentId: f.actor.agentId,
+      companyId: f.actor.companyId, onBehalfOfUserId: f.actor.userId,
+      onBehalfOfMemberships: [{ companyId: f.actor.companyId, status: "active", membershipRole: "owner" }] }; next(); });
+    app.use("/api", credentialTransferRoutes({} as Db, { serviceForRequest: credentialTransferServiceFactory({} as Db, gateway) }));
+    app.use(errorHandler);
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const response = await request(server).post(`/api/companies/${f.actor.companyId}/credential-transfers`)
+      .set("x-paperclip-tool-gateway-token", CANARIES[0]!).send(f.request).expect(422);
+    expect(response.body).toMatchObject({ code: "provider_guarantees_unqualified" });
+    expect(gateway.authorizeCredentialTransfer).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.body)).not.toContain(CANARIES[0]);
   });
   it("redacts parser errors before the route reads the request", async () => {
     const s = await setup();

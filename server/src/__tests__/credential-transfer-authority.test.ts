@@ -11,6 +11,9 @@ import { seedTransferAuthority } from "./helpers/credential-transfer-authority-f
 import { companyService } from "../services/companies.js";
 import { credentialTransferJournal } from "../services/credential-transfer-journal.js";
 import { credentialTransferService } from "../services/credential-transfer.js";
+import { resolveTransferCredentials } from "../services/credential-transfer-providers.js";
+import { writeConnectionCredential } from "../services/connection-credentials.js";
+import { syncConnectionCredentialBindings } from "../services/connection-credential-bindings.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
 import { transferFixture, CANARIES } from "./helpers/credential-transfer-fixture.js";
@@ -139,6 +142,37 @@ databaseSuite("credential transfer saved authority and journal", () => {
       .where(eq(toolPolicies.id, policy!.id));
     await expect(gateway.authorizeCredentialTransfer(binding)).rejects.toMatchObject({ status: 403 });
     expect(f.trace).toEqual([]);
+  });
+
+  it("reads the bound personal credential version in process and refuses another person", async () => {
+    const previousKey = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+    process.env.PAPERCLIP_SECRETS_MASTER_KEY = "0123456789abcdef".repeat(4);
+    try {
+      const f = await seed();
+      const request = structuredClone(f.request);
+      for (const [index, side] of (["source", "destination"] as const).entries()) {
+        const binding = request[side];
+        const first = await writeConnectionCredential(db, { companyId: f.actor.companyId, connectionName: side,
+          configPath: "TOKEN", label: "token", value: CANARIES[index]!, ownerUserId: f.actor.userId });
+        const ref = { secretId: first.secret.id, configPath: "TOKEN", versionSelector: "latest" as const };
+        // A later rotation must not replace the approved version.
+        await writeConnectionCredential(db, { companyId: f.actor.companyId, connectionName: side, configPath: "TOKEN",
+          label: "token", value: "rotated-fake-value", ownerUserId: f.actor.userId, existingRef: ref });
+        await db.update(connectionGrants).set({ credentialSecretRefs: [ref] }).where(eq(connectionGrants.id, binding.grantId));
+        const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, binding.connectionId));
+        await syncConnectionCredentialBindings(db, connection!);
+        binding.credentialVersions = { [first.secret.id]: 1 };
+      }
+      expect(await resolveTransferCredentials(db, f.actor, request)).toEqual({
+        source: { TOKEN: CANARIES[0] }, destination: { TOKEN: CANARIES[1] } });
+      await expect(resolveTransferCredentials(db, f.actor, { ...request, source: { ...request.source, credentialVersions: {} } }))
+        .rejects.toMatchObject({ status: 403 });
+      await db.update(connectionGrants).set({ subjectUserId: "another-person" }).where(eq(connectionGrants.id, request.destination.grantId));
+      await expect(resolveTransferCredentials(db, f.actor, request)).rejects.toMatchObject({ status: 403 });
+    } finally {
+      if (previousKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+      else process.env.PAPERCLIP_SECRETS_MASTER_KEY = previousKey;
+    }
   });
 
   it("persists restart cleanup and refuses concurrent executors or approval replay", async () => {

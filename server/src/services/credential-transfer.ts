@@ -42,7 +42,8 @@ export interface TransferProviders {
     jurisdiction: string;
     bucketOwned: boolean;
     identityExclusive: boolean;
-    effectivePermission: "Object Read";
+    /** "denied" when the provider does not confirm the approved Object Read permission group. */
+    effectivePermission: "Object Read" | "denied";
     baselineGrantIds: string[];
     destinationCount: number;
     safeAutomaticRemoval: boolean;

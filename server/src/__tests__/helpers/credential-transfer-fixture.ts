@@ -51,7 +51,7 @@ export function transferFixture() {
     async unfinished(companyId) { return [...rows.values()].filter(r => r.actor.companyId === companyId && !["complete", "revoked"].includes(r.state)).map(r => structuredClone(r)); },
   };
   const inventory = { complete: true, accountId: operation.accountId, bucket: operation.bucket, jurisdiction: operation.jurisdiction,
-    bucketOwned: true, identityExclusive: true, effectivePermission: "Object Read" as const, baselineGrantIds: [...grants], destinationCount: 0,
+    bucketOwned: true, identityExclusive: true, effectivePermission: "Object Read" as "Object Read" | "denied", baselineGrantIds: [...grants], destinationCount: 0,
     safeAutomaticRemoval: true };
   const ticket = (id: string) => {
     const value = tickets.get(id);

@@ -1,4 +1,5 @@
 import { credentialTransferRoutes } from "./routes/credential-transfers.js";
+import { credentialTransferServiceFactory } from "./services/credential-transfer-providers.js";
 import { cloudWarmStandbyMiddleware } from "./middleware/cloud-warm-standby.js";
 import type { CloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
@@ -957,7 +958,7 @@ export async function createApp(
     (session, run) => toolGateway.browserUseSessionAuthorized({ ...session, runId: run.heartbeatRunId, invocationId: run.invocationId }));
   api.use(browserUseRoutes(db, browserUse));
   api.use(toolGatewayRoutes(db, toolGateway));
-  api.use(credentialTransferRoutes(db));
+  api.use(credentialTransferRoutes(db, { serviceForRequest: credentialTransferServiceFactory(db, toolGateway) }));
   api.use(
     pluginRoutes(
       db,
