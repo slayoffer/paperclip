@@ -57,6 +57,7 @@ export function createStartupDatabaseMock(createDb: unknown) {
     reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
     formatDatabaseBackupResult: vi.fn(() => "ok"),
     runDatabaseBackup: vi.fn(),
+    setRunOutputRedactor: vi.fn(),
     authUsers: {},
     companies: {},
     companyMemberships: {},
