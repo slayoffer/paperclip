@@ -59,5 +59,6 @@ export function createStartupDatabaseMock(createDb: unknown, actual: typeof impo
     formatDatabaseBackupResult: vi.fn(() => "ok"),
     runDatabaseBackup: vi.fn(),
     closeLivenessDb: vi.fn(async () => {}),
+    setRunOutputRedactor: vi.fn(),
   };
 }
