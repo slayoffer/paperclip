@@ -66,14 +66,14 @@ export async function saveLegacyRestartCheckpoint(db: Db, run: Run, input: {
     issueId: run.contextSnapshot.issueId, executionWorkspaceId: run.contextSnapshot?.executionWorkspaceId ?? null, ...input };
   await db.update(heartbeatRuns).set({
     sessionIdAfter: input.sessionParams.sessionId,
-    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ restartCheckpoint: checkpoint })}::jsonb`,
+    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({ restartCheckpoint: checkpoint }, heartbeatRuns.resultJson)}::jsonb`,
   }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
 }
 
 export async function recordLegacyRestartFallback(db: Db, run: Run, reason: string) {
   await db.update(heartbeatRuns).set({
-    resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb), '{restartRecovery}', coalesce(${heartbeatRuns.resultJson}->'restartRecovery', '{}'::jsonb) || ${JSON.stringify({ outcome: "reconciliation", reason })}::jsonb)`,
+    resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb), '{restartRecovery}', coalesce(${heartbeatRuns.resultJson}->'restartRecovery', '{}'::jsonb) || ${sql.param({ outcome: "reconciliation", reason }, heartbeatRuns.resultJson)}::jsonb)`,
   }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.status, "running"),
     run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId)));
@@ -172,10 +172,10 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
     const [claimed] = await tx.update(heartbeatRuns).set({
       ...legacyControllerClaim("legacy"), processPid: null, processGroupId: null, processStartedAt: null,
       error: null, errorCode: null,
-      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
         restartCheckpoint: { ...checkpoint, providerStopped: false, workspaceSettled: false },
         restartRecovery: { outcome: "resuming", attempt: attempts + 1, sessionId: checkpoint.sessionParams.sessionId },
-      })}::jsonb`,
+      }, heartbeatRuns.resultJson)}::jsonb`,
     }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
       eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
       run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId),

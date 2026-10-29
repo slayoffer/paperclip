@@ -1001,7 +1001,7 @@ export async function repairCommittedNativeChatResponse(
       await tx
         .update(heartbeatRuns)
         .set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(
             {
               presentationDecision,
               nativeCommittedChatResponse: {
@@ -1011,6 +1011,7 @@ export async function repairCommittedNativeChatResponse(
                 decisionId: decision.id,
               },
             },
+            heartbeatRuns.resultJson,
           )}::jsonb`,
           updatedAt: new Date(),
         })
@@ -1472,11 +1473,11 @@ export async function finalizeNativeRun(input: {
           ...(providerFailure ? {
             // Recovery can finalize before heartbeat saves the adapter result.
             // Retain any independently recorded execution/cleanup failure.
-            error: sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`,
+            error: sql`coalesce(${heartbeatRuns.error}, ${sql.param(providerFailure.errorMessage, heartbeatRuns.error)})`,
             errorCode: sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`,
           } : {}),
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
-            || ${JSON.stringify(finalizationMetadata)}::jsonb
+            || ${sql.param(finalizationMetadata, heartbeatRuns.resultJson)}::jsonb
             || ${clearExecutionFailure ? recoveredExecutionFailureMetadata() : sql`'{}'::jsonb`}`,
           updatedAt: now,
         })
