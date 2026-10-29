@@ -157,6 +157,7 @@ import {
 } from "./origins.js";
 import { withRecoveryContext } from "./status-only-context.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { boardEscalationWait, reportReconcileFailure, skipRefusedReconcile } from "./stranded-escalation-wait.js";
 import {
   collectDispositionRepairSourceState,
   dispositionRepairDelayMs,
@@ -3804,6 +3805,7 @@ export function recoveryService(
     const updated = await transactionIssuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
+      ...boardEscalationWait(blockerIds, recoveryAction.id),
       companyGuard: input.issue.companyId,
     }, tx, publications, postCommitActions);
     if (!updated) return null;
@@ -4265,7 +4267,8 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
-        if (await issueOwnerParkingReason(db, issue, "recovery.stranded") ||
+        if (skipRefusedReconcile(issue) ||
+            await issueOwnerParkingReason(db, issue, "recovery.stranded") ||
             await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
           result.skipped += 1;
           continue;
@@ -5426,13 +5429,9 @@ export function recoveryService(
           result.skipped += 1;
         }
       } catch (err) {
-        // One bad issue must not stop the sweep. At startup an escaped error
-        // exits the server, and the same issue fails again on every restart.
+        // A bad issue must not stop the sweep (see reportReconcileFailure).
         result.failed += 1;
-        logger.error(
-          { err, companyId: issue.companyId, issueId: issue.id },
-          "stranded assigned issue reconcile failed; continuing with the next issue",
-        );
+        reportReconcileFailure(err, issue);
       }
     }
 

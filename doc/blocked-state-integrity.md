@@ -68,6 +68,11 @@ The update checks the saved links again in its transaction.
 Restoring completed blocker links does not send a dependency wake while a separate blocked wait remains.
 The periodic dependency check also respects these waits.
 
+Stranded-work recovery escalates an issue without an open blocker with a board-owned `human` wait.
+The wait action names the recovery action ID and no issue identifier.
+If the server refuses a recovery write with `422`, the sweep skips that issue until its row changes or one hour passes.
+The sweep logs one warning for each refused issue state, not one for each tick.
+
 No database migration is required. The descriptor uses the existing JSON column.
 Action references use all saved or proposed blocker links, including completed links.
 Readiness uses only unresolved blockers. Completed links do not create a waiting target.
@@ -76,5 +81,5 @@ The release branch still resolves cancelled dependencies when both integrity and
 Its active finalization checks and saved board review waits also remain available.
 This source change does not enable the switch or deploy the server.
 
-Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`, `server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts`, and `server/src/__tests__/dependency-release-wakes.test.ts`.
+Verification uses `server/src/__tests__/blocked-state-integrity.test.ts`, `server/src/__tests__/blocked-state-holds-and-stale-waits.test.ts`, `server/src/__tests__/dependency-release-wakes.test.ts`, and `server/src/__tests__/stranded-reconcile-refusal.test.ts`.
 The test uses a temporary PostgreSQL database.
