@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -25,6 +28,7 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "b".repeat(64));
     tempDb = await startEmbeddedPostgresTestDatabase("heartbeat-run-persistence-redaction-");
     db = createDb(tempDb.connectionString);
+    await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture operator", email: "redaction@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
   }, 60_000);
   afterAll(async () => {
     await heartbeatService(db).drainActiveRunExecutions();
@@ -39,6 +43,7 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
       id: companyId, name: "Redaction", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
     });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", membershipRole: "owner", status: "active" });
     await db.insert(agents).values({
       id: agentId, companyId, name: "Printer", role: "engineer", status: "idle", adapterType: "process",
       adapterConfig: { command: process.execPath, args: ["-e", script], ...extra },
@@ -106,6 +111,34 @@ const REGISTERED = "registered-opaque-Value-7f3k2m9x";
     expect(stored.status).toBe("cancelled");
     expect(text).not.toContain(BOARD_KEY);
   }, 40_000);
+
+  it("masks the injected PAPERCLIP_API_KEY and gateway, JWT and GitHub shapes in the row and the log (SYNA-1586)", async () => {
+    vi.stubEnv("PAPERCLIP_AGENT_JWT_SECRET", "c".repeat(64));
+    const keyFile = path.join(os.tmpdir(), `syna-1586-run-key-${randomUUID()}`);
+    const gateway = `pcgw_${randomUUID()}.${"Fk3Gw".repeat(9)}`;
+    const fineGrained = `github_pat_11${"FAKE0".repeat(4)}_${"f4keFineGrained".repeat(4)}`;
+    const oauth = `gho_${"F4ke0Tok3n".repeat(4)}`;
+    try {
+      // The process records its real run key in a private file for the assertion, then prints it the ways agents do.
+      const script = [
+        `const key = process.env.PAPERCLIP_API_KEY ?? "";`,
+        `require("node:fs").writeFileSync(${JSON.stringify(keyFile)}, key);`,
+        `console.log("env PAPERCLIP_API_KEY=" + key + " node agent.js");`,
+        `console.log(JSON.stringify({ PAPERCLIP_API_KEY: key }));`,
+        `console.error("bare " + key);`,
+        leak(`${gateway} ${fineGrained} ${oauth}`),
+      ].join(" ");
+      const { stored, text } = await runOnce(script);
+      const key = await fs.readFile(keyFile, "utf8");
+      expect(stored.status).toBe("succeeded");
+      expect(key.length).toBeGreaterThan(20);
+      for (const value of [key, gateway, fineGrained, oauth]) expect(text).not.toContain(value);
+      expect(text).toContain("PAPERCLIP_API_KEY");
+    } finally {
+      await fs.rm(keyFile, { force: true });
+      vi.stubEnv("PAPERCLIP_AGENT_JWT_SECRET", "");
+    }
+  }, 30_000);
 
   it("masks a value registered for the run while it runs (no known shape)", async () => {
     const script = `setTimeout(() => { ${leak(`opaque ${REGISTERED} done`)} }, 4000);`;

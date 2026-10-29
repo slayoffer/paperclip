@@ -18,6 +18,7 @@ import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
 import { issues } from "./issues.js";
+import { redactedRunJson, redactedRunText } from "../run-output-redaction.js";
 
 export const heartbeatRuns = pgTable(
   "heartbeat_runs",
@@ -42,7 +43,7 @@ export const heartbeatRuns = pgTable(
     executionControlDeadlineAt: timestamp("execution_control_deadline_at", { withTimezone: true }),
     // Transactional delivery marker. Null on historical rows; publication never replays provider work.
     executionStatusDeliveryId: uuid("execution_status_delivery_id"),
-    error: text("error"),
+    error: redactedRunText("error"),
     wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id),
     exitCode: integer("exit_code"),
     signal: text("signal"),
@@ -53,7 +54,8 @@ export const heartbeatRuns = pgTable(
     accountingLastError: text("accounting_last_error"),
     accountingAttemptCount: integer("accounting_attempt_count").notNull().default(0),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
-    resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
+    // Run output columns redact credentials on every write (SYNA-1586, ../run-output-redaction.ts).
+    resultJson: redactedRunJson("result_json"),
     runtimeMode: text("runtime_mode").notNull().default("legacy"),
     runtimeModeResolverVersion: text("runtime_mode_resolver_version"),
     runtimeModeReason: text("runtime_mode_reason"),
@@ -76,8 +78,8 @@ export const heartbeatRuns = pgTable(
     logBytes: bigint("log_bytes", { mode: "number" }),
     logSha256: text("log_sha256"),
     logCompressed: boolean("log_compressed").notNull().default(false),
-    stdoutExcerpt: text("stdout_excerpt"),
-    stderrExcerpt: text("stderr_excerpt"),
+    stdoutExcerpt: redactedRunText("stdout_excerpt"),
+    stderrExcerpt: redactedRunText("stderr_excerpt"),
     errorCode: text("error_code"),
     externalRunId: text("external_run_id"),
     // Legacy controller lease. A PID alone is not an identity across containers.

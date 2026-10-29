@@ -40,3 +40,26 @@ It checks real heartbeat writes with synthetic values and a local callback bridg
 The lifecycle suite supplies controlled adapter outcomes and reads stored rows and log content.
 It does not prove provider behavior, an installed image, or historical cleanup.
 The existing [upstream submission](https://github.com/paperclipai/paperclip/pull/16525) remains open.
+
+## Column-level redaction (SYNA-1586)
+
+The `heartbeat_runs` columns `result_json`, `error`, `stdout_excerpt` and `stderr_excerpt` use redacting column types.
+See `packages/db/src/run-output-redaction.ts`.
+Drizzle calls their encoder on every `insert().values()`, `update().set()` and `sql.param(value, column)`.
+Thus a writer that does not call the heartbeat policy still stores redacted output.
+The server installs the shape policy at startup (`installRunOutputRedaction` in `server/src/services/run-result-redaction.ts`).
+The run log uses the same shape policy.
+The shapes include `gho_`/`ghp_`/`github_pat_` tokens, JWTs (also the run `PAPERCLIP_API_KEY`), `pcgw_` gateway tokens,
+`pcp_` keys, and credential-named assignments such as `PAPERCLIP_API_KEY=...`.
+The display prefix `pcgw_<8 hex>` and the `pcgw_...` placeholder stay visible.
+
+Limits:
+
+- A raw `${JSON.stringify(value)}::jsonb` fragment has no column encoder. Merge with `sql.param(value, heartbeatRuns.resultJson)`.
+- The column encoder is synchronous and cannot read the run registry. Exact registered values (opaque keys) are masked
+  only by the heartbeat writers, through `redactRunPersistencePatch`.
+- `heartbeat_run_events` is not changed. Native PRP event payloads are stored as written because their digests are
+  verified again on read. Legacy events go through `redactSensitiveText` and `redactEventPayload` in the heartbeat.
+- Workspace operation output (log file and excerpts) uses the run-log shape policy per chunk.
+  A value split across two chunks is not masked there.
+- Rows written before this change keep their content. Cleanup of old rows needs a separate approval.

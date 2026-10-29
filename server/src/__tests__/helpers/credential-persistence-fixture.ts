@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, heartbeatRuns, issues, toolApplications, toolConnections, toolProfiles, toolProfileEntries, toolProfileBindings, toolConnectionInstalls } from "@paperclipai/db";
+import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, toolApplications, toolConnections, toolProfiles, toolProfileEntries, toolProfileBindings, toolConnectionInstalls } from "@paperclipai/db";
 import { startAdapterExecutionTargetPaperclipBridge } from "@paperclipai/adapter-utils/execution-target";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -14,6 +14,7 @@ import { startEmbeddedPostgresTestDatabase } from "./embedded-postgres.js";
 export async function persistenceFixture() {
   const postgres = await startEmbeddedPostgresTestDatabase("credential-matrix-");
   const db = createDb(postgres.connectionString);
+  await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture operator", email: "redaction@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
   const heartbeat = heartbeatService(db);
   return {
     db, heartbeat,
@@ -27,6 +28,7 @@ export async function persistenceFixture() {
       const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
       await db.insert(companies).values({ id: companyId, name: "Synthetic", issuePrefix: `T${companyId.slice(0, 6).toUpperCase()}`,
         defaultResponsibleUserId: "responsible-user", requireBoardApprovalForNewAgents: false });
+      await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", membershipRole: "owner", status: "active" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Synthetic", role: "engineer", status: "idle", adapterType: "process",
         adapterConfig: { command: process.execPath }, runtimeConfig: { heartbeat: { enabled: true, wakeOnDemand: true } }, permissions: {} });
       await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic", status: "todo", priority: "high",
