@@ -318,7 +318,7 @@ function runCancellationFenceSql(input: {
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
 }) {
-  const cancellation = sql.param(input.cancellation, heartbeatRuns.resultJson);
+  const cancellation = sql.param({ ...input.cancellation }, heartbeatRuns.resultJson);
   const startupCancellation = sql`${sql.param({
     requestedAt: input.cancellation.requestedAt ?? new Date().toISOString(),
     errorCode: input.errorCode,

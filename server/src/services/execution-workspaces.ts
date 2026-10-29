@@ -115,6 +115,7 @@ import { createIssueGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -2024,6 +2025,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // removes the upper bound and makes the scan chase newer churn again. This
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
+  const dirtyVerdicts = createTerminalWorkspaceDirtyVerdicts(now);
 
   async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
     const sourceIssueId = workspace.sourceIssueId;
@@ -3644,6 +3646,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         compactionFailed: 0,
       };
       const readinessByWorkingTree = new Map<string, ReturnType<typeof inspectWorkspace>>();
+      dirtyVerdicts.prune();
       const backOffTerminalWorkspace = async (snapshot: ExecutionWorkspaceRow, failure: TerminalWorkspaceFailure) => {
         const [target] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, snapshot.id));
         if (!target) return;
@@ -3784,6 +3787,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           ? await listIssuesUsingGitWorkspace(db, workspace, issueTree.map(issue => issue.id)) : null;
         const expirationTree = usingIssueIds ? issueTree.filter(issue => usingIssueIds.has(issue.id)) : issueTree;
         if (!sourceIssue || expirationTree.some(issue => !TERMINAL_ISSUE_STATUSES.has(issue.status))) {
+          dirtyVerdicts.forget(workspace.id);
           if (reopenPending) {
             await clearReopenPendingConsumptionUnderLock(workspace.id, {
               expectedGeneration: readExecutionWorkspaceLifecycleGeneration(
@@ -3938,6 +3942,20 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedBackoff += 1;
           continue;
         }
+        // A cached dirty verdict only skips. It never authorizes cleanup.
+        const useLocalDirtyCache = !remoteWorkspace && workspace.providerType !== "plugin";
+        const postponeDirtyInspection = (recheckAt: number) => {
+          const pendingCompaction = compactionPending && compactedTerminalAt.get(workspace.id) !== latestTerminalAt;
+          terminalWorkspaceDeadlines.set(workspace.id, pendingCompaction && compactionDueAt > now().getTime()
+            ? Math.min(compactionDueAt, recheckAt) : recheckAt);
+        };
+        const dirtyUntil = useLocalDirtyCache ? dirtyVerdicts.skipUntil(workspace.id, candidate.cursorAt) : null;
+        if (dirtyUntil !== null) {
+          postponeDirtyInspection(dirtyUntil);
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
         if (opts.terminalWorkspaceInspectionBackoffMs) {
           const revision = createHash("sha256").update(JSON.stringify([
             workspace.updatedAt, workspace.metadata,
@@ -4053,10 +4071,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         if (assessment.workspaceDirty) {
+          if (useLocalDirtyCache) postponeDirtyInspection(dirtyVerdicts.recordDirty(workspace.id, candidate.cursorAt));
           result.skippedDirty += 1;
           result.skippedUndelivered += 1;
           continue;
         }
+        dirtyVerdicts.forget(workspace.id);
         if (
           assessment.deliveryState !== "merged_via_pr"
           && assessment.deliveryState !== "merged_by_ancestry"
