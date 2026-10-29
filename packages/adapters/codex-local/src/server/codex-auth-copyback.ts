@@ -1,4 +1,4 @@
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -54,6 +54,83 @@ export interface CopyBackCodexAuthInput {
   resolveCacheEntryPath?: (accountId: string) => Promise<string>;
   /** Environment for the cache off-switch read. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Path of a promoted managed-home `auth.json` (a regular file the seed kept
+   * instead of the shared symlink). When set, the sandbox copy also updates this
+   * file under the same lock and predicate, only when it is strictly newer for
+   * the same identity. A missing file or a symlink is skipped: a symlink points
+   * at the shared credential, which the host step already covers.
+   */
+  promotedAuthPath?: string;
+}
+
+/**
+ * One guarded install: stage the sandbox bytes next to `hostAuthPath`, run the
+ * decision predicate under the directory merge lock, and rename the staged file
+ * over the target only when it is strictly newer for the same identity.
+ * `subject` only names the target in log lines.
+ */
+async function installSandboxAuthIfNewer(
+  sandboxAuthBytes: Buffer,
+  hostAuthPath: string,
+  log: (line: string) => void | Promise<void>,
+  env: NodeJS.ProcessEnv | undefined,
+  subject: "host" | "promoted",
+): Promise<CopyBackCodexAuthOutcome> {
+  const hostDir = path.dirname(hostAuthPath);
+  await mkdir(hostDir, { recursive: true });
+  return withDirectoryMergeLock(
+    hostDir,
+    async () => {
+      // Stage on the same filesystem as the host target so both the predicate read
+      // and the final rename stay device-local (rename across devices is not
+      // atomic and would fail with EXDEV).
+      const stagedTempPath = path.join(hostDir, `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`);
+      // `wx` + explicit mode create the temp private (0600) and fail if it somehow
+      // already exists, so we never write through a pre-existing symlink.
+      const handle = await open(stagedTempPath, "wx", 0o600);
+      try {
+        await handle.writeFile(sandboxAuthBytes);
+        await handle.close();
+
+        const decision = await decideCodexAuthMerge(stagedTempPath, hostAuthPath, {
+          errorLabel: "codex auth copy-back",
+        });
+        if (decision === USE_SOURCE_EXIT) {
+          // Atomic same-directory swap; rename preserves the temp's 0600 mode.
+          await rename(stagedTempPath, hostAuthPath);
+          await log(
+            `[paperclip] Codex auth copy-back: sandbox credential is strictly newer for the same subscription identity; installed to the ${subject} at mode 0600.`,
+          );
+          return "copied";
+        }
+
+        // Make a clock-bound rejection visible. A host with a wrong clock would
+        // otherwise discard an honest refresh with no signal. Log only the exit
+        // code and this caller's own label — never a timestamp read from either
+        // file, and never credential bytes.
+        if (decision === IMPLAUSIBLE_LAST_REFRESH_EXIT) {
+          await log(
+            `[paperclip] Codex auth copy-back: WARNING ${subject} credential kept (decision exit ${IMPLAUSIBLE_LAST_REFRESH_EXIT}, codex auth copy-back) — the sandbox copy's last_refresh sat further ahead of the host clock than the plausible skew allowance. Check the host clock if this is unexpected.`,
+          );
+          return "kept-host";
+        }
+
+        await log(
+          `[paperclip] Codex auth copy-back: ${subject} credential kept (sandbox copy is not a strictly-newer same-identity subscription credential).`,
+        );
+        return "kept-host";
+      } finally {
+        // Close is idempotent-safe to skip after an explicit close; the temp is the
+        // thing that must never linger. On the copy path rename already consumed it
+        // (force makes the removal a no-op); on every other path this deletes the
+        // staged credential bytes.
+        await handle.close().catch(() => undefined);
+        await rm(stagedTempPath, { force: true }).catch(() => undefined);
+      }
+    },
+    env,
+  );
 }
 
 /**
@@ -77,7 +154,7 @@ export interface CopyBackCodexAuthInput {
  * Never logs token bytes — only the decision outcome.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
-  const { readSandboxAuth, hostAuthPath, log, resolveCacheEntryPath, env } = input;
+  const { readSandboxAuth, hostAuthPath, log, resolveCacheEntryPath, env, promotedAuthPath } = input;
 
   // Read first (outside the lock) — a read never mutates the host, so there is
   // nothing to serialize yet. A genuinely absent sandbox `auth.json` (ENOENT —
@@ -98,60 +175,22 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
     throw error;
   }
 
-  const hostDir = path.dirname(hostAuthPath);
-  await mkdir(hostDir, { recursive: true });
-  const hostOutcome = await withDirectoryMergeLock(
-    hostDir,
-    async () => {
-      // Stage on the same filesystem as the host target so both the predicate read
-      // and the final rename stay device-local (rename across devices is not
-      // atomic and would fail with EXDEV).
-      const stagedTempPath = path.join(hostDir, `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`);
-      // `wx` + explicit mode create the temp private (0600) and fail if it somehow
-      // already exists, so we never write through a pre-existing symlink.
-      const handle = await open(stagedTempPath, "wx", 0o600);
+  const hostOutcome = await installSandboxAuthIfNewer(sandboxAuthBytes, hostAuthPath, log, env, "host");
+
+  if (promotedAuthPath && path.resolve(promotedAuthPath) !== path.resolve(hostAuthPath)) {
+    const promoted = await lstat(promotedAuthPath).catch(() => null);
+    if (promoted && promoted.isFile() && !promoted.isSymbolicLink()) {
       try {
-        await handle.writeFile(sandboxAuthBytes);
-        await handle.close();
-
-        const decision = await decideCodexAuthMerge(stagedTempPath, hostAuthPath, {
-          errorLabel: "codex auth copy-back",
-        });
-        if (decision === USE_SOURCE_EXIT) {
-          // Atomic same-directory swap; rename preserves the temp's 0600 mode.
-          await rename(stagedTempPath, hostAuthPath);
-          await log(
-            "[paperclip] Codex auth copy-back: sandbox credential is strictly newer for the same subscription identity; installed to the host at mode 0600.",
-          );
-          return "copied";
-        }
-
-        // Make a clock-bound rejection visible. A host with a wrong clock would
-        // otherwise discard an honest refresh with no signal. Log only the exit
-        // code and this caller's own label — never a timestamp read from either
-        // file, and never credential bytes.
-        if (decision === IMPLAUSIBLE_LAST_REFRESH_EXIT) {
-          await log(
-            `[paperclip] Codex auth copy-back: WARNING host credential kept (decision exit ${IMPLAUSIBLE_LAST_REFRESH_EXIT}, codex auth copy-back) — the sandbox copy's last_refresh sat further ahead of the host clock than the plausible skew allowance. Check the host clock if this is unexpected.`,
-          );
-          return "kept-host";
-        }
-
-        await log(
-          "[paperclip] Codex auth copy-back: host credential kept (sandbox copy is not a strictly-newer same-identity subscription credential).",
-        );
-        return "kept-host";
-      } finally {
-        // Close is idempotent-safe to skip after an explicit close; the temp is the
-        // thing that must never linger. On the copy path rename already consumed it
-        // (force makes the removal a no-op); on every other path this deletes the
-        // staged credential bytes.
-        await handle.close().catch(() => undefined);
-        await rm(stagedTempPath, { force: true }).catch(() => undefined);
+        await installSandboxAuthIfNewer(sandboxAuthBytes, promotedAuthPath, log, env, "promoted");
+      } catch (error) {
+        // Best-effort, like the cache write: the host result above stays.
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? "unknown";
+        await Promise.resolve(
+          log(`[paperclip] Codex auth copy-back: promoted credential update failed (${code}); host copy-back result kept.`),
+        ).catch(() => undefined);
       }
-    },
-    env,
-  );
+    }
+  }
 
   // Additive cache write. Independent of the host default overwrite above: it
   // runs on its own directory lock, keys the slot by the real sandbox
