@@ -7,11 +7,12 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { instructionGitExcludeProgram } from "../services/agent-instruction-files.js";
 
 const execFile = promisify(execFileCallback);
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: "1" };
 let root: string;
 beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-git-exclusion-")); });
 afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
-const git = (cwd: string, ...args: string[]) => execFile("git", ["-C", cwd, ...args]);
-const exclude = (cwd: string) => execFile(process.execPath, ["-e", instructionGitExcludeProgram, cwd]);
+const git = (cwd: string, ...args: string[]) => execFile("git", ["-C", cwd, ...args], { env: gitEnv });
+const exclude = (cwd: string) => execFile(process.execPath, ["-e", instructionGitExcludeProgram, cwd], { env: gitEnv });
 
 async function assertPrivateFilesIgnored(cwd: string) {
   const runtime = path.join(cwd, ".paperclip-runtime");

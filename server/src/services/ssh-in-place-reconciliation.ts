@@ -7,6 +7,7 @@ import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { confirmSshInPlaceTermination } from "./ssh-in-place-termination.js";
 import { EXECUTION_RECONCILIATION_INTERVAL_MS } from "./execution-control-deadline.js";
 import { SSH_IN_PLACE_TERMINAL_RUN_STATUSES } from "./ssh-in-place-run-status.js";
+import { readSshInPlaceWriterTracking } from "./ssh-in-place-writer-tracking.js";
 import { logger } from "../middleware/logger.js";
 
 const batchSize = 20;
@@ -34,15 +35,14 @@ export function createSshInPlaceOwnershipReconciler(db: Db) {
       let pending = false;
       try {
         const lease = row.lease as EnvironmentLease;
-        const tracking = lease.metadata?.sshInPlaceWriter as { key?: unknown; remoteCwd?: unknown } | undefined;
-        const cwd = typeof tracking?.key === "string" ? tracking.key : row.cwd;
-        if (!cwd || !lease.heartbeatRunId) continue;
+        const tracking = readSshInPlaceWriterTracking(lease, row.cwd);
+        if (!tracking || !lease.heartbeatRunId) continue;
         pending = true;
-        // Saved keys are canonical. A removed legacy workspace can still have
-        // a sibling lock file; inspect it before deciding there is no work.
-        const key = typeof tracking?.key === "string" ? tracking.key
-          : await canonicalSshInPlaceLockKey(cwd).catch(error => {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return cwd;
+        // Saved keys are canonical; legacy paths can outlive their workspace.
+        const saved = lease.metadata?.sshInPlaceWriter as { key?: unknown } | undefined;
+        const key = typeof saved?.key === "string" ? tracking.key
+          : await canonicalSshInPlaceLockKey(tracking.key).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return tracking.key;
             throw error;
           });
         const holder = readSshInPlaceWorktreeLockHolder(key);
@@ -51,9 +51,7 @@ export function createSshInPlaceOwnershipReconciler(db: Db) {
           if (releaseConfirmedSshInPlaceWorktreeLock(key, lease.id)) { released++; pending = false; }
           continue;
         }
-        const remoteCwd = typeof tracking?.remoteCwd === "string" ? tracking.remoteCwd : lease.metadata?.remoteCwd;
-        if (typeof remoteCwd !== "string") continue;
-        const candidate = { ...lease, metadata: { ...lease.metadata, sshInPlaceWriter: { key, remoteCwd } } };
+        const candidate = { ...lease, metadata: { ...lease.metadata, sshInPlaceWriter: { ...tracking, key } } };
         const status = lease.status === "expired" || lease.status === "failed" ? lease.status : "released";
         const stopped = await confirmSshInPlaceTermination(db, row.environment as Environment, candidate, status);
         if (stopped && !readSshInPlaceWorktreeLockHolder(key)) { released++; pending = false; }

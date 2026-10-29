@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import type { Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
 import { runSshCommand } from "@paperclipai/adapter-utils/ssh";
@@ -7,16 +8,18 @@ import { environmentService } from "./environments.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { isSshInPlaceOwnerRunTerminal } from "./ssh-in-place-run-status.js";
 import { releaseConfirmedSshInPlaceWorktreeLock } from "./ssh-in-place-lock.js";
+import { readSshInPlaceWriterTracking } from "./ssh-in-place-writer-tracking.js";
 
 /** No SSH disconnect or terminal run status is sufficient by itself. */
 export async function confirmSshInPlaceTermination(
   db: Db, environment: Environment, lease: EnvironmentLease,
   status: "released" | "expired" | "failed",
 ): Promise<EnvironmentLease | null> {
-  const tracking = lease.metadata?.sshInPlaceWriter as { key?: unknown; remoteCwd?: unknown } | undefined;
-  if (!tracking || typeof tracking.key !== "string" || typeof tracking.remoteCwd !== "string" ||
+  const tracking = readSshInPlaceWriterTracking(lease);
+  if (!tracking?.remoteCwd ||
       !lease.heartbeatRunId || lease.provider !== "ssh" || lease.environmentId !== environment.id) return null;
   try {
+    const key = await realpath(tracking.key);
     const parsed = await resolveEnvironmentDriverConfigForRuntime(db, lease.companyId, environment, {
       issueId: lease.issueId, heartbeatRunId: lease.heartbeatRunId,
     });
@@ -36,7 +39,7 @@ export async function confirmSshInPlaceTermination(
     const released = await environmentService(db).releaseLease(lease.id, status, {
       cleanupStatus: "success", remoteExecutionTermination: receipt,
     });
-    if (released) releaseConfirmedSshInPlaceWorktreeLock(tracking.key, lease.id);
+    if (released) releaseConfirmedSshInPlaceWorktreeLock(key, lease.id);
     return released;
   } catch {
     // A failed probe or database write preserves durable ownership.

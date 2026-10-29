@@ -21,3 +21,11 @@ Do not terminalize these runs from the stale-lock sweeper because their provider
 An expired lease permits a restart claim. It does not permit the sweeper to remove the task locks.
 Check new ownership evidence in the terminal write as well as the initial read.
 Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.
+
+## SSH ownership recovery
+
+Agent-home and primary workspaces can have no `executionWorkspaceId`.
+Older leases can also lack `sshInPlaceWriter` tracking.
+Recover their lock path from the saved `in_place` realization with matching lease and provider identities.
+A terminal run and released lease still require remote termination proof before lock removal.
+Observed on 2026-10-26 (VLAT): a sweep that used only execution-workspace rows skipped these locks.
