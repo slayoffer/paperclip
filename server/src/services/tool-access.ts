@@ -1,3 +1,5 @@
+import { resolveConnectionCredentialUpdate, upsertDefaultOrganizationGrant } from "./default-connection-grant.js";
+import { selectVaultConnectionGrant } from "./connection-vault-grant.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
 import { chatEndpoints } from "@paperclipai/db";
@@ -283,6 +285,8 @@ import {
 } from "./vercel-connect.js";
 
 type ActorInfo = {
+  /** Server-selected grant. The caller must check its audience before health testing. */
+  credentialGrantId?: string;
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   sessionId?: string | null;
@@ -5948,80 +5952,8 @@ export function toolAccessService(
       requestedScopes: string[];
     },
   ) {
-    const providerTenantWithOauth = (
-      current: (typeof connectionGrants.$inferSelect)["providerTenant"],
-    ) =>
-      oauthProvenance
-        ? {
-            ...(current ?? {}),
-            oauth: {
-              ...(current?.oauth ?? {}),
-              scopes: oauthProvenance.scopes,
-              scopeSource: oauthProvenance.scopeSource,
-              unrequestedScopes: oauthProvenance.unrequestedScopes,
-              requestedScopes: oauthProvenance.requestedScopes,
-            },
-          }
-        : current;
-    const [existing] = await dbClient
-      .select()
-      .from(connectionGrants)
-      .where(
-        and(
-          eq(connectionGrants.companyId, connection.companyId),
-          eq(connectionGrants.connectionId, connection.id),
-          eq(connectionGrants.kind, "organization"),
-          eq(connectionGrants.isDefault, true),
-        ),
-      )
-      .limit(1);
-    if (existing) {
-      // OAuth connections create their organization grant before the browser
-      // callback has issued any credentials. Reconnects can rotate those
-      // credentials later as well. Keep the execution grant synchronized with
-      // the connection so the gateway projects the current secrets instead of
-      // sending an unauthenticated request after an apparently successful
-      // setup. Reconnecting is also the explicit recovery path for a revoked
-      // shared identity, so it is correct to reactivate that default grant here.
-      const [updated] = await dbClient
-        .update(connectionGrants)
-        .set({
-          credentialSecretRefs: isRailwayConnection(connection)
-            ? [...connection.credentialSecretRefs, ...existing.credentialSecretRefs.filter((ref) => ref.configPath === RAILWAY_SSH_SECRET_PATH && !connection.credentialSecretRefs.some((candidate) => candidate.configPath === ref.configPath))]
-            : connection.credentialSecretRefs,
-          ...(oauthProvenance
-            ? { providerTenant: providerTenantWithOauth(existing.providerTenant) }
-            : {}),
-          status: "active",
-          revokedAt: null,
-          revokedByAgentId: null,
-          revokedByUserId: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(connectionGrants.id, existing.id))
-        .returning();
-      if (!updated)
-        throw new Error("Failed to update default connection grant");
-      onMutation?.({ previous: existing, current: updated });
-      return updated;
-    }
-    const [created] = await dbClient
-      .insert(connectionGrants)
-      .values({
-        companyId: connection.companyId,
-        connectionId: connection.id,
-        kind: "organization",
-        credentialSecretRefs: connection.credentialSecretRefs,
-        ...(oauthProvenance
-          ? { providerTenant: providerTenantWithOauth(null) }
-          : {}),
-        status: "active",
-        isDefault: true,
-      })
-      .returning();
-    if (!created) throw new Error("Failed to create default connection grant");
-    onMutation?.({ previous: null, current: created });
-    return created;
+    return upsertDefaultOrganizationGrant(dbClient, connection,
+      isRailwayConnection(connection) ? [RAILWAY_SSH_SECRET_PATH] : [], onMutation, true, oauthProvenance);
   }
 
   async function getProfileRow(profileId: string, companyId?: string) {
@@ -6922,75 +6854,9 @@ export function toolAccessService(
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
   ): Promise<typeof connectionGrants.$inferSelect | null> {
-    const actorUserId =
-      actor?.actorType === "user" ? (actor.actorId ?? null) : null;
-    if (actorUserId) {
-      const [personal] = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.subjectUserId, actorUserId),
-          ),
-        )
-        .limit(1);
-      if (personal) {
-        if (personal.status !== "active") {
-          throw unprocessable("OAuth authorization must be reconnected", {
-            code: "oauth_reauthorization_required",
-            setupUrl: connectionSetupUrl(connection),
-            reconnectUrl: connectionReconnectUrl(connection),
-          });
-        }
-        return personal;
-      }
-    }
-    if (!actorUserId && connection.credentialPolicy === "per_user") {
-      // A personal-only connection is intentionally fixed to one identity.
-      // Background health/catalog checks have no acting user, but may safely
-      // exercise that sole owner-bound grant without turning it into a shared
-      // credential or making it available to a different caller.
-      const personalGrants = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-            eq(connectionGrants.kind, "user"),
-            eq(connectionGrants.status, "active"),
-          ),
-        )
-        .limit(2);
-      if (personalGrants.length === 1) return personalGrants[0]!;
-    }
-    if (connection.credentialPolicy === "per_user") {
-      throw unprocessable(
-        "This connection needs the current user's authorization",
-        {
-          code: "user_authorization_required",
-          setupUrl: connectionSetupUrl(connection),
-          reconnectUrl: connectionReconnectUrl(connection),
-        },
-      );
-    }
-    const [organization] = await db
-      .select()
-      .from(connectionGrants)
-      .where(
-        and(
-          eq(connectionGrants.companyId, connection.companyId),
-          eq(connectionGrants.connectionId, connection.id),
-          eq(connectionGrants.kind, "organization"),
-          eq(connectionGrants.isDefault, true),
-        ),
-      )
-      .limit(1);
-    if (organization?.status === "active") return organization;
-    return null;
+    return selectVaultConnectionGrant(db, connection, actor, {
+      setupUrl: connectionSetupUrl(connection), reconnectUrl: connectionReconnectUrl(connection),
+    });
   }
 
   async function resolveCredentialHeaders(
@@ -7177,7 +7043,7 @@ export function toolAccessService(
     if (usedInitializedSession) {
       try {
         sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+          scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
           requestId: listRequestId });
         response = await sendToolsList(sessionHeaders);
       } catch (error) {
@@ -7210,7 +7076,7 @@ export function toolAccessService(
       forgetMcpHttpSessions(connection.id);
       await response.body?.cancel().catch(() => undefined);
       sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
+        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${actor?.credentialGrantId ?? ""}:${endpoint}`,
         requestId: listRequestId });
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
@@ -7600,10 +7466,11 @@ export function toolAccessService(
   async function checkConnectionHealth(
     connectionId: string,
     actor?: ActorInfo,
-    options: { allowUnauthenticatedProbe?: boolean } = {},
+    options: { allowUnauthenticatedProbe?: boolean; grantId?: string } = {},
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
+    if (options.grantId) actor = { ...actor, credentialGrantId: options.grantId };
     try {
       assertSupportedConnection(connection);
       const config = asRecord(connection.config);
@@ -7630,8 +7497,9 @@ export function toolAccessService(
                   grant.subjectUserId === actor.actorId,
               )
             : null;
-        const grantsToCheck =
-          connection.credentialPolicy === "per_user" &&
+        const grantsToCheck = actor?.credentialGrantId
+          ? activeGrants.filter(grant => grant.id === actor?.credentialGrantId)
+          : connection.credentialPolicy === "per_user" &&
           actor?.actorType === "user"
             ? actorGrant
               ? [actorGrant]
@@ -7667,7 +7535,7 @@ export function toolAccessService(
               : undefined;
         await remoteTools(connection, credentialHeaders, actor);
       } else if (connection.transport === "local_stdio") {
-        await resolveCredentialHeaders(connection);
+        await resolveCredentialHeaders(connection, actor);
         await stdioTemplateId(connection.companyId, connection.config);
         await validateCogneeConnection(connection, actor, false);
       } else {
@@ -9720,6 +9588,8 @@ export function toolAccessService(
       actor?: ActorInfo;
       existingRefs?: typeof connectionGrants.$inferSelect.credentialSecretRefs;
       ownerUserId?: string;
+      /** Synthiq fork: set only by automatic token refresh. */
+      preserveConnectionHealth?: boolean;
     },
     context?: {
       dbClient: Db | DbTransaction;
@@ -9732,6 +9602,7 @@ export function toolAccessService(
     const write = (client: Db | DbTransaction) => writeConnectionCredential(client, {
       companyId: input.companyId, connectionName: input.connection.name, configPath: input.configPath,
       label: input.label, value: input.value, existingRef: existing ?? undefined, actor: actorForSecret(input.actor),
+      preserveConnectionHealth: input.preserveConnectionHealth,
       // Registration authenticates the OAuth client, never the person invoking tools.
       ownerUserId: input.configPath === "oauth.client_secret" ? undefined : input.ownerUserId,
       definitionKey: input.ownerUserId ? `tool_oauth.${input.connection.id}.${input.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}` : undefined,
@@ -11096,6 +10967,7 @@ export function toolAccessService(
         label: "OAuth refresh token",
         value: token.refreshToken,
         actor,
+        preserveConnectionHealth: true,
       });
     }
     const accessRef = await createOrRotateOAuthSecret({
@@ -11105,6 +10977,7 @@ export function toolAccessService(
       label: "OAuth access token",
       value: token.accessToken,
       actor,
+      preserveConnectionHealth: true,
     });
     const nextCredentialSecretRefs = [
       ...connection.credentialSecretRefs.filter(
@@ -11546,13 +11419,13 @@ export function toolAccessService(
               const txSecrets = secretService(tx);
               await txSecrets.rotate(
                 accessRef.secretId,
-                { value: credentials.accessToken },
+                { value: credentials.accessToken, preserveConnectionHealth: true },
                 actorForSecret(credentialActor),
               );
               if (credentials.refreshToken) {
                 await txSecrets.rotate(
                   refreshRef.secretId,
-                  { value: credentials.refreshToken },
+                  { value: credentials.refreshToken, preserveConnectionHealth: true },
                   actorForSecret(credentialActor),
                 );
               }
@@ -11803,6 +11676,7 @@ export function toolAccessService(
             label: "OAuth refresh token",
             value: token.refreshToken,
             actor: credentialActor,
+            preserveConnectionHealth: true,
             existingRefs: grant.credentialSecretRefs,
             ownerUserId:
               grant.kind === "user"
@@ -11817,6 +11691,7 @@ export function toolAccessService(
           label: "OAuth access token",
           value: token.accessToken,
           actor: credentialActor,
+          preserveConnectionHealth: true,
           existingRefs: grant.credentialSecretRefs,
           ownerUserId:
             grant.kind === "user"
@@ -14579,6 +14454,9 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connection.id))
         .returning();
+      if (!personalIdentity && nextConnection.credentialPolicy === "shared") {
+        await ensureDefaultOrganizationGrant(nextConnection, tx);
+      }
       await syncConnectionCredentialBindings(tx, nextConnection,
         personalIdentity ? credentialSecretRefs : []);
       return nextConnection;
@@ -19043,30 +18921,38 @@ export function toolAccessService(
       await assertGoogleSheetsSpreadsheetOwnership(existing.companyId, config, {
         excludeConnectionId: existing.id,
       });
+      const { credentialPolicy, credentialRefs, credentialSecretRefs, changed, replaced } =
+        resolveConnectionCredentialUpdate(existing, input);
       await assertSecretRefs(existing.companyId, [
-        ...(input.credentialRefs ?? existing.credentialRefs),
-        ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
+        ...credentialRefs,
+        ...credentialSecretRefs,
       ]);
-      const [row] = await db
-        .update(toolConnections)
-        .set({
-          name: input.name ?? existing.name,
-          status: input.status ?? existing.status,
-          enabled: input.enabled ?? existing.enabled,
-          ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
-            ? config
-            : (input.transportConfig ?? config),
-          credentialRefs: input.credentialRefs ?? existing.credentialRefs,
-          credentialSecretRefs:
-            input.credentialSecretRefs ?? existing.credentialSecretRefs,
-          credentialPolicy: input.credentialPolicy ?? existing.credentialPolicy,
-          updatedAt: new Date(),
-        })
-        .where(eq(toolConnections.id, connectionId))
-        .returning();
-      await syncCredentialBindings(row);
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(toolConnections)
+          .set({
+            name: input.name ?? existing.name,
+            status: input.status ?? existing.status,
+            enabled: input.enabled ?? existing.enabled,
+            ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
+            config,
+            transportConfig: isGoogleSheetsConnectionConfig(config)
+              ? config
+              : (input.transportConfig ?? config),
+            credentialRefs,
+            credentialSecretRefs,
+            credentialPolicy,
+            updatedAt: new Date(),
+          })
+          .where(eq(toolConnections.id, connectionId))
+          .returning();
+        if (updated.credentialPolicy === "shared" && changed) {
+          await upsertDefaultOrganizationGrant(tx, updated,
+            isRailwayConnection(updated) ? [RAILWAY_SSH_SECRET_PATH] : [], undefined, replaced);
+        }
+        await syncConnectionCredentialBindings(tx, updated);
+        return updated;
+      });
       await ensureRuntimeSlot(row);
       emitConnectionUpdated(row, existing, "api");
       return toConnection(row);

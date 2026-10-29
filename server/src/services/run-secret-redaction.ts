@@ -11,6 +11,14 @@ const REGISTRY_KEY = "paperclipSecretRedactions";
 // Project only the registry: run contexts can contain megabytes of prompt data.
 const registrySnapshot = sql`jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')`;
 
+/** Preserve concurrent registrations when the execution replaces its context snapshot. */
+export function preserveRunSecretRegistry(context: Record<string, unknown>) {
+  return sql`(${JSON.stringify(context)}::jsonb - 'paperclipSecretRedactions') ||
+    (case when ${heartbeatRuns.contextSnapshot} ? 'paperclipSecretRedactions'
+      then jsonb_build_object('paperclipSecretRedactions', ${heartbeatRuns.contextSnapshot} -> 'paperclipSecretRedactions')
+      else '{}'::jsonb end)`;
+}
+
 type RegistryEntry = {
   fingerprintSha256: string;
   material: StoredSecretVersionMaterial;
@@ -57,6 +65,15 @@ export function redactRegisteredSecretValues<T>(input: T, values: string[], cred
         ? (credentialConnectionName ? { connectionName: redactText(credentialConnectionName, values) } : {})
         : redactRegisteredSecretValues(value, values, credentialConnectionName)]),
   ) as T;
+}
+
+// Bumped after each successful registration in this server process, so a live run-log writer can re-read the registry
+// exactly when it changed (SYNA-1817). The secrets route and the heartbeat run in the same process.
+// Versions come from one process-wide counter, so a version is never reused, even after the map is cleared.
+const registryVersions = new Map<string, number>();
+let registryVersionSeq = 0;
+export function runSecretRegistryVersion(runId: string): number {
+  return registryVersions.get(runId) ?? 0;
 }
 
 export function createRunSecretRedactionRegistry(db: Db) {
@@ -120,6 +137,9 @@ export function createRunSecretRedactionRegistry(db: Db) {
           })
           .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
       });
+      if (registryVersions.size > 10_000) registryVersions.clear();
+      registryVersionSeq += 1;
+      registryVersions.set(runId, registryVersionSeq);
     },
     redactForRuns: async <T extends { id: string }>(companyId: string, runs: T[], viewerUserId: string | null = null): Promise<T[]> => {
       if (runs.length === 0) return [];
@@ -149,6 +169,9 @@ export function createRunSecretRedactionRegistry(db: Db) {
       const disclosure = await valuesForRun(companyId, runId, viewerUserId);
       return redactRegisteredSecretValues(value, disclosure.values, disclosure.credentialConnectionName);
     },
+    /** Decrypted values registered for one run; for write-time masking only, never stored or logged. */
+    valuesForRun: async (companyId: string, runId: string): Promise<string[]> =>
+      (await valuesForRun(companyId, runId, null)).values,
     redactForIssue: async <T>(companyId: string, issueId: string, value: T): Promise<T> =>
       redactRegisteredSecretValues(value, await valuesForIssue(companyId, issueId)),
   };

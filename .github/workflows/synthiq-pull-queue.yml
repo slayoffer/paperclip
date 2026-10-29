@@ -1,0 +1,77 @@
+# Fork-only queue checks. Do not include this workflow in an upstream patch.
+name: Synthiq pull queue tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-pull-queue.yml
+      - server/src/**
+      - packages/db/src/**
+      - packages/shared/src/**
+      - package.json
+      - pnpm-lock.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-pull-queue-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pull-queue:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Locate package store
+        id: store
+        run: |
+          corepack enable
+          echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: synthiq-pull-queue-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/package.json') }}
+      - name: Install dependencies
+        # Release metadata requires an update to the inherited lockfile.
+        run: corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check shared types
+        run: corepack pnpm --filter @paperclipai/shared typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test queue, drain, and execution rules
+        run: >-
+          corepack pnpm exec vitest run --project @paperclipai/server
+          server/src/__tests__/heartbeat-pull-queue.test.ts
+          server/src/__tests__/heartbeat-pull-queue-gap.test.ts
+          server/src/services/agent-wip-limit.test.ts
+          server/src/__tests__/issue-execution-policy.test.ts
+          server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+          server/src/__tests__/issue-blocker-update-routes.test.ts
+          server/src/__tests__/task-drain-persistence.test.ts
+          server/src/__tests__/heartbeat-task-drain.test.ts
+          server/src/__tests__/heartbeat-task-drain-admission-release.test.ts
+          server/src/__tests__/heartbeat-task-drain-recovery.test.ts
+          server/src/__tests__/task-drain-openapi.test.ts
+          server/src/__tests__/instance-settings-routes.test.ts
+          --maxWorkers=1
+      - name: Test retained cleanup during drain
+        run: >-
+          corepack pnpm exec vitest run --project @paperclipai/server
+          server/src/__tests__/heartbeat-process-recovery.test.ts
+          -t 'joins startup and reap retained cleanup'
+          --maxWorkers=1

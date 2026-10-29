@@ -8,6 +8,7 @@ import type { createWakeQueue } from "../../modules/wake-queue/index.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
 import { createHeartbeatQueue, type HeartbeatQueueDependencies } from "./queue.js";
+import { releaseRunClaimedJustBeforeSuppression } from "../heartbeat-task-drain-admission.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 function callbacks(db: Db) {
@@ -136,7 +137,11 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     await database?.cleanup();
   });
   beforeEach(async () => {
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
   });
 
   async function fixture(status = "running") {
@@ -152,7 +157,7 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
   it.each(["claimed", "cancelled"] as const)("releases a running claim while preserving a %s wake", async (wakeStatus) => {
     const { run, issue, wake } = await fixture();
     await db.update(agentWakeupRequests).set({ status: wakeStatus }).where(eq(agentWakeupRequests.id, wake.id));
-    await createHeartbeatQueue(db, callbacks(db)).releaseRunClaimedJustBeforeSuppression(run.id);
+    await releaseRunClaimedJustBeforeSuppression(db, run.id);
     const [released] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     const [releasedIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
     const [releasedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
@@ -166,7 +171,7 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     const { run, issue, agent, company } = await fixture();
     const [newOwner] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, status: "running", invocationSource: "assignment" }).returning();
     await db.update(issues).set({ executionRunId: newOwner.id }).where(eq(issues.id, issue.id));
-    await createHeartbeatQueue(db, callbacks(db)).releaseRunClaimedJustBeforeSuppression(run.id);
+    await releaseRunClaimedJustBeforeSuppression(db, run.id);
     const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
     expect(current.executionRunId).toBe(newOwner.id);
   });

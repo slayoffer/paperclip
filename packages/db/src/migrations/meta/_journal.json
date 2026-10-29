@@ -2325,6 +2325,62 @@
       "when": 1791781882729,
       "tag": "0333_normal_wild_pack",
       "breakpoints": true
+    },
+    {
+      "idx": 334,
+      "version": "7",
+      "when": 1792433293974,
+      "tag": "0334_exotic_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 335,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0335_simple_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 336,
+      "version": "7",
+      "when": 1792563986433,
+      "tag": "0336_strange_romulus",
+      "breakpoints": true
+    },
+    {
+      "idx": 337,
+      "version": "7",
+      "when": 1792569002878,
+      "tag": "0337_wide_sersi",
+      "breakpoints": true
+    },
+    {
+      "idx": 338,
+      "version": "7",
+      "when": 1792619441764,
+      "tag": "0338_panoramic_blink",
+      "breakpoints": true
+    },
+    {
+      "idx": 339,
+      "version": "7",
+      "when": 1792858999084,
+      "tag": "0339_shocking_ultron",
+      "breakpoints": true
+    },
+    {
+      "idx": 340,
+      "version": "7",
+      "when": 1792967951765,
+      "tag": "0340_curly_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 341,
+      "version": "7",
+      "when": 1793058290067,
+      "tag": "0341_last_meteorite",
+      "breakpoints": true
     }
   ]
 }

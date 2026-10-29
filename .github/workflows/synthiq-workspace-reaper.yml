@@ -1,0 +1,55 @@
+# Fork-only workspace checks. Do not include this workflow in an upstream patch.
+name: Synthiq workspace reaper tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - ".github/workflows/synthiq-workspace-reaper.yml"
+      - "server/src/index.ts"
+      - "server/src/services/execution-workspaces.ts"
+      - "server/src/services/terminal-workspace-sweep-report.ts"
+      - "server/src/services/workspace-runtime*.ts"
+      - "server/src/__tests__/execution-workspaces-service.test.ts"
+      - "server/src/__tests__/terminal-workspace-sweep-report.test.ts"
+      - "server/src/__tests__/workspace-existing-branch-fetch.test.ts"
+      - "packages/db/**"
+      - "packages/shared/**"
+      - "packages/adapter-utils/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-workspace-reaper-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  workspace-reaper:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check server types
+        run: corepack pnpm exec tsc --noEmit -p server/tsconfig.json
+      - name: Test archive, cleanup, and sweep reports
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000
+          server/src/__tests__/execution-workspaces-service.test.ts
+          server/src/__tests__/terminal-workspace-sweep-report.test.ts
+          server/src/__tests__/workspace-existing-branch-fetch.test.ts

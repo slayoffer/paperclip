@@ -17,6 +17,7 @@ import { withAccountingTransaction } from "../../../services/accounting-transact
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+import { issueOwnerParkingReason } from "../../../services/issue-owner-parking.js";
 import { budgetService, budgetServiceInTransaction } from "../../../services/budgets.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
@@ -337,19 +338,7 @@ export function createPostgresRunDispatchAdapter(
     if (!issueId) return { agentFound: true, facts };
 
     const issueQuery = dbOrTx
-      .select({
-        id: issues.id,
-        companyId: issues.companyId,
-        projectId: issues.projectId,
-        status: issues.status,
-        assigneeAgentId: issues.assigneeAgentId,
-        assigneeUserId: issues.assigneeUserId,
-        executionRunId: issues.executionRunId,
-        checkoutRunId: issues.checkoutRunId,
-        executionPolicy: issues.executionPolicy,
-        executionState: issues.executionState,
-        monitorNextCheckAt: issues.monitorNextCheckAt,
-      })
+      .select()
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)));
     // Locking the row here, only when a caller opened a transaction for the
@@ -363,6 +352,8 @@ export function createPostgresRunDispatchAdapter(
     facts.issueFound = issue !== null;
     if (!facts.issueFound) return { agentFound: true, facts };
 
+    facts.ownerParkingReason = await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "retry.promotion");
+    if (facts.ownerParkingReason) return { agentFound: true, facts };
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
     facts.issueExecutionRunId = issue.executionRunId;
@@ -600,6 +591,8 @@ export function createPostgresRunDispatchAdapter(
       pendingResponse: issue && (input.conversationContinuation || context.connectionIntentResolution === "existing_connection")
         ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
         : null,
+      ownerParkingReason: issue ? await issueOwnerParkingReason(dbOrTx,
+        { companyId: input.companyId, id: issueId }, "run.dispatch") : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,

@@ -106,6 +106,11 @@ export const heartbeatRuns = pgTable(
     continuationAttempt: integer("continuation_attempt").notNull().default(0),
     lastUsefulActionAt: timestamp("last_useful_action_at", { withTimezone: true }),
     nextAction: text("next_action"),
+    contextTaskIdentity: jsonb("context_task_identity").generatedAlwaysAs(sql`coalesce(nullif(context_snapshot -> 'issueId', 'null'::jsonb), nullif(context_snapshot -> 'taskId', 'null'::jsonb) )`),
+    writesRevoked: boolean("writes_revoked").generatedAlwaysAs(sql`status = 'cancelled' or coalesce(jsonb_typeof(result_json -> 'executionCancellation') = 'object' and result_json -> 'executionCancellation' -> 'state' = '"requested"'::jsonb, false)`),
+    conversationMode: boolean("conversation_mode").generatedAlwaysAs(sql`coalesce(context_snapshot -> 'conversationMode' = 'true'::jsonb, false)`),
+    contextIssueId: text("context_issue_id").generatedAlwaysAs(sql`context_snapshot ->> 'issueId'`),
+    contextTaskId: text("context_task_id").generatedAlwaysAs(sql`context_snapshot ->> 'taskId'`),
     contextSnapshot: jsonb("context_snapshot").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -140,6 +145,9 @@ export const heartbeatRuns = pgTable(
       table.id,
       table.completionContractId,
     ),
+    companyAgentActivityIdx: index("heartbeat_runs_company_agent_activity_idx").on(
+      table.companyId, table.agentId, table.createdAt, table.contextIssueId, table.contextTaskId,
+    ),
     companyAgentStartedIdx: index("heartbeat_runs_company_agent_started_idx").on(
       table.companyId,
       table.agentId,
@@ -173,6 +181,20 @@ export const heartbeatRuns = pgTable(
     companyCreatedAtDescIdx: index("heartbeat_runs_company_created_at_desc_idx").on(
       table.companyId,
       table.createdAt.desc(),
+    ),
+    companyIssueCoalesceIdx: index("heartbeat_runs_company_issue_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.nativeIssueId}::text, ${table.contextSnapshot}->>'issueId'))`,
+      table.createdAt.desc(),
+    ),
+    companyRecoveryActionIdx: index("heartbeat_runs_company_recovery_action_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot}->>'recoveryActionId')`,
+      table.createdAt.desc(),
+    ),
+    companyIssueTaskCoalesceIdx: index("heartbeat_runs_company_issue_task_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.contextSnapshot}->>'issueId', ${table.contextSnapshot}->>'taskId', ${table.nativeIssueId}::text))`,
     ),
     companyCtxIssueCreatedIdx: index("heartbeat_runs_company_ctx_issue_created_idx").on(
       table.companyId,

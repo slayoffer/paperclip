@@ -6,6 +6,7 @@ import { and, count, eq, gte, inArray, isNull, lt, notInArray, sql } from "drizz
 import type { Db } from "@paperclipai/db";
 import {
   companies,
+  credentialTransfers,
   companyLogos,
   assets,
   agents,

@@ -1024,6 +1024,12 @@ Use your authenticated agent ID and keep all references in the same company. Thi
 
 ### Issue-thread confirmations
 
+`payload.credentialOperation` is an optional boolean for `request_confirmation`.
+Set it to `true` when the confirmation covers a credential operation.
+Creation responses and later reads preserve the marker for external approval coordinators.
+Invalid marker types fail validation. Existing payloads can omit the marker.
+The marker does not change resolver permissions. Set `resolverPolicy: "human_only"` separately when a human must decide.
+
 Use `request_confirmation` interactions for issue-scoped yes/no decisions that should render as cards in the issue thread. Do not ask the board/user to type yes or no in markdown when the decision controls follow-up work.
 
 Use formal approvals for governed actions. Use `request_confirmation` for decisions such as:

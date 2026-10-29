@@ -10,6 +10,7 @@ import {
   vi,
 } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   activityLog,
   agentWakeupRequests,
   agents,
@@ -26,7 +27,8 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import { nativeSha256 } from "../services/native-runtime/canonical.js";
+import { seedQuestionResponseDelivery } from "./helpers/question-response-delivery.js";
 import {
   buildQuestionResponseDeliveryEnvelope,
   formatQuestionResponseSteeringMessage,
@@ -68,7 +70,7 @@ describeEmbeddedPostgres("question response delivery", () => {
       "paperclip-question-delivery-",
     );
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueQuestionResponseDeliveries);
@@ -87,206 +89,83 @@ describeEmbeddedPostgres("question response delivery", () => {
     await tempDb?.cleanup();
   });
 
-  async function seed(
-    args: {
-      adapterType?: string;
-      runtimeMode?: "legacy" | "native";
-      sourceStatus?: string;
-      successorStatus?: "queued" | "running";
-      sourceCommentBody?: string;
-      attachSourceCommentToInteraction?: boolean;
-    } = {},
-  ) {
-    const companyId = randomUUID();
-    const agentId = randomUUID();
-    const goalId = randomUUID();
-    const issueId = randomUUID();
-    const sourceRunId = randomUUID();
-    const successorRunId = args.successorStatus ? randomUUID() : null;
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Question delivery",
-      issuePrefix: `Q${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Runner",
-      role: "engineer",
-      status: "active",
-      adapterType: args.adapterType ?? "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
-    await db.insert(goals).values({
-      id: goalId,
-      companyId,
-      title: "Test",
-      level: "task",
-      status: "active",
-    });
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      goalId,
-      title: "Deliver answers",
-      status: "in_progress",
-      priority: "medium",
-      assigneeAgentId: agentId,
-    });
-    await db.insert(heartbeatRuns).values({
-      id: sourceRunId,
-      companyId,
-      agentId,
-      invocationSource: "manual",
-      status: args.sourceStatus ?? "succeeded",
-      runtimeMode: args.runtimeMode ?? "native",
-      driverKind: "codex",
-      contextSnapshot: { issueId },
-      ...(args.sourceStatus === "running"
-        ? { startedAt: new Date() }
-        : { finishedAt: new Date() }),
-    });
-    if (successorRunId && args.successorStatus) {
-      await db.insert(heartbeatRuns).values({
-        id: successorRunId,
-        companyId,
-        agentId,
-        invocationSource: "manual",
-        status: args.successorStatus,
-        runtimeMode: args.runtimeMode ?? "native",
-        driverKind: "codex",
-        contextSnapshot: { issueId },
-        ...(args.successorStatus === "running"
-          ? { startedAt: new Date() }
-          : {}),
-      });
-    }
+  const seed = (args?: Parameters<typeof seedQuestionResponseDelivery>[1]) =>
+    seedQuestionResponseDelivery(db, args);
 
-    const sourceCommentId = args.sourceCommentBody ? randomUUID() : null;
-    if (sourceCommentId) {
-      await db.insert(issueComments).values({
-        id: sourceCommentId,
-        companyId,
-        issueId,
-        authorUserId: "external-user",
-        body: args.sourceCommentBody!,
+  it.each(["legacy", "current", "ordinary"] as const)(
+    "delivers a pending %s digest once and keeps the current envelope",
+    async (format) => {
+      const resolverPolicy = format === "legacy" ? "human_only" : format === "current" ? "not_creator" : "anyone";
+      const seeded = await seed({ syntheticCustomOption: format !== "ordinary", resolverPolicy });
+      const envelope = buildQuestionResponseDeliveryEnvelope(seeded.interaction);
+      const storedEnvelope = structuredClone(envelope);
+      if (format === "legacy") {
+        storedEnvelope.response.answers.features.selectedOptionIds = ["health", "logs", "features-custom"];
+        expect(nativeSha256(storedEnvelope)).not.toBe(nativeSha256(envelope));
+      }
+      const digest = nativeSha256(storedEnvelope);
+      await db.update(issueQuestionResponseDeliveries).set({ payloadSha256: digest })
+        .where(eq(issueQuestionResponseDeliveries.interactionId, seeded.interaction.id));
+      const resolveNativeQuestion = vi.fn().mockImplementation(async (interaction) => {
+        expect(buildQuestionResponseDeliveryEnvelope(interaction)).toEqual(envelope);
+        return "queued";
       });
-    }
+      const wakeup = vi.fn();
+      const service = questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+        resolveNativeQuestion,
+      });
 
-    const interactionSvc = issueThreadInteractionService(db);
-    const interaction = await interactionSvc.create(
-      { id: issueId, companyId },
-      {
-        kind: "ask_user_questions",
-        continuationPolicy: "wake_assignee",
-        sourceCommentId:
-          args.attachSourceCommentToInteraction === false
-            ? null
-            : sourceCommentId,
-        sourceRunId,
-        payload: {
-          version: 1,
-          title: "Server choices",
-          questions: [
-            {
-              id: "purpose",
-              prompt: "What is it for?",
-              selectionMode: "single",
-              required: true,
-              options: [
-                { id: "custom", label: "Write an answer", freeText: true },
-              ],
-            },
-            {
-              id: "runtime",
-              prompt: "Which runtime?",
-              selectionMode: "single",
-              required: true,
-              options: [
-                { id: "node", label: "Node.js" },
-                { id: "bun", label: "Bun" },
-              ],
-            },
-            {
-              id: "features",
-              prompt: "Which features?",
-              selectionMode: "multi",
-              allowOther: true,
-              options: [
-                { id: "health", label: "Health check" },
-                { id: "logs", label: "Request logs" },
-              ],
-            },
-          ],
-          questionSet: {
-            schema: "paperclip.question_set.v1",
-            title: "Server choices",
-            questions: [
-              {
-                id: "purpose",
-                header: "Purpose",
-                prompt: "What is it for?",
-                required: true,
-                answerMode: "text",
-              },
-              {
-                id: "runtime",
-                header: "Runtime",
-                prompt: "Which runtime?",
-                required: true,
-                answerMode: "single_select",
-                options: [
-                  { id: "node", label: "Node.js" },
-                  { id: "bun", label: "Bun" },
-                ],
-              },
-              {
-                id: "features",
-                header: "Features",
-                prompt: "Which features?",
-                required: false,
-                answerMode: "multi_select",
-                options: [
-                  { id: "health", label: "Health check" },
-                  { id: "logs", label: "Request logs" },
-                ],
-                customAnswer: { enabled: true, label: "Other" },
-              },
-            ],
-          },
-        },
-      },
-      { agentId, runId: sourceRunId },
-    );
-    const answered = await interactionSvc.answerQuestions(
-      { id: issueId, companyId, status: "in_progress" },
-      interaction.id,
-      {
-        answers: [
-          { questionId: "purpose", optionIds: [], otherText: "Internal API" },
-          { questionId: "runtime", optionIds: ["node"] },
-          {
-            questionId: "features",
-            optionIds: ["health", "logs"],
-            otherText: "Metrics",
-          },
-        ],
-      },
-      { userId: "board-user" },
-    );
-    return {
-      companyId,
-      agentId,
-      issueId,
-      sourceRunId,
-      sourceCommentId,
-      successorRunId,
-      interaction: answered,
-    };
-  }
+      expect(await service.deliver(seeded.interaction.id)).toMatchObject({
+        status: "delivered", duplicate: false,
+      });
+      expect(await service.deliver(seeded.interaction.id)).toMatchObject({
+        status: "delivered", duplicate: true,
+      });
+      expect(resolveNativeQuestion).toHaveBeenCalledTimes(1);
+      expect(wakeup).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery).toMatchObject({ payloadSha256: digest, attemptCount: 1, lastErrorCode: null });
+      const [interaction] = await db.select().from(issueThreadInteractions);
+      expect(interaction).toMatchObject({
+        effectiveResolverPolicy: resolverPolicy,
+        resolvedByUserId: seeded.interaction.resolvedByUserId,
+        result: seeded.interaction.result,
+      });
+    },
+  );
+
+  it.each(["answer", "option", "prompt", "source", "digest"] as const)(
+    "rejects an altered %s after a legacy digest was stored",
+    async (alteration) => {
+      const seeded = await seed({ syntheticCustomOption: true });
+      const envelope = buildQuestionResponseDeliveryEnvelope(seeded.interaction);
+      envelope.response.answers.features.selectedOptionIds = ["health", "logs", "features-custom"];
+      const digest = nativeSha256(envelope);
+      await db.update(issueQuestionResponseDeliveries).set({
+        payloadSha256: alteration === "digest" ? "0".repeat(64) : digest,
+      }).where(eq(issueQuestionResponseDeliveries.interactionId, seeded.interaction.id));
+      const changed = structuredClone(seeded.interaction);
+      if (alteration === "answer") changed.result!.answers[2].otherText = "Changed answer";
+      if (alteration === "option") changed.result!.answers[2].optionIds = ["logs", "features-custom"];
+      if (alteration === "prompt") changed.payload.questionSet!.questions[2].prompt = "Changed prompt";
+      if (alteration === "source") changed.sourceRunId = null;
+      await db.update(issueThreadInteractions).set({
+        payload: changed.payload, result: changed.result, sourceRunId: changed.sourceRunId,
+      }).where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const resolveNativeQuestion = vi.fn().mockResolvedValue("queued");
+      const wakeup = vi.fn();
+      const service = questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never, resolveNativeQuestion,
+      });
+
+      expect(await service.deliver(seeded.interaction.id)).toMatchObject({ status: "failed" });
+      expect(resolveNativeQuestion).not.toHaveBeenCalled();
+      expect(wakeup).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery.lastErrorCode).toBe("question_response_payload_digest_mismatch");
+    },
+  );
 
   it("queues an answer to a running successor instead of automatically steering", async () => {
     const seeded = await seed({ successorStatus: "running" });
@@ -621,60 +500,14 @@ describeEmbeddedPostgres("question response delivery", () => {
     });
   });
 
-  it("delivers after wake suppression outlasts the bounded error retry limit", async () => {
+  it("counts unexplained wakes and errors toward the retry limit", async () => {
     const seeded = await seed({ sourceStatus: "running" });
     const fallbackRunId = randomUUID();
     let wakeAttempts = 0;
     const wakeup = vi.fn().mockImplementation(async () => {
       wakeAttempts += 1;
-      if (wakeAttempts <= 5) return null;
-      return db
-        .insert(heartbeatRuns)
-        .values({
-          id: fallbackRunId,
-          companyId: seeded.companyId,
-          agentId: seeded.agentId,
-          invocationSource: "automation",
-          status: "queued",
-          runtimeMode: "legacy",
-          driverKind: "codex",
-          contextSnapshot: { issueId: seeded.issueId },
-        })
-        .returning()
-        .then((rows) => rows[0]!);
-    });
-    const service = questionResponseDeliveryService(db, {
-      heartbeat: { wakeup } as never,
-      steer: vi.fn(),
-    });
-
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
-    }
-    const delivered = await service.deliver(seeded.interaction.id);
-
-    expect(delivered).toMatchObject({
-      status: "fallback_queued",
-      mode: "wake_fallback",
-      targetRunId: fallbackRunId,
-    });
-    const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
-    expect(delivery).toMatchObject({
-      status: "fallback_queued",
-      attemptCount: 6,
-      errorCount: 0,
-      targetRunId: fallbackRunId,
-    });
-  });
-
-  it("preserves the actual-error retry budget after prolonged wake suppression", async () => {
-    const seeded = await seed({ sourceStatus: "running" });
-    const fallbackRunId = randomUUID();
-    let wakeAttempts = 0;
-    const wakeup = vi.fn().mockImplementation(async () => {
-      wakeAttempts += 1;
-      if (wakeAttempts <= 5) return null;
-      if (wakeAttempts === 6)
+      if (wakeAttempts <= 2) return null;
+      if (wakeAttempts === 3)
         throw new Error("scheduler temporarily unavailable");
       return db
         .insert(heartbeatRuns)
@@ -696,7 +529,7 @@ describeEmbeddedPostgres("question response delivery", () => {
       steer: vi.fn(),
     });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
     }
     await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
@@ -705,8 +538,8 @@ describeEmbeddedPostgres("question response delivery", () => {
       .from(issueQuestionResponseDeliveries);
     expect(afterError).toMatchObject({
       status: "pending",
-      attemptCount: 6,
-      errorCount: 1,
+      attemptCount: 3,
+      errorCount: 3,
       lastErrorCode: "scheduler temporarily unavailable",
     });
 
@@ -719,8 +552,8 @@ describeEmbeddedPostgres("question response delivery", () => {
     const [delivered] = await db.select().from(issueQuestionResponseDeliveries);
     expect(delivered).toMatchObject({
       status: "fallback_queued",
-      attemptCount: 7,
-      errorCount: 1,
+      attemptCount: 4,
+      errorCount: 3,
       targetRunId: fallbackRunId,
     });
   });

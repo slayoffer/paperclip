@@ -4,17 +4,14 @@ import * as idleLocalWork from "../services/idle-local-work.js";
 import { idleBackupWakeMarker, markIdleBackupWakeRequired } from "../services/idle-database-backup.js";
 import { reconcileBuiltInAgentsOnStartup, reconcileCodexLocalManagedHomesOnStartup, reconcilePersistedRuntimeServicesOnStartup } from "../services/index.js";
 import { runDatabaseBackup } from "@paperclipai/db";
+import { buildTestConfig, ORIGINAL_PAPERCLIP_API_URL, ORIGINAL_PAPERCLIP_RUNTIME_API_URL, ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON, ORIGINAL_PAPERCLIP_LISTEN_HOST, ORIGINAL_PAPERCLIP_LISTEN_PORT } from "./helpers/server-startup-config.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
-const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
-const ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON;
-const ORIGINAL_PAPERCLIP_LISTEN_HOST = process.env.PAPERCLIP_LISTEN_HOST;
-const ORIGINAL_PAPERCLIP_LISTEN_PORT = process.env.PAPERCLIP_LISTEN_PORT;
+
 
 const {
   completionSweepMock,
@@ -183,46 +180,6 @@ const {
   };
 });
 
-function buildTestConfig(overrides: Record<string, unknown> = {}) {
-  return {
-    deploymentMode: "authenticated",
-    deploymentExposure: "private",
-    bind: "loopback",
-    customBindHost: undefined,
-    host: "127.0.0.1",
-    port: 3210,
-    allowedHostnames: [],
-    authBaseUrlMode: "auto",
-    authPublicBaseUrl: undefined,
-    authDisableSignUp: false,
-    databaseMode: "postgres",
-    databaseUrl: "postgres://paperclip:paperclip@127.0.0.1:5432/paperclip",
-    embeddedPostgresDataDir: "/tmp/paperclip-test-db",
-    embeddedPostgresPort: 54329,
-    databaseBackupEnabled: false,
-    databaseBackupIntervalMinutes: 60,
-    databaseBackupRetentionDays: 30,
-    databaseBackupDir: "/tmp/paperclip-test-backups",
-    serveUi: false,
-    uiDevMiddleware: false,
-    secretsProvider: "local_encrypted",
-    secretsStrictMode: false,
-    secretsMasterKeyFilePath: "/tmp/paperclip-master.key",
-    storageProvider: "local_disk",
-    storageLocalDiskBaseDir: "/tmp/paperclip-storage",
-    storageS3Bucket: "paperclip-test",
-    storageS3Region: "us-east-1",
-    storageS3Endpoint: undefined,
-    storageS3Prefix: "",
-    storageS3ForcePathStyle: false,
-    feedbackExportBackendUrl: "https://telemetry.example.com",
-    feedbackExportBackendToken: "telemetry-token",
-    heartbeatSchedulerEnabled: false,
-    heartbeatSchedulerIntervalMs: 30000,
-    companyDeletionEnabled: false,
-    ...overrides,
-  };
-}
 
 vi.mock("node:http", () => ({
   createServer: vi.fn(() => fakeServer),
@@ -232,20 +189,10 @@ vi.mock("detect-port", () => ({
   default: detectPortMock,
 }));
 
-vi.mock("@paperclipai/db", () => ({
-  createDb: createDbMock,
-  ensurePostgresDatabase: vi.fn(),
-  getPostgresDataDirectory: vi.fn(),
-  inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
-  applyPendingMigrations: vi.fn(),
-  reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
-  formatDatabaseBackupResult: vi.fn(() => "ok"),
-  runDatabaseBackup: vi.fn(),
-  authUsers: {},
-  companies: {},
-  companyMemberships: {},
-  instanceUserRoles: {},
-}));
+vi.mock("@paperclipai/db", async () => {
+  const { createStartupDatabaseMock } = await import("./helpers/server-startup-config.js");
+  return createStartupDatabaseMock(createDbMock);
+});
 
 vi.mock("../app.js", () => ({
   createApp: createAppMock,
@@ -259,6 +206,17 @@ vi.mock("../services/native-runtime/native-session-executor.js", () => ({
 // exercised by the dedicated DB-backed recovery suites.
 vi.mock("../services/native-runtime/native-safe-replacement.js", () => ({
   reconcileSafeNativeReplacements: vi.fn(async () => ({ scanned: 0, scheduled: 0 })),
+}));
+
+// The pull queue imports the issue service, which reads table columns that
+// the @paperclipai/db mock above does not define. Startup only wires it.
+vi.mock("../services/pull-queue.js", () => ({
+  createHeartbeatPullQueue: vi.fn(() => ({
+    notify: vi.fn(async () => undefined),
+    reconcile: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+  })),
+  isPullQueueSignal: vi.fn(() => false),
 }));
 
 vi.mock("../config.js", () => ({
@@ -380,8 +338,8 @@ vi.mock("../services/connection-intent-delivery.js", () => ({
   })),
 }));
 
-vi.mock("../services/question-response-delivery.js", () => ({
-  questionResponseDeliveryService: vi.fn(() => ({
+vi.mock("../services/interaction-deliveries.js", () => ({
+  interactionDeliveryService: vi.fn(() => ({
     hasPending: vi.fn(async () => false),
     sweepPending: vi.fn(async () => ({
       scanned: 0,
@@ -867,6 +825,27 @@ describe("startServer feedback export wiring", () => {
 
     expect(heartbeatServiceMock.reconcileHotRestartAdoption).toHaveBeenCalledTimes(1);
     expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the server up and runs later steps when a startup reconcile step throws", async () => {
+    // SYNA-2368: a 422 blocking-cycle error from the stranded-issue reconcile
+    // escaped startup recovery, exited the process and crash-looped it.
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      heartbeatSchedulerEnabled: true,
+      heartbeatSchedulerIntervalMs: 30000,
+    }));
+    heartbeatServiceMock.reconcileStrandedAssignedIssues.mockRejectedValueOnce(
+      new Error("Blocking relations cannot contain cycles"),
+    );
+
+    await expect(startServer()).resolves.toBeDefined();
+
+    expect(heartbeatServiceMock.reconcileStrandedAssignedIssues).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.reconcileResolvedDependencyWakes).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.reconcileTaskWatchdogs).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.scanSilentActiveRuns).toHaveBeenCalledTimes(1);
+    expect(heartbeatServiceMock.sweepStaleIssueLocks).toHaveBeenCalledTimes(1);
+    expect(fakeServer.close).not.toHaveBeenCalled();
   });
 
   it("closes the bound listener when native startup recovery fails", async () => {

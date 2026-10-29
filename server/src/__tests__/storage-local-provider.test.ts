@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -54,6 +54,24 @@ describe("local disk storage provider", () => {
       contentType: "text/plain", body: Readable.from([bytes.subarray(0, 4), bytes.subarray(4)]), byteSize: bytes.length, sha256 });
     expect(stored).toMatchObject({ byteSize: bytes.length, sha256 });
     expect(await readStreamToBuffer((await service.getObject("company-1", stored.objectKey)).stream)).toEqual(bytes);
+  });
+
+  it("reads generated object keys with embedded dots in their filename", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-storage-"));
+    tempRoots.push(root);
+    const service = createStorageService(createLocalDiskStorageProvider(root));
+    const stored = await service.putFile({ companyId: "company-1", namespace: "issues/issue-1",
+      originalFilename: "report..final.txt", contentType: "text/plain", body: Buffer.from("dotted filename") });
+    expect(await readStreamToBuffer((await service.getObject("company-1", stored.objectKey)).stream)).toEqual(Buffer.from("dotted filename"));
+    await expect(service.getObject("company-1", "company-1/issues/../other")).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("retains a filesystem access denial instead of reporting object absence", async () => {
+    const provider = createLocalDiskStorageProvider(os.tmpdir());
+    const spy = vi.spyOn(fs, "stat").mockRejectedValueOnce(Object.assign(new Error("read denied"), { code: "EACCES" }));
+    try {
+      await expect(provider.getObject({ objectKey: "company-1/denied" })).rejects.toMatchObject({ code: "EACCES" });
+    } finally { spy.mockRestore(); }
   });
 
   it("removes partial local uploads when their source fails", async () => {

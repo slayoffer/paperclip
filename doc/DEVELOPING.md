@@ -6,8 +6,7 @@ This project can run fully in local dev without setting up PostgreSQL manually.
 
 For mode definitions and intended CLI behavior, see `doc/DEPLOYMENT-MODES.md`.
 
-For sandbox file synchronization, lock ownership, and the required upgrade
-procedure from directory locks, see [Workspace restore locks](workspace-restore-locks.md).
+See [Workspace operations](workspace-operations.md) for SSH limits, synchronization, and lock recovery.
 
 Current implementation status:
 
@@ -15,7 +14,7 @@ Current implementation status:
 
 ## Prerequisites
 
-- Node.js 24.11+
+- Node 24.22.1+
 - pnpm 9+
 
 ## Dependency Lockfile Policy
@@ -1243,6 +1242,8 @@ eval "$(npx paperclipai worktree env)"
 
 For project execution worktrees, Paperclip can also run a project-defined provision command after it creates or reuses an isolated git worktree. Configure this on the project's execution workspace policy (`workspaceStrategy.provisionCommand`). The command runs inside the derived worktree and receives `PAPERCLIP_WORKSPACE_*`, `PAPERCLIP_PROJECT_ID`, `PAPERCLIP_AGENT_ID`, and `PAPERCLIP_ISSUE_*` environment variables so each repo can bootstrap itself however it wants.
 
+Children use separate execution contexts by default. See [child execution contexts](workspace-operations.md#child-execution-contexts) for explicit sharing and Git checks.
+
 An issue's partial `workspaceStrategy` inherits omitted fields from the enabled project's strategy when both use the same type. For example, an issue can override `baseRef` without losing the project's provision, runtime provision, or teardown commands. An explicit value, including `null` or an empty string, replaces the project value. Clearing a command restores the runtime's usual default behavior; use `provisionCommand: "true"` for an explicit no-op. A different strategy type or a disabled project policy does not supply these defaults. An issue's `existingBranch` pin also excludes the project's `branchTemplate`.
 
 An issue can pin its isolated worktree to an exact pre-existing branch instead of a template-derived one — the contract PR-preparation tasks use. Set the issue's `executionWorkspaceSettings` to `{ "mode": "isolated_workspace", "workspaceStrategy": { "type": "git_worktree", "existingBranch": "<branch>" } }`. The validator requires isolated mode plus a `git_worktree` strategy and rejects `branchTemplate` alongside `existingBranch`. At dispatch the runtime attaches (never creates, renames, fast-forwards, or resets) that branch: it reuses a registered worktree that already has the branch checked out (including legacy `.worktrees/` paths), otherwise it attaches the branch under the managed worktree parent. A missing branch, an occupied worktree path on another branch, or a non-worktree strategy fails closed with a `workspace_validation_failed` error instead of falling back to the shared checkout or a derived branch, and an inherited `reuse_existing` workspace binding on a different branch is ignored in favor of realizing the pinned branch.
@@ -1415,6 +1416,8 @@ teardown state before errors propagate. Instruction getters retain updates made
 during provider execution. Keep policy changes separate from this extraction.
 
 ## Wake Context Delivery
+
+See [Owner sessions](owner-sessions.md) for the optional Synthiq session mode and canary variables.
 
 Built-in adapters deliver wake context through the run prompt, including structured
 execution-continuation data. They do not export `PAPERCLIP_WAKE_PAYLOAD_JSON`. A
@@ -1853,6 +1856,13 @@ Environment overrides:
   cooldown and restores immediate reaping. A negative or non-numeric value falls
   back to the default.
 
+The reaper preserves PostgreSQL timestamp precision when it advances between
+candidate pages. It reports `skippedConcurrentSweep` when another sweep still
+runs. The periodic skip log includes reopened workspaces. `skippedUndelivered`
+includes `skippedDirty` and `skippedGitInspection`. These two counters separate
+uncommitted files from failed Git inspection. A delivered branch with uncommitted
+instruction files remains protected. A terminal issue alone does not prove delivery.
+
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,
 and in the default sibling `health/` directory.
@@ -2109,6 +2119,14 @@ results for up to five seconds after completion. The cache holds at most 256
 entries. Close-readiness checks, the terminal-workspace reaper, and the final
 cleanup validation still inspect Git afresh. A display result never authorizes
 worktree removal.
+
+Cross-issue ownership checks exclude closed and archived execution workspaces.
+They also exclude records with a closure timestamp. Records with failed cleanup
+and no closure timestamp retain ownership checks.
+A project-less agent-home folder can be outside a Git repository. This exception
+requires Git's explicit non-repository result and no `.git` entry in the folder
+or its ancestors. Dirty Git folders, damaged repositories, and other inspection
+failures retain the reuse guard.
 
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their

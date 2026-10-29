@@ -1,6 +1,7 @@
 import express from "express";
+import { resolveMockInteraction, createMockIssue, createLoopbackServer, closeRouteServers } from "./helpers/interaction-route-resolution.js";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const UNRELATED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -28,6 +29,7 @@ const mockIssueService = vi.hoisted(() => ({
 }));
 
 const mockInteractionService = vi.hoisted(() => ({
+  getById: vi.fn(),
   listForIssue: vi.fn(),
   getForIssue: vi.fn(),
   create: vi.fn(),
@@ -77,7 +79,7 @@ const mockAccessDecide = vi.hoisted(() => vi.fn(async (input: { action?: string 
   explanation: "Allowed by test grant.",
 })));
 
-const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockLogActivity = vi.hoisted(() => vi.fn(async (_db: unknown, _input: unknown) => undefined));
 const mockReviewTransition = vi.hoisted(() => ({
   value: null as null | { actorType: string; actorId: string; details: Record<string, unknown> },
 }));
@@ -159,6 +161,13 @@ vi.mock("../services/trust-preset-resolver.js", () => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("../services/activity-log.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../services/activity-log.js")>(),
+    logActivity: (db: unknown, input: unknown) => mockLogActivity(db, input),
+  }));
+  vi.doMock("../services/interaction-resolution-outbox.js", () => ({
+    interactionResolutionOutboxService: () => ({ deliver: vi.fn(async () => undefined) }),
+  }));
   vi.doMock("../services/question-response-delivery.js", () => ({
     questionResponseDeliveryService: () => mockQuestionResponseDeliveries,
   }));
@@ -238,27 +247,12 @@ function registerModuleMocks() {
   }));
 }
 
-function createIssue(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    companyId: "company-1",
-    status: "in_progress",
-    workMode: "standard",
-    priority: "medium",
-    projectId: null,
-    goalId: null,
-    parentId: null,
-    assigneeAgentId: ASSIGNEE_AGENT_ID,
-    assigneeUserId: null,
-    createdByUserId: "local-board",
-    identifier: "PAP-1714",
-    title: "Persist interactions",
-    executionPolicy: null,
-    executionState: null,
-    hiddenAt: null,
-    ...overrides,
-  };
-}
+// The service mocks are stable singletons. Reset their state for each test,
+// but load the large route dependency graph only once per test process.
+registerModuleMocks();
+afterEach(closeRouteServers);
+
+const createIssue = (overrides: Record<string, unknown> = {}) => createMockIssue(ASSIGNEE_AGENT_ID, overrides);
 
 function loadAppModules() {
   return Promise.all([
@@ -291,31 +285,12 @@ async function createApp(actor: Record<string, unknown> = {
   });
   app.use("/api", issueRoutes(mockDb as any, {} as any, routeOptions));
   app.use(errorHandler);
-  return app;
+  return createLoopbackServer(app);
 }
 
-async function resolveMockInteraction(
-  args: unknown[],
-  interaction: Record<string, unknown>,
-) {
-  const mutationOptions = args[4] as {
-    afterResolveInTransaction?: (
-      tx: Record<string, unknown>,
-      resolved: Record<string, unknown>,
-    ) => Promise<void>;
-  } | undefined;
-  await mutationOptions?.afterResolveInTransaction?.({}, interaction);
-  return interaction;
-}
 
 describe("issue thread interaction routes", () => {
   beforeEach(async () => {
-    vi.resetModules();
-    vi.doUnmock("../routes/issues.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    vi.doUnmock("../services/index.js");
-    registerModuleMocks();
     // Every mock here is a vi.hoisted() singleton. All 70+ tests share it.
     // A queued mockResolvedValueOnce() value can outlive its own test and
     // leak into a later, unrelated test. vi.resetAllMocks() drains that
@@ -786,7 +761,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
       "interaction-1",
       { selectedClientKeys: ["task-1"] },
-      expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ userId: "local-board" }), {},
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2);
     expect(mockHeartbeatService.wakeup).toHaveBeenNthCalledWith(
@@ -841,6 +816,23 @@ describe("issue thread interaction routes", () => {
     );
   });
 
+  it.each([
+    { questionId: "scope", text: "Selected files" },
+    { questionId: "scope", optionIds: ["paperclip_custom_answer"], otherText: "Selected files" },
+  ])("normalizes API text and custom answers before persistence: %j", async (answer) => {
+    const app = await createApp();
+    const response = await request(app)
+      .post(`/api/issues/${ISSUE_ID}/interactions/interaction-2/respond`)
+      .send({ answers: [answer] });
+    expect(response.status).toBe(200);
+    expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(
+      expect.anything(), "interaction-2", {
+        answers: [{ questionId: "scope", optionIds: answer.optionIds ?? [], otherText: "Selected files" }],
+      }, expect.anything(), {},
+    );
+    expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
+  });
+
   it.each(["paperclip-id:chat-owner", "chat-owner", "paperclip-id:another-user"])("keeps chat response delivery limited to the exact owner: %s", async (userId) => {
     const issue = createIssue({ conversationAgentId: ASSIGNEE_AGENT_ID, conversationUserId: "paperclip-id:chat-owner" });
     mockIssueService.getById.mockResolvedValue(issue);
@@ -855,7 +847,7 @@ describe("issue thread interaction routes", () => {
       .send({ answers: [{ questionId: "scope", optionIds: ["phase-1"] }] });
     if (userId === "paperclip-id:chat-owner") {
       expect(response.status).toBe(200);
-      expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(expect.anything(), "interaction-2", expect.anything(), expect.objectContaining({ userId }));
+      expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(expect.anything(), "interaction-2", expect.anything(), expect.objectContaining({ userId }), {});
       expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
     } else {
       expect(response.status).toBe(403);
@@ -1627,7 +1619,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
       "interaction-checkbox",
       { selectedOptionIds: ["file-b"] },
-      expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ userId: "local-board" }), {},
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -2378,7 +2370,7 @@ describe("issue thread interaction routes", () => {
       expect.anything(),
       "interaction-2",
       expect.anything(),
-      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null }),
+      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null }), {},
     );
     expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
@@ -2449,7 +2441,7 @@ describe("issue thread interaction routes", () => {
         userId: null,
         resolverPolicyRestriction: "anyone",
         suggestedTaskEffectsAuthorized: true,
-      },
+      }, {},
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorType: "agent",
@@ -2499,7 +2491,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({
         agentId: ASSIGNEE_AGENT_ID,
         resolverPolicyRestriction: "anyone",
-      }),
+      }), {},
     );
   });
 
@@ -2911,7 +2903,7 @@ describe("issue thread interaction routes", () => {
       expect.anything(),
       "interaction-open",
       expect.anything(),
-      expect.objectContaining({ agentId: CREATED_AGENT_ID, runId: RUN_9 }),
+      expect.objectContaining({ agentId: CREATED_AGENT_ID, runId: RUN_9 }), {},
     );
   });
 
@@ -3397,5 +3389,31 @@ describe("issue thread interaction routes", () => {
     expect(mockInteractionService.answerQuestions).toHaveBeenCalledTimes(1);
     expect(mockDbTransaction).not.toHaveBeenCalled();
     expect(mockCrossIssueInfluence.inserted).toEqual([]);
+  });
+});
+
+describe("interaction location route", () => {
+  const INTERACTION_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+  it("returns the fixed v1 location for a readable card", async () => {
+    mockInteractionService.getById.mockResolvedValueOnce({ id: INTERACTION_ID, companyId: "company-1", issueId: ISSUE_ID, status: "pending" });
+    mockIssueService.getById.mockResolvedValue(createIssue({ status: "in_review", assigneeAgentId: ASSIGNEE_AGENT_ID }));
+    const res = await request(await createApp()).get(`/api/companies/company-1/interaction-locations/${INTERACTION_ID}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ version: 1, companyId: "company-1", interactionId: INTERACTION_ID, issueId: ISSUE_ID });
+  });
+
+  it("answers 404 for an unknown or malformed id and for another company's card", async () => {
+    mockInteractionService.getById.mockResolvedValueOnce(null);
+    await request(await createApp()).get(`/api/companies/company-1/interaction-locations/${INTERACTION_ID}`).expect(404);
+    await request(await createApp()).get("/api/companies/company-1/interaction-locations/not-a-uuid").expect(404);
+    mockInteractionService.getById.mockResolvedValueOnce({ id: INTERACTION_ID, companyId: "company-2", issueId: ISSUE_ID, status: "pending" });
+    await request(await createApp()).get(`/api/companies/company-1/interaction-locations/${INTERACTION_ID}`).expect(404);
+  });
+
+  it("refuses a board actor without access to the company", async () => {
+    const res = await request(await createApp({ type: "board", userId: "u", companyIds: ["company-9"], source: "session", isInstanceAdmin: false }))
+      .get(`/api/companies/company-1/interaction-locations/${INTERACTION_ID}`);
+    expect(res.status).toBe(403);
   });
 });

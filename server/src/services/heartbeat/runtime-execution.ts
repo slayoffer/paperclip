@@ -1,3 +1,4 @@
+import { readLegacyRestartCheckpoint, recordLegacyRestartFallback, restartSuspendedLegacyRuns } from "../legacy-restart-recovery.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import {
@@ -90,6 +91,7 @@ import type { NativeExecutionInput, NativeSessionBackend } from "../../vendor/pa
 import type { PluginWorkerManager } from "../plugin-worker-manager.js";
 import type { RealizedExecutionWorkspace } from "../workspace-runtime.js";
 import type { reserveWarmNativeInstructionDirectory } from "../native-runtime/index.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 
 type Selection = HeartbeatRuntimeSelectionInput;
 type Selected = Extract<HeartbeatRuntimeSelectionResult, { selected: true }>;
@@ -109,6 +111,8 @@ export interface HeartbeatRuntimeExecutionInput {
     issueRef: (NonNullable<Selection["task"]["issueRef"]> & { projectId: string | null }) | null;
     issueId: string | null;
     taskKey: string | null;
+    /** Synthiq owner sessions store the thread under owner-project:<projectId>. */
+    sessionStorageKey?: string | null;
   };
   runtime: Pick<Selected, "nativeExecution" | "nativeRunnerInstanceId" | "getNativeFreshSessionHandoff"> & {
     nativeRuntimeResolution: Selection["nativeRuntimeResolution"];
@@ -222,7 +226,7 @@ function readNonEmptyString(value: unknown): string | null {
 
 export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExecutionInput): Promise<HeartbeatRuntimeExecutionResult> {
   const { run, agent, options } = input;
-  const { issueRef, issueContext, context, issueId, taskKey, executionContinuation } = input.task;
+  const { issueRef, issueContext, context, issueId, taskKey, sessionStorageKey, executionContinuation } = input.task;
   const { nativeRuntimeResolution, nativeExecution, nativeRunnerInstanceId, adapter, runtimeForAdapter, getNativeFreshSessionHandoff, getFreshSessionHandoff, runOptions } = input.runtime;
   const { persistedExecutionWorkspace, executionWorkspace, executionTarget, workspaceOperationRecorder, nativeWorkspaceSync, workspaceRestoreSource, remoteExecution } = input.workspace;
   const { runtimeConfig, resolvedConfig, resolvedInstanceSettings, configuredTaskEnvironment, adapterEnv, agentIdentity, managedAiRuntime, runtimeEnv, useHostGitHub, githubSelection } = input.config;
@@ -248,6 +252,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           localAgentJwtScope,
         )
       : null;
+  if (authToken) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, authToken);
   if (
     nativeRuntimeResolution.kind === "legacy" &&
     adapter.supportsLocalAgentJwt &&
@@ -505,6 +510,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         runId: run.id,
         expectedAssignmentDigest: expectedNativeMcpDigest,
       });
+      for (const server of nativeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
       if ("runtimeContext" in nativeExecution) {
         if (nativeMcpServers.length > 1)
           throw new Error(
@@ -605,7 +611,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                   companyId: agent.companyId,
                   agentId: agent.id,
                   adapterType: agent.adapterType,
-                  taskKey,
+                  taskKey: (sessionStorageKey ?? taskKey)!,
                   sessionParamsJson: params,
                   sessionDisplayId: displayId,
                   lastRunId: run.id,
@@ -742,6 +748,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         runId: run.id,
         responsibleUserId: run.responsibleUserId,
       });
+      if (runtimeTools) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, runtimeTools.bearerToken);
       if (!runtimeTools) {
         logger.warn(
           {
@@ -757,6 +764,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         agent,
         runId: run.id,
       });
+      for (const server of runtimeMcpServers) await createRunSecretRedactionRegistry(db).register(run.companyId, run.id, server.token);
       const runtimeToolDelivery =
         adapter.runtimeToolDelivery ?? "invocation_context";
       if (runtimeTools && runtimeToolDelivery === "native_mcp") {
@@ -812,6 +820,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                 : undefined,
               runtimeMcp,
               runtimeTools,
+              registerSecretValue: (value) => createRunSecretRedactionRegistry(db).register(run.companyId, run.id, value),
               onLog,
               onMeta: onAdapterMeta,
               onEvent: onAdapterEvent,
@@ -976,6 +985,13 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       await completeWorkspace();
     }
   } catch (adapterErr) {
+    if (restartSuspendedLegacyRuns.has(run.id)) {
+      const saved = readLegacyRestartCheckpoint((await getRun(run.id))!);
+      // A local suspended run stays suspended; the executor returns without settling it.
+      if (!saved?.sessionParams.remoteExecution) throw adapterErr;
+      restartSuspendedLegacyRuns.delete(run.id);
+      await recordLegacyRestartFallback(db, run, "restart_workspace_unsettled");
+    }
     if (adapterErr instanceof NativeCancellationPendingRecoveryError) {
       // Durable cancellation is settled by the outer recovery handler;
       // it does not imply a failed workspace or a persisted run result.

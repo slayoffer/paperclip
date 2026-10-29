@@ -1,89 +1,17 @@
-import express from "express";
+import { createOpenApiTestApp } from "./helpers/openapi-app.js";
+import { apiPrefixes } from "./openapi-route-prefixes.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { COMPANY_IMPORT_TRANSFERS_ROUTE_PATH } from "@paperclipai/shared/company-import-transfer";
-import { errorHandler } from "../middleware/index.js";
-import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
+import { buildOpenApiSpec } from "../routes/openapi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
 
-const apiPrefixes: Record<string, string> = {
-  "pipelines.ts": "/api",
-  "cases.ts": "/api",
-  "smoke-lab.ts": "/api",
-  "access.ts": "/api",
-  "activity.ts": "/api",
-  "adapters.ts": "/api",
-  "agents.ts": "/api",
-  "agent-commentary.ts": "/api",
-  "agent-avatars.ts": "/api",
-  "agent-profile-avatar.ts": "/api",
-  "announcements.ts": "/api",
-  "ai-connections.ts": "/api",
-  "decision-models.ts": "/api",
-  "fast-responses.ts": "/api",
-  "attention.ts": "/api",
-  "approvals.ts": "/api",
-  "assets.ts": "/api",
-  "auth.ts": "/api/auth",
-  "board-chat.ts": "/api",
-  "browser-use.ts": "/api",
-  "built-in-agents.ts": "/api",
-  "chat-channels.ts": "/api",
-  "slack-tools.ts": "/api",
-  "email.ts": "/api",
-  "cloud.ts": "/api/cloud",
-  "customer-success.ts": "/api/customer-success/v1",
-  "companies.ts": "/api/companies",
-  "company-skills.ts": "/api",
-  "company-skill-policy.ts": "/api",
-  "connection-intents.ts": "/api",
-  "costs.ts": "/api",
-  "dashboard.ts": "/api",
-  "dot-runner.ts": "/api",
-  "decision-queues.ts": "/api",
-  "decisions.ts": "/api",
-  "decision-training.ts": "/api",
-  "environments.ts": "/api",
-  "execution-workspaces.ts": "/api",
-  "file-resources.ts": "/api",
-  "folders.ts": "/api",
-  "goals.ts": "/api",
-  "health.ts": "/api/health",
-  "inbox-agent-policy.ts": "/api",
-  "inbox-dismissals.ts": "/api",
-  "instance-database-backups.ts": "/api",
-  "instance-settings.ts": "/api",
-  "issues.ts": "/api",
-  "issue-tree-control.ts": "/api",
-  "llms.ts": "/api",
-  "managed-agent-profiles.ts": "/api",
-  "onboarding-seed.ts": "/api",
-  "openapi.ts": "/api",
-  "plugin-ui-static.ts": "/api",
-  "plugins.ts": "/api",
-  "projects.ts": "/api",
-  "primary-agent.ts": "/api",
-  "public-mcp.ts": "/api",
-  "project-tools.ts": "/api",
-  "resource-memberships.ts": "/api",
-  "remote-agent-profiles.ts": "/api",
-  "routines.ts": "/api",
-  "secrets.ts": "/api",
-  "sidebar-badges.ts": "/api",
-  "sidebar-preferences.ts": "/api",
-  "summary-slots.ts": "/api",
-  "status-cards.ts": "/api",
-  "teams-catalog.ts": "/api",
-  "tool-access.ts": "/api",
-  "voice-sessions.ts": "/api",
-  "tool-gateway.ts": "/api",
-  "user-profiles.ts": "/api",
-};
+
 
 const ROUTE_LITERAL_PATTERN =
   /router\.(get|post|put|patch|delete)\(\s*["'`]([^"'`]+)["'`]/g;
@@ -137,13 +65,6 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
 // now have request handlers, so the set is empty. A new contract-first route
 // belongs here only until its handler lands.
 const specOnlyContractFirstRoutes = new Set<string>([]);
-
-function createApp() {
-  const app = express();
-  app.use("/api", openApiRoutes());
-  app.use(errorHandler);
-  return app;
-}
 
 // Route files may compose paths from shared path constants inside template
 // literals; substitute the constants' values before normalizing.
@@ -388,7 +309,7 @@ describe("openapi routes", () => {
   });
 
   it("documents exact failed-run selection and durable accepted retry responses", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     const wake = res.body.paths["/api/agents/{id}/wakeup"].post;
     expect(
       wake.requestBody.content["application/json"].schema.properties
@@ -399,7 +320,7 @@ describe("openapi routes", () => {
     expect(wake.description).toContain("durable queued/deferred receipt");
   });
   it("serves the generated OpenAPI document", async () => {
-    const res = await request(createApp()).get("/api/openapi.json");
+    const res = await request(await createOpenApiTestApp()).get("/api/openapi.json");
 
     expect(res.status).toBe(200);
     expect(res.body.openapi).toBe("3.0.0");
@@ -1156,7 +1077,7 @@ describe("openapi routes", () => {
 
 describe("heartbeat run ID OpenAPI contract", () => {
   it("publishes the runtime UUID constraint and 400 response on all agent-router run endpoints", async () => {
-    const response = await request(createApp()).get("/api/openapi.json");
+    const response = await request(await createOpenApiTestApp()).get("/api/openapi.json");
     expect(response.status).toBe(200);
     const paths = response.body.paths;
     let checked = 0;

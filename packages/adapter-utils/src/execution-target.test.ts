@@ -8,7 +8,9 @@ import {
   prepareGitHubOperationLaunchers,
   adapterExecutionTargetUsesManagedHome,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
+  overrideAdapterExecutionTargetRemoteCwd,
   resolveAdapterExecutionTargetCwd,
+  resolveAdapterExecutionTargetInPlaceRuntimeRootDir,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
 } from "./execution-target.js";
@@ -437,6 +439,59 @@ describe("resolveAdapterExecutionTargetCwd", () => {
   });
 });
 
+
+describe("SSH same-host in_place target helpers", () => {
+  const spec = {
+    host: "home-pc",
+    port: 22,
+    username: "slayo",
+    remoteCwd: "/home/slayo/paperclip-work",
+    remoteWorkspacePath: "/home/slayo/paperclip-work",
+    privateKey: null,
+    knownHosts: null,
+    strictHostKeyChecking: true,
+  };
+  // The orchestrator sets only the top-level remoteCwd for an in_place run.
+  const inPlaceTarget = {
+    kind: "remote" as const,
+    transport: "ssh" as const,
+    remoteCwd: "/paperclip/worktrees/SYNA-1",
+    spec,
+    workspaceRealization: {
+      mode: "in_place" as const,
+      authoritativeRoot: "/paperclip/worktrees/SYNA-1",
+      runtimeRoot: "/home/slayo/paperclip-work/.paperclip-runtime/runs/run-1",
+      pathAliases: [],
+      outboundRestorePaths: [],
+    },
+  };
+
+  it("moves the SSH spawn cwd to the worktree even when the top-level cwd already matches", () => {
+    const overridden = overrideAdapterExecutionTargetRemoteCwd(inPlaceTarget, "/paperclip/worktrees/SYNA-1");
+    expect(overridden).toMatchObject({
+      remoteCwd: "/paperclip/worktrees/SYNA-1",
+      spec: { remoteCwd: "/paperclip/worktrees/SYNA-1" },
+    });
+    const same = overrideAdapterExecutionTargetRemoteCwd(overridden, "/paperclip/worktrees/SYNA-1");
+    expect(same).toBe(overridden);
+  });
+
+  it("returns the per-run runtime folder only for an SSH in_place target", () => {
+    expect(resolveAdapterExecutionTargetInPlaceRuntimeRootDir(inPlaceTarget, "claude")).toBe(
+      "/home/slayo/paperclip-work/.paperclip-runtime/runs/run-1/claude",
+    );
+    expect(resolveAdapterExecutionTargetInPlaceRuntimeRootDir({
+      ...inPlaceTarget,
+      workspaceRealization: { ...inPlaceTarget.workspaceRealization, mode: "copy" as const },
+    }, "claude")).toBeNull();
+    expect(resolveAdapterExecutionTargetInPlaceRuntimeRootDir({
+      ...inPlaceTarget,
+      workspaceRealization: { ...inPlaceTarget.workspaceRealization, runtimeRoot: null },
+    }, "codex")).toBeNull();
+    expect(resolveAdapterExecutionTargetInPlaceRuntimeRootDir(null, "codex")).toBeNull();
+    expect(resolveAdapterExecutionTargetInPlaceRuntimeRootDir({ kind: "local" }, "codex")).toBeNull();
+  });
+});
 
 describe("GitHub launcher lifecycle", () => {
   it("removes only the completed run's launchers and leaves concurrent runs usable", async () => {

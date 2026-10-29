@@ -1,3 +1,10 @@
+import { commonOpenApiResponses } from "./openapi-responses.js";
+import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
+import { registerCredentialTransferPaths } from "./openapi-credential-transfers.js";
+import { registerTaskDrainPaths } from "./openapi-task-drain.js";
+import { registerRunStatsPaths } from "./openapi-run-stats.js";
+import { registerUploadCorrelationPaths } from "./openapi-upload-correlation.js";
+import { forkReadApiPaths } from "./fork-read-api.js";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -226,7 +233,6 @@ import {
   patchInstanceGeneralSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
-  startTaskDrainRequestSchema,
   // Resource memberships
   updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
@@ -330,22 +336,6 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
-type OpenApiResponse = Record<string, unknown>;
-type OpenApiPathRegistration = {
-  method: string;
-  path: string;
-  request?: {
-    params?: z.ZodTypeAny;
-    query?: z.ZodTypeAny;
-    body?: {
-      content: Record<string, { schema: unknown }>;
-      required?: boolean;
-    };
-  };
-  responses?: Record<string, OpenApiResponse>;
-  [key: string]: unknown;
-};
-
 // Zod 4 stores each schema definition on `_def` with a lowercase `type`
 // discriminator and moves the wrapped members onto that def. This loose view
 // lets the converter read those members, because Zod 4 does not export a
@@ -677,53 +667,7 @@ const cliAuthChallengeIdParamSchema = z.string().trim()
 
 const ErrorSchema = registry.register("Error", z.object({ error: z.string() }));
 
-const responses = {
-  ok: (schema: z.ZodTypeAny = z.record(z.string(), z.unknown())) => ({
-    description: "Success",
-    content: { "application/json": { schema } },
-  }),
-  noContent: { description: "No content" },
-  badRequest: {
-    description: "Bad request",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unauthorized: {
-    description: "Unauthorized",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  forbidden: {
-    description: "Forbidden",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  notFound: {
-    description: "Not found",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  conflict: {
-    description: "Conflict",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  payloadTooLarge: {
-    description: "Payload too large",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unsupportedMediaType: {
-    description: "Unsupported media type",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  unprocessable: {
-    description: "Unprocessable entity",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  serverError: {
-    description: "Internal server error",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-  tooManyRequests: {
-    description: "Too many requests",
-    content: { "application/json": { schema: ErrorSchema } },
-  },
-};
+const responses = commonOpenApiResponses(ErrorSchema);
 
 const jsonBody = (schema: z.ZodTypeAny) => ({
   content: { "application/json": { schema } },
@@ -1377,6 +1321,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/decision-model",
   "PUT /api/companies/{companyId}/decision-model",
   "POST /api/companies/{companyId}/decision-model/test",
+  "GET /api/companies/{companyId}/issues/{issueId}/attachment-upload-correlation",
+  "POST /api/companies/{companyId}/agents/{agentId}/permission-grants",
   ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
   "POST /api/companies/{companyId}/ai-connections",
@@ -3923,7 +3869,7 @@ registry.registerPath({
   tags: ["agents"],
   summary: "Wake up an agent",
   description:
-    "Board failed-run retries supply failedRunId with reason retry_failed_run. Paperclip derives the exact request and current authorization; a chat retry may return a durable queued/deferred receipt before a run exists. Caller task/comment markers and fresh-session overrides do not authorize replay.",
+    "Skipped wakes include the exact receipt reason, error text, and safe details. Budget skips include usage and limits. Dependency skips include company-scoped blocker identifiers and status. Existing HTTP 409 refusals retain their status and add recorded diagnostics under details.wakeup. Board failed-run retries supply failedRunId with reason retry_failed_run. Paperclip derives the exact request and current authorization; a chat retry may return a durable queued/deferred receipt before a run exists. Caller task/comment markers and fresh-session overrides do not authorize replay.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(wakeAgentSchema),
@@ -6753,40 +6699,9 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
-registry.registerPath({
-  method: "get",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Get the task-drain status for this process only; quiescent counts in-process work, and a process restart clears it even when the database still holds running rows",
-  request: { query: z.object({ ownerId: z.string().uuid().optional(), idleSleepSafety: z.literal("1").optional().describe("Instance admins can request a conservative durable-work report while admission and ingress are held. Unknown or present work must prevent automatic sleep.") }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary:
-    "Start a task drain, so new run admission holds until active runs finish",
-  request: { body: jsonBody(startTaskDrainRequestSchema) },
-  responses: {
-    200: r.ok(),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-    409: r.conflict,
-  },
-});
-
-registry.registerPath({
-  method: "delete",
-  path: "/api/instance/task-drain",
-  tags: ["instance"],
-  summary: "End a task drain and restore run admission",
-  request: { query: z.object({ ownerId: z.string().uuid().optional() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
-});
+registerTaskDrainPaths(registry, r);
+registerRunStatsPaths(registry, r);
+registerUploadCorrelationPaths(registry, r);
 
 registry.registerPath({
   method: "get",
@@ -7836,14 +7751,7 @@ registry.registerPath({
 
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
-registry.registerPath({
-  method: "get",
-  path: "/api/issues/{id}/interactions",
-  tags: ["issues"],
-  summary: "List issue thread interactions",
-  request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
-});
+for (const path of forkReadApiPaths) registry.registerPath(path);
 
 registry.registerPath({
   method: "post",
@@ -12208,6 +12116,8 @@ for (const [method, path, body] of experimentalApiPaths) {
     },
   });
 }
+
+registerCredentialTransferPaths(registry, responses);
 
 // ─── Spec builder ─────────────────────────────────────────────────────────────
 

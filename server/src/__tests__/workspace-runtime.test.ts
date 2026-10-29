@@ -1387,9 +1387,12 @@ describe("realizeExecutionWorkspace", () => {
       expect(error.fetchError).not.toContain("private-auth-");
       return { authLookup, diagnostic: readUnresolvedWorkspaceBaseRefDiagnostic(error) };
     }));
-    for (const { authLookup, diagnostic } of results) expect(diagnostic).toEqual({ schemaVersion: 1,
-      remoteLookup: "resolved", authLookup, fetch: "failed", fetchExitCode: 128,
-      fetchFailureKind: "remote_ref_not_found", refResolution: "failed", refExitCode: 128 });
+    // Synthiq fork: a failed credential lookup fails closed and does not fetch without credentials.
+    for (const { authLookup, diagnostic } of results) expect(diagnostic).toEqual(authLookup === "failed"
+      ? { schemaVersion: 1, remoteLookup: "resolved", authLookup, fetch: "not_attempted",
+        refResolution: "failed", refExitCode: 128 }
+      : { schemaVersion: 1, remoteLookup: "resolved", authLookup, fetch: "failed", fetchExitCode: 128,
+        fetchFailureKind: "remote_ref_not_found", refResolution: "failed", refExitCode: 128 });
   });
 
   it.each([

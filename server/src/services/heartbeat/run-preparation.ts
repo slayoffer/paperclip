@@ -1,3 +1,6 @@
+import { buildOwnerRecoveryWake } from "../recovery/owner-resume.js";
+import { isOwnerSessionKey, firstCallerTaskKey } from "../owner-sessions.js";
+import type { DurableBridgeWakeupRequest } from "../durable-bridge-wakeup.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
 import { githubConfiguredInstructionSources } from "../chat-github-review-policy.js";
 import { CONFIGURED_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index.js";
@@ -25,7 +28,6 @@ import {
   CONNECTION_INTENT_AGENT_GUIDANCE,
   CONNECTION_RUNTIME_TOOL_NAMES,
   envBindingSchema,
-  isToolConnectionAttentionHealth,
   type ChatProvider,
   type RoutineRevisionSnapshotV1,
   type SourceTrustMetadata,
@@ -84,6 +86,7 @@ import {
 } from "../secrets.js";
 import { createToolGatewayService } from "../tool-gateway.js";
 import { toolAccessService } from "../tool-access.js";
+import { canDeliverRuntimeMcpConnection } from "../tool-connection-discovery.js";
 import {
   buildDocumentReviewContext,
   buildPlanReviewContext,
@@ -811,6 +814,8 @@ export async function resolveRunScopedMentionedSkillKeys(input: {
 export interface WakeupOptions {
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
+  /** A person pressed Run now / Retry in the board UI: passes the per-issue token budget (rule 5). */
+  issueBudgetOverride?: boolean;
   /** Internal resume of a queue with persisted board interruption intent. */
   queuedCommentInterruptId?: string;
   /** Internal delivery of an existing undelivered user comment. */
@@ -818,6 +823,7 @@ export interface WakeupOptions {
   /** Exact failed run selected by an authenticated board Retry request. */
   failedRunId?: string | null;
   durableChatRequest?: DurableChatWakeupRequest;
+  durableBridgeRequest?: DurableBridgeWakeupRequest;
   /** Server-owned Dot admission receipt; never accepted from API payloads. */
   durableDotRequest?: {
     id: string;
@@ -993,8 +999,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       ((Boolean(runIdentity?.activeIdentityContextId) &&
         (connection.config?.sourceTemplateKey === "github" ||
           connection.transportConfig?.sourceTemplateKey === "github")) ||
-        connection.credentialPolicy === "per_user" ||
-        !isToolConnectionAttentionHealth(connection.healthStatus)) &&
+        canDeliverRuntimeMcpConnection(connection)) &&
       (connection.transport === "mcp_remote" ||
         connection.transport === "local_stdio" || isBrowserUseConnection(connection) || githubBotConnectionIds.has(connection.id) || spekoConnectionIds.has(connection.id)),
   );
@@ -1560,15 +1565,11 @@ export function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
 ) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
+  // A caller-supplied key never addresses a reserved owner-project:* row (SYNA-2912 r2 P2).
+  return firstCallerTaskKey([
+    contextSnapshot?.taskKey, contextSnapshot?.taskId, contextSnapshot?.issueId,
+    payload?.taskKey, payload?.taskId, payload?.issueId,
+  ].map((value) => readNonEmptyString(value)));
 }
 
 function mergeWakeCommentIds(...values: Array<unknown>): string[] {
@@ -1675,6 +1676,7 @@ export function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  if (isOwnerSessionKey(contextSnapshot.taskKey)) delete contextSnapshot.taskKey;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);
@@ -2574,44 +2576,7 @@ export async function buildPaperclipWakePayload(input: {
     issueDescriptionTruncated ||
     planReviewContext?.truncated === true ||
     documentReviewContext?.truncated === true;
-  const recoveryActionId = readNonEmptyString(
-    input.contextSnapshot.recoveryActionId,
-  );
-  const recoveryCause = readNonEmptyString(input.contextSnapshot.recoveryCause);
-  const recoveryAction = recoveryActionId
-    ? await input.db
-        .select()
-        .from(issueRecoveryActions)
-        .where(
-          and(
-            eq(issueRecoveryActions.id, recoveryActionId),
-            eq(issueRecoveryActions.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const recoveryEvidence = parseObject(recoveryAction?.evidence);
-  // A restored task resumes its deliverable, not the completed repair. A
-  // referenced settled/missing action must not fall back to a stale cause.
-  const recoveryStillActive = recoveryAction
-    ? ["active", "escalated"].includes(recoveryAction.status)
-    : !recoveryActionId && Boolean(recoveryCause);
-  const originalAssigneeId =
-    recoveryAction?.returnOwnerAgentId ??
-    recoveryAction?.previousOwnerAgentId ??
-    null;
-  const originalAssignee = originalAssigneeId
-    ? await input.db
-        .select({ id: agents.id, name: agents.name })
-        .from(agents)
-        .where(
-          and(
-            eq(agents.id, originalAssigneeId),
-            eq(agents.companyId, input.companyId),
-          ),
-        )
-        .then((rows) => rows[0] ?? null)
-    : null;
+  const recovery = await buildOwnerRecoveryWake(input.db, input);
 
   const externalChatProvider = await resolveExternalChatWakeProvider({
     db: input.db,
@@ -2638,24 +2603,7 @@ export async function buildPaperclipWakePayload(input: {
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
     externalChatProvider,
-    recovery:
-      recoveryStillActive
-        ? {
-            cause: recoveryAction?.cause ?? recoveryCause,
-            failureSummary: readNonEmptyString(recoveryEvidence.failureSummary),
-            originalAssignee: originalAssignee
-              ? { id: originalAssignee.id, name: originalAssignee.name }
-              : originalAssigneeId
-                ? { id: originalAssigneeId, name: null }
-                : null,
-            attemptCount: recoveryAction?.attemptCount ?? null,
-            maxAttempts: recoveryAction?.maxAttempts ?? null,
-            nextAction: recoveryAction?.nextAction ?? null,
-            routingFallbackReason: readNonEmptyString(
-              recoveryEvidence.routingFallbackReason,
-            ),
-          }
-        : null,
+    recovery,
     issue: issueSummary
       ? {
           id: issueSummary.id,
@@ -2861,8 +2809,8 @@ export function createHeartbeatRunPreparation(db: Db) {
     return byCompany;
   }
 
-  async function getIssueExecutionContext(companyId: string, issueId: string) {
-    return db
+  async function getIssueExecutionContext(companyId: string, issueId: string, client: Pick<Db, "select"> = db) {
+    return client
       .select({
         chatCommunicationGuidance: chatConversations.communicationGuidance,
         chatAssignedAgentId: chatEndpoints.assignedAgentId,
@@ -2975,6 +2923,7 @@ export function createHeartbeatRunPreparation(db: Db) {
   async function getRoutineEnvForExecutionIssue(
     companyId: string,
     issueContext: { originKind: string | null; originId: string | null; originRunId: string | null } | null,
+    client: Pick<Db, "select"> = db,
   ) {
     if (
       !issueContext ||
@@ -2985,7 +2934,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     }
 
     const routineRun = issueContext.originRunId
-      ? await db
+      ? await client
           .select({
             routineRevisionId: routineRuns.routineRevisionId,
             responsibleUserId: routineRuns.responsibleUserId,
@@ -3002,7 +2951,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       : null;
 
     if (routineRun?.routineRevisionId) {
-      const revision = await db
+      const revision = await client
         .select({
           snapshot: routineRevisions.snapshot,
           responsibleUserId: routineRevisions.responsibleUserId,
@@ -3031,7 +2980,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       }
     }
 
-    const routine = await db
+    const routine = await client
       .select({
         env: routines.env,
         responsibleUserId: routines.responsibleUserId,
@@ -3052,8 +3001,8 @@ export function createHeartbeatRunPreparation(db: Db) {
     };
   }
 
-  async function resolveCompanyDefaultResponsibleUserId(companyId: string) {
-    const company = await db
+  async function resolveCompanyDefaultResponsibleUserId(companyId: string, client: Pick<Db, "select"> = db) {
+    const company = await client
       .select({ defaultResponsibleUserId: companies.defaultResponsibleUserId })
       .from(companies)
       .where(eq(companies.id, companyId))
@@ -3063,7 +3012,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     );
     if (explicitDefault) return explicitDefault;
 
-    const owner = await db
+    const owner = await client
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -3079,7 +3028,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (owner?.userId) return owner.userId;
 
-    const firstUser = await db
+    const firstUser = await client
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -3098,9 +3047,10 @@ export function createHeartbeatRunPreparation(db: Db) {
   async function resolveParentIssueResponsibleUserId(
     companyId: string,
     parentId: string | null | undefined,
+    client: Pick<Db, "select"> = db,
   ) {
     if (!parentId) return null;
-    const parent = await db
+    const parent = await client
       .select({
         responsibleUserId: issues.responsibleUserId,
         createdByUserId: issues.createdByUserId,
@@ -3136,7 +3086,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     source?: WakeupOptions["source"] | null;
     triggerDetail?: WakeupOptions["triggerDetail"] | null;
     existingRunResponsibleUserId?: string | null;
-  }) {
+  }, client: Pick<Db, "select"> = db) {
     const contextResponsibleUserId = readNonEmptyString(
       input.contextSnapshot.responsibleUserId,
     );
@@ -3156,7 +3106,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       messageIds.length &&
       !input.contextSnapshot.retryOfRunId
     ) {
-      const messages = await db
+      const messages = await client
         .select({
           id: issueComments.id,
           authorUserId: issueComments.authorUserId,
@@ -3181,7 +3131,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     }
     const retryOfRunId = readNonEmptyString(input.contextSnapshot.retryOfRunId);
     if (retryOfRunId) {
-      const [origin] = await db
+      const [origin] = await client
         .select({ responsibleUserId: heartbeatRuns.responsibleUserId })
         .from(heartbeatRuns)
         .where(
@@ -3203,11 +3153,12 @@ export function createHeartbeatRunPreparation(db: Db) {
     const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(
       input.companyId,
       input.issueContext?.parentId,
+      client,
     );
     if (parentResponsibleUserId) return parentResponsibleUserId;
     if (!input.issueContext && requestedUserId) return requestedUserId;
     input.contextSnapshot.executionIdentityCause = "company_default";
-    return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    return resolveCompanyDefaultResponsibleUserId(input.companyId, client);
   }
 
   async function resolveResponsibleUserIdForRun(input: {

@@ -1,0 +1,113 @@
+# Fork-only card response checks. Do not include this file in an upstream patch.
+name: Synthiq card response tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - ".github/workflows/synthiq-card-responses.yml"
+      - "packages/shared/src/**"
+      - "packages/db/src/**"
+      - "server/src/index.ts"
+      - "server/src/startup-heartbeat-recovery.ts"
+      - "server/src/routes/issue-comment-lifecycle.ts"
+      - "server/src/__tests__/server-startup-feedback-export.test.ts"
+      - "server/src/__tests__/helpers/server-startup-config.ts"
+      - "server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts"
+      - "server/src/__tests__/issue-comment-reopen-routes.test.ts"
+      - "server/src/__tests__/issue-queued-comments-routes.test.ts"
+      - "server/src/routes/issues.ts"
+      - "server/src/routes/issue-interaction-read*.ts"
+      - "server/src/routes/openapi.ts"
+      - "server/src/__tests__/issue-interaction-reads.test.ts"
+      - "server/src/__tests__/issue-interactions-read-only-contract.test.ts"
+      - "server/src/__tests__/openapi-route*.ts"
+      - "server/src/services/native-runtime/approval-evidence-api.integration.test.ts"
+      - "server/src/services/issues.ts"
+      - "server/src/services/issue-thread-interactions.ts"
+      - "server/src/services/interaction-*.ts"
+      - "server/src/services/question-interaction-answers*"
+      - "server/src/services/question-response-delivery*.ts"
+      - "server/src/services/question-response-source-retirement.ts"
+      - "server/src/services/native-runtime/external-chat-question-*.ts"
+      - "server/src/__tests__/question-response-legacy-authorization.test.ts"
+      - "server/src/services/native-runtime/native-question-bridge*"
+      - "server/src/__tests__/issue-thread-interaction*.test.ts"
+      - "server/src/__tests__/interaction-*-postgres.test.ts"
+      - "server/src/__tests__/question-response-delivery.test.ts"
+      - "ui/src/api/issues.ts"
+      - "ui/src/components/AttentionQueueRow*"
+      - "ui/src/components/CompactDecisionActions.tsx"
+      - "ui/src/components/AttentionInteractionResolver*"
+      - "ui/src/pages/Pipelines*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-card-responses-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  card-responses:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Source: https://github.com/actions/checkout/releases/tag/v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      # Source: https://github.com/actions/setup-node/releases/tag/v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Locate the package store
+        id: store
+        run: |
+          corepack enable
+          echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      # Source: https://github.com/actions/cache/releases/tag/v4.2.4
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: synthiq-card-responses-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/package.json') }}
+      - name: Install dependencies
+        # Release tags can have a lockfile that is older than package metadata.
+        run: corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check shared types
+        run: corepack pnpm --filter @paperclipai/shared typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test card responses and acceptance
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism
+          packages/shared/src/issue-thread-interactions.test.ts
+          packages/shared/src/credential-confirmation.test.ts
+          server/src/services/native-runtime/approval-evidence-api.integration.test.ts
+          server/src/__tests__/issue-interaction-reads.test.ts
+          server/src/__tests__/issue-interactions-read-only-contract.test.ts
+          server/src/__tests__/openapi-routes.test.ts
+          server/src/__tests__/issue-thread-interaction-routes.test.ts
+          server/src/__tests__/issue-thread-interactions-service.test.ts
+          server/src/__tests__/interaction-revision-postgres.test.ts
+          server/src/__tests__/interaction-resolution-outbox-postgres.test.ts
+          server/src/__tests__/interaction-binding-postgres.test.ts
+          server/src/__tests__/interaction-credential-marker-postgres.test.ts
+          server/src/services/question-interaction-answers.test.ts
+          server/src/__tests__/question-response-delivery.test.ts
+          server/src/__tests__/question-response-legacy-authorization.test.ts
+          server/src/services/native-runtime/native-question-bridge.test.ts
+          ui/src/components/AttentionQueueRow.test.tsx
+          ui/src/components/AttentionInteractionResolver.test.tsx
+          ui/src/pages/Pipelines.test.tsx
+          server/src/__tests__/server-startup-feedback-export.test.ts
+          server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+          server/src/__tests__/issue-comment-reopen-routes.test.ts
+          server/src/__tests__/issue-queued-comments-routes.test.ts

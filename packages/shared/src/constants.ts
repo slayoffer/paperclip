@@ -671,7 +671,7 @@ export type RoutineRunSource = (typeof ROUTINE_RUN_SOURCES)[number];
 // can explain the pause and offer a scoped bulk-resume; "system" remains the
 // reason for platform-managed pauses (plugins, built-ins).
 export const PAUSE_REASONS = ["manual", "budget", "system", "company_archived", "import"] as const;
-export type PauseReason = (typeof PAUSE_REASONS)[number];
+export type PauseReason = (typeof PAUSE_REASONS)[number] | `ops-guard:${string}`;
 
 export const PROJECT_COLORS = [
   "#6366f1", // indigo
@@ -1001,6 +1001,7 @@ export const JOIN_REQUEST_STATUSES = ["pending_approval", "approved", "rejected"
 export type JoinRequestStatus = (typeof JOIN_REQUEST_STATUSES)[number];
 
 export const PERMISSION_KEYS = [
+  "stats:read",
   "agents:create",
   "agents:configure",
   "agents:suggest-changes",

@@ -1,0 +1,9 @@
+# The callback gateway generator retains the merged progress policy and shrinks from the release base.
+packages/adapter-utils/src/sandbox-callback-bridge.ts
+
+# Security pins preserve complete existing workflow jobs and triggers.
+.github/workflows/docker.yml
+.github/workflows/pr-trusted.yml
+.github/workflows/release.yml
+.github/workflows/runner-full-stack-e2e.yml
+.github/workflows/runner-protocol-live-evals.yml

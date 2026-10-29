@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   executionWorkspaces,
@@ -65,6 +65,20 @@ import {
 } from "./workspace-runtime-read-model.js";
 
 type ExecutionWorkspaceRow = typeof executionWorkspaces.$inferSelect;
+
+// A task selection must not replace the environment of an inherited binding.
+export function requiresTaskEnvironmentBinding(
+  workspace: { config: Pick<ExecutionWorkspaceConfig, "environmentId"> | null } | null,
+  selectedEnvironmentId: string | null | undefined,
+  localEnvironmentId?: string | null,
+): boolean {
+  if (!workspace || !selectedEnvironmentId) return false;
+  // A saved workspace without an environment id ran in the local default environment.
+  // Without the local id, keep the conservative answer: a missing id is a change.
+  const workspaceEnvironmentId = workspace.config?.environmentId ?? localEnvironmentId ?? null;
+  return workspaceEnvironmentId !== selectedEnvironmentId;
+}
+
 type WorkspaceRuntimeServiceRow = typeof workspaceRuntimeServices.$inferSelect;
 type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -1305,7 +1319,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // required: without it the query re-selects the oldest ineligible rows every
   // sweep and starves eligible rows behind them. The cursor resets to the start
   // when a sweep reaches the end of the candidate set.
-  let terminalSweepCursor: { updatedAt: Date; id: string } | null = null;
+  let terminalSweepCursor: { updatedAt: string; id: string } | null = null;
   // The reaper freezes an upper bound on updatedAt at the start of each
   // rotation. The scan only reads candidates at or below the bound, so a steady
   // stream of newer candidates cannot keep every page full and stop the cursor
@@ -2547,6 +2561,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           eligible: 0,
           archived: 0,
           cleanupFailed: 0,
+          skippedConcurrentSweep: 1,
+          skippedGitInspection: 0,
+          skippedDirty: 0,
           skippedActiveRun: 0,
           skippedNonTerminalTree: 0,
           skippedUndelivered: 0,
@@ -2582,16 +2599,21 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         : undefined;
       const cursorFilter = cursor
         ? or(
-            gt(executionWorkspaces.updatedAt, cursor.updatedAt),
+            sql<boolean>`${executionWorkspaces.updatedAt} > ${cursor.updatedAt}::timestamptz`,
             and(
-              eq(executionWorkspaces.updatedAt, cursor.updatedAt),
+              sql<boolean>`${executionWorkspaces.updatedAt} = ${cursor.updatedAt}::timestamptz`,
               gt(executionWorkspaces.id, cursor.id),
             ),
           )
         : undefined;
       const scanFilter = and(baseCandidateFilter, boundaryFilter, cursorFilter);
+      // Keep the database timestamp as text. JavaScript Date truncates its
+      // microseconds and can make the last row appear again on every page.
       const candidates = await db
-        .select()
+        .select({
+          ...getTableColumns(executionWorkspaces),
+          sweepUpdatedAt: sql<string>`${executionWorkspaces.updatedAt}::text`,
+        })
         .from(executionWorkspaces)
         .where(scanFilter)
         .orderBy(asc(executionWorkspaces.updatedAt), asc(executionWorkspaces.id))
@@ -2604,13 +2626,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         terminalSweepBoundary = null;
       } else {
         const lastCandidate = candidates[candidates.length - 1]!;
-        terminalSweepCursor = { updatedAt: lastCandidate.updatedAt, id: lastCandidate.id };
+        terminalSweepCursor = { updatedAt: lastCandidate.sweepUpdatedAt, id: lastCandidate.id };
       }
       const result = {
         checked: candidates.length,
         eligible: 0,
         archived: 0,
         cleanupFailed: 0,
+        skippedConcurrentSweep: 0,
+        skippedGitInspection: 0,
+        skippedDirty: 0,
         skippedActiveRun: 0,
         skippedNonTerminalTree: 0,
         skippedUndelivered: 0,
@@ -2624,6 +2649,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         const executionWorkspace = toExecutionWorkspace(workspace);
         const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
         if (!statusInspectionSucceeded) {
+          result.skippedGitInspection += 1;
           result.skippedUndelivered += 1;
           continue;
         }
@@ -2648,6 +2674,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         if (assessment.workspaceDirty) {
+          result.skippedDirty += 1;
           result.skippedUndelivered += 1;
           continue;
         }
@@ -3031,6 +3058,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             },
             workspace: {
               id: row.id,
+              sourceIssueId: row.sourceIssueId,
               mode: row.mode,
               strategyType: row.strategyType,
               cwd: row.cwd,

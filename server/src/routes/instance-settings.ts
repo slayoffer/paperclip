@@ -6,8 +6,10 @@ import {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
   startTaskDrainRequestSchema,
+  stopTaskDrainRequestSchema,
 } from "@paperclipai/shared";
 import { conflict, forbidden } from "../errors.js";
+import { taskDrainService } from "../services/task-drain.js";
 import {
   cloudTenantPrimaryCompanyId,
   getCloudStackContext,
@@ -126,6 +128,9 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
   const svc = instanceSettingsService(db);
   const environments = environmentService(db);
   const heartbeat = heartbeatService(db);
+  // Synthiq fork: an ordinary drain is a persisted, owned lease (doc/task-drain.md).
+  // Upstream's idle-purpose drain stays process-local.
+  const durableTaskDrain = taskDrainService(db);
 
   router.get("/instance/settings", async (req, res) => {
     assertBoardOrgAccess(req);
@@ -313,21 +318,54 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
           code: "database_backups_platform_managed",
         });
       }
-      const idleSleepSafety = await readIdleSleepSafety(db, () => heartbeat.getTaskDrainStatus(), Date.now,
+      const idleSleepSafety = await readIdleSleepSafety(db, () => heartbeat.getLocalTaskDrainStatus(), Date.now,
         typeof req.query.ownerId === "string" ? req.query.ownerId : undefined,
         () => readIdleLocalWork({ backupCheckpoint: Boolean(prepareIdleDatabaseBackup) }),
         pluginWorkers?.inspectIdleSleep?.bind(pluginWorkers), prepareIdleDatabaseBackup);
-      res.json({ ...heartbeat.getTaskDrainStatus(), idleSleepSafety });
+      res.json({ ...(await heartbeat.getTaskDrainStatus()), idleSleepSafety });
       return;
     }
-    res.json(heartbeat.getTaskDrainStatus());
+    res.json(await heartbeat.getTaskDrainStatus());
   });
+
+  function drainAudit(req: Request, action: string, publications: ActivityPublication[]) {
+    const actor = getActorInfo(req);
+    return async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0], details: Record<string, unknown>) => {
+      const companyIds = await instanceSettingsService(tx as unknown as Db).listCompanyIds();
+      for (const companyId of companyIds) {
+        await logActivity(tx as unknown as Db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action,
+          entityType: "instance_settings",
+          entityId: "task-drain",
+          details,
+        }, publications);
+      }
+    };
+  }
 
   router.post(
     "/instance/task-drain",
     validate(startTaskDrainRequestSchema),
     async (req, res) => {
       assertCanManageInstanceSettings(req);
+      if (req.body.purpose !== "idle") {
+        // An idle drain owns the process-local hold. A lease must not replace it.
+        if (heartbeat.getLocalTaskDrainStatus().ownerId) {
+          throw conflict("Another task drain is already active");
+        }
+        const publications: ActivityPublication[] = [];
+        const action = "instance.task_drain.started";
+        const lease = await durableTaskDrain.acquire(getActorInfo(req).actorId, req.body, drainAudit(req, action, publications));
+        publishActivitiesBestEffort(publications, action);
+        res.json(lease);
+        return;
+      }
       const actor = getActorInfo(req);
       const companyIds = await svc.listCompanyIds();
       const ttlMs = req.body.ttlMs ?? null;
@@ -338,7 +376,8 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
       // startedAt reflects the moment this request actually took effect,
       // not the moment it arrived and was queued behind another transition.
       const drain = await withTaskDrainTransition(async () => {
-        const prior = heartbeat.getTaskDrainStatus();
+        // The merged status also reports an active persisted lease.
+        const prior = await heartbeat.getTaskDrainStatus();
         if (prior?.ownerId || (req.body.purpose === "idle" && prior?.draining)) {
           throw conflict("Another task drain is already active");
         }
@@ -388,6 +427,16 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
 
   router.delete("/instance/task-drain", async (req, res) => {
     assertCanManageInstanceSettings(req);
+    if (req.query.ownerId === undefined) {
+      // A lease release needs the lease ID that acquisition returned.
+      const { leaseId } = stopTaskDrainRequestSchema.parse(req.body ?? {});
+      const publications: ActivityPublication[] = [];
+      const action = "instance.task_drain.stopped";
+      const result = await durableTaskDrain.release(getActorInfo(req).actorId, leaseId, drainAudit(req, action, publications));
+      publishActivitiesBestEffort(publications, action);
+      res.json(result);
+      return;
+    }
     const actor = getActorInfo(req);
     const companyIds = await svc.listCompanyIds();
     // See the POST handler above for why the whole read-audit-apply
@@ -397,7 +446,7 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
     // its live-state mutation always land in the same order as every other
     // queued transition.
     const wasActive = await withTaskDrainTransition(async () => {
-      const priorStatus = heartbeat.getTaskDrainStatus();
+      const priorStatus = heartbeat.getLocalTaskDrainStatus();
       if ((priorStatus.ownerId || req.query.ownerId !== undefined) &&
           (typeof req.query.ownerId !== "string" || req.query.ownerId !== priorStatus.ownerId)) {
         throw conflict("Task drain ownership changed");

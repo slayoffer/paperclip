@@ -381,6 +381,12 @@ export interface WorkspaceRealizationRecord {
   authoritativeRoot: string;
   pathAliases: WorkspaceRealizationPathAlias[];
   outboundRestorePaths: string[];
+  /**
+   * Host folder for the per-run adapter runtime assets (skills, MCP config,
+   * CODEX_HOME). Set only for an SSH `in_place` realization, so these assets
+   * stay outside the tracked worktree. The adapter removes the folder at run end.
+   */
+  runtimeRoot?: string | null;
   provider: string | null;
   environmentId: string;
   leaseId: string;

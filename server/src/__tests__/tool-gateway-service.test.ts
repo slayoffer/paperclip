@@ -1,9 +1,11 @@
 import { subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
+import { createRunFixture, createRemoteMcpToolFixture, fakePluginDispatcher } from "./tool-gateway-service-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   activityLog,
   agentWakeupRequests,
   toolActionDeliveries,
@@ -64,111 +66,6 @@ function createTestToolGatewayService(db: ReturnType<typeof createDb>, options: 
   });
 }
 
-async function createRunFixture(db: ReturnType<typeof createDb>) {
-  const company = await db.insert(companies).values({
-    name: `Gateway ${randomUUID()}`,
-    issuePrefix: `TG${randomUUID().slice(0, 6).toUpperCase()}`,
-  }).returning().then((rows) => rows[0]!);
-  const agent = await db.insert(agents).values({
-    companyId: company.id,
-    name: `Gateway Agent ${randomUUID()}`,
-    role: "engineer",
-    adapterType: "process",
-    adapterConfig: {},
-    runtimeConfig: {},
-    permissions: {},
-  }).returning().then((rows) => rows[0]!);
-  const issue = await db.insert(issues).values({
-    companyId: company.id,
-    title: "Gateway approval work",
-    status: "in_progress",
-    assigneeAgentId: agent.id,
-  }).returning().then((rows) => rows[0]!);
-  const run = await db.insert(heartbeatRuns).values({
-    companyId: company.id,
-    agentId: agent.id,
-    invocationSource: "assignment",
-    status: "running",
-    contextSnapshot: { issueId: issue.id },
-  }).returning().then((rows) => rows[0]!);
-  return { company, agent, issue, run };
-}
-
-async function createRemoteMcpToolFixture(db: ReturnType<typeof createDb>, companyId: string) {
-  const application = await db.insert(toolApplications).values({
-    companyId,
-    applicationKey: `remote-${randomUUID().slice(0, 8)}`,
-    name: "Remote MCP",
-    type: "mcp_http",
-    status: "active",
-  }).returning().then((rows) => rows[0]!);
-  const connection = await db.insert(toolConnections).values({
-    companyId,
-    applicationId: application.id,
-    name: "Remote connection",
-    uid: `test/${randomUUID()}`,
-    transport: "mcp_remote",
-    status: "active",
-    enabled: true,
-    healthStatus: "ok",
-    // Use a public IP literal so protocol tests remain independent of DNS while
-    // still exercising the production egress guard and their global fetch stub.
-    credentialPolicy: "shared",
-    config: { url: "https://8.8.8.8/mcp" },
-  }).returning().then((rows) => rows[0]!);
-  await db.insert(connectionGrants).values({
-    companyId,
-    connectionId: connection.id,
-    kind: "organization",
-    credentialSecretRefs: [],
-    status: "active",
-    isDefault: true,
-  });
-  const catalogEntry = await db.insert(toolCatalogEntries).values({
-    companyId,
-    applicationId: application.id,
-    connectionId: connection.id,
-    entryKind: "tool",
-    name: "needs_input",
-    toolName: "needs_input",
-    title: "Needs input",
-    riskLevel: "read",
-    isReadOnly: true,
-    status: "active",
-    versionHash: randomUUID(),
-    schemaHash: randomUUID(),
-  }).returning().then((rows) => rows[0]!);
-  return { application, connection, catalogEntry };
-}
-
-function fakePluginDispatcher(): PluginToolDispatcher {
-  return {
-    initialize: async () => {},
-    teardown: () => {},
-    listToolsForAgent: () => [
-      {
-        name: "fixture:delete_everything",
-        displayName: "Delete everything",
-        description: "Destructive fixture tool.",
-        parametersSchema: { type: "object" },
-        pluginId: "fixture-plugin",
-      },
-    ],
-    getTool: () => null,
-    executeTool: async (_name, parameters) => ({
-      pluginId: "fixture-plugin",
-      toolName: "delete_everything",
-      result: { content: "deleted", data: parameters },
-    }),
-    registerPluginTools: () => {},
-    unregisterPluginTools: () => {},
-    toolCount: () => 1,
-    getRegistry: () => {
-      throw new Error("not implemented");
-    },
-  };
-}
-
 describeEmbeddedPostgres("tool gateway service", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -176,7 +73,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-tool-gateway-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     vi.unstubAllEnvs();
@@ -304,6 +201,46 @@ describeEmbeddedPostgres("tool gateway service", () => {
       approvedActionRequestId: actionRequest.id,
       parameters: { noteId: "n1", body: "short" },
     })).rejects.toMatchObject({ reasonCode: "action_not_approved" });
+  });
+
+  it.each(["approve", "decline"] as const)("checks revisions and reuses identical tool %s retries", async (decision) => {
+    const { company, agent, issue, run } = await createRunFixture(db);
+    await initializeRunIdentity(db, {
+      companyId: company.id, runId: run.id, issueId: issue.id,
+      responsibleUserId: null, cause: "company_default",
+    });
+    await db.insert(toolPolicies).values({
+      companyId: company.id, name: "Review writes", policyType: "require_approval",
+      selectors: { toolName: "mcp-remote-fixture:update_note" },
+    });
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note",
+      parameters: { noteId: "revision", body: "Reviewed" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [action] = await db.select().from(toolActionRequests);
+    const [displayed] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, action.interactionId!));
+    const [current] = await db.update(issueThreadInteractions).set({ title: "Updated request" })
+      .where(eq(issueThreadInteractions.id, displayed.id)).returning();
+    const input = { companyId: company.id, actionRequestId: action.id, actor: { userId: "board-user" },
+      expectedRevision: displayed.revision, idempotencyKey: `tool-${decision}` };
+    const resolve = (expectedRevision: string) => decision === "approve"
+      ? gateway.approveActionRequest({ ...input, expectedRevision })
+      : gateway.declineActionRequest({ ...input, expectedRevision, reason: "Decline" });
+    await expect(resolve(displayed.revision)).rejects.toMatchObject({ status: 409,
+      details: { code: "interaction_revision_conflict" } });
+    const [pending] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, action.id));
+    expect(pending.status).toBe("pending");
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
+    const first = await resolve(current.revision);
+    const events = await db.select().from(toolCallEvents);
+    const deliveries = await db.select().from(toolActionDeliveries);
+    const audit = await db.select().from(activityLog);
+    expect(await resolve(current.revision)).toEqual(first);
+    expect(await db.select().from(toolCallEvents)).toHaveLength(events.length);
+    expect(await db.select().from(toolActionDeliveries)).toHaveLength(deliveries.length);
+    expect(await db.select().from(activityLog)).toHaveLength(audit.length);
+    await expect(resolve(randomUUID())).rejects.toMatchObject({ status: 409,
+      details: { code: "interaction_idempotency_conflict" } });
   });
 
   it("approves a pending action request directly from the review queue and preserves signed arguments", async () => {
@@ -1741,7 +1678,8 @@ describeEmbeddedPostgres("tool gateway service", () => {
 
     const oauthGrantRefresher: NonNullable<ToolGatewayServiceOptions["oauthGrantRefresher"]> = vi.fn(async (input) => {
       if (input.forceRefresh) {
-        await secretService(db).rotate(accessSecret.id, { value: "fresh-customer-token" });
+        // Synthiq fork: the production refreshers mark an automatic token write.
+        await secretService(db).rotate(accessSecret.id, { value: "fresh-customer-token", preserveConnectionHealth: true });
       }
       return db.select().from(connectionGrants).where(eq(connectionGrants.id, input.grantId))
         .then((rows) => rows[0]!);

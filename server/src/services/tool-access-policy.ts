@@ -1,3 +1,4 @@
+import { rateLimitRule } from "./tool-rate-limit-rule.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -611,20 +612,6 @@ function targetMatches(binding: typeof toolProfileBindings.$inferSelect, ctx: To
   return false;
 }
 
-function rateLimitRule(policy: typeof toolPolicies.$inferSelect): ToolRateLimitRule | null {
-  const config = isRecord(policy.config) ? policy.config : {};
-  const raw = isRecord(config.rateLimit) ? config.rateLimit : config;
-  const limit = typeof raw.limit === "number" ? raw.limit : null;
-  const windowSeconds = typeof raw.windowSeconds === "number" ? raw.windowSeconds : null;
-  if (!limit || !windowSeconds || limit <= 0 || windowSeconds <= 0) return null;
-  return {
-    limit: Math.floor(limit),
-    windowSeconds: Math.floor(windowSeconds),
-    keyBy: Array.isArray(raw.keyBy)
-      ? raw.keyBy.filter((item): item is NonNullable<ToolRateLimitRule["keyBy"]>[number] => typeof item === "string")
-      : undefined,
-  };
-}
 
 function assertGenericPolicyType(policyType: string) {
   if (policyType === "trust_rule") {
@@ -1342,7 +1329,7 @@ export function toolAccessPolicyService(db: Db) {
    */
   async function decide(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache } = {},
+    options: { cache?: ToolAccessDecisionCache; requireKnownArguments?: boolean; authorityOnly?: boolean } = {},
   ): Promise<ToolAccessDecision> {
     // A decision that consumes a rate limit can also record a trust-rule hit
     // from the policy row, so it always reads fresh rows.
@@ -1362,6 +1349,17 @@ export function toolAccessPolicyService(db: Db) {
     for (const policy of policies) {
       const conditions = policyConditions(policy);
       if (conditions && selectorMatches(policy.selectors, ctx)) {
+        // A secret-free transfer cannot evaluate predicates on omitted provider arguments.
+        const argumentCondition = conditionRecord(conditions.arguments ?? conditions.args);
+        if (options.requireKnownArguments && argumentCondition) {
+          const paths = ["fieldEquals", "fieldNotEquals", "fieldIn", "fieldMatches"].flatMap(key =>
+            Object.keys(conditionRecord(argumentCondition[key]) ?? {}));
+          paths.push(...listValues(argumentCondition.fieldExists), ...listValues(argumentCondition.fieldAbsent));
+          if (paths.some(path => readPath(ctx.arguments, path) === undefined)) {
+            return decision("deny", "deny_policy_block", "The transfer cannot safely evaluate an argument condition.",
+              effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan });
+          }
+        }
         const parsed = toolPolicyConditionsSchema.safeParse(conditions);
         if (!parsed.success) {
           return decision(
@@ -1421,6 +1419,9 @@ export function toolAccessPolicyService(db: Db) {
             { redactionPlan: redaction.redactionPlan, policyExplanation },
           );
         }
+        // Transfer authority rechecks validate policy without inspecting already consumed quota.
+        // The provider-operation gate separately performs an atomic quota debit.
+        if (options.authorityOnly && input.consumeRateLimit !== true) continue;
         const state = await enforceRateLimit(policy, ctx, input.consumeRateLimit === true);
         if (state?.limited) {
           return decision("rate_limited", "rate_limited", "Tool access rate limit exceeded.", effectiveProfileIds, [policy.id], { rateLimitState: state, redactionPlan: redaction.redactionPlan, policyExplanation });

@@ -39,13 +39,21 @@ function isRecoveryOriginKind(originKind: string | null): boolean {
   return originKind !== null && RECOVERY_ORIGIN_KIND_VALUES.has(originKind);
 }
 
-function issueContextId(contextSnapshot: unknown): string | null {
-  const context = parseObject(contextSnapshot);
-  const issueId = context.issueId ?? context.taskId;
-  return typeof issueId === "string" && issueId.length > 0 ? issueId : null;
-}
+const watchdogRunColumns = {
+  id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+  status: heartbeatRuns.status, lastOutputAt: heartbeatRuns.lastOutputAt,
+  lastOutputSeq: heartbeatRuns.lastOutputSeq, lastOutputStream: heartbeatRuns.lastOutputStream,
+  processStartedAt: heartbeatRuns.processStartedAt, startedAt: heartbeatRuns.startedAt,
+  createdAt: heartbeatRuns.createdAt, wakeupRequestId: heartbeatRuns.wakeupRequestId,
+  processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
+  sourceIssueId: heartbeatRuns.contextTaskIdentity,
+};
+type WatchdogRunRow = Pick<typeof heartbeatRuns.$inferSelect,
+  "id" | "companyId" | "agentId" | "status" | "lastOutputAt" | "lastOutputSeq" |
+  "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt" |
+  "wakeupRequestId" | "processPid" | "processGroupId"> & { sourceIssueId: unknown };
 
-function toRunSnapshot(row: typeof heartbeatRuns.$inferSelect): RunSnapshot {
+function toRunSnapshot(row: WatchdogRunRow): RunSnapshot {
   return {
     id: row.id,
     companyId: row.companyId,
@@ -57,8 +65,8 @@ function toRunSnapshot(row: typeof heartbeatRuns.$inferSelect): RunSnapshot {
     processStartedAt: row.processStartedAt,
     startedAt: row.startedAt,
     createdAt: row.createdAt,
-    sourceIssueId: issueContextId(row.contextSnapshot),
-    resultJson: row.resultJson,
+    sourceIssueId: typeof row.sourceIssueId === "string" && row.sourceIssueId.length > 0 ? row.sourceIssueId : null,
+    resultJson: null,
     wakeupRequestId: row.wakeupRequestId,
     processPid: row.processPid,
     processGroupId: row.processGroupId,
@@ -75,7 +83,7 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
     issueCreatedAtGte?: Date | null;
   }): Promise<RunSnapshot[]> {
     const rows = await db
-      .select()
+      .select(watchdogRunColumns)
       .from(heartbeatRuns)
       .where(
         and(
@@ -112,7 +120,7 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
 
   async function findRunForCompany(companyId: string, runId: string): Promise<RunSnapshot | null> {
     const [row] = await db
-      .select()
+      .select(watchdogRunColumns)
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
       .limit(1);
@@ -290,7 +298,6 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
     const finalRunStatus = input.sourceIssue.status === "cancelled" ? "cancelled" : "succeeded";
     const postCommitIssueActions: IssuePostCommitAction[] = [];
     const resultJson = {
-      ...parseObject(input.run.resultJson),
       sourceResolvedWatchdogFold: {
         sourceIssueId: input.sourceIssue.id,
         sourceIssueIdentifier: input.sourceIssue.identifier,
@@ -314,7 +321,7 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
           finishedAt: input.now,
           error: null,
           errorCode: null,
-          resultJson,
+          resultJson: sql`(case when jsonb_typeof(${heartbeatRuns.resultJson}) = 'object' then ${heartbeatRuns.resultJson} else '{}'::jsonb end) || ${JSON.stringify(resultJson)}::jsonb`,
           updatedAt: input.now,
         })
         .where(and(

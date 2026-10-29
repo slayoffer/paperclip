@@ -246,3 +246,6 @@ export { userCompanyPreferences } from "./user_company_preferences.js";
 export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from "./ai_subscriptions.js";
 
 export * from "./fast_responses.js";
+export { credentialTransfers } from "./credential_transfers.js";
+export { interactionResolutionOutbox } from "./interaction_resolution_outbox.js";
+export { publicationAuthorityClocks, publicationBrokers, publicationRequests } from "./publication_requests.js";

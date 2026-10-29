@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const expectedEngine = ">=24.11.0";
+const expectedEngine = ">=24.22.1";
 const expectedTypes = "^24.0.0";
 const failures = [];
 const skippedDirectories = new Set([".git", ".paperclip", "coverage", "data", "dist", "node_modules"]);
@@ -41,7 +41,7 @@ walk(workflowRoot, (filePath) => {
   if (!/\.ya?ml$/.test(filePath)) return;
   const source = fs.readFileSync(filePath, "utf8");
   for (const match of source.matchAll(/node-version:\s*["']?([^\s"'#]+)/g)) {
-    if (match[1] !== "24") failures.push(`${relative(filePath)}: node-version must be 24, found ${match[1]}`);
+    if (match[1] !== "24.22.1") failures.push(`${relative(filePath)}: node-version must be 24.22.1, found ${match[1]}`);
   }
 });
 
@@ -57,14 +57,15 @@ walk(repoRoot, (filePath) => {
 });
 
 const requiredSourceFragments = [
-  [".nvmrc", "24"],
-  ["packages/shared/src/node-version.ts", 'MINIMUM_NODE_VERSION = "24.11.0"'],
+  [".nvmrc", "24.22.1"],
+  ["packages/shared/src/node-version.ts", 'MINIMUM_NODE_VERSION = "24.22.1"'],
   ["scripts/install.sh", "MIN_NODE_VERSION=\"${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}.${MIN_NODE_PATCH}\""],
   ["scripts/install.sh", "MIN_NODE_MAJOR=24"],
-  ["scripts/install.sh", "MIN_NODE_MINOR=11"],
+  ["scripts/install.sh", "MIN_NODE_MINOR=22"],
+  ["scripts/install.sh", "MIN_NODE_PATCH=1"],
   ["scripts/install.sh", "DEFAULT_NODE_MAJOR=24"],
   ["docker/agent-runtime/Dockerfile.base", "ARG NODE_VERSION=24"],
-  ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.11.0\""],
+  ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.22.1\""],
   ["packages/plugins/sandbox-providers/exe-dev/src/plugin.ts", "nodesource.com/setup_24.x"],
   ["packages/plugins/sandbox-providers/modal/src/manifest.ts", 'default: "node:24"'],
   ["cli/esbuild.config.mjs", 'target: "node24"'],
@@ -83,4 +84,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log("Node version policy check passed (Node >=24.11.0, @types/node 24.x).");
+console.log("Node version policy check passed (Node >=24.22.1, @types/node 24.x).");

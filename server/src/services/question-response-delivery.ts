@@ -1,9 +1,8 @@
-import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { releaseQuestionResponseForRetry } from "./question-response-retry.js";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  agentWakeupRequests,
   agents,
-  activityLog,
   chatPublications,
   heartbeatRuns,
   issueComments,
@@ -11,22 +10,33 @@ import {
   issues,
   issueThreadInteractions,
 } from "@paperclipai/db";
-import type {
-  AskUserQuestionsInteraction,
-  PaperclipQuestionSetPayload,
-} from "@paperclipai/shared";
-import type { PaperclipQuestionResponse } from "../vendor/paperclip-runner/index.js";
+import type { AskUserQuestionsInteraction } from "@paperclipai/shared";
 import { isUniqueViolation } from "../db-errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
-import type { heartbeatService } from "./heartbeat.js";
-import { nativeSha256 } from "./native-runtime/canonical.js";
+import { isRecoveryIssueTokenBudgetBlocked } from "./recovery/issue-token-budget.js";
+import { findDurableQuestionResponseWake, wakeQuestionResponse, type QuestionResponseHeartbeat } from "./question-response-wake.js";
+import { createQuestionResponseSweep } from "./question-response-sweep.js";
+import { hydrateQuestionInteraction, questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
+export { questionResponseDeliveryValues } from "./question-response-delivery-interaction.js";
+export { isRetiredExternalChatQuestionSource } from "./question-response-source-retirement.js";
+
+import {
+  buildQuestionResponseDeliveryEnvelope,
+  matchesQuestionResponseDeliveryDigest,
+} from "./question-response-delivery-envelope.js";
+export {
+  buildQuestionResponseDeliveryEnvelope,
+  formatDurableQuestionResponseSummary,
+  formatQuestionResponseSummary,
+  formatQuestionResponseSteeringMessage,
+  type QuestionResponseDeliveryEnvelope,
+} from "./question-response-delivery-envelope.js";
 
 const DELIVERY_CLAIM_STALE_MS = 30_000;
 const DELIVERY_CLAIM_REFRESH_MS = 10_000;
 const MAX_DELIVERY_ATTEMPTS = 5;
-const DELIVERY_CORRELATION_PREFIX = "question-response:";
 const QUESTION_RESPONSE_WAKE_IDEMPOTENCY_CONSTRAINT =
   "agent_wakeup_requests_question_response_delivery_idempotency_uq";
 
@@ -36,24 +46,9 @@ class DeliveryClaimUnavailableError extends Error {
     this.name = "DeliveryClaimUnavailableError";
   }
 }
-const DURABLE_WAKE_REQUEST_STATUSES = [
-  "queued",
-  "claimed",
-  "running",
-  "succeeded",
-  "completed",
-  "coalesced",
-  "deferred_issue_execution",
-  "retrying",
-  "scheduled_retry",
-] as const;
-
 type QuestionInteractionRow = typeof issueThreadInteractions.$inferSelect;
 type DeliveryRow = typeof issueQuestionResponseDeliveries.$inferSelect;
-type Heartbeat = Pick<
-  ReturnType<typeof heartbeatService>,
-  "wakeup" | "cancelRun"
->;
+type Heartbeat = QuestionResponseHeartbeat;
 type QuestionResponseSteer = (input: {
   runId: string;
   message: string;
@@ -62,14 +57,6 @@ type QuestionResponseSteer = (input: {
 type NativeQuestionResponseResolver = (
   interaction: AskUserQuestionsInteraction,
 ) => Promise<"not_native" | "pending" | "queued">;
-
-export interface QuestionResponseDeliveryEnvelope {
-  schema: "paperclip.question_response_delivery.v1";
-  interactionId: string;
-  sourceRunId: string | null;
-  questionSet: PaperclipQuestionSetPayload;
-  response: PaperclipQuestionResponse;
-}
 
 export interface QuestionResponseDeliveryOutcome {
   deliveryId: string;
@@ -102,268 +89,6 @@ function compactLine(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length > 0 ? normalized : null;
-}
-
-function canonicalQuestionSet(
-  interaction: Pick<AskUserQuestionsInteraction, "title" | "payload">,
-): PaperclipQuestionSetPayload {
-  if (interaction.payload.questionSet)
-    return structuredClone(interaction.payload.questionSet);
-  return {
-    schema: "paperclip.question_set.v1",
-    ...(interaction.title ? { title: interaction.title } : {}),
-    ...(interaction.payload.submitLabel
-      ? { submitLabel: interaction.payload.submitLabel }
-      : {}),
-    questions: interaction.payload.questions.map((question) => {
-      const customOption = question.options.find(
-        (option) => option.freeText === true,
-      );
-      return {
-        id: question.id,
-        prompt: question.prompt,
-        ...(question.helpText ? { helpText: question.helpText } : {}),
-        required: question.required === true,
-        answerMode:
-          question.selectionMode === "multi"
-            ? ("multi_select" as const)
-            : ("single_select" as const),
-        options: question.options
-          .filter((option) => option.freeText !== true)
-          .map((option) => ({
-            id: option.id,
-            label: option.label,
-            ...(option.description ? { description: option.description } : {}),
-          })),
-        ...(customOption
-          ? {
-              customAnswer: {
-                enabled: true as const,
-                label: customOption.label,
-                ...(customOption.description
-                  ? { placeholder: customOption.description }
-                  : {}),
-              },
-            }
-          : {}),
-      };
-    }),
-  };
-}
-
-export function buildQuestionResponseDeliveryEnvelope(
-  interaction: AskUserQuestionsInteraction,
-): QuestionResponseDeliveryEnvelope {
-  if (
-    interaction.status !== "answered" ||
-    !interaction.result ||
-    interaction.result.cancelled === true
-  ) {
-    throw new Error("question_response_interaction_not_answered");
-  }
-  const questionSet = canonicalQuestionSet(interaction);
-  const questionById = new Map(
-    questionSet.questions.map((question) => [question.id, question]),
-  );
-  const response: PaperclipQuestionResponse = {
-    schema: "paperclip.question_response.v1",
-    answers: Object.fromEntries(
-      interaction.result.answers.map((answer) => {
-        const question = questionById.get(answer.questionId);
-        return [
-          answer.questionId,
-          question?.answerMode === "text"
-            ? { ...(answer.otherText ? { text: answer.otherText } : {}) }
-            : {
-                selectedOptionIds: answer.optionIds,
-                ...(answer.otherText ? { customText: answer.otherText } : {}),
-              },
-        ];
-      }),
-    ),
-  };
-  return {
-    schema: "paperclip.question_response_delivery.v1",
-    interactionId: interaction.id,
-    sourceRunId: interaction.sourceRunId ?? null,
-    questionSet,
-    response,
-  };
-}
-
-function questionAnswerLines(
-  envelope: QuestionResponseDeliveryEnvelope,
-): string[] {
-  const lines: string[] = [];
-  for (const question of envelope.questionSet.questions) {
-    const answer = envelope.response.answers[question.id];
-    if (!answer) continue;
-    const optionLabelById = new Map(
-      (question.options ?? []).map((option) => [option.id, option.label]),
-    );
-    const values = (answer.selectedOptionIds ?? []).map(
-      (optionId) => optionLabelById.get(optionId) ?? optionId,
-    );
-    const text = compactLine(answer.text);
-    const customText = compactLine(answer.customText);
-    if (text) values.push(text);
-    if (customText) values.push(customText);
-    const header = compactLine(question.header);
-    const prompt = compactLine(question.prompt);
-    const label =
-      header && prompt && header !== prompt
-        ? `${header} — ${prompt}`
-        : (header ?? prompt ?? question.id);
-    lines.push(`- ${label}: ${values.join(", ") || "No answer"}`);
-  }
-  return lines;
-}
-
-export function formatQuestionResponseSummary(
-  envelope: QuestionResponseDeliveryEnvelope,
-): string {
-  const lines = questionAnswerLines(envelope);
-  return lines.length > 0
-    ? ["Resolved questions and answers:", ...lines].join("\n")
-    : "Resolved questions and answers.";
-}
-
-export function formatDurableQuestionResponseSummary(
-  interaction: AskUserQuestionsInteraction,
-): string {
-  const existing = compactLine(interaction.result?.summaryMarkdown);
-  return (
-    existing ??
-    formatQuestionResponseSummary(
-      buildQuestionResponseDeliveryEnvelope(interaction),
-    )
-  );
-}
-
-export function formatQuestionResponseSteeringMessage(
-  envelope: QuestionResponseDeliveryEnvelope,
-): string {
-  const lines = questionAnswerLines(envelope);
-  return lines.length > 0
-    ? ["Answered questions", "", ...lines].join("\n")
-    : "Answered questions";
-}
-
-function hydrateQuestionInteraction(
-  row: QuestionInteractionRow,
-): AskUserQuestionsInteraction {
-  return {
-    ...row,
-    kind: "ask_user_questions",
-    status: row.status as AskUserQuestionsInteraction["status"],
-    continuationPolicy:
-      row.continuationPolicy as AskUserQuestionsInteraction["continuationPolicy"],
-    resolverPolicy: row.effectiveResolverPolicy,
-    requestedResolverPolicy: row.requestedResolverPolicy,
-    effectiveResolverPolicy: row.effectiveResolverPolicy,
-    resolverPolicyProvenance: row.resolverPolicyProvenance,
-    effectiveResolverPolicySource: row.effectiveResolverPolicySource,
-    legacyResolverPolicyAliases: { requested: null, effective: null },
-    payload: row.payload as AskUserQuestionsInteraction["payload"],
-    result: row.result as AskUserQuestionsInteraction["result"],
-  };
-}
-
-export function questionResponseDeliveryValues(
-  interaction: AskUserQuestionsInteraction,
-) {
-  const envelope = buildQuestionResponseDeliveryEnvelope(interaction);
-  return {
-    companyId: interaction.companyId,
-    issueId: interaction.issueId,
-    interactionId: interaction.id,
-    sourceRunId: interaction.sourceRunId ?? null,
-    correlationId: `${DELIVERY_CORRELATION_PREFIX}${interaction.id}`,
-    payloadSha256: nativeSha256(envelope),
-  };
-}
-
-/**
- * An intentional retired question source is not a failed execution incident.
- * This is only a stop classification: the dedicated answer wake still needs
- * its own fresh source/principal attestation before it can execute. Call while
- * holding the task lock; no provider operation or successor is started here.
- */
-export async function isRetiredExternalChatQuestionSource(
-  database: Db,
-  scope: { companyId: string; issueId: string; agentId: string; runId: string },
-): Promise<boolean> {
-  const source = await database.select().from(heartbeatRuns).where(and(
-    eq(heartbeatRuns.id, scope.runId),
-    eq(heartbeatRuns.companyId, scope.companyId),
-    eq(heartbeatRuns.agentId, scope.agentId),
-    eq(heartbeatRuns.nativeIssueId, scope.issueId),
-    eq(heartbeatRuns.runtimeMode, "native"),
-    eq(heartbeatRuns.status, "cancelled"),
-    eq(heartbeatRuns.errorCode, "external_chat_continuation"),
-  )).limit(1).then(rows => rows[0] ?? null);
-  if (!source) return false;
-  const result = record(source.resultJson);
-  const cancellation = record(result.nativeCancellation);
-  const interactionId = result.interactionId;
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (
-    result.externalChatContinuation !== true ||
-    typeof interactionId !== "string" || !uuid.test(interactionId) ||
-    cancellation.schema !== "paperclip.native-cancellation.v1" ||
-    cancellation.companyId !== scope.companyId ||
-    cancellation.runId !== scope.runId ||
-    cancellation.issueId !== scope.issueId ||
-    cancellation.scope !== "run" ||
-    cancellation.dispatchState !== "acknowledged" ||
-    typeof cancellation.intentId !== "string" ||
-    typeof cancellation.intentAuditId !== "string" || !uuid.test(cancellation.intentAuditId) ||
-    typeof cancellation.acknowledgementAuditId !== "string" || !uuid.test(cancellation.acknowledgementAuditId)
-  ) return false;
-  const interaction = await database.select().from(issueThreadInteractions).where(and(
-    eq(issueThreadInteractions.id, interactionId),
-    eq(issueThreadInteractions.companyId, scope.companyId),
-    eq(issueThreadInteractions.issueId, scope.issueId),
-    eq(issueThreadInteractions.createdByAgentId, scope.agentId),
-    eq(issueThreadInteractions.sourceRunId, scope.runId),
-    eq(issueThreadInteractions.kind, "ask_user_questions"),
-    eq(issueThreadInteractions.status, "answered"),
-  )).limit(1).then(rows => rows[0] ?? null);
-  if (!interaction) return false;
-  let expected: ReturnType<typeof questionResponseDeliveryValues>;
-  try {
-    expected = questionResponseDeliveryValues(hydrateQuestionInteraction(interaction));
-  } catch {
-    return false;
-  }
-  const delivery = await database.select({ id: issueQuestionResponseDeliveries.id }).from(issueQuestionResponseDeliveries).where(and(
-    eq(issueQuestionResponseDeliveries.companyId, scope.companyId),
-    eq(issueQuestionResponseDeliveries.issueId, scope.issueId),
-    eq(issueQuestionResponseDeliveries.interactionId, interactionId),
-    eq(issueQuestionResponseDeliveries.sourceRunId, scope.runId),
-    eq(issueQuestionResponseDeliveries.correlationId, expected.correlationId),
-    eq(issueQuestionResponseDeliveries.payloadSha256, expected.payloadSha256),
-  )).limit(1);
-  if (!delivery.length) return false;
-  const audits = await database.select().from(activityLog).where(and(
-    eq(activityLog.companyId, scope.companyId),
-    eq(activityLog.agentId, scope.agentId),
-    eq(activityLog.runId, scope.runId),
-    eq(activityLog.entityType, "heartbeat_run"),
-    eq(activityLog.entityId, scope.runId),
-    eq(activityLog.actorType, "system"),
-    eq(activityLog.actorId, "native-session-cancellation"),
-    inArray(activityLog.id, [cancellation.intentAuditId, cancellation.acknowledgementAuditId]),
-  ));
-  return audits.some(audit => audit.id === cancellation.intentAuditId &&
-    audit.action === "native.cancellation_intent_recorded" &&
-    record(audit.details).intentId === cancellation.intentId &&
-    record(audit.details).scope === "run") &&
-    audits.some(audit => audit.id === cancellation.acknowledgementAuditId &&
-      audit.action === "native.cancellation_dispatch_acknowledged" &&
-      record(audit.details).intentId === cancellation.intentId &&
-      record(audit.details).intentAuditId === cancellation.intentAuditId &&
-      record(audit.details).scope === "run");
 }
 
 function issueIdFromRun(
@@ -445,7 +170,8 @@ export function questionResponseDeliveryService(
         .then((rows) => rows[0] ?? null);
       if (
         !current ||
-        ["delivered", "fallback_queued", "failed"].includes(current.status)
+        ["delivered", "fallback_queued", "failed"].includes(current.status) ||
+        (current.nextAttemptAt && current.nextAttemptAt > claimAt)
       )
         return null;
       if (
@@ -582,35 +308,8 @@ export function questionResponseDeliveryService(
     };
   }
 
-  async function releaseForRetry(
-    delivery: DeliveryRow,
-    errorCode: string,
-    options: { bounded: boolean } = { bounded: true },
-  ) {
-    const at = now();
-    const nextErrorCount = delivery.errorCount + (options.bounded ? 1 : 0);
-    const exhausted =
-      options.bounded && nextErrorCount >= MAX_DELIVERY_ATTEMPTS;
-    await db
-      .update(issueQuestionResponseDeliveries)
-      .set({
-        // Keep an exhausted claim owned until recordTerminal commits its outcome.
-        status: exhausted ? "delivering" : "pending",
-        ...(options.bounded ? { errorCount: nextErrorCount } : {}),
-        lastErrorCode: errorCode,
-        updatedAt: at,
-      })
-      .where(
-        and(
-          eq(issueQuestionResponseDeliveries.id, delivery.id),
-          eq(issueQuestionResponseDeliveries.status, "delivering"),
-          eq(
-            issueQuestionResponseDeliveries.attemptCount,
-            delivery.attemptCount,
-          ),
-        ),
-      );
-    return exhausted;
+  function releaseForRetry(delivery: DeliveryRow, errorCode: string, options = { bounded: true }) {
+    return releaseQuestionResponseForRetry(db, delivery, errorCode, options, now(), MAX_DELIVERY_ATTEMPTS);
   }
 
   async function withClaimLease<T>(
@@ -701,45 +400,18 @@ export function questionResponseDeliveryService(
     companyId: string;
     idempotencyKey: string;
   }) {
-    const request = await db
-      .select({
-        agentId: agentWakeupRequests.agentId,
-        id: agentWakeupRequests.id,
-        runId: agentWakeupRequests.runId,
-        status: agentWakeupRequests.status,
-      })
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, input.companyId),
-          eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
-          inArray(agentWakeupRequests.status, [
-            ...DURABLE_WAKE_REQUEST_STATUSES,
-          ]),
-        ),
-      )
-      .orderBy(desc(agentWakeupRequests.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (!request?.runId) return request ? { request, run: null } : null;
-    const run = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.id, request.runId),
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.agentId, request.agentId),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    return { request, run };
+    return findDurableQuestionResponseWake(db, input);
   }
 
   async function deliver(
     interactionId: string,
+    checkBudget = (issue: { companyId: string; id: string }) => isRecoveryIssueTokenBudgetBlocked(db, issue),
   ): Promise<QuestionResponseDeliveryOutcome | null> {
+    const [pending] = await db.select().from(issueQuestionResponseDeliveries)
+      .where(eq(issueQuestionResponseDeliveries.interactionId, interactionId)).limit(1);
+    // Check before claiming: a budget stop consumes neither a claim nor an error retry.
+    if (pending && ["pending", "delivering"].includes(pending.status) &&
+      await checkBudget({ companyId: pending.companyId, id: pending.issueId })) return null;
     const claimed = await claim(interactionId);
     if (!claimed) return terminalOutcome(interactionId);
 
@@ -1008,7 +680,7 @@ export function questionResponseDeliveryService(
       ) ?? null;
     const hydratedInteraction = hydrateQuestionInteraction(interaction);
     const envelope = buildQuestionResponseDeliveryEnvelope(hydratedInteraction);
-    if (nativeSha256(envelope) !== claimed.payloadSha256) {
+    if (!matchesQuestionResponseDeliveryDigest(hydratedInteraction, envelope, claimed.payloadSha256)) {
       return recordTerminal({
         delivery: claimed,
         interaction,
@@ -1154,12 +826,13 @@ export function questionResponseDeliveryService(
         companyId: interaction.companyId,
         idempotencyKey: wakeIdempotencyKey,
       });
+      let suppression: string | null = null;
       const wakeRun =
         existingWake?.run ??
         (existingWake
           ? null
           : await withClaimLease(claimed, () =>
-              options.heartbeat.wakeup(assigneeAgentId, {
+              wakeQuestionResponse(options.heartbeat, assigneeAgentId, {
                 source: "automation",
                 triggerDetail: "system",
                 reason: "issue_commented",
@@ -1201,7 +874,7 @@ export function questionResponseDeliveryService(
                   wakeReason: "issue_commented",
                   source: "issue.interaction.respond",
                 },
-              }),
+              }).then((result) => { suppression = result.suppression; return result.run; }),
             ));
       const durableWake =
         existingWake ??
@@ -1212,12 +885,11 @@ export function questionResponseDeliveryService(
               idempotencyKey: wakeIdempotencyKey,
             }));
       if (!wakeRun && !durableWake) {
-        const errorCode = "question_response_wake_skipped";
-        // Scheduling suppression is an availability state, not a delivery
-        // failure. Keep the durable receipt retryable until the suppression is
-        // lifted; the bounded limit remains reserved for actual wake errors.
-        await releaseForRetry(claimed, errorCode, { bounded: false });
-        return null;
+        const errorCode = suppression ?? "question_response_wake_skipped";
+        if (suppression !== "agent.terminated" &&
+            !await releaseForRetry(claimed, errorCode, { bounded: !suppression })) return null;
+        return recordTerminal({ delivery: claimed, interaction, status: "failed",
+          mode: null, targetRunId: null, adapter, errorCode });
       }
       const eligibleQueuedSuccessor = externalChatBoundary
         ? null
@@ -1298,47 +970,7 @@ export function questionResponseDeliveryService(
     }
   }
 
-  async function sweepPending(limit = 50) {
-    const sweepAt = now();
-    const staleAt = new Date(sweepAt.getTime() - claimStaleMs);
-    await db
-      .update(issueQuestionResponseDeliveries)
-      .set({
-        status: "pending",
-        updatedAt: sweepAt,
-      })
-      .where(
-        and(
-          eq(issueQuestionResponseDeliveries.status, "delivering"),
-          or(
-            isNull(issueQuestionResponseDeliveries.lastAttemptAt),
-            lte(issueQuestionResponseDeliveries.lastAttemptAt, staleAt),
-          ),
-        ),
-      );
-    const ids = await db
-      .select({ interactionId: issueQuestionResponseDeliveries.interactionId })
-      .from(issueQuestionResponseDeliveries)
-      .where(eq(issueQuestionResponseDeliveries.status, "pending"))
-      .orderBy(asc(issueQuestionResponseDeliveries.createdAt))
-      .limit(limit)
-      .then((rows) => rows.map((row) => row.interactionId));
-    const counts = {
-      scanned: ids.length,
-      steered: 0,
-      coalesced: 0,
-      wakeFallback: 0,
-      failed: 0,
-    };
-    for (const id of ids) {
-      const outcome = await deliver(id);
-      if (outcome?.mode === "steered") counts.steered += 1;
-      else if (outcome?.mode === "coalesced") counts.coalesced += 1;
-      else if (outcome?.mode === "wake_fallback") counts.wakeFallback += 1;
-      else if (outcome?.status === "failed") counts.failed += 1;
-    }
-    return counts;
-  }
+  const sweepPending = createQuestionResponseSweep(db, deliver, now, claimStaleMs);
 
   async function hasPending() {
     return (await db.select({ id: issueQuestionResponseDeliveries.id }).from(issueQuestionResponseDeliveries)

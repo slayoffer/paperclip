@@ -5,18 +5,11 @@ import {
   buildIssueBlockersResolvedWakeStateKey,
 } from "../services/issue-dependency-wakeups.ts";
 
-// The first test in this suite imports the large `routes/issues.ts` module
-// through `vi.importActual` inside `createApp`. `vi.resetModules()` in
-// `beforeEach` forces a fresh import each test, so the first test pays the
-// one-time transform and execution cost of that module. Locally the first
-// test takes about 3.7s while the later tests take about 0.13s each. Under
-// the loaded serial shard (maxWorkers=1) this cold-start can cross vitest's
-// default 5000ms test timeout and produce a flaky "Test timed out in 5000ms"
-// failure. Give the suite generous headroom, far above the observed cold-start
-// yet still below the 30s hook timeout.
+// The route import needs additional time on a loaded test host.
 vi.setConfig({ testTimeout: 30000 });
 
-const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
+const mockWakeup = vi.hoisted(() => vi.fn(async (): Promise<{ id: string } | null> => null));
+const mockLogActivity = vi.hoisted(() => vi.fn(async (_db: unknown, _entry: Record<string, unknown>) => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
@@ -67,6 +60,7 @@ vi.mock("../services/index.js", () => ({
   }),
   heartbeatService: () => ({
     wakeup: mockWakeup,
+    getActiveRunForAgent: vi.fn(async () => null),
     reportRunActivity: vi.fn(async () => undefined),
   }),
   getIssueContinuationSummaryDocument: vi.fn(async () => null),
@@ -99,7 +93,7 @@ vi.mock("../services/index.js", () => ({
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   }),
   issueService: () => mockIssueService,
-  logActivity: vi.fn(async () => undefined),
+  logActivity: mockLogActivity,
   projectService: () => ({
     getById: vi.fn(),
     listByIds: vi.fn(async () => []),
@@ -189,7 +183,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
   });
 
-  it("wakes dependents when the final blocker transitions to done", async () => {
+  it.each(["done", "cancelled"])("wakes dependents when the final blocker becomes %s", async status => {
     mockIssueService.getById.mockResolvedValue({
       id: "issue-1",
       companyId: "company-1",
@@ -213,7 +207,7 @@ describe("issue dependency wakeups in issue routes", () => {
       identifier: "PAP-100",
       title: "Finish blocker",
       description: null,
-      status: "done",
+      status,
       priority: "medium",
       parentId: null,
       assigneeAgentId: "agent-1",
@@ -232,7 +226,7 @@ describe("issue dependency wakeups in issue routes", () => {
       },
     ]);
 
-    const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status });
     expect(res.status).toBe(200);
     await vi.waitFor(() => {
       expect(mockWakeup).toHaveBeenCalledWith(
@@ -433,6 +427,23 @@ describe("issue dependency wakeups in issue routes", () => {
       ...overrides,
     };
   }
+
+  it.each([false, true])("records dependency emission only after successful admission: %s", async admitted => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      { id: "issue-2", assigneeAgentId: "agent-2", blockerIssueIds: ["issue-1"] },
+    ]);
+    mockWakeup.mockResolvedValue(admitted ? { id: "admitted-run" } : null);
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => { expect(mockWakeup).toHaveBeenCalledTimes(1); });
+    // Let the completion callback finish before inspecting its activity rows.
+    await new Promise(resolve => setImmediate(resolve));
+    const emitted = mockLogActivity.mock.calls.filter(([, entry]) =>
+      (entry as { action: string }).action === "issue.blockers_resolved_wake_emitted");
+    expect(emitted).toHaveLength(admitted ? 1 : 0);
+  });
 
   it("wakes a Release-like dependent after a terminal reset using the current blocked cycle", async () => {
     const reviewIssueId = "11111111-1111-4111-8111-111111111111";

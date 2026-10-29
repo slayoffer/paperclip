@@ -100,9 +100,11 @@ export function createCodexJsonlParser() {
     return {
       sessionId,
       summary: finalMessage?.trim() ?? "",
-      // Codex includes cache hits in input_tokens; Paperclip stores them separately.
-      usage: { ...usage, inputTokens: Math.max(0, usage.inputTokens - usage.cachedInputTokens) },
-      usageBasis: "per_run" as const,
+      // Synthiq fork: keep Codex raw thread totals (input includes cache hits). Session usage
+      // derives per-run deltas from them, and issue token budgets subtract cached input.
+      usage,
+      // The exec JSONL processor copies ThreadTokenUsage.total, including on resume.
+      usageBasis: "session_cumulative" as const,
       errorMessage,
       sawProtocolEvent,
       sawProtocolTerminalEvent,

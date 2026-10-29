@@ -1,0 +1,70 @@
+# Fork-only persistence evidence. Keep this workflow outside the upstream patch.
+name: Synthiq run persistence redaction
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-run-redaction.yml
+      - packages/adapter-utils/**
+      - packages/adapters/**
+      - server/src/services/heartbeat.ts
+      - server/src/services/run-*-redaction.ts
+      - server/src/services/run-log-redactor.ts
+      - server/src/services/native-runtime/native-github-access*
+      - server/src/services/native-runtime/native-session-executor*
+      - server/src/__tests__/*redaction.test.ts
+      - server/src/__tests__/heartbeat-credential-matrix.test.ts
+      - server/src/__tests__/helpers/credential-persistence-fixture.ts
+      - server/src/__tests__/helpers/acp-credential-persistence-fixture.ts
+      - server/src/__tests__/helpers/embedded-postgres.ts
+      - packages/db/**
+      - packages/shared/**
+      - package.json
+      - pnpm-lock.yaml
+permissions:
+  contents: read
+concurrency:
+  group: synthiq-run-redaction-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  persistence:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TESTS: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check adapter types
+        run: corepack pnpm --filter @paperclipai/adapter-utils typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Prove synthetic persistence and stream masking
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1
+          server/src/__tests__/heartbeat-credential-matrix.test.ts
+          server/src/__tests__/heartbeat-run-persistence-redaction.test.ts
+          server/src/__tests__/run-log-stream-redaction.test.ts
+          server/src/__tests__/run-result-redaction.test.ts
+          server/src/__tests__/run-secret-redaction.test.ts
+          server/src/services/native-runtime/native-github-access.test.ts
+      - name: Check registration for reused native sessions
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1
+          server/src/services/native-runtime/native-session-executor.test.ts
+          -t 'verifies a live warm owner before refreshing run authority'

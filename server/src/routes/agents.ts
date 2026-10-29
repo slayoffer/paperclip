@@ -54,6 +54,7 @@ import {
   deriveAgentUrlKey,
   isUuidLike,
   normalizeIssueIdentifier,
+  pauseAgentSchema,
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentDesiredSkillEntry,
@@ -5404,7 +5405,8 @@ export function agentRoutes(
     if (!(await getAccessibleAgent(req, res, id))) {
       return;
     }
-    const agent = await svcLifecycle.pauseAgent(id);
+    const { reason = "manual" } = pauseAgentSchema.parse(req.body);
+    const agent = await svcLifecycle.pauseAgent(id, reason);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
@@ -5419,6 +5421,7 @@ export function agentRoutes(
       action: "agent.paused",
       entityType: "agent",
       entityId: agent.id,
+      details: { reason },
     });
 
     res.json(redactAgentRowForResponse(agent));
@@ -5886,9 +5889,11 @@ export function agentRoutes(
         ),
       );
     }
-    const run = await heartbeat.wakeup(id, {
+    const { run, skipped } = await heartbeat.wakeupWithDiagnostics(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: opts.source,
       triggerDetail: req.body.triggerDetail ?? "manual",
       reason: req.body.reason ?? null,
@@ -5922,7 +5927,19 @@ export function agentRoutes(
     });
 
     if (!run) {
-      res.status(202).json(await opts.skippedResponse(agent, wakePayload));
+      res.status(202).json(skipped
+        ? {
+            status: "skipped",
+            issueId: typeof wakePayload?.issueId === "string" && wakePayload.issueId.trim()
+              ? wakePayload.issueId : null,
+            executionRunId: typeof skipped.details?.heartbeatSkip?.executionRunId === "string"
+              ? skipped.details.heartbeatSkip.executionRunId : null,
+            executionAgentId: typeof skipped.details?.heartbeatSkip?.executionAgentId === "string"
+              ? skipped.details.heartbeatSkip.executionAgentId : null,
+            executionAgentName: null,
+            ...skipped,
+          }
+        : await opts.skippedResponse(agent, wakePayload));
       return;
     }
 
@@ -6027,6 +6044,8 @@ export function agentRoutes(
     }
     const wakeOpts: Parameters<typeof heartbeat.wakeup>[1] = {
       ...(req.actor.type === "board" ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: "on_demand",
       triggerDetail: typeof body.triggerDetail === "string" ? body.triggerDetail as "manual" | "system" | "ping" | "callback" : "manual",
       requestedByActorType: req.actor.type === "agent" ? "agent" : "user",

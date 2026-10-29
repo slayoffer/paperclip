@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { getTableName, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../errors.js";
 import { hoistModuleGraph } from "./helpers/hoist-module-graph.js";
 
@@ -325,8 +325,10 @@ function createRunContextDb(
   runAgentOrRows: string | Record<string, unknown>[] = ownerAgentId,
   runId: string = ownerRunId,
   chatBindings: Array<{ id: string; companyId: string; issueId: string; state: string }> = [],
+  handoffs: Array<{ body: string }> = [],
 ) {
   const chatBindingQueries: ReturnType<PgDialect["sqlToQuery"]>[] = [];
+  const handoffQueries: ReturnType<PgDialect["sqlToQuery"]>[] = [];
   const runRows = Array.isArray(runAgentOrRows)
     ? runAgentOrRows
     : [{
@@ -379,9 +381,16 @@ function createRunContextDb(
   };
   const dbStub = {
     chatBindingQueries,
+    handoffQueries,
     transaction: async (callback: (tx: typeof dbStub) => Promise<unknown>) => callback(dbStub),
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn((table: Parameters<typeof getTableName>[0]) => {
+        if (getTableName(table) === "issue_comments") {
+          return { where: vi.fn((condition: SQL) => {
+            handoffQueries.push(new PgDialect().sqlToQuery(condition));
+            return { orderBy: vi.fn(() => ({ limit: vi.fn(async () => handoffs.slice(0, 1)) })) };
+          }) };
+        }
         if (getTableName(table) === "issue_thread_interactions") {
           return { where: vi.fn(() => ({ limit: vi.fn(async () => []) })) };
         }
@@ -425,6 +434,7 @@ function boardActor() {
 }
 
 describe("agent issue mutation checkout ownership", () => {
+  afterEach(() => vi.unstubAllEnvs());
   const routeModules = hoistModuleGraph(registerRouteMocks, async () => {
     const [{ errorHandler }, { issueRoutes, __clearIssueListResponseCacheForTests }] = await Promise.all([
       vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -1764,6 +1774,95 @@ describe("agent issue mutation checkout ownership", () => {
         status: "blocked",
         unblockDescriptor: { owner: "board", action: "Review the blocker" },
       }),
+    );
+  });
+
+  describe("saved review waits", () => {
+    const head = "a".repeat(40);
+    const manifest = (sha = head, branch = "review/PAP-1649") => ({
+      body: `\`\`\`handoff\nrepo: slayoffer/paperclip\nbase: ${"b".repeat(40)}\nhead: ${sha}\nbranch: ${branch}\n\`\`\``,
+    });
+    const wait = (sha = head, owner: unknown = "board") => ({
+      status: "blocked",
+      unblockDescriptor: { owner, action: `waiting for the cross-vendor review of ${sha}` },
+    });
+    const reviewDb = (handoffs = [manifest()]) => createRunContextDb({}, ownerAgentId, ownerRunId, [], handoffs);
+
+    it("accepts one PATCH for a saved head with the self-block guard enabled", async () => {
+      vi.stubEnv("PAPERCLIP_SELF_BLOCK_GUARD", "true");
+      const db = reviewDb();
+      const res = await request(await createApp(ownerActor(), db)).patch(`/api/issues/${issueId}`).send(wait());
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining(wait()));
+      expect(mockLogActivity).toHaveBeenCalled();
+      expect(db.handoffQueries).toEqual([expect.objectContaining({
+        params: [companyId, issueId, ownerAgentId, expect.stringContaining("```handoff")],
+        sql: expect.stringContaining('"issue_comments"."deleted_at" is null'),
+      })]);
+    });
+
+    it("permits a board review wait on an already-blocked issue", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked" }));
+      const res = await request(await createApp(ownerActor(), reviewDb())).patch(`/api/issues/${issueId}`).send(wait());
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    });
+
+    it("does not permit an assignment change with the review wait", async () => {
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(peerAgentId) });
+      const res = await request(await createApp(ownerActor(), reviewDb())).patch(`/api/issues/${issueId}`)
+        .send({ ...wait(), assigneeAgentId: peerAgentId });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("keeps the self-owned wait refusal", async () => {
+      vi.stubEnv("PAPERCLIP_SELF_BLOCK_GUARD", "true");
+      const res = await request(await createApp(ownerActor(), reviewDb())).patch(`/api/issues/${issueId}`).send({
+        status: "blocked", unblockDescriptor: { owner: { agentId: ownerAgentId }, action: "Finish my work" },
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.details.code).toBe("self_block_refused");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["wrong head", [manifest("c".repeat(40))], head],
+      ["missing handoff", [], head],
+      ["short head", [manifest()], "a".repeat(39)],
+      ["non-hex head", [manifest()], "g".repeat(40)],
+      ["stale head", [manifest("c".repeat(40)), manifest()], head],
+      ["wrong branch", [manifest(head, "review/PAP-999")], head],
+      ["quoted handoff", [{ body: "> " + manifest().body.replaceAll("\n", "\n> ") }], head],
+      ["duplicate fields", [{ body: manifest().body.replace("base:", "head:") }], head],
+      ["multiple handoffs", [{ body: manifest().body + "\n" + manifest().body }], head],
+    ])("rejects a review wait with %s", async (_name, handoffs, sha) => {
+      const res = await request(await createApp(ownerActor(), reviewDb(handoffs))).patch(`/api/issues/${issueId}`).send(wait(sha));
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("does not accept a handoff supplied only in the same PATCH", async () => {
+      const res = await request(await createApp(ownerActor(), reviewDb([]))).patch(`/api/issues/${issueId}`)
+        .send({ ...wait(), comment: manifest().body });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
+    it("does not permit a peer to record the wait", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo" }));
+      const res = await request(await createApp(peerActor(), reviewDb())).patch(`/api/issues/${issueId}`).send(wait());
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it.each([{ userId: "board-user" }, { agentId: peerAgentId }, { agentId: ownerAgentId }])(
+      "does not permit a different owner %j for a valid handoff", async (owner) => {
+        vi.stubEnv("PAPERCLIP_SELF_BLOCK_GUARD", "true");
+        const res = await request(await createApp(ownerActor(), reviewDb())).patch(`/api/issues/${issueId}`).send(wait(head, owner));
+        expect(res.status).toBe("agentId" in owner && owner.agentId === ownerAgentId ? 409 : 403);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      },
     );
   });
 

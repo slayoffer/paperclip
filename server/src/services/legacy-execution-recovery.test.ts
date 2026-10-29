@@ -1,5 +1,6 @@
 import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
 import { expect, it } from "vitest";
+import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { legacyExecutionNeedsReconciliation } from "./legacy-execution-recovery.js";
 
 const stopped = {
@@ -9,6 +10,16 @@ const stopped = {
     executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
   },
 };
+
+it("retains reconciliation after restart resume fails, even when the new invocation did not start", () => {
+  const resultJson = {
+    restartRecovery: { outcome: "reconciliation", reason: "restart_session_missing" },
+    conversationContinuation: "continue_conversation_v1",
+    executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+  };
+  expect(hasConversationContinuationPolicy(resultJson)).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ runtimeMode: "legacy", status: "failed", errorCode: "setup_failed", resultJson })).toBe(true);
+});
 
 it.each(["workspace_git_scan_timeout", "workspace_git_scan_saturated"])("does not invent unknown provider actions after exhausted %s bootstrap retries", (errorCode) => {
   const run = { runtimeMode: "legacy", status: "failed", errorCode, scheduledRetryAttempt: 2,
