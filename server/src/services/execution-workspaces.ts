@@ -58,6 +58,7 @@ import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -247,11 +248,15 @@ export type ExecutionWorkspaceServiceOptions = {
   // becomes terminal before it archives the workspace. A value of 0 disables
   // the cooldown. The default is 7 days.
   workspaceReaperCooldownDays?: number;
+  // The reaper also uses this seam. A result without statusInspectionSucceeded
+  // counts as a successful status inspection.
   inspectGitCloseReadiness?: (workspace: ExecutionWorkspace) => Promise<{
     git: ExecutionWorkspaceCloseGitReadiness | null;
     warnings: string[];
+    statusInspectionSucceeded?: boolean;
   }>;
 };
+
 
 function parseGitHubRepository(repoUrl: string | null) {
   if (!repoUrl) return null;
@@ -1335,6 +1340,13 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // removes the upper bound and makes the scan chase newer churn again. This
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
+  const dirtyVerdicts = createTerminalWorkspaceDirtyVerdicts(now);
+  const inspectGitForSweep = opts.inspectGitCloseReadiness
+    ? async (workspace: ExecutionWorkspace) => {
+        const inspected = await opts.inspectGitCloseReadiness!(workspace);
+        return { ...inspected, statusInspectionSucceeded: inspected.statusInspectionSucceeded ?? true };
+      }
+    : inspectGitCloseReadiness;
 
   async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
     if (!workspace.sourceIssueId) return [];
@@ -1392,10 +1404,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .limit(100);
   }
 
-  async function assessDelivery(
-    workspace: ExecutionWorkspaceRow,
-    git: ExecutionWorkspaceCloseGitReadiness | null,
-  ) {
+  async function assessIssueTree(workspace: ExecutionWorkspaceRow) {
     const issueTree = await listWorkspaceIssueTree(workspace);
     const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
     const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
@@ -1411,6 +1420,18 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         cooldownAnchor = terminalAt;
       }
     }
+    return { sourceIssueTerminal, subtreeTerminal, cooldownAnchor };
+  }
+
+  type WorkspaceIssueTreeAssessment = Awaited<ReturnType<typeof assessIssueTree>>;
+
+  async function assessDelivery(
+    workspace: ExecutionWorkspaceRow,
+    git: ExecutionWorkspaceCloseGitReadiness | null,
+    issueTreeAssessment?: WorkspaceIssueTreeAssessment,
+  ) {
+    const { sourceIssueTerminal, subtreeTerminal, cooldownAnchor } =
+      issueTreeAssessment ?? await assessIssueTree(workspace);
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
     const workspaceHeadSha = git?.repoRoot && git.workspacePath
@@ -2645,19 +2666,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         clearedStaleReopenPending: 0,
       };
 
+      dirtyVerdicts.prune();
+
       for (const workspace of candidates) {
-        const executionWorkspace = toExecutionWorkspace(workspace);
-        const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
-        if (!statusInspectionSucceeded) {
-          result.skippedGitInspection += 1;
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        const assessment = await assessDelivery(workspace, git);
+        // Run the gates that need only the database before any git work.
+        const issueTreeAssessment = await assessIssueTree(workspace);
         const reopenPending = metadataHasReopenPendingConsumption(
           workspace.metadata as Record<string, unknown> | null,
         );
-        if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
+        if (!issueTreeAssessment.sourceIssueTerminal || !issueTreeAssessment.subtreeTerminal) {
+          dirtyVerdicts.forget(workspace.id);
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition
             // committed. Clear the reopen-pending flag under the lifecycle lock so
@@ -2673,18 +2691,6 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        if (assessment.workspaceDirty) {
-          result.skippedDirty += 1;
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        if (
-          assessment.deliveryState !== "merged_via_pr"
-          && assessment.deliveryState !== "merged_by_ancestry"
-        ) {
-          result.skippedUndelivered += 1;
-          continue;
-        }
         // Hold the archive during the cooldown window. The anchor is the most
         // recent terminal timestamp across the issue tree. A person can reopen
         // the work inside this window. A cooldown of 0 disables the check, so the
@@ -2696,10 +2702,38 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : null;
         if (
           cooldownCutoff
-          && assessment.cooldownAnchor
-          && assessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
+          && issueTreeAssessment.cooldownAnchor
+          && issueTreeAssessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
         ) {
           result.skippedCooldown += 1;
+          continue;
+        }
+        // A cached dirty verdict only skips. It never archives.
+        if (dirtyVerdicts.shouldSkip(workspace.id, workspace.sweepUpdatedAt)) {
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        const executionWorkspace = toExecutionWorkspace(workspace);
+        const { git, statusInspectionSucceeded } = await inspectGitForSweep(executionWorkspace);
+        if (!statusInspectionSucceeded) {
+          result.skippedGitInspection += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        const assessment = await assessDelivery(workspace, git, issueTreeAssessment);
+        if (assessment.workspaceDirty) {
+          dirtyVerdicts.recordDirty(workspace.id, workspace.sweepUpdatedAt);
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        dirtyVerdicts.forget(workspace.id);
+        if (
+          assessment.deliveryState !== "merged_via_pr"
+          && assessment.deliveryState !== "merged_by_ancestry"
+        ) {
+          result.skippedUndelivered += 1;
           continue;
         }
         if (reopenPending) {
