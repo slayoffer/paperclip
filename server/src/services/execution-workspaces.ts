@@ -94,6 +94,7 @@ import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -333,9 +334,11 @@ export type ExecutionWorkspaceServiceOptions = {
   // Test hook. Runs after compaction moves directories out of the worktree and
   // before it re-checks the guard under the lifecycle lock.
   afterWorkspaceCompactionMove?: (workspace: ExecutionWorkspaceRow) => Promise<void>;
+  // The reaper also uses this seam. An omitted success flag means success.
   inspectGitCloseReadiness?: (workspace: ExecutionWorkspace) => Promise<{
     git: ExecutionWorkspaceCloseGitReadiness | null;
     warnings: string[];
+    statusInspectionSucceeded?: boolean;
   }>;
 };
 
@@ -1772,6 +1775,14 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // removes the upper bound and makes the scan chase newer churn again. This
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
+  const dirtyVerdicts = createTerminalWorkspaceDirtyVerdicts(now);
+  const inspectForSweep = async (workspace: ExecutionWorkspace) => {
+    if (workspace.providerType !== "plugin" && opts.inspectGitCloseReadiness) {
+      const inspected = await opts.inspectGitCloseReadiness(workspace);
+      return { ...inspected, statusInspectionSucceeded: inspected.statusInspectionSucceeded ?? true };
+    }
+    return inspectWorkspace(workspace);
+  };
 
   async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
     const sourceIssueId = workspace.sourceIssueId;
@@ -3332,6 +3343,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         compactionFailed: 0,
       };
       const readinessByWorkingTree = new Map<string, ReturnType<typeof inspectGitCloseReadiness>>();
+      dirtyVerdicts.prune();
 
       for (const workspace of candidates) {
         signal?.throwIfAborted();
@@ -3346,6 +3358,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         );
         if (reopenPending) terminalWorkspaceDeadlines.set(workspace.id, now().getTime());
         if (!sourceIssue || issueTree.some(issue => !TERMINAL_ISSUE_STATUSES.has(issue.status))) {
+          dirtyVerdicts.forget(workspace.id);
           if (reopenPending) {
             await clearReopenPendingConsumptionUnderLock(workspace.id, {
               expectedGeneration: readExecutionWorkspaceLifecycleGeneration(
@@ -3445,6 +3458,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           else result.skippedActiveRun += 1;
           continue;
         }
+        // A cached dirty verdict only skips. It never authorizes cleanup.
+        if (dirtyVerdicts.shouldSkip(workspace.id, workspace.sweepUpdatedAt)) {
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
         if (opts.terminalWorkspaceInspectionBackoffMs) {
           const revision = createHash("sha256").update(JSON.stringify([
             workspace.updatedAt, workspace.metadata,
@@ -3470,7 +3489,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : `workspace:${workspace.id}`;
         let inspection = readinessByWorkingTree.get(readinessKey);
         if (!inspection) {
-          inspection = inspectWorkspace(toExecutionWorkspace(workspace));
+          inspection = inspectForSweep(toExecutionWorkspace(workspace));
           readinessByWorkingTree.set(readinessKey, inspection);
         }
         const { git, statusInspectionSucceeded } = await inspection;
@@ -3497,10 +3516,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         if (assessment.workspaceDirty) {
+          dirtyVerdicts.recordDirty(workspace.id, workspace.sweepUpdatedAt);
           result.skippedDirty += 1;
           result.skippedUndelivered += 1;
           continue;
         }
+        dirtyVerdicts.forget(workspace.id);
         if (
           assessment.deliveryState !== "merged_via_pr"
           && assessment.deliveryState !== "merged_by_ancestry"
