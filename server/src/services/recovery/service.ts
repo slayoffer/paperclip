@@ -182,6 +182,7 @@ import {
 import { withRecoveryContext } from "./status-only-context.js";
 import { currentRunFailureText } from "../native-runtime/native-exact-resume-failure.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { boardEscalationWait, reportReconcileFailure, skipRefusedReconcile } from "./stranded-escalation-wait.js";
 import {
   collectDispositionRepairSourceState,
   readDispositionRepairDurableWaitingState,
@@ -4197,6 +4198,7 @@ export function recoveryService(
     const updated = await transactionIssuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
+      ...boardEscalationWait(blockerIds, recoveryAction.id),
       companyGuard: input.issue.companyId,
     }, tx, publications, postCommitActions);
     if (!updated) return null;
@@ -4667,7 +4669,7 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
-        if (await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+        if (skipRefusedReconcile(issue) || await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
           result.skipped += 1;
           continue;
         }
@@ -5866,11 +5868,9 @@ export function recoveryService(
           result.skipped += 1;
         }
       } catch (err) {
+        // A bad issue must not stop the sweep (see reportReconcileFailure).
         result.failed += 1;
-        logger.error(
-          { err, companyId: issue.companyId, issueId: issue.id },
-          "stranded assigned issue reconcile failed; continuing with the next issue",
-        );
+        reportReconcileFailure(err, issue);
       }
     }
 
