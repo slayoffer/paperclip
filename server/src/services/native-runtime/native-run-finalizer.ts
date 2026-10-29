@@ -1002,10 +1002,10 @@ export async function repairCommittedNativeChatResponse(
           { agentId: run.agentId, runId: run.id },
           { authorizationReason: "internal_agent_write", completionReply: true }, tx);
         await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             presentationDecision: { ...resolved.decision, commentId: comment.id,
               reasonCodes: [...resolved.decision.reasonCodes, "committed_task_response_recovered"] },
-          })}::jsonb`, updatedAt: new Date(),
+          }, heartbeatRuns.resultJson)}::jsonb`, updatedAt: new Date(),
         }).where(eq(heartbeatRuns.id, run.id));
         agentId = run.agentId;
         return true;

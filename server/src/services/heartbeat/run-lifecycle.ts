@@ -1867,7 +1867,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         .set({
           livenessReason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-            ${JSON.stringify({ stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON })}::jsonb`,
+            ${sql.param({ stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON }, heartbeatRuns.resultJson)}::jsonb`,
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
