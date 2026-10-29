@@ -15,6 +15,11 @@ export {
   type Db,
 } from "./client.js";
 export {
+  setRunOutputRedactor,
+  getRunOutputRedactor,
+  type RunOutputRedactor,
+} from "./run-output-redaction.js";
+export {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,

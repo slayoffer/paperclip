@@ -401,12 +401,12 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         await runUsedConversationAdapter(db, stopped) &&
         await remoteExecutionHasStopped(db, companyId, runId)) {
       await db.update(heartbeatRuns).set({
-        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
           executionCancellation: { ...parseObject(stopped.resultJson?.executionCancellation),
             state: "acknowledged", acknowledgedAt: new Date().toISOString(),
             proof: "provider_termination_receipt" },
           conversationContinuation: CONVERSATION_CONTINUATION_POLICY,
-                 })}::jsonb`,
+                 }, heartbeatRuns.resultJson)}::jsonb`,
         updatedAt: new Date(),
       }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId),
         eq(heartbeatRuns.status, "cancelled")));
@@ -947,9 +947,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           // Record handoff intent before native cancellation can finalize and release
           // the run. Only its audited stop acknowledgement suppresses recovery.
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-            ${JSON.stringify(options.errorCode === "issue_reassigned" && options.resultJson?.reassignmentStopConfirmed === true
-              ? { reassignmentStopRequested: true } : {})}::jsonb ||
-            ${JSON.stringify({ cancellation })}::jsonb ||
+            ${sql.param(options.errorCode === "issue_reassigned" && options.resultJson?.reassignmentStopConfirmed === true
+              ? { reassignmentStopRequested: true } : {}, heartbeatRuns.resultJson)}::jsonb ||
+            ${sql.param({ cancellation }, heartbeatRuns.resultJson)}::jsonb ||
             jsonb_build_object('startupCancellation', jsonb_build_object(
               'requestedAt', ${new Date().toISOString()}::text,
               'beforeNativeSelection', ${heartbeatRuns.runtimeMode} = 'legacy'

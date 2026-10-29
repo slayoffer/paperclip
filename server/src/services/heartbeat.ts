@@ -4556,7 +4556,7 @@ export function heartbeatService(
               instructionSave = { state: "prepared", contract: "agent_files", storageWarning };
               // This is an advisory on the run, never an agent pause, execution
               // failure, or scheduling gate. Keep it visible while work runs.
-              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ instructionSave })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({ instructionSave }, heartbeatRuns.resultJson)}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
               await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
                 message: storageWarning, payload: instructionSave });
             }
@@ -5245,7 +5245,7 @@ export function heartbeatService(
           // after a restart; cleanup receipts are independently rechecked there.
           await db.update(heartbeatRuns).set({
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
+              ${sql.param({ startupPreparationSettledAt: new Date().toISOString() }, heartbeatRuns.resultJson)}::jsonb`,
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
         }
         await db.update(heartbeatRuns).set({
