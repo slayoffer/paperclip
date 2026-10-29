@@ -77,8 +77,19 @@ function maskJwts(input: string): string {
   return input.replace(JWT_RUN_RE, (run) => (run.includes("eyJ") && run.includes(".") ? maskJwtsInRun(run) : run));
 }
 
+// Env-style credential name with a colon (`PAPERCLIP_API_KEY: …` in YAML, `env` listings and config dumps). The shared
+// scanner masks the `=` and JSON forms only (SYNA-1586). Upper-case names only, so prose such as "token: see below" stays.
+// The bounded name and the literal suffix keep the scan linear.
+const ENV_COLON_ASSIGNMENT_RE =
+  /\b([A-Z][A-Z0-9_]{0,60}(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD))(["']?[ \t]{0,5}:[ \t]{0,5}["']?)([^\s"'\\,;]{8,})/g;
+function maskEnvColonAssignments(input: string): string {
+  if (!input.includes(":")) return input;
+  return input.replace(ENV_COLON_ASSIGNMENT_RE, (match: string, key: string, separator: string, value: string) =>
+    NEUTRAL_ASSIGNMENT_VALUE.test(value) || value.startsWith(REDACTED_EVENT_VALUE) ? match : `${key}${separator}${REDACTED_EVENT_VALUE}`);
+}
+
 function redactLinear(input: string): string {
-  return maskJwts(LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input));
+  return maskJwts(maskEnvColonAssignments(LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input)));
 }
 
 function redactLongSegment(segment: string): string {
