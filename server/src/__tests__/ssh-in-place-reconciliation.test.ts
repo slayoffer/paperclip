@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { createServer, type AddressInfo } from "node:net";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,7 @@ import { logger } from "../middleware/logger.js";
 import * as leaseServices from "../services/environments.js";
 import * as ownership from "../services/ssh-in-place-lock.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { registerAgentHomeOwnershipCases } from "./helpers/ssh-in-place-agent-home-cases.js";
 
 // Only secret resolution uses fixture authentication. SQL, SSH, remote process
 // checks, receipt persistence, ownership files, and realization remain real.
@@ -105,6 +107,7 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
   async function stored(id: string) {
     return (await db.select().from(environmentLeases).where(eq(environmentLeases.id, id)))[0] as EnvironmentLease;
   }
+  registerAgentHomeOwnershipCases({ db: () => db, owner, stored });
   it.each([false, true])("recovers terminal ownership with saved tracking %s and logs the next realization in place", async tracking => {
     const f = await owner({ tracking }); await stoppedWriter(f);
     if (tracking) await db.update(environmentLeases).set({ status: "active", releasedAt: null })
@@ -176,12 +179,21 @@ describe.skipIf(!sshSupport.supported || !pgSupport.supported)("SSH ownership re
   });
   it("preserves ownership when SSH cannot check the original endpoint", async () => {
     const f = await owner(); await stoppedWriter(f);
-    await db.update(environments).set({ config: { ...config, port: 1 } }).where(eq(environments.id, f.environment.id));
-    await db.update(environmentLeases).set({ providerLeaseId:
-      `ssh://${config.username}@${config.host}:1${config.remoteWorkspacePath}` }).where(eq(environmentLeases.id, f.lease.id));
-    expect((await createSshInPlaceOwnershipReconciler(db)()).released).toBe(0);
-    expect(hasRemoteTerminationReceipt(await stored(f.lease.id))).toBe(false);
-    expect(readSshInPlaceWorktreeLockHolder(f.cwd)?.leaseId).toBe(f.lease.id);
+    // Own the failing endpoint: an arbitrary host port can wait for the full SSH timeout.
+    const unavailableSsh = createServer(socket => socket.destroy());
+    unavailableSsh.listen(0, "127.0.0.1");
+    await once(unavailableSsh, "listening");
+    const port = (unavailableSsh.address() as AddressInfo).port;
+    try {
+      await db.update(environments).set({ config: { ...config, host: "127.0.0.1", port } }).where(eq(environments.id, f.environment.id));
+      await db.update(environmentLeases).set({ providerLeaseId:
+        `ssh://${config.username}@127.0.0.1:${port}${config.remoteWorkspacePath}` }).where(eq(environmentLeases.id, f.lease.id));
+      expect((await createSshInPlaceOwnershipReconciler(db)()).released).toBe(0);
+      expect(hasRemoteTerminationReceipt(await stored(f.lease.id))).toBe(false);
+      expect(readSshInPlaceWorktreeLockHolder(f.cwd)?.leaseId).toBe(f.lease.id);
+    } finally {
+      await new Promise<void>((resolve, reject) => unavailableSsh.close(error => error ? reject(error) : resolve()));
+    }
   });
   it("preserves ownership after a receipt write failure and retries later", async () => {
     const f = await owner(); await stoppedWriter(f);
