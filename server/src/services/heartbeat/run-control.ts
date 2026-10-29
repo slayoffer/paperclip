@@ -318,10 +318,11 @@ function runCancellationFenceSql(input: {
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
 }) {
-  const cancellation = JSON.stringify(input.cancellation);
-  const startupCancellation = sql`jsonb_build_object(
-    'requestedAt', ${input.cancellation.requestedAt ?? new Date().toISOString()}::text,
-    'errorCode', ${input.errorCode}::text,
+  const cancellation = sql.param(input.cancellation, heartbeatRuns.resultJson);
+  const startupCancellation = sql`${sql.param({
+    requestedAt: input.cancellation.requestedAt ?? new Date().toISOString(),
+    errorCode: input.errorCode,
+  }, heartbeatRuns.resultJson)}::jsonb || jsonb_build_object(
     'beforeNativeSelection', ${heartbeatRuns.runtimeMode} = 'legacy'
       and ${heartbeatRuns.runtimeModeResolvedAt} is null
       and ${heartbeatRuns.executionStage} = 'preparing'
@@ -331,16 +332,16 @@ function runCancellationFenceSql(input: {
     ? sql`coalesce(${heartbeatRuns.resultJson}->'startupCancellation', ${startupCancellation})`
     : startupCancellation;
   if (input.budgetEnforcement) {
-    const intent = JSON.stringify({ companyId: input.budgetEnforcement.companyId,
+    const intent = sql.param({ companyId: input.budgetEnforcement.companyId,
       scopeType: input.budgetEnforcement.scopeType, scopeId: input.budgetEnforcement.scopeId,
       policyId: input.budgetEnforcement.enforcement?.policyId, version: input.budgetEnforcement.enforcement?.version,
-      createdBefore: input.budgetEnforcement.createdBefore?.toISOString() });
+      createdBefore: input.budgetEnforcement.createdBefore?.toISOString() }, heartbeatRuns.resultJson);
     startupFence = sql`${startupFence} || jsonb_build_object('budgetEnforcement',
       coalesce(nullif(${heartbeatRuns.resultJson}->'startupCancellation'->'budgetEnforcement', 'null'::jsonb), ${intent}::jsonb))`;
   }
   return sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-    ${JSON.stringify(input.attribution ?? {})}::jsonb ||
-    ${JSON.stringify(input.reassignmentStopRequested ? { reassignmentStopRequested: true } : {})}::jsonb ||
+    ${sql.param(input.attribution ?? {}, heartbeatRuns.resultJson)}::jsonb ||
+    ${sql.param(input.reassignmentStopRequested ? { reassignmentStopRequested: true } : {}, heartbeatRuns.resultJson)}::jsonb ||
     jsonb_build_object('cancellation', ${input.preserveCancellation
       ? sql`coalesce(${heartbeatRuns.resultJson}->'cancellation', ${cancellation}::jsonb)`
       : sql`${cancellation}::jsonb`}) ||
@@ -536,12 +537,12 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         const apiStopped = stopped.runtimeMode === "native" && await acknowledgedNativeApiStopExecutionHasStopped(db, stopped);
         if (!apiStopped && !await remoteExecutionHasStopped(db, companyId, runId)) return;
         const acknowledged = await db.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             executionCancellation: { ...parseObject(stopped.resultJson?.executionCancellation),
               state: "acknowledged", acknowledgedAt: new Date().toISOString(),
               proof: apiStopped ? "provider_api_stop_receipt" : "provider_termination_receipt" },
             ...(stopped.runtimeMode === "legacy" ? { conversationContinuation: CONVERSATION_CONTINUATION_POLICY } : {}),
-                   })}::jsonb`,
+          }, heartbeatRuns.resultJson)}::jsonb`,
           updatedAt: new Date(),
         }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId),
           eq(heartbeatRuns.status, "cancelled"),
@@ -1166,7 +1167,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     if (!parseObject(parseObject(run.resultJson?.startupCancellation).budgetEnforcement).scopeType) return;
     const acknowledged = await db.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(${heartbeatRuns.resultJson},
       '{startupCancellation,budgetEnforcement}', ${heartbeatRuns.resultJson}->'startupCancellation'->'budgetEnforcement'
-        || ${JSON.stringify({ deliveredAt: new Date().toISOString(), ...(terminationProof ? { terminationProof } : {}) })}::jsonb)` })
+        || ${sql.param({ deliveredAt: new Date().toISOString(), ...(terminationProof ? { terminationProof } : {}) }, heartbeatRuns.resultJson)}::jsonb)` })
       .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
         pendingBudgetRunCancellationPredicate(),
         terminationProof ? and(eq(heartbeatRuns.status, run.status), eq(heartbeatRuns.nextEventSeq, run.nextEventSeq),
@@ -1290,9 +1291,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         } : {};
         await notifyScheduledRetryCancellation(tx, { companyId: run!.companyId, runId });
         const [fenced] = await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             ...attribution, executionCancellation: { state: "requested", requestedAt }, ...guardedCancellation,
-          })}::jsonb`,
+          }, heartbeatRuns.resultJson)}::jsonb`,
         }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, run!.companyId),
           inArray(heartbeatRuns.status, cancellableStatuses))).returning();
         if (options.expectedStatus && !fenced) return false;
@@ -1849,7 +1850,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           // edit admits new work. Do not revoke or repeat that earlier fence.
           await withBudgetStopDelivery(db, async () => {
             const [attempted] = await db.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(${heartbeatRuns.resultJson},
-              '{startupCancellation,budgetEnforcement,lastAttemptAt}', ${JSON.stringify(new Date().toISOString())}::jsonb)` })
+              '{startupCancellation,budgetEnforcement,lastAttemptAt}', ${sql.param({ at: new Date().toISOString() }, heartbeatRuns.resultJson)}::jsonb->'at')` })
               .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, runId),
                 pendingBudgetRunCancellationPredicate())).returning({ id: heartbeatRuns.id, resultJson: heartbeatRuns.resultJson });
             if (attempted) {

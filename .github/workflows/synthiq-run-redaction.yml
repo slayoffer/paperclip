@@ -10,6 +10,11 @@ on:
       - server/src/services/heartbeat.ts
       - server/src/services/run-*-redaction.ts
       - server/src/services/run-log-redactor.ts
+      - server/src/services/workspace-operations.ts
+      - server/src/services/legacy-restart-recovery.ts
+      - server/src/services/native-runtime/native-run-finalizer.ts
+      - server/src/services/native-runtime/native-chat-review-presentation.ts
+      - server/src/modules/active-run-watchdog/adapters/postgres.ts
       - server/src/services/native-runtime/native-github-access*
       - server/src/services/native-runtime/native-session-executor*
       - server/src/__tests__/*redaction.test.ts
@@ -60,6 +65,7 @@ jobs:
           server/src/__tests__/heartbeat-credential-matrix.test.ts
           server/src/__tests__/heartbeat-run-persistence-redaction.test.ts
           server/src/__tests__/run-log-stream-redaction.test.ts
+          server/src/__tests__/run-output-column-redaction.test.ts
           server/src/__tests__/run-result-redaction.test.ts
           server/src/__tests__/run-secret-redaction.test.ts
           server/src/services/native-runtime/native-github-access.test.ts

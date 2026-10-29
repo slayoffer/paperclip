@@ -511,14 +511,14 @@ async function recordRetryableFailure(input: {
         nativePhaseUpdatedAt: now,
         // Preserve concurrent cancellation and accounting receipts while
         // recording the finalizer's own failure history.
-        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
           finalizationPhase: phase,
           failureCode,
           originalFailureCode: input.failureCode,
           // The latest attempt's redacted cause; cleared when it named none.
           failureCause,
           nextAttemptAt: supersededByNewerRun || exhausted ? null : nextAttemptAt.toISOString(),
-        })}::jsonb`,
+        }, heartbeatRuns.resultJson)}::jsonb`,
         updatedAt: now,
       })
       .where(eq(heartbeatRuns.id, input.run.id))
@@ -988,10 +988,10 @@ async function recoverCommittedNativeChatResponseInScope(
         const comment = await issueService(db).addComment(input.issueId, resolved.text,
           { agentId: run.agentId, runId: run.id }, { authorizationReason, completionReply: true }, tx);
         await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             presentationDecision: { ...resolved.decision, commentId: comment.id,
               reasonCodes: [...resolved.decision.reasonCodes, "committed_monitor_response_recovered"] },
-          })}::jsonb`, updatedAt: new Date(),
+          }, heartbeatRuns.resultJson)}::jsonb`, updatedAt: new Date(),
         }).where(eq(heartbeatRuns.id, run.id));
         agentId = run.agentId;
         return true;
@@ -1068,10 +1068,10 @@ async function recoverCommittedNativeChatResponseInScope(
           // The reply is already on the task (for example, the live path wrote
           // it but did not record its decision). Record it; never post again.
           await tx.update(heartbeatRuns).set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
               presentationDecision: { ...resolved.decision,
                 reasonCodes: [...resolved.decision.reasonCodes, "committed_task_response_reused"] },
-            })}::jsonb || ${settledResponsePublicationSql()}`, updatedAt: new Date(),
+            }, heartbeatRuns.resultJson)}::jsonb || ${settledResponsePublicationSql()}`, updatedAt: new Date(),
           }).where(eq(heartbeatRuns.id, run.id));
           return false;
         }
@@ -1080,10 +1080,10 @@ async function recoverCommittedNativeChatResponseInScope(
           // the live path. Record that decision once so the turn settles and
           // leaves the pending presentation set.
           await tx.update(heartbeatRuns).set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
               presentationDecision: { ...resolved.decision,
                 reasonCodes: [...resolved.decision.reasonCodes, "committed_conversation_interaction_presented"] },
-            })}::jsonb`, updatedAt: new Date(),
+            }, heartbeatRuns.resultJson)}::jsonb`, updatedAt: new Date(),
           }).where(eq(heartbeatRuns.id, run.id));
           settledWithoutReply = true;
           return false;
@@ -1094,10 +1094,10 @@ async function recoverCommittedNativeChatResponseInScope(
           { agentId: run.agentId, runId: run.id },
           { authorizationReason: "internal_agent_write", completionReply: true }, tx);
         await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             presentationDecision: { ...resolved.decision, commentId: comment.id,
               reasonCodes: [...resolved.decision.reasonCodes, "committed_task_response_recovered"] },
-          })}::jsonb || ${settledResponsePublicationSql()}`, updatedAt: new Date(),
+          }, heartbeatRuns.resultJson)}::jsonb || ${settledResponsePublicationSql()}`, updatedAt: new Date(),
         }).where(eq(heartbeatRuns.id, run.id));
         agentId = run.agentId;
         conversationReply = conversation;
@@ -1153,7 +1153,7 @@ async function recoverCommittedNativeChatResponseInScope(
       await tx
         .update(heartbeatRuns)
         .set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(
             {
               presentationDecision,
               nativeCommittedChatResponse: {
@@ -1163,6 +1163,7 @@ async function recoverCommittedNativeChatResponseInScope(
                 decisionId: decision.id,
               },
             },
+            heartbeatRuns.resultJson,
           )}::jsonb`,
           updatedAt: new Date(),
         })
@@ -1791,10 +1792,10 @@ export async function finalizeNativeRun(input: {
       const projectedRunStatus = sql`case when ${heartbeatRuns.status} = 'cancelled'
         then ${heartbeatRuns.status} else ${projectedStatus} end`;
       const projectedResult = sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
-        || ${JSON.stringify(finalizationMetadata)}::jsonb
+        || ${sql.param(finalizationMetadata, heartbeatRuns.resultJson)}::jsonb
         || ${clearExecutionFailure ? sql`case when ${heartbeatRuns.status} = 'cancelled' then '{}'::jsonb
           else ${recoveredExecutionFailureMetadata()} end` : sql`'{}'::jsonb`}`;
-      const nextError = providerFailure ? sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`
+      const nextError = providerFailure ? sql`coalesce(${heartbeatRuns.error}, ${sql.param(providerFailure.errorMessage, heartbeatRuns.error)})`
         : clearExecutionFailure ? sql`null` : sql`${heartbeatRuns.error}`;
       const nextErrorCode = providerFailure ? sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`
         : clearExecutionFailure ? sql`null` : sql`${heartbeatRuns.errorCode}`;

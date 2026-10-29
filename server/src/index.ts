@@ -89,6 +89,7 @@ import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
 import { setSentryRunLinkResolver } from "./sentry-links.js";
 import { createSentryRunLinkResolver } from "./services/sentry-run-links.js";
 import { waitForPendingRunFailureReports } from "./services/run-failure-report.js";
+import { installRunOutputRedaction } from "./services/run-result-redaction.js";
 import { verifyStoppedNativeSessionForReplacement } from "./services/native-runtime/native-session-executor.js";
 import { registerNativeCleanupReleaseWake } from "./services/native-runtime/native-cleanup-release-wake.js";
 import { logNativeCleanupQuarantines } from "./services/native-runtime/native-cleanup-quarantine-log.js";
@@ -475,6 +476,7 @@ async function startServerWithDatabaseTeardown(
   let startupDbInfo:
     | { mode: "external-postgres"; connectionString: string }
     | { mode: "embedded-postgres"; dataDir: string; port: number };
+  installRunOutputRedaction();
   if ("deploymentMode" in startupConfig) assertCloudDatabaseContract(startupConfig);
   if (startupConfig.databaseUrl) {
     const migrationUrl = startupConfig.databaseMigrationUrl ?? startupConfig.databaseUrl;

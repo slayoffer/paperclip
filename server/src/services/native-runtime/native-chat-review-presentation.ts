@@ -583,7 +583,7 @@ export async function restoreNativeChatReviewPresentationInTransaction(
     eq(heartbeatRuns.nativeIssueId, input.issueId),
     eq(heartbeatRuns.runtimeMode, "native"),
   );
-  const projectedResult = sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(projection)}::jsonb`;
+  const projectedResult = sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(projection, heartbeatRuns.resultJson)}::jsonb`;
   const [run] = await db.select({
     needsUpdate: sql<boolean>`${projectedResult} is distinct from ${heartbeatRuns.resultJson}`,
   }).from(heartbeatRuns).where(runOwner).for("update");

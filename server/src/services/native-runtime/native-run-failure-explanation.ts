@@ -27,7 +27,7 @@ export function explainFailedRun(
   const errorCode = current.errorCode ?? sql`${heartbeatRuns.errorCode}`;
   const error = current.error ?? sql`${heartbeatRuns.error}`;
   const explainedCode = sql`coalesce(nullif(btrim(${errorCode}), ''), ${fallback.errorCode})`;
-  const explainedError = sql`coalesce(nullif(btrim(${error}), ''), ${fallback.error})`;
+  const explainedError = sql`coalesce(nullif(btrim(${error}), ''), ${sql.param(fallback.error, heartbeatRuns.error)})`;
   if (current.preserveCancelled === false) return { errorCode: explainedCode, error: explainedError };
   return {
     errorCode: sql`case when ${heartbeatRuns.status} = 'cancelled' then ${heartbeatRuns.errorCode} else ${explainedCode} end`,

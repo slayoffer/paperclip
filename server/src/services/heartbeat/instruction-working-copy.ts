@@ -205,7 +205,7 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
           instructionSave = { state: "prepared", contract: "agent_files", storageWarning };
           // This is an advisory on the run, never an agent pause, execution
           // failure, or scheduling gate. Keep it visible while work runs.
-          await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ instructionSave })}::jsonb` }).where(eq(heartbeatRuns.id, readRun().id));
+          await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({ instructionSave }, heartbeatRuns.resultJson)}::jsonb` }).where(eq(heartbeatRuns.id, readRun().id));
           await appendRunEvent(readRun(), { eventType: "instruction_save", stream: "system", level: "warn",
             message: storageWarning, payload: instructionSave });
         }

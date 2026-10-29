@@ -4218,7 +4218,7 @@ export function heartbeatService(
           // after a restart; cleanup receipts are independently rechecked there.
           await db.update(heartbeatRuns).set({
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
+              ${sql.param({ startupPreparationSettledAt: new Date().toISOString() }, heartbeatRuns.resultJson)}::jsonb`,
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
         }
         if (latestRun?.runtimeMode === "native" && isHeartbeatRunTerminalStatus(latestRun.status) &&
