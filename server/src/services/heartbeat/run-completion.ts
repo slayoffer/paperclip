@@ -375,15 +375,16 @@ function controllerLeaseLossResultJson(signal: AbortSignal) {
 
 /** Persist the resolved presentation and wake dependents in its committing transaction. */
 export async function recordRunPresentationDecision(db: Db, input: {
-  companyId: string; runId: string; issueId?: string; decision: RunPresentationDecision;
+  companyId: string; runId: string; issueId?: string; decision?: RunPresentationDecision;
 }) {
   await db.transaction(async tx => {
     await notifyChatRunMilestones(tx, { companyId: input.companyId, runId: input.runId, issueId: input.issueId });
+    const projection = input.decision ? { presentationDecision: input.decision } : { redactionUnavailable: true };
     await tx.update(heartbeatRuns).set({
-      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ presentationDecision: input.decision })}::jsonb
-        || ${typeof input.decision.commentId === "string" ? settledResponsePublicationSql() : sql`'{}'::jsonb`}`,
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(projection, heartbeatRuns.resultJson)}::jsonb
+        || ${typeof input.decision?.commentId === "string" ? settledResponsePublicationSql() : sql`'{}'::jsonb`}`,
       updatedAt: new Date(),
-    }).where(eq(heartbeatRuns.id, input.runId));
+    }).where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
   });
 }
 
@@ -982,7 +983,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           stream: "system",
           level: "info",
           message: "run presentation resolved",
-          payload: { presentationDecision },
+          payload: resultJson,
         });
         resolvedPresentationDecision = presentationDecision;
       } catch (err) {

@@ -4430,7 +4430,7 @@ export function recoveryService(
           errorCode: classifiedRun.errorCode,
           // Classification owns retry metadata, not workspace repair receipts
           // that may have committed after this run was selected.
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(classificationMetadata)}::jsonb`,
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(classificationMetadata, heartbeatRuns.resultJson)}::jsonb`,
           updatedAt: new Date(),
         })
         .where(and(eq(heartbeatRuns.id, latestRun.id), eq(heartbeatRuns.companyId, issue.companyId)))
