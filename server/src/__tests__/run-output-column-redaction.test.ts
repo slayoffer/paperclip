@@ -30,10 +30,16 @@ const FINE_PAT = `github_pat_11${"FAKE0".repeat(4)}_${"f4keFineGrained".repeat(4
 const JWT = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJmYWtlLXJ1biJ9", "ZmFrZS1zaWduYXR1cmUtbm90LXJlYWw"].join(".");
 const PCGW = `pcgw_${randomUUID()}.${"Fk3Gw".repeat(9)}`;
 const OPAQUE_KEY = "fake-opaque-run-key-Q7w9e2r4t6y8";
-const SECRETS = [GHO, GHP, FINE_PAT, JWT, PCGW, OPAQUE_KEY];
+const SHAPED = [GHO, GHP, FINE_PAT, JWT, PCGW];
+// An opaque key has no shape: the column encoder masks it only after a credential name. A bare opaque value needs the
+// run registry (heartbeat-run-persistence-redaction.test.ts).
+const SECRETS = [...SHAPED, OPAQUE_KEY];
 
 // Neutral data that looks close to a credential and must stay visible.
-const NEUTRAL = ["pcgw_1a2b3c4d", "pcgw_...", "tokens: 1234", "sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0"];
+const NEUTRAL = [
+  "pcgw_1a2b3c4d", "pcgw_...", "tokens: 1234", "sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "token: see below", "GITHUB_TOKEN_URL: https://example.test/x", "PAPERCLIP_API_KEY: required",
+];
 
 const API_KEY_FORMS = [
   `PAPERCLIP_API_KEY=${OPAQUE_KEY}`,
@@ -82,7 +88,7 @@ describe("run output redaction policy (result_json and run log)", () => {
     const value = { notes: NEUTRAL, count: 3, ok: true, none: null };
     expect(redactRunResultSecrets(value)).toEqual(value);
     for (const item of NEUTRAL) expect(redactRunLogText(item)).toBe(item);
-    const once = redactRunResultSecrets({ stdout: SECRETS.slice(0, 5).join(" ") });
+    const once = redactRunResultSecrets({ stdout: [...SHAPED, ...API_KEY_FORMS].join("\n") });
     expect(redactRunResultSecrets(once)).toEqual(once);
     expect(() => JSON.parse(JSON.stringify(once))).not.toThrow();
   });
@@ -107,7 +113,7 @@ if (!support.supported && process.env.PAPERCLIP_REQUIRE_PERSISTENCE_REDACTION_TE
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let logRoot = "";
   let previousLogRoot: string | undefined;
-  const leak = `stdout ${SECRETS.join(" ")} ${API_KEY_FORMS[0]} ${NEUTRAL.join(" ")}`;
+  const leak = `stdout ${SHAPED.join(" ")}\n${API_KEY_FORMS.join("\n")}\n${NEUTRAL.join("\n")}`;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("run-output-column-redaction-");
