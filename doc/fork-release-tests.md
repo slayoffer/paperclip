@@ -16,10 +16,25 @@ The workflow first executes its contract check:
 node --test .github/scripts/tests/fork-release-tests.test.mjs
 ```
 
-It installs Node.js 24 and `pnpm@9.15.4`.
+It installs Node.js `24.22.1` and `pnpm@9.15.4`.
 It uses `pnpm install --no-frozen-lockfile`, as the release branch's PR policy requires.
 The runner resolves dependencies without committing a lockfile change.
-Then it executes these commands from the repository root:
+Before test collection, each shard prepares the linked workspace packages,
+SDK exports, Runner distribution, and native test binaries:
+
+```sh
+pnpm run preflight:workspace-links
+(cd packages/paperclip-runner && rustup show)
+pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+pnpm --filter @paperclipai/paperclip-runner build
+pnpm --filter @paperclipai/paperclip-runner build:rust
+(cd packages/paperclip-runner && cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd --bin fake-codex-app-server)
+```
+
+`rustup show` selects the package's pinned Rust `1.97.1` toolchain and `rustfmt`.
+The debug binaries must exist before collection, or the native restart integration
+suite skips its process cases. The release binaries support native fixtures.
+Preparation has a 45-minute limit. After preparation, each shard executes:
 
 ```sh
 pnpm -r typecheck
@@ -27,14 +42,27 @@ pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-para
 pnpm build
 ```
 
-Each check runs after a successful install, even when an earlier check fails.
+The root Vitest configuration excludes the Runner package. Shard 1 also executes
+its protocol, TypeScript, Rust, evaluation-kernel, and API-authority checks:
+
+```sh
+pnpm --filter @paperclipai/paperclip-runner check:all
+```
+
+Runner checks have a 120-minute step limit and use their own temporary instance paths.
+Both test steps disable user-namespace sandbox tests only when the host denies
+an actual user/network namespace probe. Browser suites and live provider tests
+remain opt-in.
+Each check runs after successful installation and preparation, even when another check fails.
 A failed check fails the job. The workflow does not suppress command exit codes.
 Typecheck and build each have a 20-minute limit. Tests have a 150-minute limit.
-Each shard has a 180-minute limit, including installation.
+Each shard has a 180-minute total limit, including installation and preparation.
+Step limits do not extend that total limit.
 The summary job has a five-minute limit and requires all six shards.
 It runs after failed or cancelled shards and fails unless their combined result is `success`.
 The matrix uses `fail-fast: false`, so one failure does not cancel other shards.
-Every shard retains the existing installation, typecheck, and build steps.
+Every shard retains installation, preparation, typecheck, root tests, and build.
+A failed Runner check also fails shard 1 and the aggregate release check.
 The first workflow run exceeded the original 30-minute test limit during its first group.
 Its typecheck and build passed. No test assertion failure appeared before the timeout.
 The recorded server timings total about 85 minutes across general and serialized suites.
@@ -44,16 +72,18 @@ The matrix sets `TEST_SHARD` to `1/6` through `6/6`.
 Vitest partitions the root configuration's source test files across these runners.
 The workflow calls Vitest directly because `pnpm test:run` uses a wrapper
 that accepts group-specific shard options rather than a repository-wide `--shard` option.
-This also includes configured projects that the wrapper's explicit project list omits.
 Each shard uses a fresh temporary home, config path, instance ID, and temporary directory.
 Files run one at a time, in isolated fork workers, to preserve port and process-state isolation.
 Separate hosted machines isolate fixed ports and temporary paths across shards.
-No suite needs a separate dedicated job.
+Runner checks use shard 1; the workflow adds no separate Runner job.
 The first matrix run found a Cursor fixture outside the old wrapper's project list.
 Its fake sandbox runner dropped standard input during archive upload.
 The fixture now forwards standard input, as its adjacent runner fixture already does.
 This corrects the test runner without changing adapter runtime behavior.
-The finite limits remain unchanged for test execution.
+The managed-home restore fixture also performs real shell commands and bounded archive reads.
+Its five-second default test limit expired in shard 1 and in a focused Node.js 24 run.
+That fixture now has a 30-second test limit. Its assertions and subprocess limits remain unchanged.
+The workflow and subprocess limits remain unchanged.
 The contract check also tests failure, cancellation, skipped, and absent summary results.
 A newer test event for the same pull request cancels its previous run.
 Ignored label events use separate concurrency groups and cannot cancel tests.
@@ -61,7 +91,8 @@ These limits bound configured execution time. They do not guarantee a billing ca
 Browser suites and live provider tests remain outside this workflow.
 
 Each shard summary records its index, pull request head, target branch, base commit,
-tested merge commit, run URL, and each command's outcome.
+tested merge commit, run URL, and each command's outcome, including preparation
+and Runner checks. Runner checks are skipped by design on shards 2 through 6.
 The merge commit includes the target branch and the pull request head.
 A successful contract check alone does not prove the repository checks passed.
 A timeout or failed installation also does not prove a test failure.
