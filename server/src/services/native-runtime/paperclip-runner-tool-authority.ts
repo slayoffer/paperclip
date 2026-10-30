@@ -60,6 +60,7 @@ import {
   chatConversations,
   companies,
   documentRevisions,
+  getRunOutputRedactor,
   heartbeatRuns,
   issueApprovals,
   issueComments,
@@ -201,6 +202,15 @@ function canonicalJson(value: unknown): string {
     return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+// heartbeat_runs.result_json redacts on write (SYNA-1586), so a stored receipt holds the redacted input.
+// A replay matches either the raw input (receipts written before redaction) or its redacted form.
+function sameReceiptInput(stored: unknown, input: unknown): boolean {
+  const target = canonicalJson(stored);
+  if (target === canonicalJson(input)) return true;
+  const redactor = getRunOutputRedactor();
+  return redactor !== null && target === canonicalJson(redactor.json(input));
 }
 
 export class PaperclipRunnerToolAuthority {
@@ -1563,7 +1573,7 @@ export class PaperclipRunnerToolAuthority {
         sql`${heartbeatRuns.resultJson}->'semanticToolReceipts' ? ${input.idempotencyKey}`,
       )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
       if (earlier?.receipt) {
-        if (earlier.receipt.operationId !== "set_task_monitor" || canonicalJson(earlier.receipt.input) !== canonicalJson(input)) {
+        if (earlier.receipt.operationId !== "set_task_monitor" || !sameReceiptInput(earlier.receipt.input, input)) {
           throw new Error("paperclip_runner_tool_idempotency_conflict");
         }
         replayed = true;
@@ -2044,7 +2054,7 @@ export class PaperclipRunnerToolAuthority {
         if (prior !== undefined) {
           if (
             prior.operationId !== operationId ||
-            canonicalJson(prior.input) !== canonicalJson(input)
+            !sameReceiptInput(prior.input, input)
           ) {
             throw new Error("paperclip_runner_tool_idempotency_conflict");
           }
