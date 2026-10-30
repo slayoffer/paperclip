@@ -153,6 +153,10 @@ jobs:
         run: corepack pnpm -r typecheck
       - name: Run the repository test suite
         timeout-minutes: 150
-        run: corepack pnpm test:run
+        run: |
+          # Same rule as fork-release-tests.yml (#88): skip the real-runnerd Codex
+          # test only on a runner that denies unprivileged user and network namespaces.
+          if ! unshare --user --map-root-user --net true 2>/dev/null; then export PAPERCLIP_TEST_NO_USERNS_SANDBOX=1; fi
+          corepack pnpm test:run
       - name: Build the repository
         run: corepack pnpm build
