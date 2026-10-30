@@ -1,8 +1,9 @@
 import { realpath } from "node:fs/promises";
-import type { Db } from "@paperclipai/db";
+import { and, eq, isNull } from "drizzle-orm";
+import { environmentLeases, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
 import { runSshCommand } from "@paperclipai/adapter-utils/ssh";
-import { sshWriterTerminationScript } from "@paperclipai/adapter-utils/ssh-writer-termination";
+import { sshWriterStopScript, sshWriterTerminationScript } from "@paperclipai/adapter-utils/ssh-writer-termination";
 import { resolveEnvironmentDriverConfigForRuntime } from "./environment-config.js";
 import { environmentService } from "./environments.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -44,5 +45,39 @@ export async function confirmSshInPlaceTermination(
   } catch {
     // A failed probe or database write preserves durable ownership.
     return null;
+  }
+}
+
+/** SYNA-2959: before a server restart, stop the run's tracked SSH writers and prove that they stopped. A killed SSH
+ * client proves nothing about the remote provider, so without this a restart can never resume an SSH run
+ * (restart_remote_stop_unverified). Returns true only on the "stopped" receipt. The lease stays held. */
+export async function stopSshInPlaceWritersForRestart(
+  db: Db, run: { id: string; companyId: string }, graceSec = 20,
+): Promise<boolean> {
+  try {
+    const [row] = await db.select().from(environmentLeases).where(and(
+      eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
+      eq(environmentLeases.provider, "ssh"), eq(environmentLeases.status, "active"), isNull(environmentLeases.releasedAt),
+    )).limit(1);
+    if (!row) return false;
+    const lease = row as unknown as EnvironmentLease;
+    const tracking = readSshInPlaceWriterTracking(lease);
+    const environment = await environmentService(db).getById(lease.environmentId);
+    if (!tracking?.remoteCwd || !environment) return false;
+    const parsed = await resolveEnvironmentDriverConfigForRuntime(db, lease.companyId, environment, {
+      issueId: lease.issueId, heartbeatRunId: run.id,
+    });
+    if (parsed.driver !== "ssh") return false;
+    const config = parsed.config;
+    // A changed environment endpoint cannot stop or prove anything on the old host.
+    if (lease.providerLeaseId !== `ssh://${config.username}@${config.host}:${config.port}${tracking.remoteCwd}` ||
+        config.remoteWorkspacePath !== lease.metadata?.remoteWorkspacePath) return false;
+    await runSshCommand(config, sshWriterStopScript(config.remoteWorkspacePath, run.id, graceSec),
+      { timeoutMs: (graceSec + 15) * 1000 });
+    const result = await runSshCommand(config, sshWriterTerminationScript(config.remoteWorkspacePath, run.id),
+      { timeoutMs: 15_000 });
+    return result.stdout.trim() === "stopped";
+  } catch {
+    return false;
   }
 }

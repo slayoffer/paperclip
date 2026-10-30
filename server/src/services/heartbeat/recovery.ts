@@ -1,4 +1,5 @@
 import { withStopRequestEvidence } from "../run-execution-evidence.js";
+import { stopSshInPlaceWritersForRestart } from "../ssh-in-place-termination.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
@@ -1160,7 +1161,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         restartSuspendedRunIds.push(run.id);
         return;
       }
-      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess, now.toISOString())) {
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess, now.toISOString(),
+        (current) => stopSshInPlaceWritersForRestart(db, current))) {
         restartSuspendedRunIds.push(run.id);
         return;
       }

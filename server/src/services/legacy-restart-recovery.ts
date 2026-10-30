@@ -87,6 +87,7 @@ export async function suspendLegacyRunForRestart(
   db: Db, run: Run, suspended: Set<string>,
   terminate: (input: { pid: number | undefined; processGroupId: number | null; graceMs: number }) => Promise<void>,
   requestedAt = new Date().toISOString(),
+  stopRemote?: (run: Run) => Promise<boolean>,
 ) {
   if (run.runtimeMode !== "legacy") return false;
   const [current] = await db.select().from(heartbeatRuns).where(and(
@@ -99,6 +100,13 @@ export async function suspendLegacyRunForRestart(
   return withStopRequestEvidence({ db, run, requestedAt, reason: "server_restart",
     source: "shutdown" }, async () => {
     suspended.add(run.id);
+    // SYNA-2959: an SSH run resumes only with proof that its remote provider stopped. Killing the local SSH
+    // client is no such proof, so stop the remote writers first; the SSH command then returns the provider's
+    // own exit status, and the confirmed stop is recorded here as well.
+    const checkpoint = readLegacyRestartCheckpoint(current);
+    if (stopRemote && checkpoint?.sessionParams.remoteExecution && await stopRemote(current).catch(() => false)) {
+      await markLegacyRestartBoundary(db, current, "providerStopped");
+    }
     control?.controller.abort(new Error("server_restart"));
     if (process) {
       try {
