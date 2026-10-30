@@ -37,7 +37,7 @@ import {
 import { and, desc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
 import { conflict, unprocessable } from "../errors.js";
-import { resolveHomeAwarePath } from "../home-paths.js";
+import { resolveHomeAwarePath, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { hasVerifiedWorktreeSeedManifest, isVerifiedWorktreeSeedManifest } from "../worktree-seed-manifest.js";
 import {
   buildManagedWorkspaceGuestEnv,
@@ -128,6 +128,21 @@ export interface ExecutionWorkspaceAdditionalInput {
   workspaceId: string | null;
   repoUrl: string | null;
   repoRef: string | null;
+}
+
+/**
+ * A directory outside Git that every issue shares by construction, so the cross-issue reuse guard
+ * cannot protect one issue's files from another there: the project-less agent home, and the managed
+ * directory of a project that has no repository (`<projects>/<company>/<project>/_default`). Every
+ * issue of such a project resolves to that same directory and has no separate workspace to fall back
+ * to, so failing closed blocked the whole project while any other issue's record was active (SYNA:
+ * guild-ops, 2026-10-24..28). The guard still requires that Git reports no repository and that no
+ * `.git` marker exists, so a damaged checkout keeps failing closed.
+ */
+function permitsSharedNonGitDirectory(base: ExecutionWorkspaceInput, companyId: string): boolean {
+  if (base.source === "agent_home" && base.projectId === null) return true;
+  if (base.source !== "project_primary" || base.repoUrl !== null || base.workspaceId !== null || !base.projectId) return false;
+  return path.resolve(base.baseCwd) === resolveManagedProjectWorkspaceDir({ companyId, projectId: base.projectId, repoName: null });
 }
 
 export interface ExecutionWorkspaceInput {
@@ -3389,7 +3404,7 @@ export async function realizeExecutionWorkspace(input: {
       companyId: input.agent.companyId,
       issueId: input.issue?.id,
       cwd: input.base.baseCwd,
-      allowNonGitDirectory: input.base.source === "agent_home" && input.base.projectId === null,
+      allowNonGitDirectory: permitsSharedNonGitDirectory(input.base, input.agent.companyId),
     });
     return {
       ...input.base,
@@ -3888,7 +3903,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       issueId: input.issue?.id,
       cwd,
       executionWorkspaceId: input.workspace.id,
-      allowNonGitDirectory: input.base.source === "agent_home" && input.base.projectId === null,
+      allowNonGitDirectory: permitsSharedNonGitDirectory(input.base, input.agent.companyId),
     });
   }
 

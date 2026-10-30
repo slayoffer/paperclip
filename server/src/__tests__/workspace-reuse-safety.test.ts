@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { companies, createDb, executionWorkspaces, issues, projects } from "@paperclipai/db";
 import { ensurePersistedExecutionWorkspaceAvailable, realizeExecutionWorkspace } from "../services/workspace-runtime.js";
 import { resolveUnsafeWorkspaceReuseFallback } from "../services/workspace-reuse-fallback.js";
+import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const exec = promisify(execFile);
@@ -175,6 +176,36 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await fs.readFile(path.join(root, "notes.txt"), "utf8")).toBe("home notes\n");
     await expect(realizeExecutionWorkspace({ db, base: { ...base, projectId }, config: {}, issue, agent }))
       .rejects.toMatchObject({ code: "workspace_validation_failed" });
+    await fs.mkdir(path.join(root, ".git"));
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+        workspaceValidation: { cleanliness: "unknown" },
+      } });
+  });
+
+  it("permits the shared directory of a project without a repository despite active foreign records", async () => {
+    // guild-ops (2026-10-24..28): every issue of a repo-less project resolves to this one directory.
+    const root = resolveManagedProjectWorkspaceDir({ companyId, projectId, repoName: null });
+    await fs.mkdir(root, { recursive: true });
+    roots.push(root);
+    await fs.writeFile(path.join(root, "board.json"), "{}\n");
+    await db.insert(executionWorkspaces).values({ companyId, projectId, sourceIssueId,
+      mode: "shared_workspace", strategyType: "project_primary", name: "Repo-less project", cwd: root });
+    const base = { baseCwd: root, source: "project_primary" as const, projectId,
+      workspaceId: null, repoUrl: null, repoRef: null };
+    await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
+      .resolves.toMatchObject({ cwd: root, source: "project_primary" });
+    const workspace = { sourceIssueId, mode: "shared_workspace", strategyType: "project_primary",
+      cwd: root, providerRef: root, projectId, projectWorkspaceId: null,
+      repoUrl: null, baseRef: null, branchName: null };
+    await expect(ensurePersistedExecutionWorkspaceAvailable({ db, base, workspace, issue, agent }))
+      .resolves.toMatchObject({ cwd: root });
+    expect(await fs.readFile(path.join(root, "board.json"), "utf8")).toBe("{}\n");
+    // A configured repository, a project workspace row, or a Git marker keeps the guard closed.
+    for (const other of [{ ...base, repoUrl: "https://example.test/repo.git" }, { ...base, workspaceId: randomUUID() }]) {
+      await expect(realizeExecutionWorkspace({ db, base: other, config: {}, issue, agent }))
+        .rejects.toMatchObject({ code: "workspace_validation_failed" });
+    }
     await fs.mkdir(path.join(root, ".git"));
     await expect(realizeExecutionWorkspace({ db, base, config: {}, issue, agent }))
       .rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
