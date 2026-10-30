@@ -1135,7 +1135,13 @@ export class PaperclipRunnerToolAuthority {
       };
     });
     if (publication) publishActivity(publication);
-    return result;
+    // A replay returns the receipt copy in result_json, which is redacted on write (SYNA-1586). The replay matched
+    // this input, and the write stores the trimmed input title and body, so return those and not the redacted copy.
+    const output = record(result);
+    return {
+      ...output,
+      document: { ...record(output.document), title: requiredString(input.title), body: requiredString(input.body) },
+    };
   }
 
   async #assertCompanyPerson(tx: Db, userId: string) {
