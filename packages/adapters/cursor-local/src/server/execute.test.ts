@@ -306,6 +306,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
 
     const runnerState = {
       commands: [] as string[],
+      installCommands: [] as string[],
     };
     // The managed-runtime restore path probes the generated archive with
     // `wc -c` before reading bounded `dd | base64` chunks. Keep this fixture's
@@ -314,9 +315,16 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
     const runner = {
       execute: async (input: { command: string; args?: string[]; env?: Record<string, string>; stdin?: string }) => {
         runnerState.commands.push(input.command);
+        const args = [...(input.args ?? [])];
+        if (args[1] === SANDBOX_INSTALL_COMMAND) {
+          runnerState.installCommands.push(args[1]);
+          args[1] = buildInstallSimulationCommand(
+            path.join(systemHomeDir, ".local", "bin", "agent"), managedCaptureDir,
+          );
+        }
         // Exercise actual bounded file reads during managed-home restoration;
         // reporting empty success for every shell command hides missing bytes.
-        return runChildProcess(`cursor-fresh-lease-${runnerState.commands.length}`, input.command, input.args ?? [], {
+        return runChildProcess(`cursor-fresh-lease-${runnerState.commands.length}`, input.command, args, {
           cwd: remoteWorkspace,
           env: { ...input.env, PATH: `${input.env?.PATH ?? ""}:/usr/bin:/bin` },
           stdin: input.stdin,
@@ -371,6 +379,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
       });
 
       expect(result.exitCode).toBe(0);
+      expect(runnerState.installCommands).toEqual([SANDBOX_INSTALL_COMMAND]);
       expect(prepareInputs).toHaveLength(2);
       expect(finalPreparedCommand).not.toBeNull();
       expect(finalPreparedCommand).toMatch(/\.local\/(bin|sbin)\/agent$/);
