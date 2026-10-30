@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
+import { materializeIsolatedTaskDirectory, prepareIsolatedTaskWorkspace, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -98,6 +98,44 @@ describe("isolated task directories", () => {
     vi.stubEnv("PAPERCLIP_HOME", root);
     return { companyId: "company-1", issueId: "issue-1" };
   }
+
+  it("retains an owned directory during recovery", async () => {
+    const identity = await setup();
+    const cwd = await materializeIsolatedTaskDirectory(identity);
+    await writeFile(path.join(cwd, "notes.txt"), "saved task output");
+    const workspace = await prepareIsolatedTaskWorkspace({
+      ...identity, projectId: "project-1", recoveryCwd: cwd,
+      existingWorkspace: { ...identity, projectId: "project-1", sourceIssueId: identity.issueId,
+        mode: "isolated_workspace", strategyType: "project_primary", cwd },
+    });
+    expect(workspace).toMatchObject({ cwd, source: "task_session", projectId: "project-1" });
+    expect(await readFile(path.join(cwd, "notes.txt"), "utf8")).toBe("saved task output");
+  });
+
+  it("rejects recovery in a different directory", async () => {
+    const identity = await setup();
+    await expect(prepareIsolatedTaskWorkspace({ ...identity, projectId: "project-1",
+      recoveryCwd: path.join(root!, "another-task"), existingWorkspace: null,
+    })).rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+      workspaceValidation: { reason: "isolated_task_directory_recovery_mismatch", issueId: identity.issueId },
+    } });
+  });
+
+  it.each([
+    { companyId: "company-2" }, { projectId: "project-2" }, { sourceIssueId: "issue-2" },
+    { mode: "shared_workspace" }, { strategyType: "git_worktree" }, { cwd: "/another-task" },
+  ])("rejects a mismatched directory binding: %j", async (override) => {
+    const identity = await setup();
+    const cwd = await materializeIsolatedTaskDirectory(identity);
+    await writeFile(path.join(cwd, "notes.txt"), "retain task output");
+    await expect(prepareIsolatedTaskWorkspace({ ...identity, projectId: "project-1", recoveryCwd: null,
+      existingWorkspace: { companyId: identity.companyId, projectId: "project-1", sourceIssueId: identity.issueId,
+        mode: "isolated_workspace", strategyType: "project_primary", cwd, ...override },
+    })).rejects.toMatchObject({ code: "workspace_validation_failed", resultJson: {
+      workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: identity.issueId },
+    } });
+    expect(await readFile(path.join(cwd, "notes.txt"), "utf8")).toBe("retain task output");
+  });
 
   it("retains a task's files across turns without sharing them with another task or company", async () => {
     const identity = await setup();

@@ -1,3 +1,4 @@
+import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
@@ -356,7 +357,9 @@ import {
   nativeChatWorkspaceCwd,
   nativeChatWorkspaceMatches,
 } from "./native-runtime/native-chat-workspace.js";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
+import { prepareIsolatedTaskWorkspace, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
+import { WORKSPACE_VALIDATION_FAILURE_CODE, WorkspaceValidationFailure } from "./heartbeat/workspace-validation-failure.js";
+export { WorkspaceValidationFailure } from "./heartbeat/workspace-validation-failure.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import {
@@ -908,7 +911,6 @@ export {
   INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
 };
 const INTERACTION_CONTINUATION_INFRA_MAX_ATTEMPTS = 2;
-const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
@@ -1015,17 +1017,6 @@ interface MaxTurnContinuationPolicy {
   enabled: boolean;
   maxAttempts: number;
   delayMs: number;
-}
-
-export class WorkspaceValidationFailure extends Error {
-  code = WORKSPACE_VALIDATION_FAILURE_CODE;
-  resultJson: Record<string, unknown>;
-
-  constructor(message: string, resultJson: Record<string, unknown>) {
-    super(message);
-    this.name = "WorkspaceValidationFailure";
-    this.resultJson = resultJson;
-  }
 }
 
 // Pre-dispatch gate outcome: required secret/env bindings are missing, so the
@@ -15086,60 +15077,62 @@ export function heartbeatService(
         restartSuspendedRunIds.push(run.id);
         continue;
       }
-      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess)) {
+      if (await suspendLegacyRunForRestart(db, run, restartSuspendedLegacyRuns, terminateHeartbeatRunProcess, now.toISOString())) {
         restartSuspendedRunIds.push(run.id);
         continue;
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
-      const running = runningProcesses.get(run.id);
-      try {
-        if (run.runtimeMode === "native") {
-          await cancelHeartbeatNativeRun({
-            db,
-            runId: run.id,
-            reason: message,
-            runtimeMode: run.runtimeMode,
-          });
+      await withStopRequestEvidence({ db, run, requestedAt: now.toISOString(), reason: message,
+        source: "shutdown" }, async () => {
+        const running = runningProcesses.get(run.id);
+        try {
+          if (run.runtimeMode === "native") {
+            await cancelHeartbeatNativeRun({
+              db,
+              runId: run.id,
+              reason: message,
+              runtimeMode: run.runtimeMode,
+            });
+          }
+          if (running) {
+            await terminateHeartbeatRunProcess({
+              pid: running.child.pid,
+              processGroupId: running.processGroupId,
+              graceMs: Math.max(1, running.graceSec) * 1000,
+            });
+          }
+        } finally {
+          runningProcesses.delete(run.id);
         }
-        if (running) {
-          await terminateHeartbeatRunProcess({
-            pid: running.child.pid,
-            processGroupId: running.processGroupId,
-            graceMs: Math.max(1, running.graceSec) * 1000,
-          });
-        }
-      } finally {
-        runningProcesses.delete(run.id);
-      }
 
-      const persistedCancellationResult =
-        run.runtimeMode === "native"
-          ? await getRun(run.id).then((current) =>
-              parseObject(current?.resultJson),
-            )
-          : parseObject(run.resultJson);
+        const persistedCancellationResult =
+          run.runtimeMode === "native"
+            ? await getRun(run.id).then((current) =>
+                parseObject(current?.resultJson),
+              )
+            : parseObject(run.resultJson);
 
-      const interruptedStatus = await setRunStatusIfRunning(
-        run.id,
-        "interrupted",
-        {
-          finishedAt: now,
-          error: message,
-          errorCode: "server_shutdown_interrupted",
-          signal,
-          resultJson: mergeRunStopMetadataForAgent(agent, "interrupted", {
-            conversationContinuationEligible: await runUsedConversationAdapter(db, run),
-            resultJson: persistedCancellationResult,
+        const interruptedStatus = await setRunStatusIfRunning(
+          run.id,
+          "interrupted",
+          {
+            finishedAt: now,
+            error: message,
             errorCode: "server_shutdown_interrupted",
-            errorMessage: message,
-          }),
-        },
-      );
-      if (!interruptedStatus.updated || !interruptedStatus.run) continue;
-      let interrupted = interruptedStatus.run;
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: now,
-        error: null,
+            signal,
+            resultJson: mergeRunStopMetadataForAgent(agent, "interrupted", {
+              conversationContinuationEligible: await runUsedConversationAdapter(db, run),
+              resultJson: persistedCancellationResult,
+              errorCode: "server_shutdown_interrupted",
+              errorMessage: message,
+            }),
+          },
+        );
+        if (!interruptedStatus.updated || !interruptedStatus.run) return;
+        let interrupted = interruptedStatus.run;
+        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+          finishedAt: now,
+          error: null,
       });
       interrupted =
         (await classifyAndPersistRunLiveness(
@@ -15179,6 +15172,7 @@ export function heartbeatService(
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
       interruptedRunIds.push(interrupted.id);
+      });
     }
 
     if (interruptedRunIds.length > 0) {
@@ -18159,8 +18153,8 @@ export function heartbeatService(
 
     const [eventStats] = await db
       .select({
-        count: sql<number>`count(*) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error'))::int`,
-        latestAt: sql<Date | null>`max(${heartbeatRunEvents.createdAt}) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error'))`,
+        count: sql<number>`count(*) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error', 'execution.evidence'))::int`,
+        latestAt: sql<Date | null>`max(${heartbeatRunEvents.createdAt}) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error', 'execution.evidence'))`,
       })
       .from(heartbeatRunEvents)
       .where(
@@ -19997,7 +19991,11 @@ export function heartbeatService(
   const wakeupWithDiagnostics = (agentId: string, opts: WakeupOptions = {}) => diagnosticWakeup(agentId, opts);
   const wakeupForOutbox = createOutboxWakeup(trackWakeup);
 
-  async function executeRun(
+  async function executeRun(...args: Parameters<typeof executeRunInner>) {
+    return withRunExecutionEvidence(db, { id: args[0] }, () => executeRunInner(...args), false);
+  }
+
+  async function executeRunInner(
     runId: string,
     runOptions: {
       nativeLeaseOwner?: string;
@@ -20136,11 +20134,13 @@ export function heartbeatService(
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
     activeRunExecutions.add(run.id);
+    admitRunExecutionEvidence();
     const executionControl = createAdapterExecutionControl();
     // This coarse scope also covers host finalization after the adapter returns.
     // Nested scopes refine the label without making any termination claim.
     executionControl.phases.enter("host_execution");
     const executionPhaseContext = { onExecutionPhase: executionControl.phases.enter };
+    const finishAbortEvidence = observeRunAbort(db, run, executionControl.controller.signal);
     const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
@@ -21749,41 +21749,16 @@ export function heartbeatService(
         },
         resolveWorkspace: async () => {
           if (useIsolatedTaskDirectory && issueRef) {
-            const cwd = await materializeIsolatedTaskDirectory({
+            const anchorWorkspace = await prepareIsolatedTaskWorkspace({
               companyId: agent.companyId,
               issueId: issueRef.id,
+              projectId: issueRef.projectId,
+              recoveryCwd: persistedNativeExecutionInput?.workspace.cwd ?? null,
+              existingWorkspace: reusableExistingExecutionWorkspace,
             });
-            if (persistedNativeExecutionInput && persistedNativeExecutionInput.workspace.cwd !== cwd) {
-              throw new WorkspaceValidationFailure("The native recovery directory differs from its admitted directory.", {
-                workspaceValidation: { reason: "isolated_task_directory_recovery_mismatch", issueId: issueRef.id },
-              });
-            }
-            if (reusableExistingExecutionWorkspace && (
-              reusableExistingExecutionWorkspace.companyId !== agent.companyId ||
-              reusableExistingExecutionWorkspace.projectId !== issueRef.projectId ||
-              reusableExistingExecutionWorkspace.sourceIssueId !== issueRef.id ||
-              reusableExistingExecutionWorkspace.mode !== "isolated_workspace" ||
-              reusableExistingExecutionWorkspace.strategyType !== "project_primary" ||
-              reusableExistingExecutionWorkspace.cwd !== cwd
-            )) {
-              throw new WorkspaceValidationFailure("The existing execution workspace is not this task's isolated directory.", {
-                workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: issueRef.id },
-              });
-            }
             return resolveWorkspaceForRun(agent, context, previousSessionParams, {
               executionEnvironmentDriver: selectedEnvironmentForConfig?.driver ?? null,
-              anchorWorkspace: {
-                cwd,
-                source: "task_session",
-                projectId: issueRef.projectId,
-                workspaceId: null,
-                repoUrl: null,
-                repoRef: null,
-                workspaceHints: [],
-                warnings: [],
-                baseCwdFallback: false,
-                materializationFailures: [],
-              },
+              anchorWorkspace,
             });
           }
           if (nativeChatWorkspaceScope && !nativeChatWorkspaceScope.projectId) {
@@ -26542,6 +26517,7 @@ export function heartbeatService(
         }
         await managedAiRuntime?.cleanup().catch(() => undefined);
         controllerLease.stop();
+        await finishAbortEvidence();
         activeRunExecutions.delete(run.id);
         executionControl.finish();
         adapterExecutionControls.delete(run.id);
@@ -26749,6 +26725,7 @@ export function heartbeatService(
         if (adapterExecutionControls.get(run.id) === executionControl) {
           adapterExecutionControls.delete(run.id);
         }
+        await finishAbortEvidence();
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
@@ -29511,6 +29488,7 @@ export function heartbeatService(
   }
 
   type CancelRunOptions = {
+    requestedAt?: string;
     errorCode?: string;
     resultJson?: Record<string, unknown>;
     eventMessage?: string;
@@ -29520,6 +29498,8 @@ export function heartbeatService(
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
   };
+
+  type StopRequestContext = Pick<CancelRunOptions, "requestedAt" | "resultJson">;
 
   function cancellationTerminationGraceMs(
     configuredGraceSec: number,
@@ -29532,7 +29512,13 @@ export function heartbeatService(
     return Math.max(100, Math.min(30_000, Math.trunc(requestedGraceMs)));
   }
 
-  async function cancelRunInternal(
+  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
+    const request = { ...options, requestedAt: options.requestedAt ?? new Date().toISOString() };
+    return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: request.requestedAt,
+      reason, metadata: request.resultJson }, () => cancelRunInternalImpl(runId, reason, request));
+  }
+
+  async function cancelRunInternalImpl(
     runId: string,
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
@@ -29562,7 +29548,7 @@ export function heartbeatService(
       return run;
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
-    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
+    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason, options.requestedAt);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -29837,7 +29823,9 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    context: StopRequestContext = {},
   ) {
+    const requestedAt = context.requestedAt ?? new Date().toISOString();
     const agent = await getAgent(agentId);
     const runs = await db
       .select()
@@ -29850,63 +29838,66 @@ export function heartbeatService(
       );
 
     for (const run of runs) {
-      const stopOwnership =
-        run.runtimeMode !== "native"
-          ? captureAdapterStopOwnership(run.id)
-          : undefined;
-      try {
-        if (stopOwnership?.control) {
-          await cancelRunInternal(run.id, reason, { errorCode });
-          continue;
-        }
-        if (run.runtimeMode === "native") {
-          await db.update(heartbeatRuns).set({ resultJson:
-            sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation({}, reason) })}::jsonb`,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, run.status)));
-          await cancelHeartbeatNativeRun({
-            db,
-            runId: run.id,
-            reason,
-            runtimeMode: run.runtimeMode,
+      await withStopRequestEvidence({ db, run, requestedAt, reason, metadata: context.resultJson }, async () => {
+        const stopOwnership =
+          run.runtimeMode !== "native"
+            ? captureAdapterStopOwnership(run.id)
+            : undefined;
+        try {
+          if (stopOwnership?.control) {
+            await cancelRunInternal(run.id, reason, { ...context, requestedAt, errorCode });
+            return;
+          }
+          if (run.runtimeMode === "native") {
+            await db.update(heartbeatRuns).set({ resultJson:
+              sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation(context.resultJson ?? {}, reason, requestedAt) })}::jsonb`,
+            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, run.status)));
+            await cancelHeartbeatNativeRun({
+              db,
+              runId: run.id,
+              reason,
+              runtimeMode: run.runtimeMode,
+            });
+          }
+          const persistedCancellationResult =
+            run.runtimeMode === "native"
+              ? await getRun(run.id).then((current) =>
+                  parseObject(current?.resultJson),
+                )
+              : parseObject(run.resultJson);
+          await setRunStatus(run.id, "cancelled", {
+            finishedAt: new Date(),
+            error: reason,
+            errorCode,
+            resultJson: {
+              ...persistedCancellationResult,
+              ...context.resultJson,
+              ...(agent ? mergeRunStopMetadataForAgent(agent, "cancelled", {
+                resultJson: persistedCancellationResult, errorCode, errorMessage: reason,
+              }) : {}),
+              cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation(context.resultJson ?? {}, reason, requestedAt),
+            },
           });
-        }
-        const persistedCancellationResult =
-          run.runtimeMode === "native"
-            ? await getRun(run.id).then((current) =>
-                parseObject(current?.resultJson),
-              )
-            : parseObject(run.resultJson);
-        await setRunStatus(run.id, "cancelled", {
-          finishedAt: new Date(),
-          error: reason,
-          errorCode,
-          resultJson: {
-            ...persistedCancellationResult,
-            ...(agent ? mergeRunStopMetadataForAgent(agent, "cancelled", {
-              resultJson: persistedCancellationResult, errorCode, errorMessage: reason,
-            }) : {}),
-            cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation({}, reason),
-          },
-        });
 
-        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-          finishedAt: new Date(),
-          error: reason,
-        });
-
-        const running = runningProcesses.get(run.id);
-        if (running) {
-          await terminateHeartbeatRunProcess({
-            pid: running.child.pid,
-            processGroupId: running.processGroupId,
-            graceMs: Math.max(1, running.graceSec) * 1000,
+          await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+            finishedAt: new Date(),
+            error: reason,
           });
+
+          const running = runningProcesses.get(run.id);
+          if (running) {
+            await terminateHeartbeatRunProcess({
+              pid: running.child.pid,
+              processGroupId: running.processGroupId,
+              graceMs: Math.max(1, running.graceSec) * 1000,
+            });
+          }
+          runningProcesses.delete(run.id);
+          await releaseIssueExecutionAndPromote(run);
+        } finally {
+          stopOwnership?.release();
         }
-        runningProcesses.delete(run.id);
-        await releaseIssueExecutionAndPromote(run);
-      } finally {
-        stopOwnership?.release();
-      }
+      });
     }
 
     return runs.length;
@@ -29955,13 +29946,15 @@ export function heartbeatService(
   async function cancelInvocationsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    context: StopRequestContext = {},
   ) {
+    const request = { ...context, requestedAt: context.requestedAt ?? new Date().toISOString() };
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
     );
     let runsCancelled = 0;
     for (const agentId of uniqueAgentIds) {
-      runsCancelled += await cancelActiveForAgentInternal(agentId, reason);
+      runsCancelled += await cancelActiveForAgentInternal(agentId, reason, "cancelled", request);
     }
     const wakeupsCancelled = await cancelPendingWakeupsForAgentsInternal(
       uniqueAgentIds,
@@ -29975,10 +29968,12 @@ export function heartbeatService(
   }
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
+    const request = { requestedAt: new Date().toISOString() };
     if (scope.scopeType === "agent") {
       await cancelActiveForAgentInternal(
         scope.scopeId,
         "Cancelled due to budget pause",
+        "cancelled", request,
       );
       await cancelPendingWakeupsForBudgetScope(scope);
       return;
@@ -30001,7 +29996,7 @@ export function heartbeatService(
         : await listProjectScopedRunIds(scope.companyId, scope.scopeId);
 
     for (const runId of runIds) {
-      await cancelRunInternal(runId, "Cancelled due to budget pause");
+      await cancelRunInternal(runId, "Cancelled due to budget pause", request);
     }
 
     await cancelPendingWakeupsForBudgetScope(scope);
@@ -30477,11 +30472,11 @@ export function heartbeatService(
      * agent pause route. For non-pause cancellations use cancelRun, or call the internal
      * cancelActiveForAgentInternal(agentId, reason, errorCode) with an explicit errorCode.
      */
-    cancelActiveForAgent: (agentId: string, reason?: string) =>
-      cancelActiveForAgentInternal(agentId, reason, "agent_paused"),
+    cancelActiveForAgent: (agentId: string, reason?: string, context?: StopRequestContext) =>
+      cancelActiveForAgentInternal(agentId, reason, "agent_paused", context),
 
-    cancelInvocationsForAgents: (agentIds: string[], reason: string) =>
-      cancelInvocationsForAgentsInternal(agentIds, reason),
+    cancelInvocationsForAgents: (agentIds: string[], reason: string, context?: StopRequestContext) =>
+      cancelInvocationsForAgentsInternal(agentIds, reason, context),
 
     cancelBudgetScopeWork,
 

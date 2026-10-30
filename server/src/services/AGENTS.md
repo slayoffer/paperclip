@@ -14,6 +14,22 @@ On 2026-10-28 (VLAT), `XDG_SESSION_CLASS=user` caused diagnostic messages to red
 Compare exception messages with the report's redacted message in lifecycle tests.
 The persisted run error can retain the original message.
 
+## SSH ownership recovery
+
+Agent-home and primary workspaces can have no `executionWorkspaceId`.
+Older leases can also lack `sshInPlaceWriter` tracking.
+Recover their lock path from the saved `in_place` realization with matching lease and provider identities.
+A terminal run and released lease still require remote termination proof before lock removal.
+Observed on 2026-10-26 (VLAT): a sweep that used only execution-workspace rows skipped these locks.
+
+## Restart recovery ownership
+
+The orphan reaper owns process-loss recovery for legacy runs with a controller or checkpoint.
+Do not terminalize these runs from the stale-lock sweeper because their provider stopped.
+An expired lease permits a restart claim. It does not permit the sweeper to remove the task locks.
+Check new ownership evidence in the terminal write as well as the initial read.
+Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.
+
 ## Pull queue stops
 
 Record an explicit backlog disposition with its parking receipt in the issue transaction.

@@ -30,6 +30,7 @@ import type {
   AgentWakeupResponse,
   ChatFailedRunRetryResponse,
   HeartbeatRun,
+  RunExecutionEvidenceReport,
   Approval,
   AgentConfigRevision,
   ClearAgentErrorResponse,
@@ -263,6 +264,8 @@ export const agentsApi = {
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/auth-signal${query}`,
     );
   },
+  executionEvidence: (runId: string) =>
+    api.get<RunExecutionEvidenceReport>(`/heartbeat-runs/${encodeURIComponent(runId)}/execution-evidence`),
   invoke: (id: string, companyId?: string, data: AgentWakeRequest = {}) =>
     api.post<HeartbeatRun>(agentPath(id, companyId, "/heartbeat/invoke"), data),
   wakeup: (

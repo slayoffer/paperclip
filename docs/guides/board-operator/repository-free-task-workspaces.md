@@ -31,6 +31,9 @@ Recovery can reuse a task directory only through its owned execution workspace
 binding. Native recovery must use the directory in its saved execution input.
 A mismatched binding fails workspace validation.
 
+Recovery checks the company, project, task, directory, mode, and strategy bindings.
+A failed check retains the task files.
+
 For verification, use the heartbeat repository-free workspace tests.
 They cover a foreign source issue and a non-Git project default directory.
 They also check repeat runs, saved sessions, configured Git work, and projectless
