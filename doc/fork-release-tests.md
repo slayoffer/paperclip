@@ -53,7 +53,10 @@ The first matrix run found a Cursor fixture outside the old wrapper's project li
 Its fake sandbox runner dropped standard input during archive upload.
 The fixture now forwards standard input, as its adjacent runner fixture already does.
 This corrects the test runner without changing adapter runtime behavior.
-The finite limits remain unchanged for test execution.
+The managed-home restore fixture also performs real shell commands and bounded archive reads.
+Its five-second default test limit expired in shard 1 and in a focused Node.js 24 run.
+That fixture now has a 30-second test limit. Its assertions and subprocess limits remain unchanged.
+The workflow and subprocess limits remain unchanged.
 The contract check also tests failure, cancellation, skipped, and absent summary results.
 A newer test event for the same pull request cancels its previous run.
 Ignored label events use separate concurrency groups and cannot cancel tests.
