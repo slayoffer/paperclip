@@ -58,6 +58,8 @@ import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createWorkspaceIssueTreeAssessor } from "./execution-workspace-issue-tree.js";
+import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -84,23 +86,6 @@ type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const execFileAsync = promisify(execFile);
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
-
-// Return the timestamp when an issue became terminal. A `done` issue uses
-// `completedAt`. A `cancelled` issue uses `cancelledAt`. The reaper cooldown
-// measures the age of the terminal transition from this timestamp. Fall back to
-// `updatedAt` when the terminal timestamp is null, so an old issue that lacks a
-// recorded transition time still gates the cooldown. Return null for a
-// non-terminal issue.
-function issueTerminalTimestamp(issue: {
-  status: string;
-  completedAt: Date | null;
-  cancelledAt: Date | null;
-  updatedAt: Date;
-}): Date | null {
-  if (issue.status === "done") return issue.completedAt ?? issue.updatedAt;
-  if (issue.status === "cancelled") return issue.cancelledAt ?? issue.updatedAt;
-  return null;
-}
 
 const WORKSPACE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
@@ -247,9 +232,12 @@ export type ExecutionWorkspaceServiceOptions = {
   // becomes terminal before it archives the workspace. A value of 0 disables
   // the cooldown. The default is 7 days.
   workspaceReaperCooldownDays?: number;
+  // The reaper also uses this seam. A result without statusInspectionSucceeded
+  // counts as a successful status inspection.
   inspectGitCloseReadiness?: (workspace: ExecutionWorkspace) => Promise<{
     git: ExecutionWorkspaceCloseGitReadiness | null;
     warnings: string[];
+    statusInspectionSucceeded?: boolean;
   }>;
 };
 
@@ -1335,38 +1323,15 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // removes the upper bound and makes the scan chase newer churn again. This
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
+  const dirtyVerdicts = createTerminalWorkspaceDirtyVerdicts(now);
+  const inspectGitForSweep = opts.inspectGitCloseReadiness
+    ? async (workspace: ExecutionWorkspace) => {
+        const inspected = await opts.inspectGitCloseReadiness!(workspace);
+        return { ...inspected, statusInspectionSucceeded: inspected.statusInspectionSucceeded ?? true };
+      }
+    : inspectGitCloseReadiness;
 
-  async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
-    if (!workspace.sourceIssueId) return [];
-    return db
-      .select({
-        id: issues.id,
-        status: issues.status,
-        completedAt: issues.completedAt,
-        cancelledAt: issues.cancelledAt,
-        updatedAt: issues.updatedAt,
-      })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, workspace.companyId),
-        sql<boolean>`
-          ${issues.id} IN (
-            WITH RECURSIVE issue_tree(id) AS (
-              SELECT ${issues.id}
-              FROM ${issues}
-              WHERE ${issues.companyId} = ${workspace.companyId}
-                AND ${issues.id} = ${workspace.sourceIssueId}
-              UNION ALL
-              SELECT child.id
-              FROM ${issues} child
-              JOIN issue_tree parent ON child.parent_id = parent.id
-              WHERE child.company_id = ${workspace.companyId}
-            )
-            SELECT id FROM issue_tree
-          )
-        `,
-      ));
-  }
+  const assessIssueTree = createWorkspaceIssueTreeAssessor(db);
 
   async function listDeliveryPullRequestProducts(
     workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">,
@@ -1392,25 +1357,15 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .limit(100);
   }
 
+  type WorkspaceIssueTreeAssessment = Awaited<ReturnType<typeof assessIssueTree>>;
+
   async function assessDelivery(
     workspace: ExecutionWorkspaceRow,
     git: ExecutionWorkspaceCloseGitReadiness | null,
+    issueTreeAssessment?: WorkspaceIssueTreeAssessment,
   ) {
-    const issueTree = await listWorkspaceIssueTree(workspace);
-    const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
-    const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
-    const subtreeTerminal = Boolean(sourceIssue && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
-    // The cooldown anchor is the most recent terminal timestamp across the whole
-    // issue tree. The reaper compares it against the cooldown window. A null
-    // anchor means no issue in the tree is terminal yet, so the cooldown never
-    // applies (the terminal-tree gates above already block the archive).
-    let cooldownAnchor: Date | null = null;
-    for (const issue of issueTree) {
-      const terminalAt = issueTerminalTimestamp(issue);
-      if (terminalAt && (!cooldownAnchor || terminalAt.getTime() > cooldownAnchor.getTime())) {
-        cooldownAnchor = terminalAt;
-      }
-    }
+    const { sourceIssueTerminal, subtreeTerminal, cooldownAnchor } =
+      issueTreeAssessment ?? await assessIssueTree(workspace);
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
     const workspaceHeadSha = git?.repoRoot && git.workspacePath
@@ -2645,19 +2600,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         clearedStaleReopenPending: 0,
       };
 
+      dirtyVerdicts.prune();
+
       for (const workspace of candidates) {
-        const executionWorkspace = toExecutionWorkspace(workspace);
-        const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
-        if (!statusInspectionSucceeded) {
-          result.skippedGitInspection += 1;
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        const assessment = await assessDelivery(workspace, git);
+        // Run the gates that need only the database before any git work.
+        const issueTreeAssessment = await assessIssueTree(workspace);
         const reopenPending = metadataHasReopenPendingConsumption(
           workspace.metadata as Record<string, unknown> | null,
         );
-        if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
+        if (!issueTreeAssessment.sourceIssueTerminal || !issueTreeAssessment.subtreeTerminal) {
+          dirtyVerdicts.forget(workspace.id);
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition
             // committed. Clear the reopen-pending flag under the lifecycle lock so
@@ -2673,18 +2625,6 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        if (assessment.workspaceDirty) {
-          result.skippedDirty += 1;
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        if (
-          assessment.deliveryState !== "merged_via_pr"
-          && assessment.deliveryState !== "merged_by_ancestry"
-        ) {
-          result.skippedUndelivered += 1;
-          continue;
-        }
         // Hold the archive during the cooldown window. The anchor is the most
         // recent terminal timestamp across the issue tree. A person can reopen
         // the work inside this window. A cooldown of 0 disables the check, so the
@@ -2696,10 +2636,38 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : null;
         if (
           cooldownCutoff
-          && assessment.cooldownAnchor
-          && assessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
+          && issueTreeAssessment.cooldownAnchor
+          && issueTreeAssessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
         ) {
           result.skippedCooldown += 1;
+          continue;
+        }
+        // A cached dirty verdict only skips. It never archives.
+        if (dirtyVerdicts.shouldSkip(workspace.id, workspace.sweepUpdatedAt)) {
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        const executionWorkspace = toExecutionWorkspace(workspace);
+        const { git, statusInspectionSucceeded } = await inspectGitForSweep(executionWorkspace);
+        if (!statusInspectionSucceeded) {
+          result.skippedGitInspection += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        const assessment = await assessDelivery(workspace, git, issueTreeAssessment);
+        if (assessment.workspaceDirty) {
+          dirtyVerdicts.recordDirty(workspace.id, workspace.sweepUpdatedAt);
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        dirtyVerdicts.forget(workspace.id);
+        if (
+          assessment.deliveryState !== "merged_via_pr"
+          && assessment.deliveryState !== "merged_by_ancestry"
+        ) {
+          result.skippedUndelivered += 1;
           continue;
         }
         if (reopenPending) {
