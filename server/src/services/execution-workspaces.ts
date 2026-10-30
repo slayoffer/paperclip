@@ -94,6 +94,7 @@ import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createWorkspaceIssueTreeAssessor } from "./execution-workspace-issue-tree.js";
 import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
@@ -125,23 +126,6 @@ type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const execFileAsync = promisify(execFile);
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
-
-// Return the timestamp when an issue became terminal. A `done` issue uses
-// `completedAt`. A `cancelled` issue uses `cancelledAt`. The reaper cooldown
-// measures the age of the terminal transition from this timestamp. Fall back to
-// `updatedAt` when the terminal timestamp is null, so an old issue that lacks a
-// recorded transition time still gates the cooldown. Return null for a
-// non-terminal issue.
-function issueTerminalTimestamp(issue: {
-  status: string;
-  completedAt: Date | null;
-  cancelledAt: Date | null;
-  updatedAt: Date;
-}): Date | null {
-  if (issue.status === "done") return issue.completedAt ?? issue.updatedAt;
-  if (issue.status === "cancelled") return issue.cancelledAt ?? issue.updatedAt;
-  return null;
-}
 
 const WORKSPACE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
@@ -1784,39 +1768,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     return inspectWorkspace(workspace);
   };
 
-  async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
-    const sourceIssueId = workspace.sourceIssueId;
-    if (!sourceIssueId) return [];
-    // A read-only lookup: rebuild it after a transient pooled disconnect.
-    return retryIdempotentDatabaseOperation(() => db
-      .select({
-        id: issues.id,
-        status: issues.status,
-        completedAt: issues.completedAt,
-        cancelledAt: issues.cancelledAt,
-        updatedAt: issues.updatedAt,
-      })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, workspace.companyId),
-        sql<boolean>`
-          ${issues.id} IN (
-            WITH RECURSIVE issue_tree(id) AS (
-              SELECT ${issues.id}
-              FROM ${issues}
-              WHERE ${issues.companyId} = ${workspace.companyId}
-                AND ${issues.id} = ${sourceIssueId}
-              UNION ALL
-              SELECT child.id
-              FROM ${issues} child
-              JOIN issue_tree parent ON child.parent_id = parent.id
-              WHERE child.company_id = ${workspace.companyId}
-            )
-            SELECT id FROM issue_tree
-          )
-        `,
-      )));
-  }
+  const assessIssueTree = createWorkspaceIssueTreeAssessor(db);
 
   async function listDeliveryPullRequestProducts(
     workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">,
@@ -1844,26 +1796,15 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .limit(100));
   }
 
+  type WorkspaceIssueTreeAssessment = Awaited<ReturnType<typeof assessIssueTree>>;
+
   async function assessDelivery(
     workspace: ExecutionWorkspaceRow,
     git: ExecutionWorkspaceCloseGitReadiness | null,
-    precomputedIssueTree?: Awaited<ReturnType<typeof listWorkspaceIssueTree>>,
+    issueTreeAssessment?: WorkspaceIssueTreeAssessment,
   ) {
-    const issueTree = precomputedIssueTree ?? await listWorkspaceIssueTree(workspace);
-    const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
-    const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
-    const subtreeTerminal = Boolean(sourceIssue && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
-    // The cooldown anchor is the most recent terminal timestamp across the whole
-    // issue tree. The reaper compares it against the cooldown window. A null
-    // anchor means no issue in the tree is terminal yet, so the cooldown never
-    // applies (the terminal-tree gates above already block the archive).
-    let cooldownAnchor: Date | null = null;
-    for (const issue of issueTree) {
-      const terminalAt = issueTerminalTimestamp(issue);
-      if (terminalAt && (!cooldownAnchor || terminalAt.getTime() > cooldownAnchor.getTime())) {
-        cooldownAnchor = terminalAt;
-      }
-    }
+    const { sourceIssueTerminal, subtreeTerminal, cooldownAnchor } =
+      issueTreeAssessment ?? await assessIssueTree(workspace);
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
     const workspaceHeadSha = workspace.providerType === "plugin" ? git?.headSha ?? null : sourceIssueTerminal && git?.repoRoot && git.workspacePath
@@ -3351,8 +3292,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // also leaves leftover trash for a later sweep.
         if (options.compact !== false) await purgeCompactionTrashIfDue(workspace);
         else deferCompactionTrashPurge(workspace);
-        const issueTree = await listWorkspaceIssueTree(workspace);
-        const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId);
+        const issueTreeAssessment = await assessIssueTree(workspace);
+        const { issueTree, sourceIssue } = issueTreeAssessment;
         const reopenPending = metadataHasReopenPendingConsumption(
           workspace.metadata as Record<string, unknown> | null,
         );
@@ -3397,7 +3338,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        const latestTerminalAt = Math.max(...issueTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
+        const latestTerminalAt = issueTreeAssessment.cooldownAnchor!.getTime();
         // Compaction runs once per terminal cycle, after its own delay and
         // before the archive cooldown, so a workspace the reaper cannot archive
         // yet (or ever) stops holding regenerable files.
@@ -3498,7 +3439,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedUndelivered += 1;
           continue;
         }
-        const assessment = await assessDelivery(workspace, git, issueTree);
+        const assessment = await assessDelivery(workspace, git, issueTreeAssessment);
         if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition
