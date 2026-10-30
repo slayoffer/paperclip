@@ -154,7 +154,7 @@ Run each command from `server/`:
 ../node_modules/.bin/vitest run src/__tests__/credential-transfer-cleanup.test.ts
 ```
 
-The last suite uses an isolated PostgreSQL database and applies the generated migration.
+The authority suite uses an isolated PostgreSQL database and applies the generated migration.
 It checks saved approvals, connection versions, company isolation, concurrency, replay, and restart cleanup.
 It also checks argument-dependent denial, delayed providers, lost lock backends, and company removal.
 The other suites check failure injection, deadlines, partial storage, and secret canaries.

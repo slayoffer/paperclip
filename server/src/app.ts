@@ -860,9 +860,7 @@ export async function createApp(
     oauthGrantRefresher: (input) =>
       gatewayOAuthAccess.refreshOAuthGrantCredentials(input),
   });
-  // Issue routes are intentionally mounted after the gateway is constructed because
-  // issue approval endpoints delegate to it. The intervening routers use distinct
-  // route prefixes, so this dependency does not change issue-route precedence.
+  // Construct the gateway before issue approval routes.
   api.use(issueRoutes(db, opts.storageService, {
     chatRunRetries: chatChannels,
     feedbackExportService: opts.feedbackExportService,
