@@ -9,6 +9,11 @@ After startup, the orphan reaper claims an expired controller and resumes the sa
 The adapter receives the saved session and a short restart prompt.
 The adapter cannot replace a missing restart session with a fresh session.
 
+The orphan reaper owns process-loss recovery for legacy runs with a controller or checkpoint.
+The stale-lock sweeper retains these runs and their task locks, even after the controller lease expires.
+Its terminal write also checks for a controller or checkpoint saved after the sweep read.
+Terminal tasks and older unmanaged runs retain the existing cleanup path.
+
 Managed local sessions retain their transcript directories before temporary home cleanup.
 Recovery restores these transcripts into the replacement provider home. Authentication and configuration files stay excluded.
 
@@ -34,3 +39,6 @@ Verified bootstrap failures retain their existing retry path when no provider ex
 
 Operators must verify a deployed release with a controlled restart and record the affected run IDs.
 Tests do not replace this live deployment check.
+
+`server/src/__tests__/restart-live-runs.test.ts` stops six live Codex and Claude runs.
+It checks that every saved session resumes once when lock cleanup precedes or overlaps recovery.

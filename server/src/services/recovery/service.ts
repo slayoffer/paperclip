@@ -5306,9 +5306,8 @@ export function recoveryService(
   //   authority that catches the reuse-lease path: the release stops the sandbox
   //   but keeps the server process alive, so the in-memory handle and the
   //   recorded pid can both persist.
-  // - Process-death authority: the run has no in-memory handle and its recorded
-  //   process and process group are both gone. This catches a hard server crash
-  //   that skipped the graceful teardown, even when the issue is not terminal.
+  // - Process-death authority covers unmanaged rows. The reaper owns legacy
+  //   runs with a controller or restart checkpoint.
   async function terminalizeOrphanedRunningRun(
     run: typeof heartbeatRuns.$inferSelect,
     options?: {
@@ -5376,11 +5375,15 @@ export function recoveryService(
       else if (issueStatus === "cancelled") issueTerminalStatus = "cancelled";
     }
 
-    // Process-death authority. The run is live while either its adapter process
-    // or the enclosing heartbeat execution/finalization still owns it. Check
-    // that full in-process lifecycle first, then the recorded pid and process
-    // group. Require recorded process metadata, so this authority never fires
-    // on a run that has not yet stored its pid.
+    // The orphan reaper owns restart claims and process-loss retries. A stopped
+    // provider is expected after shutdown. Never terminalize its retained run
+    // or clear its issue locks before the reaper can claim the session.
+    if (!issueTerminalStatus && run.runtimeMode === "legacy" &&
+        (run.controllerBootId || run.resultJson?.restartCheckpoint)) {
+      return { terminalized: false, status: run.status };
+    }
+
+    // Unmanaged historical runs retain the process-death backstop.
     let processGone = false;
     const hasLiveExecution =
       deps.liveRunExecutions?.has(run.id) ?? runningProcesses.has(run.id);
@@ -5462,6 +5465,12 @@ export function recoveryService(
           // controller's run, even if that controller's lease later expires.
           run.runtimeMode === "legacy"
             ? and(
+                // Fence a restart checkpoint or controller saved after this
+                // sweep's snapshot. Only the reaper may recover that run.
+                !issueTerminalStatus ? and(
+                  isNull(heartbeatRuns.controllerBootId),
+                  sql`${heartbeatRuns.resultJson}->'restartCheckpoint' is null`,
+                ) : undefined,
                 run.controllerBootId
                   ? eq(heartbeatRuns.controllerBootId, run.controllerBootId)
                   : isNull(heartbeatRuns.controllerBootId),
@@ -5529,14 +5538,8 @@ export function recoveryService(
     return { terminalized: true, status: updated.status };
   }
 
-  // Backstop sweeper: clears stale lock columns on issues whose checkoutRunId
-  // or executionRunId points at a heartbeat_runs row that is either missing or
-  // in a terminal status. Provides self-heal for stale locks that fell outside
-  // releaseIssueExecutionAndPromote / clearCheckoutRunIfTerminal / adoption.
-  // Before it evaluates cleanability, it terminalizes any referenced run that
-  // still claims to be live but can no longer reach a terminal status on its
-  // own, so a stuck "running" run can no longer block the sweep. Idempotent and
-  // safe: clears at most one row's worth of lock columns per candidate.
+  // Clear missing/terminal run locks. The orphan reaper owns controller-backed
+  // legacy recovery. Terminal issues and unmanaged rows retain this backstop.
   async function sweepStaleIssueLocks() {
     const result = {
       cleared: 0,

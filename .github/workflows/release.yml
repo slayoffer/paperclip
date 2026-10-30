@@ -108,7 +108,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Validate immutable source and inspect existing artifacts
         id: plan
         env:
@@ -142,7 +142,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Install build dependencies without lifecycle scripts
         working-directory: source
         run: pnpm install --ignore-scripts --no-frozen-lockfile
@@ -183,7 +183,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Install npm with trusted publishing support
         run: npm install --global npm@11.18.0 --ignore-scripts
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -214,7 +214,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Prepare locked image context
         env:
           SOURCE_SHA: ${{ inputs.source_ref }}
@@ -268,7 +268,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: preview-image
@@ -299,7 +299,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Confirm exact artifacts are visible
         env:
           SOURCE_SHA: ${{ inputs.source_ref }}
@@ -329,7 +329,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
       - name: Require successful source checks for this exact master push
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -364,7 +364,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Validate release package manifest
@@ -456,7 +456,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
 
       - name: Install test dependencies
         run: pnpm install --frozen-lockfile
@@ -626,7 +626,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Validate release package manifest
@@ -892,7 +892,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Validate release package manifest
@@ -1262,7 +1262,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Validate release package manifest
@@ -1309,7 +1309,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Install dependencies
