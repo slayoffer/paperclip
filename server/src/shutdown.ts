@@ -78,6 +78,13 @@ export function createPreDrainShutdownBudget(input: {
   };
 }
 
+/** How long shutdown waits for runs suspended for restart to settle (PAPERCLIP_RESTART_SETTLE_MS, default 60 s).
+ * Keep the container stop grace period above it plus the remote writer stop (compose stop_grace_period). */
+export function restartSettleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.PAPERCLIP_RESTART_SETTLE_MS);
+  return Number.isInteger(value) && value >= 5_000 && value <= 600_000 ? value : 60_000;
+}
+
 export async function drainRunExecutionFinalizersForShutdown(input: {
   signal: "SIGINT" | "SIGTERM";
   drain: (() => Promise<void>) | null;

@@ -216,6 +216,7 @@ import {
   finalizeServerShutdown,
   loadWithoutCoordinatedShutdownSignalHooks,
   runBoundedShutdownStep,
+  restartSettleTimeoutMs,
 } from "./shutdown.js";
 import { initializeCloudRuntimeIdentity } from "./services/cloud-runtime-identity.js";
 import { initializeAdapterSettings } from "./services/adapter-settings.js";
@@ -1206,7 +1207,7 @@ async function startServerWithDatabaseTeardown(
   let drainHeartbeatRunsForShutdown: ((
     signal: "SIGINT" | "SIGTERM",
     runIds?: readonly string[] | null,
-  ) => Promise<unknown>) | null = null;
+  ) => Promise<{ restartSuspendedRunIds: readonly string[] }>) | null = null;
   let drainHeartbeatExecutionFinalizers: (() => Promise<void>) | null = null;
   let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{
     skipDrain: boolean;
@@ -2077,6 +2078,7 @@ async function startServerWithDatabaseTeardown(
       );
     }
 
+    let restartSuspendedRuns = 0;
     if (!skipHeartbeatDrain && drainHeartbeatRunsForShutdown) {
       const drainStartedAt = Date.now();
       logger.info(
@@ -2085,6 +2087,7 @@ async function startServerWithDatabaseTeardown(
       );
       try {
         const drain = await drainHeartbeatRunsForShutdown(signal, selectiveDrainRunIds);
+        restartSuspendedRuns = drain.restartSuspendedRunIds.length;
         logger.info(
           { signal, drain, durationMs: Date.now() - drainStartedAt },
           "graceful heartbeat run drain complete",
@@ -2098,7 +2101,8 @@ async function startServerWithDatabaseTeardown(
       await drainRunExecutionFinalizersForShutdown({
         signal,
         drain: drainHeartbeatExecutionFinalizers,
-        timeoutMs: 30_000,
+        // Suspended runs must save workspace and termination proof before the database closes.
+        timeoutMs: restartSuspendedRuns > 0 ? restartSettleTimeoutMs() : 30_000,
         log: logger,
       });
     }
