@@ -249,6 +249,7 @@ type Binding = {
 type ToolReceipt = {
   operationId: string;
   input: unknown;
+  inputDigest?: string;
   result: unknown;
 };
 
@@ -324,6 +325,13 @@ function hireAgentApiRequest(input: Record<string, unknown>, binding: Pick<Bindi
 
 function hireAgentResult(value: unknown, provider: unknown) {
   return { ...apiToolResult(value), ...(provider === "openai_dot" ? { setupRequired: "This creates a separate Paperclip Dot agent. Its operator must pair a separate OpenAI Dot before it can run. The existing Dot binding and workspace permission are never inherited." } : {}) };
+}
+
+// Compare exact identities even when the output column masks the stored input.
+function sameReceiptInput(receipt: ToolReceipt, input: unknown): boolean {
+  return receipt.inputDigest === undefined
+    ? canonicalJson(receipt.input) === canonicalJson(input)
+    : receipt.inputDigest === toolInputDigest(input);
 }
 
 export class PaperclipRunnerToolAuthority {
@@ -2424,7 +2432,7 @@ export class PaperclipRunnerToolAuthority {
         sql`${heartbeatRuns.resultJson}->'semanticToolReceipts' ? ${input.idempotencyKey}`,
       )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
       if (earlier?.receipt) {
-        if (earlier.receipt.operationId !== "set_task_monitor" || canonicalJson(earlier.receipt.input) !== canonicalJson(input)) {
+        if (earlier.receipt.operationId !== "set_task_monitor" || !sameReceiptInput(earlier.receipt, input)) {
           throw new Error("paperclip_runner_tool_idempotency_conflict");
         }
         replayed = true;
@@ -3018,7 +3026,7 @@ export class PaperclipRunnerToolAuthority {
         if (prior !== undefined) {
           if (
             prior.operationId !== operationId ||
-            canonicalJson(prior.input) !== canonicalJson(input)
+            !sameReceiptInput(prior, input)
           ) {
             if (effect === null || options.receiptOnly) return undefined;
             throw new Error("paperclip_runner_tool_idempotency_conflict");
@@ -3035,6 +3043,7 @@ export class PaperclipRunnerToolAuthority {
         receipts[idempotencyKey] = {
           operationId,
           input,
+          inputDigest: toolInputDigest(input),
           result,
         } satisfies ToolReceipt;
         await tx

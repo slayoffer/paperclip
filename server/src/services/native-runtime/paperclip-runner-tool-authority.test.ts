@@ -1312,6 +1312,10 @@ describe("PaperclipRunnerToolAuthority", () => {
         arguments: { ...call.arguments, body: "Conflicting retry." },
       }),
     ).rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
+    await expect(authority.execute({
+      ...call,
+      arguments: { ...call.arguments, body: body.replace(/Bearer .+$/, "Bearer different-document-credential") },
+    })).rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
   });
 
   it("returns the exact accepted plan revision in task context", async () => {
