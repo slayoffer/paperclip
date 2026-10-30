@@ -62,8 +62,9 @@ export async function stopSshInPlaceWritersForRestart(
     if (!row) return false;
     const lease = row as unknown as EnvironmentLease;
     const tracking = readSshInPlaceWriterTracking(lease);
+    if (!tracking?.remoteCwd || !lease.environmentId) return false;
     const environment = await environmentService(db).getById(lease.environmentId);
-    if (!tracking?.remoteCwd || !environment) return false;
+    if (!environment) return false;
     const parsed = await resolveEnvironmentDriverConfigForRuntime(db, lease.companyId, environment, {
       issueId: lease.issueId, heartbeatRunId: run.id,
     });

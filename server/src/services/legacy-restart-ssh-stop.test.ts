@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companies, createDb, heartbeatRuns, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
@@ -16,12 +19,14 @@ const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("SSH restart stop proof", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
+  let local: string;
   beforeAll(async () => {
+    local = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-restart-ssh-"));
     database = await startEmbeddedPostgresTestDatabase("legacy-restart-ssh-");
     db = createDb(database.connectionString);
     await db.insert(authUsers).values({ id: "ssh-user", name: "Test", email: "ssh@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
   }, 60_000);
-  afterAll(async () => { await database?.cleanup(); });
+  afterAll(async () => { await database?.cleanup(); if (local) await fs.rm(local, { recursive: true, force: true }); });
 
   async function read(id: string) { return (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)))[0]!; }
   async function seed(params: Record<string, unknown> = remote) {
@@ -30,15 +35,15 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.insert(companies).values({ id: companyId, name: "Restart", issuePrefix: `S${companyId.slice(0, 7)}`, defaultResponsibleUserId: "ssh-user" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "general", adapterType: "codex_local", adapterConfig: { engine: "cli" } });
     await db.insert(projects).values({ id: projectId, companyId, name: "Project" });
-    await db.insert(projectWorkspaces).values({ id: projectWorkspaceId, companyId, projectId, name: "Checkout", cwd: "/remote/workspace", isPrimary: true });
+    await db.insert(projectWorkspaces).values({ id: projectWorkspaceId, companyId, projectId, name: "Checkout", cwd: local, isPrimary: true });
     await db.insert(executionWorkspaces).values({ id: executionWorkspaceId, companyId, projectId, projectWorkspaceId,
-      mode: "shared_workspace", strategyType: "project_primary", name: "Checkout", cwd: "/remote/workspace" });
+      mode: "shared_workspace", strategyType: "project_primary", name: "Checkout", cwd: local });
     await db.insert(issues).values({ projectId, projectWorkspaceId, executionWorkspaceId, id: issueId, companyId, title: "Review", assigneeAgentId: agentId, status: "in_progress", responsibleUserId: "ssh-user" });
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running", ...legacyControllerClaim("legacy"),
       contextSnapshot: { issueId, executionWorkspaceId } }).returning();
     await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
     await saveLegacyRestartCheckpoint(db, run, { adapterType: "codex_local", taskKey: "owner-project:test",
-      workspaceCwd: "/remote/workspace", sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", ...params } });
+      workspaceCwd: local, sessionParams: { sessionId: "01234567-89ab-4cde-8f01-23456789abcd", ...params } });
     return read(run.id);
   }
   async function expire(id: string) {
@@ -64,7 +69,8 @@ const support = await getEmbeddedPostgresTestSupport();
     });
     await suspend(run, stopRemote);
     expect(stopRemote).toHaveBeenCalledOnce();
-    expect(readLegacyRestartCheckpoint(await read(run.id))).toMatchObject({ providerStopped: true, workspaceSettled: false });
+    const checkpoint = readLegacyRestartCheckpoint(await read(run.id));
+    expect([checkpoint?.providerStopped, checkpoint?.workspaceSettled]).toEqual([true, undefined]);
     await markLegacyRestartBoundary(db, run, "workspaceSettled");
     expect(await claimLegacyRestartRecovery(db, await expire(run.id), "codex_local")).not.toBeNull();
     expect((await read(run.id)).resultJson).toMatchObject({ restartRecovery: { outcome: "resuming", attempt: 1 } });
@@ -77,7 +83,7 @@ const support = await getEmbeddedPostgresTestSupport();
   ])("%s leaves providerStopped unset and recovery reconciles", async (_name, stopRemote) => {
     const run = await seed();
     await suspend(run, stopRemote);
-    expect(readLegacyRestartCheckpoint(await read(run.id))?.providerStopped).toBe(false);
+    expect(readLegacyRestartCheckpoint(await read(run.id))?.providerStopped).toBeUndefined();
     expect(await claimLegacyRestartRecovery(db, await expire(run.id), "codex_local")).toBeNull();
     expect((await read(run.id)).resultJson).toMatchObject({ restartRecovery: { outcome: "reconciliation", reason: "restart_remote_stop_unverified" } });
   });
