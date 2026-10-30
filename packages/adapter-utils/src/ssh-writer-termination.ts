@@ -98,3 +98,21 @@ export function sshWriterTerminationScript(
   `;
   return `node -e ${shellQuote(source)} ${shellQuote(directory)} ${shellQuote(remoteWorkspacePath)} ${options.allowMissingDirectory === true ? "1" : "0"}`;
 }
+
+/** SYNA-2959: stop every tracked writer scope of a run before a server restart, so the provider really exits and
+ * the SSH command returns its own exit status. TERM first, KILL after the grace. It proves nothing by itself:
+ * the caller confirms with sshWriterTerminationScript. Untracked ("uncontained") records are left alone. */
+export function sshWriterStopScript(remoteWorkspacePath: string, runId: string, graceSec = 20): string {
+  const directory = sshWriterDirectory(remoteWorkspacePath, runId);
+  const grace = Math.max(1, Math.min(120, Math.floor(graceSec)));
+  return [
+    'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+    `[ -d ${shellQuote(directory)} ] || exit 0`,
+    // The leading-parenthesis case form keeps the pattern from closing a command substitution.
+    `units() { for f in ${shellQuote(directory)}/*; do n=\${f##*/}; case "$n" in (????????-????-????-????-????????????) printf 'paperclip-writer-%s.scope\\n' "$n";; esac; done; }`,
+    'for u in $(units); do systemctl --user kill --signal=SIGTERM "$u" 2>/dev/null; done',
+    `i=0; while [ "$i" -lt ${grace} ]; do a=0; for u in $(units); do systemctl --user is-active --quiet "$u" && a=1; done; [ "$a" = 0 ] && break; sleep 1; i=$((i+1)); done`,
+    'for u in $(units); do systemctl --user is-active --quiet "$u" && systemctl --user kill --signal=SIGKILL "$u" 2>/dev/null; done',
+    "exit 0",
+  ].join("; ");
+}
