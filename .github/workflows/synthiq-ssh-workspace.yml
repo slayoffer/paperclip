@@ -18,6 +18,17 @@ on:
       - "server/src/__tests__/execution-control-sweeper.test.ts"
       - "server/src/services/environment-runtime.ts"
       - "server/src/services/environment-ssh-driver.ts"
+      - "server/src/services/heartbeat.ts"
+      - "server/src/services/run-execution-evidence*"
+      - "server/src/services/reconcile-execution-evidence.ts"
+      - "server/src/services/local-evidence-projection.ts"
+      - "server/src/services/stop-request-evidence.test.ts"
+      - "server/src/services/run-cancellation*"
+      - "server/src/services/legacy-restart-recovery*"
+      - "server/src/services/native-runtime/native-session-executor.ts"
+      - "server/src/routes/agents.ts"
+      - "server/src/routes/openapi.ts"
+      - "server/src/__tests__/execution-evidence.test.ts"
       - "server/src/services/heartbeat-github-launchers*"
       - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
       - "server/src/__tests__/ssh-in-place-*.test.ts"
@@ -98,3 +109,54 @@ jobs:
           server/src/__tests__/ssh-in-place-lock-checks.test.ts
           server/src/__tests__/ssh-in-place-reconciliation.test.ts
           server/src/__tests__/execution-control-sweeper.test.ts
+
+      - name: Test complete local execution evidence
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          packages/adapter-utils/src/local-execution-evidence.test.ts
+          server/src/services/run-execution-evidence.test.ts
+          server/src/services/stop-request-evidence.test.ts
+          server/src/services/run-cancellation.test.ts
+          server/src/services/legacy-restart-recovery.test.ts
+          server/src/__tests__/execution-evidence.test.ts
+          server/src/__tests__/heartbeat-native-runner-cancellation.test.ts
+          server/src/__tests__/agent-cross-tenant-authz-routes.test.ts
+          server/src/__tests__/agent-permissions-routes.test.ts
+      - name: Test Stop and shutdown safety
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          server/src/__tests__/heartbeat-process-recovery.test.ts
+          --testNamePattern 'cancel|shutdown|Stop'
+
+  repository-verification:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    # Match fork-release-tests.yml. The complete serial suite takes about two hours.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.22.1"
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build verification dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check all package types
+        run: corepack pnpm -r typecheck
+      - name: Run the repository test suite
+        timeout-minutes: 150
+        run: |
+          # Same rule as fork-release-tests.yml (#88): skip the real-runnerd Codex
+          # test only on a runner that denies unprivileged user and network namespaces.
+          if ! unshare --user --map-root-user --net true 2>/dev/null; then export PAPERCLIP_TEST_NO_USERNS_SANDBOX=1; fi
+          corepack pnpm test:run
+      - name: Build the repository
+        run: corepack pnpm build

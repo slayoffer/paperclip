@@ -1002,10 +1002,10 @@ export async function repairCommittedNativeChatResponse(
           { agentId: run.agentId, runId: run.id },
           { authorizationReason: "internal_agent_write", completionReply: true }, tx);
         await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             presentationDecision: { ...resolved.decision, commentId: comment.id,
               reasonCodes: [...resolved.decision.reasonCodes, "committed_task_response_recovered"] },
-          })}::jsonb`, updatedAt: new Date(),
+          }, heartbeatRuns.resultJson)}::jsonb`, updatedAt: new Date(),
         }).where(eq(heartbeatRuns.id, run.id));
         agentId = run.agentId;
         return true;
@@ -1059,7 +1059,7 @@ export async function repairCommittedNativeChatResponse(
       await tx
         .update(heartbeatRuns)
         .set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(
             {
               presentationDecision,
               nativeCommittedChatResponse: {
@@ -1069,6 +1069,7 @@ export async function repairCommittedNativeChatResponse(
                 decisionId: decision.id,
               },
             },
+            heartbeatRuns.resultJson,
           )}::jsonb`,
           updatedAt: new Date(),
         })
@@ -1557,11 +1558,11 @@ export async function finalizeNativeRun(input: {
           ...(providerFailure ? {
             // Recovery can finalize before heartbeat saves the adapter result.
             // Retain any independently recorded execution/cleanup failure.
-            error: sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`,
+            error: sql`coalesce(${heartbeatRuns.error}, ${sql.param(providerFailure.errorMessage, heartbeatRuns.error)})`,
             errorCode: sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`,
           } : {}),
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
-            || ${JSON.stringify(finalizationMetadata)}::jsonb
+            || ${sql.param(finalizationMetadata, heartbeatRuns.resultJson)}::jsonb
             || ${clearExecutionFailure ? recoveredExecutionFailureMetadata() : sql`'{}'::jsonb`}`,
           updatedAt: now,
         })

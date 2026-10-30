@@ -17,7 +17,6 @@ import { pullQueueCandidateBlocked, pullQueueFingerprint, pullQueueWakeWasSkippe
 type WakeupOptions = NonNullable<Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]>;
 
 const liveStatuses = ["queued", "running", "scheduled_retry"];
-const pendingWakeStatuses = ["queued", "deferred_issue_execution"];
 const terminalStatuses = ["succeeded", "failed", "cancelled", "timed_out", "interrupted"];
 
 export function isPullQueueSignal(event: LiveEvent) {
@@ -27,6 +26,22 @@ export function isPullQueueSignal(event: LiveEvent) {
         "issue.thread_interaction_accepted", "issue.thread_interaction_rejected", "issue.thread_interaction_expired",
         "issue.thread_interaction_item_verdicts_submitted", "issue.thread_interaction_withdrawn",
         "issue.thread_interaction_cancelled", "issue.thread_interaction_skipped"].includes(String(event.payload.action)));
+}
+
+/**
+ * A queued wake always holds the owner's slot. A deferred wake holds it only
+ * while its task is open and still assigned to that owner. Receipts for done,
+ * cancelled, or reassigned tasks can stay deferred for weeks (2026-10-29:
+ * 179 such receipts, the oldest 32 days, held 16 owners), so they must not
+ * stop selection.
+ */
+function ownerHasPendingWake(companyId: string, agentId: string) {
+  return sql<boolean>`exists (select 1 from ${agentWakeupRequests} w
+    where w.company_id = ${companyId} and w.agent_id = ${agentId}
+      and (w.status = 'queued' or (w.status = 'deferred_issue_execution'
+        and (w.payload->>'issueId' is null or exists (select 1 from ${issues} task
+          where task.company_id = w.company_id and task.id::text = w.payload->>'issueId'
+            and task.assignee_agent_id = w.agent_id and task.status not in ('done', 'cancelled'))))))`;
 }
 
 /** Select work here. Normal heartbeat admission retains all execution authority. */
@@ -55,10 +70,9 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
         const executions = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agent.id),
             inArray(heartbeatRuns.status, liveStatuses))).limit(1);
-        const wakes = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)
-          .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agent.id),
-            inArray(agentWakeupRequests.status, pendingWakeStatuses))).limit(1);
-        if (executions.length || wakes.length) return;
+        const [wake] = await tx.execute<{ pending: boolean }>(
+          sql`select ${ownerHasPendingWake(companyId, agent.id)} as pending`);
+        if (executions.length || wake?.pending) return;
         const assigned = await tx.select({ issue: issues, hasExecution: issueHasExecution(), wipReason: issueWipReason() }).from(issues)
           .where(and(eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agent.id),
             isNull(issues.conversationAgentId), inArray(issues.status, ["backlog", "todo", "in_progress", "blocked"])))
@@ -100,9 +114,7 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
           const [busy] = await tx.execute<{ busy: boolean }>(sql`select exists (select 1 from ${heartbeatRuns}
             where company_id = ${companyId} and agent_id = ${agent.id}
               and status in ('queued', 'running', 'scheduled_retry'))
-            or exists (select 1 from ${agentWakeupRequests}
-              where company_id = ${companyId} and agent_id = ${agent.id}
-                and status in ('queued', 'deferred_issue_execution')) as busy`);
+            or ${ownerHasPendingWake(companyId, agent.id)} as busy`);
           if (busy?.busy) return;
         }
       }).catch((err) => {

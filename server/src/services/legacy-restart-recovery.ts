@@ -1,3 +1,4 @@
+import { withStopRequestEvidence } from "./run-execution-evidence.js";
 import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
@@ -68,14 +69,14 @@ export async function saveLegacyRestartCheckpoint(db: Db, run: Run, input: {
     issueId: run.contextSnapshot.issueId, executionWorkspaceId: run.contextSnapshot?.executionWorkspaceId ?? null, ...input };
   await db.update(heartbeatRuns).set({
     sessionIdAfter: input.sessionParams.sessionId,
-    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ restartCheckpoint: checkpoint })}::jsonb`,
+    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({ restartCheckpoint: checkpoint }, heartbeatRuns.resultJson)}::jsonb`,
   }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
 }
 
 export async function recordLegacyRestartFallback(db: Db, run: Run, reason: string) {
   await db.update(heartbeatRuns).set({
-    resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb), '{restartRecovery}', coalesce(${heartbeatRuns.resultJson}->'restartRecovery', '{}'::jsonb) || ${JSON.stringify({ outcome: "reconciliation", reason })}::jsonb)`,
+    resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb), '{restartRecovery}', coalesce(${heartbeatRuns.resultJson}->'restartRecovery', '{}'::jsonb) || ${sql.param({ outcome: "reconciliation", reason }, heartbeatRuns.resultJson)}::jsonb)`,
   }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.status, "running"),
     run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId)));
@@ -85,6 +86,7 @@ export async function recordLegacyRestartFallback(db: Db, run: Run, reason: stri
 export async function suspendLegacyRunForRestart(
   db: Db, run: Run, suspended: Set<string>,
   terminate: (input: { pid: number | undefined; processGroupId: number | null; graceMs: number }) => Promise<void>,
+  requestedAt = new Date().toISOString(),
 ) {
   if (run.runtimeMode !== "legacy") return false;
   const [current] = await db.select().from(heartbeatRuns).where(and(
@@ -94,15 +96,18 @@ export async function suspendLegacyRunForRestart(
   const process = runningProcesses.get(run.id);
   const control = adapterExecutionControls.get(run.id);
   if (!process && !control) return false;
-  suspended.add(run.id);
-  control?.controller.abort(new Error("server_restart"));
-  if (process) {
-    try {
-      await terminate({ pid: process.child.pid, processGroupId: process.processGroupId,
-        graceMs: Math.max(1, process.graceSec) * 1000 });
-    } finally { runningProcesses.delete(run.id); }
-  }
-  return true;
+  return withStopRequestEvidence({ db, run, requestedAt, reason: "server_restart",
+    source: "shutdown" }, async () => {
+    suspended.add(run.id);
+    control?.controller.abort(new Error("server_restart"));
+    if (process) {
+      try {
+        await terminate({ pid: process.child.pid, processGroupId: process.processGroupId,
+          graceMs: Math.max(1, process.graceSec) * 1000 });
+      } finally { runningProcesses.delete(run.id); }
+    }
+    return true;
+  });
 }
 
 export async function saveLegacyRestartProviderHome(db: Db, run: Run, home: string) {
@@ -170,10 +175,10 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
     const [claimed] = await tx.update(heartbeatRuns).set({
       ...legacyControllerClaim("legacy"), processPid: null, processGroupId: null, processStartedAt: null,
       error: null, errorCode: null,
-      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
         restartCheckpoint: { ...checkpoint, providerStopped: false, workspaceSettled: false },
         restartRecovery: { outcome: "resuming", attempt: attempts + 1, sessionId: checkpoint.sessionParams.sessionId },
-      })}::jsonb`,
+      }, heartbeatRuns.resultJson)}::jsonb`,
     }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
       eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
       run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId),

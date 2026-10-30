@@ -60,6 +60,7 @@ import {
   chatConversations,
   companies,
   documentRevisions,
+  getRunOutputRedactor,
   heartbeatRuns,
   issueApprovals,
   issueComments,
@@ -201,6 +202,15 @@ function canonicalJson(value: unknown): string {
     return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+// heartbeat_runs.result_json redacts on write (SYNA-1586), so a stored receipt holds the redacted input.
+// A replay matches either the raw input (receipts written before redaction) or its redacted form.
+function sameReceiptInput(stored: unknown, input: unknown): boolean {
+  const target = canonicalJson(stored);
+  if (target === canonicalJson(input)) return true;
+  const redactor = getRunOutputRedactor();
+  return redactor !== null && target === canonicalJson(redactor.json(input));
 }
 
 export class PaperclipRunnerToolAuthority {
@@ -1125,7 +1135,13 @@ export class PaperclipRunnerToolAuthority {
       };
     });
     if (publication) publishActivity(publication);
-    return result;
+    // A replay returns the receipt copy in result_json, which is redacted on write (SYNA-1586). The replay matched
+    // this input, and the write stores the trimmed input title and body, so return those and not the redacted copy.
+    const output = record(result);
+    return {
+      ...output,
+      document: { ...record(output.document), title: requiredString(input.title), body: requiredString(input.body) },
+    };
   }
 
   async #assertCompanyPerson(tx: Db, userId: string) {
@@ -1563,7 +1579,7 @@ export class PaperclipRunnerToolAuthority {
         sql`${heartbeatRuns.resultJson}->'semanticToolReceipts' ? ${input.idempotencyKey}`,
       )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
       if (earlier?.receipt) {
-        if (earlier.receipt.operationId !== "set_task_monitor" || canonicalJson(earlier.receipt.input) !== canonicalJson(input)) {
+        if (earlier.receipt.operationId !== "set_task_monitor" || !sameReceiptInput(earlier.receipt.input, input)) {
           throw new Error("paperclip_runner_tool_idempotency_conflict");
         }
         replayed = true;
@@ -2044,7 +2060,7 @@ export class PaperclipRunnerToolAuthority {
         if (prior !== undefined) {
           if (
             prior.operationId !== operationId ||
-            canonicalJson(prior.input) !== canonicalJson(input)
+            !sameReceiptInput(prior.input, input)
           ) {
             throw new Error("paperclip_runner_tool_idempotency_conflict");
           }

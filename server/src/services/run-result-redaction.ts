@@ -1,3 +1,4 @@
+import { setRunOutputRedactor } from "@paperclipai/db";
 import { REDACTED_EVENT_VALUE, redactSensitiveText } from "../redaction.js";
 import { redactRegisteredSecretValues } from "./run-secret-redaction.js";
 
@@ -34,6 +35,9 @@ const LINEAR_TOKEN_RES = [
   /\bsk-[A-Za-z0-9_-]{12,}/g,
   // Paperclip agent, board, CLI, claim and invite keys (server/src/services/{agents,board-auth}.ts, routes/access.ts).
   /pcp_(?:board_|cli_auth_|claim_|invite_)?[0-9a-f]{48}/g,
+  // Tool-gateway bearer: "pcgw_" + token id + "." + secret (server/src/services/tool-gateway.ts). The display prefix
+  // "pcgw_<8 hex>" and the "pcgw_..." placeholder have no secret part and stay visible.
+  /pcgw_[A-Za-z0-9-]{8,}\.[A-Za-z0-9_-]{16,}/g,
   // Telegram bot token: bot id, ":AA", 33 more characters.
   /\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/g,
 ];
@@ -73,8 +77,19 @@ function maskJwts(input: string): string {
   return input.replace(JWT_RUN_RE, (run) => (run.includes("eyJ") && run.includes(".") ? maskJwtsInRun(run) : run));
 }
 
+// Env-style credential name with a colon (`PAPERCLIP_API_KEY: …` in YAML, `env` listings and config dumps). The shared
+// scanner masks the `=` and JSON forms only (SYNA-1586). Upper-case names only, so prose such as "token: see below" stays.
+// The bounded name and the literal suffix keep the scan linear.
+const ENV_COLON_ASSIGNMENT_RE =
+  /\b([A-Z][A-Z0-9_]{0,60}(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD))(["']?[ \t]{0,5}:[ \t]{0,5}["']?)([^\s"'\\,;]{8,})/g;
+function maskEnvColonAssignments(input: string): string {
+  if (!input.includes(":")) return input;
+  return input.replace(ENV_COLON_ASSIGNMENT_RE, (match: string, key: string, separator: string, value: string) =>
+    NEUTRAL_ASSIGNMENT_VALUE.test(value) || value.startsWith(REDACTED_EVENT_VALUE) ? match : `${key}${separator}${REDACTED_EVENT_VALUE}`);
+}
+
 function redactLinear(input: string): string {
-  return maskJwts(LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input));
+  return maskJwts(maskEnvColonAssignments(LINEAR_TOKEN_RES.reduce((text, re) => text.replace(re, REDACTED_EVENT_VALUE), input)));
 }
 
 function redactLongSegment(segment: string): string {
@@ -246,3 +261,17 @@ export function redactRunPersistencePatch<T extends PersistedRunFields>(patch: T
   }
   return (changed ? next : patch) as T;
 }
+
+/**
+ * Install the shape policy as the column encoder of the heartbeat_runs output columns (SYNA-1586,
+ * packages/db/src/run-output-redaction.ts). Then every drizzle write of `result_json`, `error` and the excerpts is
+ * scanned, also writers that do not call this module. Registered exact values need the run's registry, which a sync
+ * column encoder cannot read: the heartbeat writers still apply them through redactRunPersistencePatch. Idempotent.
+ */
+export function installRunOutputRedaction(): void {
+  setRunOutputRedactor({ json: (value) => redactRunResultSecrets(value), text: redactString });
+}
+
+// The server calls it at startup (src/index.ts). Module load covers every other importer of the heartbeat service,
+// for example tests and scripts, so they write with the production policy.
+installRunOutputRedaction();

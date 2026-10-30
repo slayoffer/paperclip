@@ -227,13 +227,16 @@ const support = await getEmbeddedPostgresTestSupport();
     const control = createAdapterExecutionControl();
     adapterExecutionControls.set(snapshot.id, control);
     const suspended = new Set<string>(), terminate = vi.fn(async () => {});
+    const requestedAt = "2026-10-25T00:00:00.000Z";
     try {
-      expect(await suspendLegacyRunForRestart(db, snapshot, suspended, terminate)).toBe(true);
+      expect(await suspendLegacyRunForRestart(db, snapshot, suspended, terminate, requestedAt)).toBe(true);
       expect(suspended.has(snapshot.id)).toBe(true);
       expect(control.controller.signal.aborted).toBe(true);
       expect((control.controller.signal.reason as Error).message).toBe("server_restart");
       expect((await read(snapshot.id)).status).toBe("running");
       expect(terminate).not.toHaveBeenCalled();
+      const rows = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, snapshot.id));
+      expect(rows.find(row => row.payload?.kind === "stop_request")?.payload).toMatchObject({ requestedAt, source: "shutdown" });
     } finally { adapterExecutionControls.delete(snapshot.id); control.finish(); }
   });
 

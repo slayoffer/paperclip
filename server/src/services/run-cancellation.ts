@@ -9,6 +9,8 @@ export interface RunCancellation {
   initiator: { type: "user" | "agent" | "system" | "provider"; id?: string };
   reason: string;
   recordedAt: string;
+  /** Null means the request boundary is unknown. recordedAt is never a substitute. */
+  requestedAt?: string | null;
 }
 
 /** Server-owned local evidence. Sentry receives only the closed labels below. */
@@ -23,20 +25,21 @@ export function readRunCancellation(result: Run["resultJson"] | undefined): RunC
   return { source: entry.source as CancellationSource, expected: entry.expected,
     initiator: { type: initiator.type as RunCancellation["initiator"]["type"],
       ...(typeof initiator.id === "string" ? { id: initiator.id } : {}) },
-    reason: entry.reason.slice(0, 512), recordedAt: entry.recordedAt };
+    reason: entry.reason.slice(0, 512), recordedAt: entry.recordedAt,
+    ...(Object.hasOwn(entry, "requestedAt") ? { requestedAt: typeof entry.requestedAt === "string" ? entry.requestedAt : null } : {}) };
 }
 
-export function requestedRunCancellation(result: Run["resultJson"], reason: string): RunCancellation {
+export function requestedRunCancellation(result: Run["resultJson"], reason: string, requestedAt = new Date().toISOString()): RunCancellation {
   const queued = typeof result?.queuedCommentInterruptQueueId === "string";
   const actorType = result?.cancelledByActorType ?? result?.interruptedByActorType;
   const user = actorType === "user" || actorType === "board" || typeof result?.cancelledByUserId === "string";
   const agent = actorType === "agent";
   const actorId = result?.cancelledByUserId ?? result?.cancelledByAgentId ?? result?.interruptedByActorId;
   const source: CancellationSource = queued ? "queued_message" : user ? "operator" : "control_plane";
-  return { source, expected: true, initiator: {
+  return { source, expected: true, requestedAt, initiator: {
     type: user ? "user" : agent ? "agent" : "system",
     ...(typeof actorId === "string" ? { id: actorId } : {}),
-  }, reason: reason.slice(0, 512), recordedAt: new Date().toISOString() };
+  }, reason: reason.slice(0, 512), recordedAt: requestedAt };
 }
 
 /** Preserve recorded stop intent when adapter completion replaces resultJson. */
@@ -63,6 +66,7 @@ export function cancellationResultJson(run: Run, status: string, patch?: Run["re
         recordedAt: new Date().toISOString() };
     }
   }
+  if (!previous && !readRunCancellation(patch)) cancellation = { ...cancellation, requestedAt: null };
   return { ...result, cancellation };
 }
 

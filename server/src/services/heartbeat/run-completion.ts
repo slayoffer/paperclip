@@ -855,7 +855,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         await db
           .update(heartbeatRuns)
           .set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(redactedPresentationResult)}::jsonb`,
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(redactedPresentationResult, heartbeatRuns.resultJson)}::jsonb`,
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, livenessRun.id));

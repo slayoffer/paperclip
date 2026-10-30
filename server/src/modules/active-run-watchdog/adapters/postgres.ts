@@ -321,7 +321,7 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
           finishedAt: input.now,
           error: null,
           errorCode: null,
-          resultJson: sql`(case when jsonb_typeof(${heartbeatRuns.resultJson}) = 'object' then ${heartbeatRuns.resultJson} else '{}'::jsonb end) || ${JSON.stringify(resultJson)}::jsonb`,
+          resultJson: sql`(case when jsonb_typeof(${heartbeatRuns.resultJson}) = 'object' then ${heartbeatRuns.resultJson} else '{}'::jsonb end) || ${sql.param(resultJson, heartbeatRuns.resultJson)}::jsonb`,
           updatedAt: input.now,
         })
         .where(and(

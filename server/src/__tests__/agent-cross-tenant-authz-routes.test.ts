@@ -370,7 +370,9 @@ describe("agent cross-tenant route authorization", () => {
     expect(res.status).toBe(200);
     expect(res.body.pauseReason).toBe(reason);
     expect(mockAgentService.pause).toHaveBeenCalledWith(agentId, reason);
-    expect(mockHeartbeatService.cancelActiveForAgent).toHaveBeenCalledWith(agentId);
+    expect(mockHeartbeatService.cancelActiveForAgent).toHaveBeenCalledWith(agentId, undefined, {
+      requestedAt: expect.any(String), resultJson: { cancelledByActorType: "user", cancelledByUserId: "board-user" },
+    });
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       companyId, actorType: "user", actorId: "board-user", action: "agent.paused",
       entityType: "agent", entityId: agentId, details: { reason },

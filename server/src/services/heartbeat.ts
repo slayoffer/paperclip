@@ -1,3 +1,4 @@
+import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence } from "./run-execution-evidence.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { buildOwnerRecoveryWake } from "./recovery/owner-resume.js";
 import { isolatedWorkspaceReuseConfig, shouldKeepWorkspaceReuseIsolation } from "./workspace-reuse-fallback.js";
@@ -30,6 +31,7 @@ import {
   providerResourceDispositionForTerminalRun,
   createHeartbeatRunControl,
   type CancelRunOptions,
+  type StopRequestContext,
 } from "./heartbeat/run-control.js";
 export {
   leaseReleaseStatusForRunStatus,
@@ -1957,7 +1959,11 @@ export function heartbeatService(
     failedProcessRunCancellations,
   });
 
-  async function executeRun(
+  async function executeRun(...args: Parameters<typeof executeRunInner>) {
+    return withRunExecutionEvidence(db, { id: args[0] }, () => executeRunInner(...args), false);
+  }
+
+  async function executeRunInner(
     runId: string,
     runOptions: {
       nativeLeaseOwner?: string;
@@ -2097,11 +2103,13 @@ export function heartbeatService(
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
     activeRunExecutions.add(run.id);
+    admitRunExecutionEvidence();
     const executionControl = createAdapterExecutionControl();
     // This coarse scope also covers host finalization after the adapter returns.
     // Nested scopes refine the label without making any termination claim.
     executionControl.phases.enter("host_execution");
     const executionPhaseContext = { onExecutionPhase: executionControl.phases.enter };
+    const finishAbortEvidence = observeRunAbort(db, run, executionControl.controller.signal);
     const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
@@ -4548,7 +4556,7 @@ export function heartbeatService(
               instructionSave = { state: "prepared", contract: "agent_files", storageWarning };
               // This is an advisory on the run, never an agent pause, execution
               // failure, or scheduling gate. Keep it visible while work runs.
-              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ instructionSave })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({ instructionSave }, heartbeatRuns.resultJson)}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
               await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
                 message: storageWarning, payload: instructionSave });
             }
@@ -5042,6 +5050,7 @@ export function heartbeatService(
         }
         await managedAiRuntime?.cleanup().catch(() => undefined);
         controllerLease.stop();
+        await finishAbortEvidence();
         activeRunExecutions.delete(run.id);
         executionControl.finish();
         adapterExecutionControls.delete(run.id);
@@ -5236,7 +5245,7 @@ export function heartbeatService(
           // after a restart; cleanup receipts are independently rechecked there.
           await db.update(heartbeatRuns).set({
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
+              ${sql.param({ startupPreparationSettledAt: new Date().toISOString() }, heartbeatRuns.resultJson)}::jsonb`,
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
         }
         await db.update(heartbeatRuns).set({
@@ -5257,6 +5266,7 @@ export function heartbeatService(
         if (adapterExecutionControls.get(run.id) === executionControl) {
           adapterExecutionControls.delete(run.id);
         }
+        await finishAbortEvidence();
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
@@ -5495,11 +5505,11 @@ export function heartbeatService(
      * agent pause route. For non-pause cancellations use cancelRun, or call the internal
      * cancelActiveForAgentInternal(agentId, reason, errorCode) with an explicit errorCode.
      */
-    cancelActiveForAgent: (agentId: string, reason?: string) =>
-      cancelActiveForAgentInternal(agentId, reason, "agent_paused"),
+    cancelActiveForAgent: (agentId: string, reason?: string, context?: StopRequestContext) =>
+      cancelActiveForAgentInternal(agentId, reason, "agent_paused", context),
 
-    cancelInvocationsForAgents: (agentIds: string[], reason: string) =>
-      cancelInvocationsForAgentsInternal(agentIds, reason),
+    cancelInvocationsForAgents: (agentIds: string[], reason: string, context?: StopRequestContext) =>
+      cancelInvocationsForAgentsInternal(agentIds, reason, context),
 
     cancelBudgetScopeWork,
 
