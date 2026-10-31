@@ -50,7 +50,10 @@ export function createLifecycleDriver(db: Db, manager: PluginWorkerManager): Lif
             await db.select().from(agents).where(eq(agents.companyId, agent.companyId)))];
         const reason = agent.lifecycleHolds?.includes("company_archived")
           ? "Cancelled because the company was archived" : "Agent lifecycle stop requested";
-        if (!await heartbeat.stopInvocationsForAgents(ids, reason)) return "pending";
+        // A pause waits only for what it cancelled; termination proves every stop.
+        const historyBefore = agent.lifecycleState === "pausing"
+          ? agent.pausedAt ?? null : null;
+        if (!await heartbeat.stopInvocationsForAgents(ids, reason, { historyBefore })) return "pending";
       }
       return "complete";
     },

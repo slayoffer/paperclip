@@ -4096,7 +4096,7 @@ export function heartbeatService(
     }
   }
 
-  async function stopInvocationsForAgents(agentIds: string[], reason: string) {
+  async function stopInvocationsForAgents(agentIds: string[], reason: string, options: { historyBefore?: Date | null } = {}) {
     await cancelInvocationsForAgentsInternal(agentIds, reason);
     const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
     const leasesToRelease = await db.select({ runId: environmentLeases.heartbeatRunId }).from(environmentLeases)
@@ -4115,7 +4115,7 @@ export function heartbeatService(
           agentId: run.agentId, status: run.status, providerResourceDisposition: "destroy" });
       }
     }
-    return agentExecutionsHaveStopped(db, agentIds);
+    return agentExecutionsHaveStopped(db, agentIds, options);
   }
 
   return {

@@ -7,6 +7,7 @@ export interface LifecycleAgent {
   lifecycleState: AgentLifecycleState;
   lifecycleVersion: number;
   lifecycleHolds?: readonly string[];
+  pausedAt?: Date | null;
   lifecycleRequiredPluginIds: string[] | null;
   lifecycleError: string | null;
   lifecycleOperation: AgentLifecycleOperation | null;
