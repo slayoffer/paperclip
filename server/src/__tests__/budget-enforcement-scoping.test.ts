@@ -1,7 +1,8 @@
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, projects, type Db } from "@paperclipai/db";
+import { agents, budgetIncidents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, projects, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { budgetService, computeObservedSpend, flushBudgetEvaluationWork } from "../services/budgets.js";
 import { reserveRunBudget } from "../services/budget-reservations.js";
@@ -17,10 +18,11 @@ const support = await getEmbeddedPostgresTestSupport();
     database = await startEmbeddedPostgresTestDatabase("budget-live-scoping-");
     db = createDb(database.connectionString);
   }, 60_000);
-  afterEach(async () => { await db.transaction(async tx => {
-    await tx.execute(sql`SET LOCAL client_min_messages = warning`);
-    await tx.execute(sql`TRUNCATE companies CASCADE`);
-  }); });
+  afterEach(async () => {
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
+    await clearCompanyFixtures(db);
+  });
   afterAll(async () => { await database?.cleanup(); });
 
   // The explicit worker turn separates receipt commit from budget transitions.
