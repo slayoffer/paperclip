@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import {
   agents, agentSessionGoalActions, agentTaskSessions, companies, createDb,
-  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issues,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueRelations, issues,
 } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { conflict } from "../../errors.js";
+import { issueService } from "../issues.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { createHeartbeatScheduling, type HeartbeatSchedulingDependencies } from "./scheduling.js";
@@ -34,6 +35,7 @@ function callbacks(db: Db) {
     issuesSvc: {
       listReviewAttention: vi.fn<HeartbeatSchedulingDependencies["issuesSvc"]["listReviewAttention"]>(async () => new Map()),
       create: vi.fn<HeartbeatSchedulingDependencies["issuesSvc"]["create"]>(),
+      listDependencyReadiness: (companyId: string, issueIds: string[]) => issueService(db).listDependencyReadiness(companyId, issueIds),
     },
     enqueueWakeup: vi.fn<HeartbeatSchedulingDependencies["enqueueWakeup"]>(async () => admitted),
     scheduleBoundedRetryForRun: vi.fn<HeartbeatSchedulingDependencies["scheduleBoundedRetryForRun"]>(),
@@ -209,6 +211,48 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     expect(f.deps.enqueueWakeup).toHaveBeenCalledWith(f.agent.id, expect.objectContaining({
       source: "timer", reason: "heartbeat_timer", contextSnapshot: expect.objectContaining({ timerClaimWasFirstHeartbeat: true }),
     }));
+  });
+
+  describe("timer driver issue", () => {
+    async function driverFixture(patch: Partial<typeof issues.$inferInsert> = {}) {
+      const f = await fixture();
+      enableTimer(f.deps);
+      await db.update(issues).set({ monitorNextCheckAt: null }).where(eq(issues.id, f.issue.id));
+      const [driver] = await db.insert(issues).values({
+        companyId: f.company.id, title: "PM driver", status: "blocked", assigneeAgentId: f.agent.id,
+        identifier: `SCH-${Math.floor(Math.random() * 1e6)}`, createdAt: dueAt, ...patch,
+      }).returning();
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { driverIssueId: driver.identifier!.toLowerCase() } } })
+        .where(eq(agents.id, f.agent.id));
+      return { ...f, driver };
+    }
+    function timerWake(f: Awaited<ReturnType<typeof fixture>>) {
+      const call = f.deps.enqueueWakeup.mock.calls.find(([, opts]) => opts.source === "timer");
+      expect(call).toBeDefined();
+      return call![1];
+    }
+
+    it("gives the timer run its open, assigned driver issue as the source issue", async () => {
+      const f = await driverFixture();
+      await f.scheduler.tickTimers(now);
+      const wake = timerWake(f);
+      expect(wake.payload).toEqual({ issueId: f.driver.id });
+      expect(wake.contextSnapshot).toMatchObject({ issueId: f.driver.id, taskKey: f.driver.id, timerDriverIssue: true });
+    });
+
+    it("ignores a driver that is closed, assigned elsewhere, or blocked by an open issue", async () => {
+      for (const patch of [{ status: "done" }, { status: "cancelled" }, { assigneeAgentId: null }] as const) {
+        const f = await driverFixture(patch);
+        await f.scheduler.tickTimers(now);
+        expect(timerWake(f).contextSnapshot).not.toHaveProperty("issueId");
+        expect(timerWake(f)).not.toHaveProperty("payload");
+      }
+      const f = await driverFixture();
+      const [blocker] = await db.insert(issues).values({ companyId: f.company.id, title: "Blocker", status: "todo" }).returning();
+      await db.insert(issueRelations).values({ companyId: f.company.id, issueId: blocker.id, relatedIssueId: f.driver.id, type: "blocks" });
+      await f.scheduler.tickTimers(now);
+      expect(timerWake(f).contextSnapshot).not.toHaveProperty("issueId");
+    });
   });
 
   it("does not enqueue a timer after losing its due claim", async () => {
