@@ -42,7 +42,10 @@ export function createLifecycleDriver(db: Db, manager: PluginWorkerManager): Lif
         const companyAgents = await db.select().from(agents).where(eq(agents.companyId, agent.companyId));
         const ids = agent.lifecycleState === "pausing" ? [agent.id]
           : [agent.id, ...listInvalidOrgChainDescendantIds(agent.id, companyAgents)];
-        if (!await heartbeat.stopInvocationsForAgents(ids, "Agent lifecycle stop requested")) return "pending";
+        // A pause waits only for what it cancelled; termination proves every stop.
+        const historyBefore = agent.lifecycleState === "pausing"
+          ? companyAgents.find(row => row.id === agent.id)?.pausedAt ?? null : null;
+        if (!await heartbeat.stopInvocationsForAgents(ids, "Agent lifecycle stop requested", { historyBefore })) return "pending";
       }
       return "complete";
     },

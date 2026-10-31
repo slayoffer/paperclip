@@ -6,9 +6,13 @@ import { hasNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 
-/** Cancellation changes admission. Process and lease evidence controls cleanup. */
-export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
+/** Cancellation changes admission. Process and lease evidence controls cleanup.
+ * A pause proves the stop of what it cancelled: a cancel that ended before
+ * `historyBefore` needs no stop receipt, since the agent kept admitting work
+ * after it. Live processes and open leases still block. */
+export async function agentExecutionsHaveStopped(db: Db, agentIds: string[], options: { historyBefore?: Date | null } = {}) {
   if (!agentIds.length) return true;
+  const history = (at: Date | null | undefined) => Boolean(options.historyBefore && at && at < options.historyBefore);
   const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const runIds = db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const leases = await db.select().from(environmentLeases).where(or(
@@ -37,7 +41,8 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
     if (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return false;
     const runLeases = leases.filter(lease => lease.heartbeatRunId === run.id);
     if (runLeases.some(lease => lease.provider && lease.provider !== "local")) {
-      if (run.status === "cancelled" && !runLeases.every(hasRemoteTerminationReceipt)) return false;
+      if (run.status === "cancelled" && !(history(run.finishedAt) && runLeases.every(lease => history(lease.releasedAt))) &&
+          !runLeases.every(hasRemoteTerminationReceipt)) return false;
       continue;
     }
     let processAlive = Boolean(run.processPid && !absent(run.processPid));
@@ -50,7 +55,7 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
       }
     }
     if (processAlive || groupAlive) return false;
-    if (run.status !== "cancelled" || !run.startedAt) continue;
+    if (run.status !== "cancelled" || !run.startedAt || history(run.finishedAt)) continue;
     if (run.runtimeMode === "native" && !run.processPid && !run.processGroupId &&
         !await hasNativeLocalProcessStop(db, run.companyId, run.id) &&
         !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
