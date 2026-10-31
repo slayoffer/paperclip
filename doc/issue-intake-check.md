@@ -44,6 +44,8 @@ The check validates section names only. It does not evaluate the content or requ
 
 ## Exemptions
 
+- Board conversations with a saved `conversationAgentId`.
+- External conversations with the `chat_channel` origin.
 - Issues with a current, company-scoped `owner:local-session` label.
 - Titles that start with `Review hold:`.
 - Legacy bridge titles that start with `Review r<N>:` or `Gate `.
@@ -94,6 +96,9 @@ Repeated attempts, concurrent attempts, and server restarts therefore keep one c
 The first refusal also records `issue.intake_refused` in the local activity log.
 The marker does not expire when the description changes. The original comment can contain an old missing-section list.
 Each later check still reads the current description. A corrected issue can proceed on its next pickup attempt.
+An intake skip receipt cannot block automatic selection by itself.
+The next automatic attempt checks current intake through normal wake admission.
+This permits pickup after a description correction or after the operator disables enforcement.
 
 ## Verification
 
@@ -106,5 +111,6 @@ pnpm exec vitest run server/src/services/issue-intake-check.test.ts --maxWorkers
 ```
 
 The suite checks parser forms, all modes, real checkout and wake admission, concurrent comment insertion,
-company boundaries, current labels, bridge exemptions, corrected descriptions, and queued-run cancellation.
+company boundaries, current labels, chat and bridge exemptions, corrected descriptions, and queued-run cancellation.
+It also checks that saved intake refusals permit fresh admission after a correction or a mode change.
 It does not start an external agent provider.

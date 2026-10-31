@@ -33,8 +33,12 @@ export function missingIntakeSections(description: string | null | undefined): s
   return INTAKE_SECTIONS.filter((section) => !found.has(section.toLowerCase()));
 }
 
-export function intakeExempt(issue: { title: string; originKind: string }, labelNames: string[]): boolean {
-  return labelNames.some((name) => name.toLowerCase() === "owner:local-session")
+export function intakeExempt(
+  issue: Pick<typeof issues.$inferSelect, "title" | "originKind" | "conversationAgentId">,
+  labelNames: string[],
+): boolean {
+  return Boolean(issue.conversationAgentId) || issue.originKind === "chat_channel"
+    || labelNames.some((name) => name.toLowerCase() === "owner:local-session")
     || /^Review hold:/i.test(issue.title)
     || /^Review r\d+:/i.test(issue.title)
     || /^Gate /i.test(issue.title)
@@ -53,7 +57,8 @@ export async function issueIntakeCheck(
   if (mode === "off" || input.companyId !== INTAKE_COMPANY_ID) return null;
   return db.transaction(async (tx) => {
     // Checkout, admission, and dispatch share this fence. Read current data after the lock.
-    const [issue] = await tx.select({ title: issues.title, description: issues.description, originKind: issues.originKind })
+    const [issue] = await tx.select({ title: issues.title, description: issues.description,
+      originKind: issues.originKind, conversationAgentId: issues.conversationAgentId })
       .from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId))).for("update");
     if (!issue) return null;
     const names = await tx.select({ name: labels.name }).from(issueLabels)

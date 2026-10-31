@@ -29,6 +29,8 @@ Record an explicit backlog disposition with its parking receipt in the issue tra
 Keep parking conditions separate from general issue recency. Comments and title edits do not resume a parked issue.
 Skip receipts restrict automatic selection only. Normal admission always checks current authority.
 Recheck budget, dependency, pause, and recovery gates before reusing an old skip.
+Intake skip receipts must permit fresh admission. Descriptions, exemptions, and intake mode are absent from the queue fingerprint.
+Do not hold an issue row lock in selection across the independent wake admission transaction.
 
 ## Owner parking
 

@@ -6,6 +6,7 @@ import { activityLog, agents, agentWakeupRequests, companies, createDb, heartbea
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { logger } from "../middleware/logger.js";
 import { commentWakeSuppressed } from "./issue-comment-wakeup.js";
+import { pullQueueCandidateBlocked, pullQueueFingerprint } from "./pull-queue-state.js";
 import { INTAKE_COMPANY_ID, INTAKE_SECTIONS, INTAKE_SKIP_REASON, intakeCommentKey,
   issueIntakeCheck, issueIntakeMode, missingIntakeSections } from "./issue-intake-check.js";
 
@@ -112,6 +113,18 @@ databaseTests("intake pickup with PostgreSQL", () => {
     await db.update(issues).set({ originKind: "task_bridge" }).where(eq(issues.id, issue.id));
     expect(await check()).toBeNull();
   });
+  it("exempts board conversations without task sections", async () => {
+    await db.update(issues).set({ conversationAgentId: agentId, conversationUserId: "board-user",
+      conversationState: "active", description: null }).where(eq(issues.id, issue.id));
+    expect(await check("heartbeat.admission")).toBeNull();
+    expect(await comments()).toEqual([]);
+  });
+  it("exempts external chat-channel conversations", async () => {
+    await db.update(issues).set({ originKind: "chat_channel", description: "Started from telegram: chat" })
+      .where(eq(issues.id, issue.id));
+    expect(await check("heartbeat.admission")).toBeNull();
+    expect(await comments()).toEqual([]);
+  });
   it("exempts current local-session labels but ignores labels from another company", async () => {
     const other = randomUUID();
     await db.insert(companies).values({ id: other, name: "Other", issuePrefix: `O${other.slice(0, 5)}` });
@@ -169,5 +182,23 @@ databaseTests("intake pickup with PostgreSQL", () => {
     }
     expect(await comments()).toHaveLength(1);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.contextIssueId, issue.id))).toEqual([]);
+  });
+  it.each(["corrected description", "disabled enforcement"])("rechecks an intake skip after %s", async (correction) => {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    const fingerprint = await pullQueueFingerprint(db, issue, agent);
+    const { heartbeatService } = await import("./heartbeat.js");
+    expect(await heartbeatService(db).wakeup(agentId, { source: "assignment", reason: "issue_assigned",
+      requestedByActorType: "system", payload: { issueId: issue.id, pullQueueFingerprint: fingerprint } })).toBeNull();
+    expect(await pullQueueCandidateBlocked(db, issue, agent, fingerprint)).toBe(false);
+    expect(await check("heartbeat.admission")).toBe(INTAKE_SKIP_REASON);
+    if (correction === "corrected description") {
+      await db.update(issues).set({ description: complete }).where(eq(issues.id, issue.id));
+    } else {
+      vi.stubEnv("PAPERCLIP_ISSUE_INTAKE_CHECK", "off");
+    }
+    const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(await pullQueueFingerprint(db, current, agent)).toBe(fingerprint);
+    expect(await pullQueueCandidateBlocked(db, current, agent, fingerprint)).toBe(false);
+    expect(await comments()).toHaveLength(1);
   });
 });
