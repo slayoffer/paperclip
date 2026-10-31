@@ -264,6 +264,7 @@ import {
   settleConversationTurn,
 } from "./agent-conversations.js";
 import { withAdapterExecutionPhase } from "@paperclipai/adapter-utils/execution-phase";
+import type { AdapterRuntimeEvent } from "@paperclipai/adapter-utils";
 import {
   recordNativeLocalProcessStop,
 } from "./native-local-process-stop.js";
@@ -509,6 +510,7 @@ import { declaredSecretValues } from "./run-result-redaction.js";
 
 
 import { environmentService } from "./environments.js";
+import { confirmClosedSshLeaseStops } from "./ssh-in-place-termination.js";
 
 import {
   environmentRuntimeService,
@@ -4115,6 +4117,7 @@ export function heartbeatService(
           agentId: run.agentId, status: run.status, providerResourceDisposition: "destroy" });
       }
     }
+    await confirmClosedSshLeaseStops(db, agentIds, options.historyBefore);
     return agentExecutionsHaveStopped(db, agentIds, options);
   }
 

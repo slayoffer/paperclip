@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
-import { and, eq, isNull } from "drizzle-orm";
-import { environmentLeases, type Db } from "@paperclipai/db";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { environmentLeases, environments, heartbeatRuns, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
 import { runSshCommand } from "@paperclipai/adapter-utils/ssh";
 import { sshWriterStopScript, sshWriterTerminationScript } from "@paperclipai/adapter-utils/ssh-writer-termination";
@@ -46,6 +46,28 @@ export async function confirmSshInPlaceTermination(
     // A failed probe or database write preserves durable ownership.
     return null;
   }
+}
+
+/** An SSH lease can end (expired, failed, released) before its cleanup ran, so it never gets a termination receipt,
+ * and a pause or termination that waits for stop proof of the cancelled run then never completes (Reviewer·Codex,
+ * 2026-10-31: lease expired, cleanup null). Probe each such lease of the agents' cancelled runs once per call; the
+ * probe writes the receipt only when the remote writer is confirmed stopped. Cancels before historyBefore need none. */
+export async function confirmClosedSshLeaseStops(db: Db, agentIds: string[], historyBefore?: Date | null) {
+  if (!agentIds.length) return 0;
+  const rows = await db.select({ lease: environmentLeases, environment: environments }).from(environmentLeases)
+    .innerJoin(heartbeatRuns, and(eq(heartbeatRuns.id, environmentLeases.heartbeatRunId),
+      eq(heartbeatRuns.companyId, environmentLeases.companyId)))
+    .innerJoin(environments, eq(environments.id, environmentLeases.environmentId))
+    .where(and(inArray(heartbeatRuns.agentId, agentIds), eq(heartbeatRuns.status, "cancelled"),
+      eq(environmentLeases.provider, "ssh"), inArray(environmentLeases.status, ["expired", "failed", "released"]),
+      sql`${environmentLeases.metadata}->'remoteExecutionTermination' is null`,
+      historyBefore ? gte(heartbeatRuns.finishedAt, historyBefore) : undefined));
+  let confirmed = 0;
+  for (const { lease, environment } of rows) {
+    const status = lease.status as "expired" | "failed" | "released";
+    if (await confirmSshInPlaceTermination(db, environment as Environment, lease as EnvironmentLease, status)) confirmed++;
+  }
+  return confirmed;
 }
 
 /** SYNA-2959: before a server restart, stop the run's tracked SSH writers and prove that they stopped. A killed SSH
