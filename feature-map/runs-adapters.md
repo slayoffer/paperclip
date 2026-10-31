@@ -37,6 +37,7 @@ Manual: Select the intended adapter and account, refresh model choices, and run 
 Automated: [live run routes](../server/src/__tests__/agent-live-run-routes.test.ts) and [run event sequencing](../server/src/__tests__/heartbeat-run-event-sequencing.test.ts) cover run data contracts.
 
 The [adapter cap tests](../packages/adapters/codex-local/src/server/run-token-cap.test.ts) cover usage and mode selection. The [server cap tests](../server/src/services/run-token-cap.test.ts) cover handoffs, duplicate wakes, budgets, and recovery exclusion. These tests use fake provider results.
+The [restart tests](../server/src/__tests__/heartbeat-run-token-cap-restart.test.ts) use real wake admission to hold absent or stale checkpoints. The [finalization tests](../server/src/__tests__/heartbeat-run-token-cap-finalization.test.ts) check checkpoint ordering at the terminal database write and execute simulated task and owner successors.
 
 Manual: Start a disposable task, open its running transcript, and follow it to a terminal outcome. Reload and compare task/run IDs, status, output, and cost. Verify a failed run remains distinguishable from a completed run with useful output.
 

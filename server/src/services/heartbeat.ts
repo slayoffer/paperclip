@@ -12,7 +12,7 @@ import { resolveWorkspaceReuseSelection, isolatedWorkspaceReuseConfig, shouldKee
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
+import { getTaskSession, ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -10979,27 +10979,6 @@ export function heartbeatService(
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getTaskSession(
-    companyId: string,
-    agentId: string,
-    adapterType: string,
-    taskKey: string,
-    client: Pick<Db, "select"> = db,
-  ) {
-    return client
-      .select()
-      .from(agentTaskSessions)
-      .where(
-        and(
-          eq(agentTaskSessions.companyId, companyId),
-          eq(agentTaskSessions.agentId, agentId),
-          eq(agentTaskSessions.adapterType, adapterType),
-          eq(agentTaskSessions.taskKey, taskKey),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
-  }
-
   const issueMonitorDispatchColumns = {
     id: issues.id,
     companyId: issues.companyId,
@@ -12006,6 +11985,7 @@ export function heartbeatService(
     if (taskKey) {
       const codec = getAdapterSessionCodec(agent.adapterType);
       const existingTaskSession = await getTaskSession(
+        db,
         agent.companyId,
         agent.id,
         agent.adapterType,
@@ -12055,11 +12035,11 @@ export function heartbeatService(
 
     const codec = getAdapterSessionCodec(input.agent.adapterType);
     const taskSession = await getTaskSession(
+      client,
       input.agent.companyId,
       input.agent.id,
       input.agent.adapterType,
       input.taskKey,
-      client,
     );
     const taskSessionParams = normalizeResumeParamsForAdapter(
       input.agent.adapterType,
@@ -12099,6 +12079,7 @@ export function heartbeatService(
     const resumeTaskKey = deriveTaskKey(resumeContext, null) ?? taskKey;
     const resumeTaskSession = resumeTaskKey
       ? await getTaskSession(
+          db,
           agent.companyId,
           agent.id,
           agent.adapterType,
@@ -20634,6 +20615,7 @@ export function heartbeatService(
       const sessionStorageKey = ownerSession?.key ?? taskKey;
       const taskSession = sessionStorageKey
         ? await getTaskSession(
+            db,
             agent.companyId,
             agent.id,
             agent.adapterType,
@@ -25477,11 +25459,12 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
-        if (ownerSession) {
-          // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+        const capStop = ownsRunTokenCapContinuation({ status, resultJson: persistedResultJson });
+        if (ownerSession || (sessionStorageKey && capStop)) {
+          // Save the checkpoint before terminal success releases admission.
           const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
           await saveOwnerSessionState(db, {
-            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: sessionStorageKey!,
             runId: run.id, expectedLastRunId: taskSession?.lastRunId ?? null, lastError: runErrorMessage,
             session: clear ? null : {
               params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
@@ -25849,7 +25832,7 @@ export function heartbeatService(
             },
             normalizedUsage,
           );
-          if (taskKey && !ownerSession) {
+          if (taskKey && !ownerSession && !capStop) {
             if (
               adapterResult.clearSession ||
               (!nextSessionState.params && !nextSessionState.displayId)

@@ -7,6 +7,8 @@ import {
 } from "@paperclipai/db";
 import { heartbeatService } from "../services/heartbeat.js";
 import { recoveryService } from "../services/recovery/service.js";
+import { sessionCodec } from "@paperclipai/adapter-codex-local/server";
+import { adapterExecutionTargetSessionMatches } from "@paperclipai/adapter-utils/execution-target";
 import { refreshIssueContinuationSummary } from "../services/issue-continuation-summary.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -26,7 +28,7 @@ databaseTests("cap recovery before task-session persistence", () => {
     await database?.cleanup();
   });
 
-  it.each(["absent", "stale"])("restores the capped run through real wake admission with a task checkpoint that is %s", async (checkpoint) => {
+  it.each(["absent", "stale"])("waits for a complete source checkpoint when the task checkpoint is %s", async (checkpoint) => {
     const companyId = randomUUID();
     const issueId = randomUUID();
     const responsibleUserId = randomUUID();
@@ -52,7 +54,7 @@ databaseTests("cap recovery before task-session persistence", () => {
         taskKey: issueId, sessionParamsJson: { sessionId: oldSessionId },
         sessionDisplayId: oldSessionId, lastRunId: active.id });
     }
-    // This is the durable state after terminal success, before upsertTaskSession.
+    // Reproduce the old terminal-success gap. Recovery must hold until the source checkpoint is present.
     const [source] = await db.insert(heartbeatRuns).values({ companyId, agentId: agent.id,
       status: "succeeded", invocationSource: "assignment", finishedAt: new Date(),
       contextSnapshot: { issueId, taskKey: issueId }, sessionIdBefore: oldSessionId,
@@ -64,6 +66,18 @@ databaseTests("cap recovery before task-session persistence", () => {
     const heartbeat = heartbeatService(db);
     const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
     await recovery.reconcileLegacyContinuation(source.id);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    const remoteExecution = { transport: "ssh", host: "fixture.invalid", port: 22,
+      username: "fixture", remoteCwd: "/workspace" };
+    const params = { sessionId: sourceSessionId, cwd: "/workspace", remoteExecution };
+    await db.insert(agentTaskSessions).values({ companyId, agentId: agent.id, adapterType: agent.adapterType,
+      taskKey: issueId, sessionParamsJson: sessionCodec.serialize(params),
+      sessionDisplayId: sourceSessionId, lastRunId: source.id,
+    }).onConflictDoUpdate({ target: [agentTaskSessions.companyId, agentTaskSessions.agentId,
+      agentTaskSessions.adapterType, agentTaskSessions.taskKey], set: {
+      sessionParamsJson: sessionCodec.serialize(params), sessionDisplayId: sourceSessionId, lastRunId: source.id,
+    } });
+    await recovery.reconcileLegacyContinuation(source.id);
     await recovery.reconcileLegacyContinuation(source.id);
 
     const wakes = await db.select().from(agentWakeupRequests).where(and(
@@ -72,12 +86,20 @@ databaseTests("cap recovery before task-session persistence", () => {
     expect(wakes).toHaveLength(1);
     const successor = await heartbeat.getRun(wakes[0].runId!);
     expect(successor).toMatchObject({ status: "queued", sessionIdBefore: sourceSessionId,
-      contextSnapshot: { runTokenCapSourceRunId: source.id, resumeFromRunId: source.id,
-        resumeSessionDisplayId: sourceSessionId, resumeSessionParams: { sessionId: sourceSessionId } },
+      contextSnapshot: { runTokenCapSourceRunId: source.id },
     });
-    expect(wakes[0].payload).toMatchObject({ issueId, resumeFromRunId: source.id });
+    expect(wakes[0].payload?.resumeFromRunId).toBeUndefined();
+    expect(successor?.contextSnapshot?.resumeSessionParams).toBeUndefined();
     const taskSessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
-    if (checkpoint === "absent") expect(taskSessions).toHaveLength(0);
-    else expect(taskSessions[0]).toMatchObject({ sessionDisplayId: oldSessionId, lastRunId: active.id });
+    expect(taskSessions[0]).toMatchObject({ sessionDisplayId: sourceSessionId, lastRunId: source.id });
+    const restored = sessionCodec.deserialize(taskSessions[0].sessionParamsJson);
+    expect(restored).toEqual(params);
+    expect(adapterExecutionTargetSessionMatches(restored?.remoteExecution, {
+      kind: "remote", transport: "ssh", remoteCwd: remoteExecution.remoteCwd, spec: {
+        host: remoteExecution.host, port: remoteExecution.port, username: remoteExecution.username,
+        remoteWorkspacePath: remoteExecution.remoteCwd, remoteCwd: remoteExecution.remoteCwd,
+        privateKey: null, knownHosts: null, strictHostKeyChecking: true,
+      },
+    })).toBe(true);
   });
 });

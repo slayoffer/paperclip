@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { agents, companies, createDb, documents, heartbeatRuns, issues, agentWakeupRequests } from "@paperclipai/db";
+import { agents, agentTaskSessions, companies, createDb, documents, heartbeatRuns, issues, agentWakeupRequests } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { continueRunTokenCap, ownsRunTokenCapContinuation, runTokenCapBaseline } from "./run-token-cap.js";
 import { getIssueContinuationSummaryDocument, refreshIssueContinuationSummary } from "./issue-continuation-summary.js";
@@ -50,6 +50,9 @@ databaseTests("cap handoff and continuation", () => {
       sessionIdAfter: randomUUID(),
       resultJson: { stopReason: "run_token_cap", summary: "Done: A. Left: B. Next: test B." },
       usageJson: { inputTokens: 101 }, finishedAt: new Date() }).returning();
+    await db.insert(agentTaskSessions).values({ companyId, agentId: agent.id, adapterType: agent.adapterType,
+      taskKey: issue.id, sessionDisplayId: run.sessionIdAfter,
+      sessionParamsJson: { sessionId: run.sessionIdAfter }, lastRunId: run.id });
     await refreshIssueContinuationSummary({ db, issueId: issue.id, run, agent });
     wakeup.mockReset();
     wakeup.mockImplementation(async (agentId, options) => {
@@ -83,6 +86,12 @@ databaseTests("cap handoff and continuation", () => {
     expect(wakeup).not.toHaveBeenCalled();
   });
 
+  it("admits no continuation without the source run's complete checkpoint", async () => {
+    await db.delete(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+    await continueRunTokenCap(db, run, wakeup);
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
   it("respects an exhausted issue budget including this completed run", async () => {
     vi.stubEnv("PAPERCLIP_ISSUE_TOKEN_BUDGET", "100");
     await continueRunTokenCap(db, run, wakeup);
@@ -106,6 +115,7 @@ databaseTests("cap handoff and continuation", () => {
     const [next] = await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId,
       invocationSource: "assignment", status: "succeeded", contextSnapshot: run.contextSnapshot,
       resultJson: run.resultJson, sessionIdAfter: run.sessionIdAfter }).returning();
+    await db.update(agentTaskSessions).set({ lastRunId: next.id }).where(eq(agentTaskSessions.agentId, agent.id));
     await continueRunTokenCap(db, next, wakeup);
     expect((await getIssueContinuationSummaryDocument(db, issue.id))?.body).toContain(`Last updated by run: ${next.id}`);
     expect(wakeup).toHaveBeenCalledOnce();
@@ -122,6 +132,7 @@ databaseTests("cap handoff and continuation", () => {
     const [next] = await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId,
       invocationSource: "assignment", status: "succeeded", contextSnapshot: run.contextSnapshot,
       resultJson: run.resultJson, sessionIdAfter: run.sessionIdAfter }).returning();
+    await db.update(agentTaskSessions).set({ lastRunId: next.id }).where(eq(agentTaskSessions.agentId, agent.id));
     await continueRunTokenCap(db, next, wakeup);
     expect(wakeup).not.toHaveBeenCalled();
     expect((await getIssueContinuationSummaryDocument(db, issue.id))?.body).toContain(`Last updated by run: ${run.id}`);

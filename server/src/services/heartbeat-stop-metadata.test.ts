@@ -7,6 +7,17 @@ import {
 } from "./heartbeat-stop-metadata.js";
 
 describe("heartbeat stop metadata", () => {
+  it("preserves a cap stop only after a successful run", () => {
+    const result = mergeHeartbeatRunStopMetadata({ stopReason: "run_token_cap" },
+      buildHeartbeatRunStopMetadata({ adapterType: "codex_local", adapterConfig: {}, outcome: "succeeded" }));
+    expect(result.stopReason).toBe("run_token_cap");
+    for (const outcome of ["failed", "cancelled", "timed_out"] as const) {
+      const metadata = buildHeartbeatRunStopMetadata({ adapterType: "codex_local", adapterConfig: {}, outcome });
+      expect(mergeHeartbeatRunStopMetadata({ stopReason: "run_token_cap" }, metadata).stopReason)
+        .toBe(metadata.stopReason);
+    }
+  });
+
   it("keeps local coding adapters at no timeout by default", () => {
     for (const adapterType of [
       "codex_local",

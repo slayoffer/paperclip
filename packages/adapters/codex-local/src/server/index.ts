@@ -86,7 +86,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
     return {
       sessionId,
-      ...ownerSessionState(record),
+      ...ownerSessionState(record, true),
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
@@ -106,7 +106,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
     return {
       sessionId,
-      ...ownerSessionState(params),
+      ...ownerSessionState(params, true),
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),

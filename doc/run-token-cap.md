@@ -53,9 +53,12 @@ The receipt records the boundary, mode, limit, and input tokens for inspection.
 
 The existing issue continuation-summary document stores the objective, acceptance criteria,
 latest agent message, recent work, and next action. The provider session also retains the transcript.
-Paperclip saves the source session ID with the terminal run and writes the summary before the continuation wake.
-The wake names that run through the existing `resumeFromRunId` path, which checks the source's company and agent.
-After a restart, that path restores the source session even if the task-session checkpoint is absent or stale.
+Paperclip saves the complete task or owner checkpoint before it records terminal success.
+The checkpoint includes the provider session ID, working directory, and SSH identity when applicable.
+Recovery requires that checkpoint to belong to the source run, company, and agent.
+An absent or stale checkpoint admits no successor. Recovery can retry when the source checkpoint is available.
+The wake uses normal task or owner selection, without an explicit resume override.
+Owner execution keeps its project directory and persistent provider-session root.
 A missing source session ID or a failed summary write cannot admit a successor.
 The recovery sweep can repair a missing summary and retry delivery after a server restart.
 
@@ -82,12 +85,15 @@ The adapter tests cover modes, cumulative deltas, resets, equality, failed exits
 and unfinished tool events. The server tests use PostgreSQL for duplicate delivery,
 handoff persistence, restart delivery, ownership checks, and the issue budget.
 The heartbeat restart test uses real wake admission with absent and stale task-session checkpoints.
+The finalization test checks checkpoint ordering at the terminal database write and executes a simulated successor in task and owner modes.
+The codec tests check that the saved SSH identity still matches the adapter's target.
 Tests use fake provider results. They do not start Codex.
 
 ```sh
 pnpm exec vitest run packages/adapters/codex-local/src/server/run-token-cap.test.ts
 pnpm exec vitest run server/src/services/run-token-cap.test.ts
 pnpm exec vitest run server/src/__tests__/heartbeat-run-token-cap-restart.test.ts
+pnpm exec vitest run server/src/__tests__/heartbeat-run-token-cap-finalization.test.ts
 ```
 
 Run full repository checks on the configured test host or through fork CI.

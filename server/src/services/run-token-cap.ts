@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
-import { agents, agentWakeupRequests, heartbeatRuns, issues, withDedicatedDbConnection, type Db } from "@paperclipai/db";
+import { agents, agentTaskSessions, agentWakeupRequests, heartbeatRuns, issues, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import { isRunTokenCapStop, readRunTokenCapConfig, type AdapterRuntime } from "@paperclipai/adapter-utils";
-import { readLatestUsageSample } from "./owner-sessions.js";
+import { isOwnerSessionKey, readLatestUsageSample } from "./owner-sessions.js";
 import { readRawUsageTotals } from "./session-usage.js";
 import { getIssueContinuationSummaryDocument, refreshIssueContinuationSummary } from "./issue-continuation-summary.js";
 import { issueTokenBudgetConfig, loadIssueTokenBudgetState } from "./issue-token-budget.js";
@@ -49,7 +49,7 @@ export async function continueRunTokenCap(db: Db, run: Run, wakeup: Wakeup) {
 
 async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) {
   if (!isRunTokenCapStop(run) || run.contextSnapshot?.runTokenCapSourceRunId) return;
-  // Terminal success saves this ID before the task-session write. Never resume an older checkpoint.
+  // A session ID alone cannot restore a remote provider's execution identity.
   if (!run.sessionIdAfter?.trim()) return;
   const issueId = run.contextSnapshot?.issueId;
   if (typeof issueId !== "string") return;
@@ -65,6 +65,17 @@ async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) 
       .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId))).limit(1);
     if (!issue || issue.assigneeAgentId !== run.agentId || issue.assigneeUserId || issue.conversationAgentId ||
         !["todo", "in_progress"].includes(issue.status)) return;
+    const [agent] = await tx.select().from(agents)
+      .where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId))).limit(1);
+    if (agent?.adapterType !== "codex_local") return;
+    const [session] = await tx.select().from(agentTaskSessions).where(and(
+      eq(agentTaskSessions.companyId, run.companyId), eq(agentTaskSessions.agentId, run.agentId),
+      eq(agentTaskSessions.adapterType, "codex_local"), eq(agentTaskSessions.lastRunId, run.id),
+    )).limit(1);
+    if (!session || session.sessionDisplayId !== run.sessionIdAfter ||
+        session.sessionParamsJson?.sessionId !== run.sessionIdAfter) return;
+    const owner = isOwnerSessionKey(session.taskKey);
+    if (owner && session.taskKey !== `owner-project:${issue.projectId}`) return;
     const [latest] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.contextIssueId, issueId)))
       .orderBy(desc(heartbeatRuns.createdAt)).limit(1);
@@ -76,9 +87,6 @@ async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) 
     // Never admit a successor after a failed handoff write.
     let summary = await getIssueContinuationSummaryDocument(tx as unknown as Db, issueId);
     if (!summary?.body.includes(`Last updated by run: ${run.id}`)) {
-      const [agent] = await tx.select().from(agents)
-        .where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId))).limit(1);
-      if (!agent) return;
       await refreshIssueContinuationSummary({ db, issueId, run, agent });
       summary = await getIssueContinuationSummaryDocument(tx as unknown as Db, issueId);
       if (!summary?.body.includes(`Last updated by run: ${run.id}`)) return;
@@ -88,9 +96,9 @@ async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) 
       idempotencyKey: key, requestedByActorType: "system",
       issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: run.agentId },
       allowRunCoalescing: false,
-      payload: { issueId, sourceRunId: run.id, resumeFromRunId: run.id },
+      payload: { issueId, sourceRunId: run.id },
       contextSnapshot: {
-        issueId, taskKey: issueId, runTokenCapSourceRunId: run.id,
+        issueId, taskKey: owner ? issueId : session.taskKey, runTokenCapSourceRunId: run.id,
         wakeReason: "run_token_cap",
         wakeInstruction: "Read the continuation summary. Continue the unfinished work from the saved session. Respect all issue gates.",
       },

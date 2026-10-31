@@ -2,10 +2,11 @@
 
 ## Cap recovery sessions
 
-Terminal success can precede task-session persistence.
-A cap wake must use `payload.resumeFromRunId` and require the source run's saved `sessionIdAfter`.
-The ordinary resume path checks the source's company and agent before it restores that session.
-Test restart recovery with real wake admission and an absent or stale task checkpoint.
+Save the complete cap checkpoint before terminal success releases admission.
+Preserve `run_token_cap` through the successful-run metadata merge so finalization reaches the cap path.
+Recovery requires a company-scoped and agent-scoped checkpoint whose `lastRunId` matches the source run.
+Use normal task or owner selection. An explicit resume override disables owner-session execution.
+Preserve SSH identity through the codec. Test absent and stale checkpoints through real wake admission.
 
 ## Deferred dependency wakes
 
