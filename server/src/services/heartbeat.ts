@@ -552,6 +552,7 @@ import { declaredSecretValues } from "./run-result-redaction.js";
 
 
 import { environmentService } from "./environments.js";
+import { confirmClosedSshLeaseStops } from "./ssh-in-place-termination.js";
 
 import {
   environmentRuntimeService,
@@ -4346,6 +4347,7 @@ export function heartbeatService(
           agentId: run.agentId, status: run.status, providerResourceDisposition: "destroy" });
       }
     }
+    await confirmClosedSshLeaseStops(db, agentIds);
     return agentExecutionsHaveStopped(db, agentIds);
   }
 
