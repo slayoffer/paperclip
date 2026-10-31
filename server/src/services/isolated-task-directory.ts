@@ -2,6 +2,36 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseObject } from "../adapters/utils.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { WorkspaceValidationFailure } from "./heartbeat/workspace-validation-failure.js";
+
+/** Unbound tasks without a repository must not inherit shared directory contents. */
+export function shouldUseRepositoryFreeTaskDirectory(input: {
+  isolatedWorkspacesEnabled: boolean;
+  issueId: string;
+  mode: string;
+  hasProject: boolean;
+  hasProjectWorkspace: boolean;
+  hasPriorTaskSession: boolean;
+  isRecovery: boolean;
+  projectWorkspaceId: string | null;
+  requestedExecutionWorkspaceId: string | null;
+  existingWorkspace: {
+    sourceIssueId: string | null;
+    metadata?: Record<string, unknown> | null;
+  } | null;
+  workspaceStrategies: unknown[];
+}): boolean {
+  if (!input.isolatedWorkspacesEnabled) return false;
+  if (input.mode !== "shared_workspace" && input.mode !== "isolated_workspace") return false;
+  if (!input.hasProject || input.hasProjectWorkspace || input.projectWorkspaceId) return false;
+  const ownsTaskDirectory = input.existingWorkspace?.sourceIssueId === input.issueId
+    && input.existingWorkspace.metadata?.isolatedTaskDirectory === true;
+  // Never move a saved session or a recovery input into a new empty directory.
+  if ((input.hasPriorTaskSession || input.isRecovery) && !ownsTaskDirectory) return false;
+  if (input.requestedExecutionWorkspaceId && !ownsTaskDirectory) return false;
+  // Exact branches, repository requirements, and setup hooks keep their original path.
+  return input.workspaceStrategies.every((value) => Object.keys(parseObject(value)).length === 0);
+}
 
 /** A repository-free sandbox task needs isolation, but has no Git base. */
 export function shouldUseIsolatedTaskDirectory(input: {
@@ -45,4 +75,51 @@ export async function materializeIsolatedTaskDirectory(input: {
     }
   }
   return cwd;
+}
+
+export async function prepareIsolatedTaskWorkspace(input: {
+  companyId: string;
+  issueId: string;
+  projectId: string | null;
+  recoveryCwd: string | null;
+  existingWorkspace: {
+    companyId: string;
+    projectId: string | null;
+    sourceIssueId: string | null;
+    mode: string;
+    strategyType: string;
+    cwd: string | null;
+  } | null;
+}) {
+  const cwd = await materializeIsolatedTaskDirectory(input);
+  if (input.recoveryCwd !== null && input.recoveryCwd !== cwd) {
+    throw new WorkspaceValidationFailure("The native recovery directory differs from its admitted directory.", {
+      workspaceValidation: { reason: "isolated_task_directory_recovery_mismatch", issueId: input.issueId },
+    });
+  }
+  const workspace = input.existingWorkspace;
+  if (workspace && (
+    workspace.companyId !== input.companyId ||
+    workspace.projectId !== input.projectId ||
+    workspace.sourceIssueId !== input.issueId ||
+    workspace.mode !== "isolated_workspace" ||
+    workspace.strategyType !== "project_primary" ||
+    workspace.cwd !== cwd
+  )) {
+    throw new WorkspaceValidationFailure("The existing execution workspace is not this task's isolated directory.", {
+      workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: input.issueId },
+    });
+  }
+  return {
+    cwd,
+    source: "task_session" as const,
+    projectId: input.projectId,
+    workspaceId: null,
+    repoUrl: null,
+    repoRef: null,
+    workspaceHints: [],
+    warnings: [],
+    baseCwdFallback: false,
+    materializationFailures: [],
+  };
 }
