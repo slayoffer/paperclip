@@ -88,7 +88,8 @@ copy mode").
   A second run waits for the configured interval, then selects copy mode.
   A server restart preserves the file.
   A lease timeout or a dead controller does not prove remote writer termination.
-  Stale ownership transfers require an inactive lease and a bound provider termination receipt.
+  Stale ownership transfers require a bound provider termination receipt.
+  A terminal owner run permits a remote probe even when its bookkeeping lease remains active.
   Missing termination evidence keeps the lock, including after normal lease release.
   SSH client exit, run success, failure, cancellation, and timeout do not prove writer termination.
   On supported Linux hosts, each provider invocation starts in a unique systemd scope.
@@ -116,6 +117,11 @@ copy mode").
   Each sweep scans at most twenty leases and advances through older uncertain rows.
   It validates company, run, lease, worktree, and original SSH endpoint identities.
   Legacy leases can recover their worktree path from the execution workspace.
+  Agent-home and primary workspaces can have no execution-workspace row or separate writer tracking.
+  For these leases, recovery reads the local path from their saved `in_place` realization.
+  The realization must identify the same lease, environment, provider lease, and authoritative root.
+  Release, the next acquisition, and the restart sweep use this recovery path.
+  The path identifies a lock. It grants no termination authority.
   A recorded remote PID must be absent. A surviving PID or an uncertain check preserves ownership.
   Existing containment records without a PID still require verified empty control groups.
   These checks use the same SSH path. Permission errors preserve ownership.
