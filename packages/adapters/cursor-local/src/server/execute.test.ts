@@ -264,11 +264,7 @@ exit 7
     await fs.mkdir(managedCaptureDir, { recursive: true });
     await fs.mkdir(workspaceDir, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
-    const preferredAgentScript = `#!/bin/sh
-printf '%s\\n' '{"type":"system","subtype":"init","session_id":"cursor-session-fresh-1","model":"auto"}'
-printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"output_text","text":"hello"}]}}'
-printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-session-fresh-1","result":"ok"}'
-`;
+    const preferredAgentScript = buildFakeAgentScript(managedCaptureDir);
 
     setPrepareCursorSandboxCommand.mockImplementation(async (input) => {
       const call = prepareInputs.length;
@@ -304,29 +300,14 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
       };
     });
 
-    const runnerState = {
-      commands: [] as string[],
-    };
     // The managed-runtime restore path probes the generated archive with
-    // `wc -c` before reading bounded `dd | base64` chunks. Keep this fixture's
-    // shell seam faithful to that protocol instead of returning empty stdout
-    // for every shell command.
-    const runner = {
-      execute: async (input: { command: string; args?: string[]; env?: Record<string, string>; stdin?: string }) => {
-        runnerState.commands.push(input.command);
-        // Exercise actual bounded file reads during managed-home restoration;
-        // reporting empty success for every shell command hides missing bytes.
-        return runChildProcess(`cursor-fresh-lease-${runnerState.commands.length}`, input.command, input.args ?? [], {
-          cwd: remoteWorkspace,
-          env: { ...input.env, PATH: `${input.env?.PATH ?? ""}:/usr/bin:/bin` },
-          stdin: input.stdin,
-          timeoutSec: 30,
-          graceSec: 5,
-          onLog: async () => {},
-          onSpawn: async () => {},
-        });
-      },
-    };
+    // `wc -c` before reading bounded `dd | base64` chunks. Reuse the runner
+    // that simulates installation but still executes those shell commands.
+    const runner = createFreshLeaseSandboxRunner({
+      homeDir: systemHomeDir,
+      installCommandPath: path.join(systemHomeDir, ".local", "bin", "agent"),
+      captureDir: managedCaptureDir,
+    });
 
     const runMeta: Array<{ command?: string; [key: string]: unknown }> = [];
     const previousHome = process.env.HOME;
@@ -361,6 +342,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
           command,
           cwd: workspaceDir,
           promptTemplate: "Run against runtime-managed command.",
+          env: { PATH: "/usr/bin:/bin" },
         },
         context: {},
         authToken: "run-jwt-token",
@@ -372,6 +354,8 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
 
       expect(result.exitCode).toBe(0);
       expect(prepareInputs).toHaveLength(2);
+      expect(runner.installCommands).toEqual([SANDBOX_INSTALL_COMMAND]);
+      expect(await fs.readFile(path.join(managedCaptureDir, "command.txt"), "utf8")).toBe(finalPreparedCommand);
       expect(finalPreparedCommand).not.toBeNull();
       expect(finalPreparedCommand).toMatch(/\.local\/(bin|sbin)\/agent$/);
       const resolvedCommand = runMeta.find(Boolean)?.command as string | undefined;

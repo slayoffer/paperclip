@@ -1,3 +1,5 @@
+import { and, desc, eq, sql } from "drizzle-orm";
+import { heartbeatRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { asNumber, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import { readLatestUsageSample } from "./owner-sessions.js";
@@ -80,4 +82,29 @@ export async function resolveCumulativeSessionUsage(db: Db, input: {
     previousRawUsage,
     derivedFromSessionTotals: previousRawUsage !== null,
   };
+}
+
+export async function getLatestRunForSession(
+  db: Db,
+  agentId: string,
+  sessionId: string,
+  opts?: { excludeRunId?: string | null },
+) {
+  const conditions = [
+    eq(heartbeatRuns.agentId, agentId),
+    eq(heartbeatRuns.sessionIdAfter, sessionId),
+  ];
+  if (opts?.excludeRunId) {
+    conditions.push(sql`${heartbeatRuns.id} <> ${opts.excludeRunId}`);
+  }
+  return db
+    .select({
+      id: heartbeatRuns.id,
+      usageJson: heartbeatRuns.usageJson,
+    })
+    .from(heartbeatRuns)
+    .where(and(...conditions))
+    .orderBy(desc(heartbeatRuns.createdAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
 }

@@ -158,3 +158,6 @@ export type {
   SandboxCallbackBridgeWorkerHandle,
   StartedSandboxCallbackBridgeServer,
 } from "./sandbox-callback-bridge.js";
+
+export { RUN_TOKEN_CAP, readRunTokenCapConfig, isRunTokenCapStop } from "./run-token-cap.js";
+export type { RunTokenCapMode, RunTokenCapReceipt } from "./run-token-cap.js";
