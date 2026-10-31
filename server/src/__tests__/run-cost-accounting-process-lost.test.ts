@@ -38,9 +38,9 @@ describe("accounting of runs whose process was lost", () => {
   }
   const read = async (id: string) => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)))[0]!;
 
-  it("closes the open receipt of a process_lost run and releases the budget hard stop", async () => {
+  it("closes the open receipt of a process_lost run", async () => {
     const { agentId, policy, run } = await fixture("process_lost");
-    expect(await policyBlocks(db, policy)).toBe(true);
+    expect(await policyBlocks(db, policy)).toBe(false);
     await reconcileRunCosts(db);
     expect(await read(run.id)).toMatchObject({ costAccountingPending: false });
     const events = await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, run.id));
@@ -53,6 +53,14 @@ describe("accounting of runs whose process was lost", () => {
     await reconcileRunCosts(db);
     expect(await read(run.id)).toMatchObject({ costAccountingPending: true });
     expect(await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, run.id))).toEqual([]);
+    // An open receipt is not observed spend: it must not pause the agent.
+    expect(await policyBlocks(db, policy)).toBe(false);
+  });
+
+  it("still hard-stops on priced spend over the limit", async () => {
+    const { agentId, policy } = await fixture("adapter_failed");
+    await db.insert(costEvents).values({ companyId: policy.companyId, agentId, provider: "openai", model: "gpt",
+      biller: "openai", billingType: "metered_api", costCents: 1000, costStatus: "reported", occurredAt: new Date() });
     expect(await policyBlocks(db, policy)).toBe(true);
   });
 });
