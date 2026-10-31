@@ -1,3 +1,5 @@
+import { boundRunIssueIdSql } from "./run-task-binding.js";
+import { alias } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { heartbeatRuns, agentWakeupRequests } from "@paperclipai/db";
 
@@ -8,8 +10,7 @@ export function isPullQueueEnabled() {
 export function issueHasExecution() {
   return sql<boolean>`(exists (select 1 from ${heartbeatRuns} r
     where r.company_id = "issues"."company_id"
-      and (r.native_issue_id = "issues"."id"
-        or r.context_snapshot->>'issueId' = "issues"."id"::text)
+      and ${boundRunIssueIdSql(alias(heartbeatRuns, "r"))} = "issues"."id"::text
       and r.status in ('queued', 'running', 'scheduled_retry'))
     or exists (select 1 from ${agentWakeupRequests} w
       where w.company_id = "issues"."company_id"

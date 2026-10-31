@@ -1,3 +1,5 @@
+import { boundRunIssueIdSql } from "./run-task-binding.js";
+import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, isNull, isNotNull, lt, sql } from "drizzle-orm";
 import {
   agents, companies, heartbeatRuns, agentWakeupRequests, issues,
@@ -159,8 +161,7 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
         isNull(issues.monitorNextCheckAt), lt(issues.updatedAt, cutoff),
         sql`not ${issueHasExecution()}`,
         sql`not exists (select 1 from ${heartbeatRuns} r where r.company_id = "issues"."company_id"
-          and (r.native_issue_id = "issues"."id"
-            or r.context_snapshot->>'issueId' = "issues"."id"::text)
+          and ${boundRunIssueIdSql(alias(heartbeatRuns, "r"))} = "issues"."id"::text
           and coalesce(r.finished_at, r.updated_at) >= ${cutoff.toISOString()}::timestamptz)`,
         sql`not exists (select 1 from ${agentWakeupRequests} w where w.company_id = "issues"."company_id"
           and w.payload->>'issueId' = "issues"."id"::text and w.updated_at >= ${cutoff.toISOString()}::timestamptz)`,
@@ -199,12 +200,15 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
     const rows = await db.update(agentWakeupRequests)
       .set({ status: "cancelled", finishedAt: now, updatedAt: now,
         error: "Issue closed with no execution left to drain this deferred wake" })
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), lt(agentWakeupRequests.updatedAt, cutoff),
+      // Age by the issue's close time, not the wake's updated_at: the execution-wait retry rewrites every deferred
+      // wake about once a minute, so updated_at never ages (2026-11-01: 107 of 170 rows stayed).
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         sql`exists (select 1 from ${issues} task where task.company_id = ${agentWakeupRequests.companyId}
           and task.id::text = ${agentWakeupRequests.payload}->>'issueId'
           and task.status in ('done', 'cancelled') and task.execution_run_id is null
+          and coalesce(task.completed_at, task.cancelled_at, task.updated_at) < ${cutoff.toISOString()}::timestamptz
           and not exists (select 1 from ${heartbeatRuns} r where r.company_id = task.company_id
-            and (r.native_issue_id = task.id or r.context_snapshot->>'issueId' = task.id::text)
+            and ${boundRunIssueIdSql(alias(heartbeatRuns, "r"))} = task.id::text
             and r.status in ('queued', 'running', 'scheduled_retry')))`))
       .returning({ id: agentWakeupRequests.id });
     if (rows.length) logger.info({ count: rows.length }, "Pull queue cancelled deferred wakes of closed issues");
