@@ -1,6 +1,7 @@
 import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { issueIntakeCheck } from "./issue-intake-check.js";
+import { cancelRejectedQueuedRuns, isPermanentClaimRejection, isDeferrableClaimRejection } from "./queued-claim-rejection.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
 import { buildOwnerRecoveryWake, ownerRecoveryResumeEnabled } from "./recovery/owner-resume.js";
 import {
@@ -19704,45 +19705,6 @@ export function heartbeatService(
     }
   }
 
-  // Identity denials cannot clear on retry. Intake refusals require a fresh pickup
-  // after the description changes. Settle both after releasing the agent start lock.
-  function isPermanentClaimRejection(err: unknown): err is HttpError {
-    return err instanceof HttpError && (err.status === 403 || parseObject(err.details).code === "issue.intake_missing_sections");
-  }
-
-  // Other 4xx rejections can clear later (a responsible user gets assigned, a
-  // conflicting claim finishes). Keep the run queued, but do not let it stop
-  // the rest of the queue or startup recovery.
-  function isDeferrableClaimRejection(err: unknown): err is HttpError {
-    return err instanceof HttpError && err.status >= 400 && err.status < 500;
-  }
-
-  // Settle runs that can never be claimed. Letting the error escape stalls the
-  // agent's queue and, during startup recovery, stops the server from booting.
-  async function cancelRejectedQueuedRuns(
-    rejected: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }>,
-  ) {
-    for (const { run, err } of rejected) {
-      logger.warn(
-        { err, runId: run.id, agentId: run.agentId, companyId: run.companyId },
-        "cancelling queued heartbeat run whose claim was rejected",
-      );
-      try {
-        await cancelRunInternal(
-          run.id,
-          `Cancelled because the queued run cannot be claimed: ${err.message}`,
-          { errorCode: "queued_run_claim_rejected",
-            suppressImmediateRecovery: parseObject(err.details).code === "issue.intake_missing_sections" },
-        );
-      } catch (cancelErr) {
-        logger.error(
-          { err: cancelErr, runId: run.id },
-          "failed to cancel queued heartbeat run whose claim was rejected; it stays queued for the next recovery pass",
-        );
-      }
-    }
-  }
-
   async function startNextQueuedRunForAgent(agentId: string) {
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
@@ -19909,7 +19871,7 @@ export function heartbeatService(
         });
       }
       return claimedRuns;
-    }).finally(() => cancelRejectedQueuedRuns(rejectedClaims));
+    }).finally(() => cancelRejectedQueuedRuns(rejectedClaims, cancelRunInternal));
   }
 
   // Await every background heartbeat execution that is currently in flight. A

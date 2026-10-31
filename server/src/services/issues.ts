@@ -6,7 +6,7 @@ import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./iss
 import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
-import { assertIssueReadyToStart } from "./issue-start-readiness.js";
+import { assertCheckoutReady, assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordPullQueueParking } from "./pull-queue-state.js";
@@ -15,7 +15,6 @@ import { getWakeableParentAfterChildCompletion } from "./issue-parent-completion
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
-import { issueIntakeCheck } from "./issue-intake-check.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -10882,15 +10881,7 @@ export function issueService(db: Db) {
         .where(eq(issues.id, id))
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
-      await assertAssignableAgent(db, issueCompany.companyId, agentId, {
-        kind: "work",
-      });
-
-      if (await issueIntakeCheck(db, { companyId: issueCompany.companyId, issueId: id, source: "issue.checkout" })) {
-        throw conflict("Issue intake check refused pickup. Add the missing sections named in the issue comment.", {
-          code: "issue.intake_missing_sections", issueId: id,
-        });
-      }
+      await assertCheckoutReady(db, issueCompany.companyId, id, agentId);
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(

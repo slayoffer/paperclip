@@ -62,6 +62,11 @@ These checks read current issue data and labels. A saved wake payload cannot sup
 Queued runs that fail the check are cancelled after the agent start lock ends.
 The cancellation suppresses immediate recovery.
 
+`issue-start-readiness.ts` owns checkout assignability and intake validation.
+`queued-claim-rejection.ts` classifies queued claim errors and settles rejected runs.
+Heartbeat calls settlement after the agent start lock ends, because cancellation can promote the next queued run.
+These modules keep the service coordinators smaller than the release base without file-size exceptions.
+
 In `dry_run` and `enforce`, a failed check writes a structured server event:
 
 ```json
@@ -93,8 +98,10 @@ Each later check still reads the current description. A corrected issue can proc
 ## Verification
 
 Run the focused suite on a host with Node 24 and embedded PostgreSQL support:
+In a fresh checkout, first build the plugin SDK for the heartbeat imports:
 
 ```sh
+pnpm --filter @paperclipai/plugin-sdk build
 pnpm exec vitest run server/src/services/issue-intake-check.test.ts --maxWorkers=1
 ```
 
