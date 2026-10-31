@@ -20,6 +20,7 @@ const policy = {
 
 describe("unbound repository-free task selection", () => {
   const unbound = {
+    isolatedWorkspacesEnabled: true,
     issueId: "report-1",
     mode: "shared_workspace",
     hasProject: true,
@@ -37,6 +38,7 @@ describe("unbound repository-free task selection", () => {
   });
 
   it.each([
+    { isolatedWorkspacesEnabled: false },
     { mode: "operator_branch" }, { mode: "agent_default" }, { mode: "reuse_existing" },
     { hasProject: false }, { hasPriorTaskSession: true }, { isRecovery: true },
     { hasProjectWorkspace: true }, { projectWorkspaceId: "selected-repository" },

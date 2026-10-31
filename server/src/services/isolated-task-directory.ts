@@ -6,6 +6,7 @@ import { WorkspaceValidationFailure } from "./heartbeat/workspace-validation-fai
 
 /** Unbound tasks without a repository must not inherit shared directory contents. */
 export function shouldUseRepositoryFreeTaskDirectory(input: {
+  isolatedWorkspacesEnabled: boolean;
   issueId: string;
   mode: string;
   hasProject: boolean;
@@ -20,6 +21,7 @@ export function shouldUseRepositoryFreeTaskDirectory(input: {
   } | null;
   workspaceStrategies: unknown[];
 }): boolean {
+  if (!input.isolatedWorkspacesEnabled) return false;
   if (input.mode !== "shared_workspace" && input.mode !== "isolated_workspace") return false;
   if (!input.hasProject || input.hasProjectWorkspace || input.projectWorkspaceId) return false;
   const ownsTaskDirectory = input.existingWorkspace?.sourceIssueId === input.issueId

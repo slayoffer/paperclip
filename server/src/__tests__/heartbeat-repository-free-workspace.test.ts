@@ -188,4 +188,51 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(await readFile(path.join(foreignCwd, "source.txt"), "utf8")).toBe("Retain source work\n");
     }, 90_000,
   );
+
+  it("retains the shared project directory across a saved session when isolation is disabled", async () => {
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const projectId = randomUUID();
+    const sessionId = randomUUID();
+    const cwd = resolveManagedProjectWorkspaceDir({ companyId, projectId, repoName: null });
+    await mkdir(cwd, { recursive: true });
+    await db.insert(companies).values({ id: companyId, name: "Disabled isolation", issuePrefix: "DISABLED",
+      defaultResponsibleUserId: "directory-user" });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Repository-free project" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Fixture", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Saved session",
+      identifier: "DISABLED-1", status: "in_progress", assigneeAgentId: agentId });
+    let turns = 0;
+    execute.mockImplementation(async (input) => {
+      expect(input.context.paperclipWorkspace.cwd).toBe(cwd);
+      if (turns++) expect(await readFile(path.join(cwd, "report.txt"), "utf8")).toBe("Retain task output");
+      else await writeFile(path.join(cwd, "report.txt"), "Retain task output");
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, summary: "Kept shared directory", sessionId };
+    });
+    try {
+      for (let turn = 0; turn < 2; turn++) {
+        if (turn) await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+        const run = await heartbeat.wakeup(agentId, { source: "on_demand", triggerDetail: "manual",
+          contextSnapshot: { issueId, taskId: issueId, projectId } });
+        expect(run).not.toBeNull();
+        await vi.waitFor(async () => {
+          expect(["queued", "running"]).not.toContain((await heartbeat.getRun(run!.id))?.status);
+        }, { timeout: 30_000 });
+        await drainHeartbeatRunsToQuiescence(db, heartbeat);
+        expect(await heartbeat.getRun(run!.id)).toMatchObject({ status: "succeeded", error: null });
+        const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
+        expect(task.executionWorkspaceId).toBeNull();
+        const [session] = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agentId));
+        expect(session?.sessionParamsJson).toMatchObject({ sessionId });
+      }
+      expect(turns).toBe(2);
+    } finally {
+      await drainHeartbeatRunsToQuiescence(db, heartbeat);
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    }
+  }, 90_000);
 });

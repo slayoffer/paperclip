@@ -21094,6 +21094,7 @@ export function heartbeatService(
       });
       const repositoryFreeTaskDirectory = issueRef !== null && !isConversation(issueContext)
         && shouldUseRepositoryFreeTaskDirectory({
+          isolatedWorkspacesEnabled,
           issueId: issueRef.id,
           mode: requestedExecutionWorkspaceMode,
           hasProject: projectContext !== null,
@@ -21402,8 +21403,7 @@ export function heartbeatService(
         ...workspaceManagedConfig,
         ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
         ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
-        // The base below is already task-owned. Keep directory transport while
-        // preserving isolated mode and the mandatory sandbox preflight.
+        // The task directory is already isolated. Keep the sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
       };
       if (issueRef && !useIsolatedTaskDirectory && (workspaceReuseFallback || shouldKeepWorkspaceReuseIsolation({

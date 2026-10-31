@@ -7,4 +7,5 @@ A fixture that drops this input creates an empty archive and fails during extrac
 Fake agent scripts must read their prompt from standard input before they exit.
 An early exit can cause `EPIPE` while the runner writes the prompt.
 The execution fixtures perform real filesystem and subprocess operations.
-Their test deadlines must allow their 30-second execution budget.
+Allow 30 seconds for install and resume fixtures.
+Allow 60 seconds for the managed-runtime round trip, which runs several archive commands.

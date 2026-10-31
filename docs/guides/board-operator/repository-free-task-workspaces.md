@@ -3,7 +3,8 @@ title: Repository-Free Task Workspaces
 summary: Stable task directories for projects without a configured repository
 ---
 
-New ordinary tasks in projects without a configured workspace use private task
+With experimental isolated workspaces enabled, new ordinary tasks in projects
+without a configured workspace use private task
 directories. Shared and isolated workspace modes both select these directories.
 Each directory belongs to one company and task:
 
@@ -14,6 +15,8 @@ Each directory belongs to one company and task:
 The path honors `PAPERCLIP_HOME` and `PAPERCLIP_INSTANCE_ID`.
 Each task retains its files across turns and agent reassignment.
 The directory needs no Git repository.
+When the experimental setting is disabled, tasks retain the existing shared
+project directory selection, including saved sessions.
 New recurring tasks do not inherit the project default directory or another
 task's files. Their execution workspace records identify the owning task.
 
