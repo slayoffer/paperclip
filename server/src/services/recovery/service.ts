@@ -1,4 +1,5 @@
 import { dispatchBridgeWakes } from "../review-bridge-wakes.js";
+import { continueRunTokenCap, ownsRunTokenCapContinuation } from "../run-token-cap.js";
 import { isReviewBridgeWait } from "../review-bridge-contract.js";
 import { pendingBridgeWakeCondition } from "../review-bridge-waits.js";
 import type { LatestIssueRun } from "./run-types.js";
@@ -3476,6 +3477,7 @@ export function recoveryService(
   async function reconcileLegacyContinuation(runId: string) {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1);
     if (!run || run.runtimeMode === "native" || run.status !== "succeeded") return "skipped" as const;
+    if (ownsRunTokenCapContinuation(run)) { await continueRunTokenCap(db, run, deps.enqueueWakeup); return "skipped" as const; }
     const context = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
     if (!issueId) return "skipped" as const;
@@ -3489,6 +3491,7 @@ export function recoveryService(
     latestRun: LatestIssueRun,
     options: { historicalAttemptCount?: number; legacyEpisode?: LegacyDispositionEpisode } = {},
   ): Promise<"queued" | "escalated" | "covered" | "skipped"> {
+    if (ownsRunTokenCapContinuation(latestRun)) return "skipped";
     const current = await db
       .select()
       .from(issues)
@@ -3563,16 +3566,12 @@ export function recoveryService(
       activeRepairAction.fingerprint === state.fingerprint
         ? activeRepairAction.attemptCount
         : 0;
-    // Upgrade compatibility: pre-fingerprint continuation parks already spent
-    // attempts against this unchanged source state. Seed the durable counter
-    // from that consecutive legacy history instead of granting five fresh
-    // attempts merely because the recovery-action row did not exist yet.
+    // Pre-fingerprint attempts still consume the unchanged source state's allowance.
     const historicalAttempt = Math.min(
       maxAttempts,
       Math.max(episode?.attempt ?? 0, Math.floor(options.historicalAttemptCount ?? 0)),
     );
-    // A source run owns one successor slot. Concurrent checks must not advance
-    // the counter again after another checker reserved that same successor.
+    // Concurrent checks cannot reserve a second successor for one source run.
     if (episode && persistedAttempt > episode.attempt) return "skipped";
     const sameFingerprintAttempt = Math.max(
       runAttempt,
@@ -4178,10 +4177,8 @@ export function recoveryService(
         }
 
         let latestRun = await getLatestIssueRun(issue.companyId, issue.id);
-        // A native chat can finish between the earlier settlement read and this
-        // fresh run read, before its response is materialized. Its trusted
-        // finalizer owns that settlement; generic productive-work recovery must
-        // not invent another conversation turn during the publication window.
+        if (ownsRunTokenCapContinuation(latestRun)) { await reconcileLegacyContinuation(latestRun!.id); result.skipped += 1; continue; }
+        // Native finalization owns chat settlement until response publication.
         if (
           issue.conversationAgentId &&
           latestRun?.status === "succeeded" &&

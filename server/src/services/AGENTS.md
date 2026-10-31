@@ -1,5 +1,13 @@
 # Service rules
 
+## Cap recovery sessions
+
+Save the complete cap checkpoint before terminal success releases admission.
+Preserve `run_token_cap` through the successful-run metadata merge so finalization reaches the cap path.
+Recovery requires a company-scoped and agent-scoped checkpoint whose `lastRunId` matches the source run.
+Use normal task or owner selection. An explicit resume override disables owner-session execution.
+Preserve SSH identity through the codec. Test absent and stale checkpoints through real wake admission.
+
 ## Deferred dependency wakes
 
 Durable wake payloads describe the blocker set at release time.

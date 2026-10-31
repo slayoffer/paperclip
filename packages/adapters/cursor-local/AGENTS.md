@@ -4,8 +4,11 @@ Pass `input.stdin` to `runChildProcess` in sandbox runner fixtures.
 Managed runtime sync sends archive bytes through standard input.
 A fixture that drops this input creates an empty archive and fails during extraction.
 
-Fake agent scripts must read their prompt from standard input before they exit.
-An early exit can cause `EPIPE` while the runner writes the prompt.
+Use the runner's installer simulation in managed-runtime execution fixtures.
+Forward other shell commands to the real process runner so archive staging and restoration remain tested.
+Without the simulation, a missing `agent` starts the live Cursor installer and makes tests depend on network downloads.
+Measured on 2026-11-01 (VLAT): the managed-runtime fixture exceeded both five-second and 30-second deadlines during installation.
+The simulated agent must consume prompt stdin before it exits. An immediate exit can cause an unhandled `EPIPE` in the process runner.
 The execution fixtures perform real filesystem and subprocess operations.
 Allow 30 seconds for install and resume fixtures.
 Allow 60 seconds for the managed-runtime round trip, which runs several archive commands.

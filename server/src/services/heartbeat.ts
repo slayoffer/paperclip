@@ -1,3 +1,4 @@
+import { continueRunTokenCap, ownsRunTokenCapContinuation, runTokenCapBaseline } from "./run-token-cap.js";
 import { admitRunExecutionEvidence, observeRunAbort, withRunExecutionEvidence, withStopRequestEvidence } from "./run-execution-evidence.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "./instance-run-cap.js";
@@ -11,7 +12,7 @@ import { resolveWorkspaceReuseSelection, isolatedWorkspaceReuseConfig, shouldKee
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
 import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, markLegacyRestartBoundary, preserveLegacyRestartEvidence, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { sessionCompactionReason, buildSessionCompactionHandoff } from "./session-compaction-decision.js";
-import { ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
+import { getTaskSession, ownerSessionsEnabled, resolveOwnerSession, ownerSessionInputLimit, ownerSessionEngineEligible, readOwnerSessionInputTokens, shouldResetOwnerSessionForWake, describeOwnerSessionResetReason, isOwnerSessionKey, firstCallerTaskKey, saveOwnerSessionState, ownerSessionKeyForIssueReset } from "./owner-sessions.js";
 import { readDeferredWakeForAdmission, queueDeferredBridgeReceipt } from "./deferred-wake-admission.js";
 import { resumeDeferredBridgeReceipt } from "./review-bridge-wakes.js";
 import { recoverQueuedRuns } from "./queued-run-recovery.js";
@@ -377,7 +378,7 @@ import {
   issueTokenBudgetSkipDetails,
   loadIssueTokenBudgetState,
 } from "./issue-token-budget.js";
-import { readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
+import { getLatestRunForSession, readRawUsageTotals, deriveNormalizedUsageDelta, resolveCumulativeSessionUsage } from "./session-usage.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import {
   resolveDefaultAgentWorkspaceDir,
@@ -10968,51 +10969,6 @@ export function heartbeatService(
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getTaskSession(
-    companyId: string,
-    agentId: string,
-    adapterType: string,
-    taskKey: string,
-    client: Pick<Db, "select"> = db,
-  ) {
-    return client
-      .select()
-      .from(agentTaskSessions)
-      .where(
-        and(
-          eq(agentTaskSessions.companyId, companyId),
-          eq(agentTaskSessions.agentId, agentId),
-          eq(agentTaskSessions.adapterType, adapterType),
-          eq(agentTaskSessions.taskKey, taskKey),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
-  }
-
-  async function getLatestRunForSession(
-    agentId: string,
-    sessionId: string,
-    opts?: { excludeRunId?: string | null },
-  ) {
-    const conditions = [
-      eq(heartbeatRuns.agentId, agentId),
-      eq(heartbeatRuns.sessionIdAfter, sessionId),
-    ];
-    if (opts?.excludeRunId) {
-      conditions.push(sql`${heartbeatRuns.id} <> ${opts.excludeRunId}`);
-    }
-    return db
-      .select({
-        id: heartbeatRuns.id,
-        usageJson: heartbeatRuns.usageJson,
-      })
-      .from(heartbeatRuns)
-      .where(and(...conditions))
-      .orderBy(desc(heartbeatRuns.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-  }
-
   const issueMonitorDispatchColumns = {
     id: issues.id,
     companyId: issues.companyId,
@@ -11880,7 +11836,7 @@ export function heartbeatService(
     if (usageBasis === "session_cumulative") return resolveCumulativeSessionUsage(db, {
       agentId, runId, sessionId, rawUsage,
     });
-    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(agentId, sessionId, {
+    const previousRawUsage = readRawUsageTotals((await getLatestRunForSession(db, agentId, sessionId, {
       excludeRunId: runId,
     }))?.usageJson);
     return {
@@ -12019,6 +11975,7 @@ export function heartbeatService(
     if (taskKey) {
       const codec = getAdapterSessionCodec(agent.adapterType);
       const existingTaskSession = await getTaskSession(
+        db,
         agent.companyId,
         agent.id,
         agent.adapterType,
@@ -12068,11 +12025,11 @@ export function heartbeatService(
 
     const codec = getAdapterSessionCodec(input.agent.adapterType);
     const taskSession = await getTaskSession(
+      client,
       input.agent.companyId,
       input.agent.id,
       input.agent.adapterType,
       input.taskKey,
-      client,
     );
     const taskSessionParams = normalizeResumeParamsForAdapter(
       input.agent.adapterType,
@@ -12112,6 +12069,7 @@ export function heartbeatService(
     const resumeTaskKey = deriveTaskKey(resumeContext, null) ?? taskKey;
     const resumeTaskSession = resumeTaskKey
       ? await getTaskSession(
+          db,
           agent.companyId,
           agent.id,
           agent.adapterType,
@@ -14129,7 +14087,7 @@ export function heartbeatService(
     const contextSnapshot = parseObject(run.contextSnapshot);
     // The explicit receipt admitted one turn. A prose-only follow-up cannot
     // reuse it or renew it under the separate transient-failure retry policy.
-    if (readNonEmptyString(contextSnapshot.goalControlRequestId) || contextSnapshot.explicitUserContinuation) {
+    if (ownsRunTokenCapContinuation(run) || readNonEmptyString(contextSnapshot.goalControlRequestId) || contextSnapshot.explicitUserContinuation) {
       if (run.issueCommentStatus !== "not_applicable") {
         await patchRunIssueCommentStatus(run.id, {
           issueCommentStatus: "not_applicable",
@@ -20647,6 +20605,7 @@ export function heartbeatService(
       const sessionStorageKey = ownerSession?.key ?? taskKey;
       const taskSession = sessionStorageKey
         ? await getTaskSession(
+            db,
             agent.companyId,
             agent.id,
             agent.adapterType,
@@ -24777,6 +24736,7 @@ export function heartbeatService(
             // heartbeat run snapshot.
             const adapterContext: Record<string, unknown> = {
               ...context,
+              ...await runTokenCapBaseline(db, { agentId: agent.id, runId: run.id, adapterType: agent.adapterType, runtime: runtimeForAdapter }),
               ...(legacyQuestionResponse
                 ? {
                     [PAPERCLIP_WAKE_PAYLOAD_KEY]: {
@@ -25486,11 +25446,12 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
-        if (ownerSession) {
-          // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+        const capStop = ownsRunTokenCapContinuation({ status, resultJson: persistedResultJson });
+        if (ownerSession || (sessionStorageKey && capStop)) {
+          // Save the checkpoint before terminal success releases admission.
           const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
           await saveOwnerSessionState(db, {
-            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+            companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: sessionStorageKey!,
             runId: run.id, expectedLastRunId: taskSession?.lastRunId ?? null, lastError: runErrorMessage,
             session: clear ? null : {
               params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
@@ -25795,7 +25756,7 @@ export function heartbeatService(
               parseObject(livenessRun.contextSnapshot)
                 .resumeSessionGoalHeartbeat === true,
           });
-          if (!conversationSettled) {
+          if (!conversationSettled && !ownsRunTokenCapContinuation(livenessRun)) {
             await handleIssueReviewPathDisposition(livenessRun);
             if (livenessRun.runtimeMode !== "native") {
               await recovery.reconcileLegacyContinuation(livenessRun.id);
@@ -25858,7 +25819,7 @@ export function heartbeatService(
             },
             normalizedUsage,
           );
-          if (taskKey && !ownerSession) {
+          if (taskKey && !ownerSession && !capStop) {
             if (
               adapterResult.clearSession ||
               (!nextSessionState.params && !nextSessionState.displayId)
@@ -25887,6 +25848,7 @@ export function heartbeatService(
             }
           }
         }
+        if (finalizedRun) await continueRunTokenCap(db, finalizedRun, enqueueWakeup);
         await finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
           keepIdleOnFailure:
             outcome === "failed" &&
@@ -26782,7 +26744,7 @@ export function heartbeatService(
         now: new Date(),
         // A durable authentication card owns recovery. This covers the review path,
         // while continuation classification blocks periodic generic retries.
-        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source),
+        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source) || ownsRunTokenCapContinuation(source),
       });
       await applyWakeQueuePostCommitEffects(postCommitEffects);
       const completed = await getRun(run.id);

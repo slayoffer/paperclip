@@ -1,4 +1,5 @@
 import { isAiAuthenticationFailure } from "./ai-auth-failure.js";
+import { isRunTokenCapStop } from "@paperclipai/adapter-utils";
 import type { HeartbeatRunStatus, IssueStatus, RunLivenessState } from "@paperclipai/shared";
 
 export type RunLivenessActionability =
@@ -332,6 +333,10 @@ export function classifyRunLiveness(input: RunLivenessClassificationInput): RunL
       return output("failed", UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON);
     }
     return output("failed", input.errorCode ? `Run ended with ${input.runStatus} (${input.errorCode})` : `Run ended with ${input.runStatus}`);
+  }
+
+  if (isRunTokenCapStop({ status: input.runStatus, resultJson: input.resultJson })) {
+    return output("advanced", "run_token_cap", "Read the continuation summary before the next run.");
   }
 
   if (issueStatus === "done" || issueStatus === "cancelled") {

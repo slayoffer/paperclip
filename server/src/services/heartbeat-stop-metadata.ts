@@ -2,6 +2,7 @@ export type HeartbeatRunOutcome = "succeeded" | "interrupted" | "failed" | "canc
 
 export type HeartbeatRunStopReason =
   | "completed"
+  | "run_token_cap"
   | "interrupted"
   | "timeout"
   | "cancelled"
@@ -121,6 +122,7 @@ export function mergeHeartbeatRunStopMetadata(
   metadata: HeartbeatRunStopMetadata,
 ): Record<string, unknown> {
   const existingMaxTurnStopReason = normalizeMaxTurnStopReason(resultJson?.stopReason);
+  const capStop = metadata.stopReason === "completed" && resultJson?.stopReason === "run_token_cap";
   // Only a complete, valid adapter resolution overrides the config fallback.
   // Older adapters and persisted rows retain their existing interpretation.
   const resolution = resultJson?.adapterExecutionTimeout;
@@ -139,7 +141,7 @@ export function mergeHeartbeatRunStopMetadata(
   }
   return {
     ...(resultJson ?? {}),
-    stopReason: existingMaxTurnStopReason ?? metadata.stopReason,
+    stopReason: existingMaxTurnStopReason ?? (capStop ? "run_token_cap" : metadata.stopReason),
     effectiveTimeoutSec: timeoutPolicy.effectiveTimeoutSec,
     timeoutConfigured: timeoutPolicy.timeoutConfigured,
     timeoutSource: timeoutPolicy.timeoutSource,

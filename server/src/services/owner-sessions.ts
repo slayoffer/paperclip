@@ -4,6 +4,19 @@ import { and, desc, eq, or, sql } from "drizzle-orm";
 
 const OWNER_SESSION_KEY_PREFIX = "owner-project:";
 
+export async function getTaskSession(
+  client: Pick<Db, "select">,
+  companyId: string,
+  agentId: string,
+  adapterType: string,
+  taskKey: string,
+) {
+  return client.select().from(agentTaskSessions).where(and(
+    eq(agentTaskSessions.companyId, companyId), eq(agentTaskSessions.agentId, agentId),
+    eq(agentTaskSessions.adapterType, adapterType), eq(agentTaskSessions.taskKey, taskKey),
+  )).then((rows) => rows[0] ?? null);
+}
+
 /** The controller owns `owner-project:*` rows. A task key from a wake must never address one. */
 export function isOwnerSessionKey(value: unknown): boolean {
   return typeof value === "string" && value.trim().startsWith(OWNER_SESSION_KEY_PREFIX);
@@ -107,7 +120,7 @@ export async function readLatestUsageSample<T>(
 }
 
 /**
- * Save the shared owner row while the run still holds the agent's only admission slot, so a successor never reads
+ * Save the task or shared owner checkpoint before the run releases admission, so a successor never reads
  * stale state. A finalizer is stale, and writes nothing, when its run has left `running` or when the row moved to
  * another run after this run read it.
  */
