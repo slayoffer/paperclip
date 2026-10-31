@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { agents, companies, environmentLeases, heartbeatRuns, createDb, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../../__tests__/helpers/embedded-postgres.js";
 import { createAgentLifecycle, configureAgentLifecycle } from "../../../services/agent-lifecycle.js";
@@ -38,35 +38,44 @@ const support = await getEmbeddedPostgresTestSupport();
     return lease!;
   }
   const state = async (id: string) => (await db.select().from(agents).where(eq(agents.id, id)))[0]!.lifecycleState;
+  // pauseAgent also schedules a background attempt, which can hold the lease or
+  // defer the operation. Clear the retry delay and process until it settles.
+  const settlesTo = (id: string, expected: string, work = worker()) =>
+    vi.waitFor(async () => {
+      if (await state(id) !== expected) {
+        await createAgentLifecycle(db).retry(id).catch(() => null);
+        await work.process(id);
+      }
+      expect(await state(id)).toBe(expected);
+    }, { timeout: 15_000, interval: 250 });
 
   it("finishes a pause when only cancels from before the pause lack a stop receipt", async () => {
     const agent = await readyAgent();
     await cancelledRemoteRun(agent.id, new Date(Date.now() - 86_400_000));
     await createAgentLifecycle(db).pauseAgent(agent.id);
-    await worker().process(agent.id);
-    expect(await state(agent.id)).toBe("paused");
+    await settlesTo(agent.id, "paused");
   });
 
   it("still waits for the stop receipt of a run cancelled after the pause began", async () => {
     const agent = await readyAgent();
+    // pauseAgent schedules the worker at once, so the run must exist first.
+    // Its end lies after pausedAt, as for a run this pause cancelled.
+    const lease = await cancelledRemoteRun(agent.id, new Date(Date.now() + 60_000));
     await createAgentLifecycle(db).pauseAgent(agent.id);
-    const lease = await cancelledRemoteRun(agent.id, new Date(Date.now() + 1_000));
     const work = worker();
     await work.process(agent.id);
     expect(await state(agent.id)).toBe("pausing");
     await db.update(environmentLeases).set({ metadata: {
       remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "stopped" }),
     } }).where(eq(environmentLeases.id, lease.id));
-    await createAgentLifecycle(db).retry(agent.id);
-    await work.process(agent.id);
-    expect(await state(agent.id)).toBe("paused");
+    await settlesTo(agent.id, "paused", work);
   });
 
   it("keeps a resume given while pausing and returns the agent to ready", async () => {
     const agent = await readyAgent();
     const lifecycle = createAgentLifecycle(db);
+    const lease = await cancelledRemoteRun(agent.id, new Date(Date.now() + 60_000));
     await lifecycle.pauseAgent(agent.id);
-    const lease = await cancelledRemoteRun(agent.id, new Date(Date.now() + 1_000));
     const work = worker();
     await work.process(agent.id);
     await lifecycle.resumeAgent(agent.id);
@@ -74,8 +83,6 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.update(environmentLeases).set({ metadata: {
       remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "stopped" }),
     } }).where(eq(environmentLeases.id, lease.id));
-    await lifecycle.retry(agent.id);
-    await work.process(agent.id);
-    expect(await state(agent.id)).toBe("ready");
+    await settlesTo(agent.id, "ready", work);
   });
 });
