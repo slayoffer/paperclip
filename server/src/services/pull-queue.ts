@@ -199,10 +199,13 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
     const rows = await db.update(agentWakeupRequests)
       .set({ status: "cancelled", finishedAt: now, updatedAt: now,
         error: "Issue closed with no execution left to drain this deferred wake" })
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), lt(agentWakeupRequests.updatedAt, cutoff),
+      // Age by the issue's close time, not the wake's updated_at: the execution-wait retry rewrites every deferred
+      // wake about once a minute, so updated_at never ages (2026-11-01: 107 of 170 rows stayed).
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         sql`exists (select 1 from ${issues} task where task.company_id = ${agentWakeupRequests.companyId}
           and task.id::text = ${agentWakeupRequests.payload}->>'issueId'
           and task.status in ('done', 'cancelled') and task.execution_run_id is null
+          and coalesce(task.completed_at, task.cancelled_at, task.updated_at) < ${cutoff.toISOString()}::timestamptz
           and not exists (select 1 from ${heartbeatRuns} r where r.company_id = task.company_id
             and (r.native_issue_id = task.id or r.context_snapshot->>'issueId' = task.id::text)
             and r.status in ('queued', 'running', 'scheduled_retry')))`))

@@ -111,16 +111,17 @@ databaseTests("pull queue slot accounting for deferred wakes", () => {
   it("reconcile cancels a stale deferred wake only on a closed issue with no execution left", async () => {
     const now = new Date();
     const old = new Date(now.getTime() - 60 * 60_000);
-    const done = await wake((await task({ status: "done" })).id, "deferred_issue_execution", old);
-    const cancelled = await wake((await task({ status: "cancelled" })).id, "deferred_issue_execution", old);
-    const fresh = await wake((await task({ status: "done" })).id);
+    // The execution-wait retry keeps updated_at fresh, so the age comes from the issue's close time.
+    const done = await wake((await task({ status: "done", completedAt: old })).id);
+    const cancelled = await wake((await task({ status: "cancelled", cancelledAt: old })).id);
+    const fresh = await wake((await task({ status: "done", completedAt: now })).id, "deferred_issue_execution", old);
     const open = await wake((await task({ status: "in_progress" })).id, "deferred_issue_execution", old);
-    const lockedIssue = await task({ status: "done" });
+    const lockedIssue = await task({ status: "done", completedAt: old });
     const [lockRun] = await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: lockedIssue.id,
       invocationSource: "assignment", status: "running" }).returning();
     await db.update(issues).set({ executionRunId: lockRun.id }).where(eq(issues.id, lockedIssue.id));
     const locked = await wake(lockedIssue.id, "deferred_issue_execution", old);
-    const queued = await wake((await task({ status: "done" })).id, "queued", old);
+    const queued = await wake((await task({ status: "done", completedAt: old })).id, "queued", old);
     const { queue } = scheduler();
 
     await queue.reconcile(now);
