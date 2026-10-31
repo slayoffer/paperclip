@@ -1,5 +1,12 @@
 # Service rules
 
+## Cap recovery sessions
+
+Terminal success can precede task-session persistence.
+A cap wake must use `payload.resumeFromRunId` and require the source run's saved `sessionIdAfter`.
+The ordinary resume path checks the source's company and agent before it restores that session.
+Test restart recovery with real wake admission and an absent or stale task checkpoint.
+
 ## Deferred dependency wakes
 
 Durable wake payloads describe the blocker set at release time.

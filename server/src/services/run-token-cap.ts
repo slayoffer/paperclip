@@ -49,6 +49,8 @@ export async function continueRunTokenCap(db: Db, run: Run, wakeup: Wakeup) {
 
 async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) {
   if (!isRunTokenCapStop(run) || run.contextSnapshot?.runTokenCapSourceRunId) return;
+  // Terminal success saves this ID before the task-session write. Never resume an older checkpoint.
+  if (!run.sessionIdAfter?.trim()) return;
   const issueId = run.contextSnapshot?.issueId;
   if (typeof issueId !== "string") return;
   const key = `run_token_cap:${run.companyId}:${issueId}:${run.id}`;
@@ -86,7 +88,7 @@ async function enqueueRunTokenCapContinuation(db: Db, run: Run, wakeup: Wakeup) 
       idempotencyKey: key, requestedByActorType: "system",
       issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: run.agentId },
       allowRunCoalescing: false,
-      payload: { issueId, sourceRunId: run.id },
+      payload: { issueId, sourceRunId: run.id, resumeFromRunId: run.id },
       contextSnapshot: {
         issueId, taskKey: issueId, runTokenCapSourceRunId: run.id,
         wakeReason: "run_token_cap",

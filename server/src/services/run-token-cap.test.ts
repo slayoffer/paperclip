@@ -47,6 +47,7 @@ databaseTests("cap handoff and continuation", () => {
       title: "Finish work", status: "in_progress" }).returning();
     [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: agent.id,
       invocationSource: "assignment", status: "succeeded", contextSnapshot: { issueId: issue.id },
+      sessionIdAfter: randomUUID(),
       resultJson: { stopReason: "run_token_cap", summary: "Done: A. Left: B. Next: test B." },
       usageJson: { inputTokens: 101 }, finishedAt: new Date() }).returning();
     await refreshIssueContinuationSummary({ db, issueId: issue.id, run, agent });
@@ -77,6 +78,11 @@ databaseTests("cap handoff and continuation", () => {
     expect(wakeup).toHaveBeenCalledOnce();
   });
 
+  it.each([null, "", " "])("admits no continuation without a saved source session: %j", async (sessionIdAfter) => {
+    await continueRunTokenCap(db, { ...run, sessionIdBefore: randomUUID(), sessionIdAfter }, wakeup);
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
   it("respects an exhausted issue budget including this completed run", async () => {
     vi.stubEnv("PAPERCLIP_ISSUE_TOKEN_BUDGET", "100");
     await continueRunTokenCap(db, run, wakeup);
@@ -99,7 +105,7 @@ databaseTests("cap handoff and continuation", () => {
   it("repairs a missing source-run handoff before it admits the wake", async () => {
     const [next] = await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId,
       invocationSource: "assignment", status: "succeeded", contextSnapshot: run.contextSnapshot,
-      resultJson: run.resultJson }).returning();
+      resultJson: run.resultJson, sessionIdAfter: run.sessionIdAfter }).returning();
     await continueRunTokenCap(db, next, wakeup);
     expect((await getIssueContinuationSummaryDocument(db, issue.id))?.body).toContain(`Last updated by run: ${next.id}`);
     expect(wakeup).toHaveBeenCalledOnce();
@@ -115,7 +121,7 @@ databaseTests("cap handoff and continuation", () => {
       .where(eq(documents.companyId, run.companyId));
     const [next] = await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId,
       invocationSource: "assignment", status: "succeeded", contextSnapshot: run.contextSnapshot,
-      resultJson: run.resultJson }).returning();
+      resultJson: run.resultJson, sessionIdAfter: run.sessionIdAfter }).returning();
     await continueRunTokenCap(db, next, wakeup);
     expect(wakeup).not.toHaveBeenCalled();
     expect((await getIssueContinuationSummaryDocument(db, issue.id))?.body).toContain(`Last updated by run: ${run.id}`);

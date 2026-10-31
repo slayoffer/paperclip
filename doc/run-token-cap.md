@@ -53,8 +53,10 @@ The receipt records the boundary, mode, limit, and input tokens for inspection.
 
 The existing issue continuation-summary document stores the objective, acceptance criteria,
 latest agent message, recent work, and next action. The provider session also retains the transcript.
-Paperclip writes the summary and saves the task session before the continuation wake.
-A missing or failed summary write cannot admit a successor.
+Paperclip saves the source session ID with the terminal run and writes the summary before the continuation wake.
+The wake names that run through the existing `resumeFromRunId` path, which checks the source's company and agent.
+After a restart, that path restores the source session even if the task-session checkpoint is absent or stale.
+A missing source session ID or a failed summary write cannot admit a successor.
 The recovery sweep can repair a missing summary and retry delivery after a server restart.
 
 Each source run uses the key `run_token_cap:<company>:<issue>:<run>`.
@@ -79,11 +81,13 @@ If that successor leaves work unfinished, a person must start the next run.
 The adapter tests cover modes, cumulative deltas, resets, equality, failed exits,
 and unfinished tool events. The server tests use PostgreSQL for duplicate delivery,
 handoff persistence, restart delivery, ownership checks, and the issue budget.
+The heartbeat restart test uses real wake admission with absent and stale task-session checkpoints.
 Tests use fake provider results. They do not start Codex.
 
 ```sh
 pnpm exec vitest run packages/adapters/codex-local/src/server/run-token-cap.test.ts
 pnpm exec vitest run server/src/services/run-token-cap.test.ts
+pnpm exec vitest run server/src/__tests__/heartbeat-run-token-cap-restart.test.ts
 ```
 
 Run full repository checks on the configured test host or through fork CI.
