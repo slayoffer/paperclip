@@ -329,6 +329,7 @@ export function shouldRouteRecoveryToOriginalAgent(
 }
 
 type StrandedPreviousStatus = "todo" | "in_progress" | "in_review";
+type StrandedEscalationReason = "assignee_not_invokable";
 
 type SuccessfulRunHandoffRecoveryEvidence = {
   sourceRunId: string | null;
@@ -2513,6 +2514,7 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     recoveryCause: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }) {
     const context = parseObject(input.latestRun?.contextSnapshot);
     const workspaceValidation =
@@ -2539,6 +2541,7 @@ export function recoveryService(
       maxHandoffAttempts:
         input.successfulRunHandoffEvidence?.maxHandoffAttempts ?? null,
       ...(workspaceValidation ? { workspaceValidation } : {}),
+      escalationReason: input.escalationReason ?? null,
     };
   }
 
@@ -2548,6 +2551,7 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }, database: DbOrTransaction = db) {
     const recoveryCause = resolveStrandedRecoveryCause(
       input.latestRun,
@@ -2588,6 +2592,7 @@ export function recoveryService(
           previousStatus: input.previousStatus,
           recoveryCause,
           successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+          escalationReason: input.escalationReason,
         }),
         failureSummary:
           summarizeRunFailureForIssueComment(input.latestRun)?.trim() ?? null,
@@ -3515,6 +3520,49 @@ export function recoveryService(
     return Boolean(run || wake);
   }
 
+  async function restoreIssueForInvokableAssignee(
+    action: typeof issueRecoveryActions.$inferSelect,
+    issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "status" | "assigneeAgentId">,
+  ) {
+    if (action.ownerType !== "board" || parseObject(action.evidence).escalationReason !== "assignee_not_invokable" ||
+        issue.status !== "blocked" || !issue.assigneeAgentId || issue.assigneeAgentId !== action.returnOwnerAgentId) return false;
+    const agent = await getAgent(issue.assigneeAgentId);
+    if (!agent || agent.companyId !== issue.companyId || !(await isAgentInvokable(agent))) return false;
+
+    const publications: ActivityPublication[] = [];
+    const postCommitActions: IssuePostCommitAction[] = [];
+    const restored = await db.transaction(async tx => {
+      const [current] = await tx.select().from(issues).where(and(
+        eq(issues.id, issue.id), eq(issues.companyId, issue.companyId),
+      )).for("update");
+      if (!current || current.status !== "blocked" || current.assigneeAgentId !== agent.id) return false;
+
+      const expectedWait = boardEscalationWait([], action.id).unblockDescriptor;
+      if (current.unblockDescriptor && (current.unblockDescriptor.owner !== expectedWait?.owner ||
+          current.unblockDescriptor.action !== expectedWait?.action)) return false;
+
+      const txDb = tx as unknown as Db;
+      const transactionIssues = issueService(txDb);
+      const readiness = await transactionIssues.getDependencyReadiness(issue.id, tx, { lockSources: true });
+      if (!readiness.isDependencyReady ||
+          await isAutomaticRecoverySuppressedByPauseHold(txDb, issue.companyId, issue.id)) return false;
+
+      const resolved = await recoveryActionsSvc.resolveActiveForIssue({
+        companyId: action.companyId, sourceIssueId: action.sourceIssueId, actionId: action.id,
+        status: "resolved", outcome: "restored", resolutionNote: "assignee_invokable_again",
+      }, tx);
+      if (!resolved) return false;
+      if (!await transactionIssues.update(issue.id, { status: "todo", companyGuard: issue.companyId },
+        tx, publications, postCommitActions)) throw new Error("Could not restore the locked recovery issue");
+      return true;
+    });
+    if (restored) {
+      for (const publication of publications) publishActivity(publication);
+      await executeIssuePostCommitActions(db, postCommitActions);
+    }
+    return restored;
+  }
+
   async function reconcileActiveRecoveryActions(opts?: { companyId?: string }) {
     const rows = await db
       .select({
@@ -3594,6 +3642,12 @@ export function recoveryService(
           // A queued wake or healthy child does not export this accepted result.
           // Only its native finalizer or an explicit board disposition can settle it.
           result.skipped += 1;
+          continue;
+        }
+
+        if (await restoreIssueForInvokableAssignee(action, issue)) {
+          result.resolved += 1;
+          result.issueIds.push(issue.id);
           continue;
         }
 
@@ -4105,6 +4159,7 @@ export function recoveryService(
     notice?: StrandedRecoveryNoticeSeed | null;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }) {
     const publications: ActivityPublication[] = [];
     const postCommitActions: IssuePostCommitAction[] = [];
@@ -4177,6 +4232,7 @@ export function recoveryService(
       latestRun: input.latestRun,
       recoveryCause,
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+      escalationReason: input.escalationReason,
     }, tx);
     const isProviderQuotaWait =
       recoveryCause === "provider_quota" &&
@@ -4832,6 +4888,7 @@ export function recoveryService(
               comment:
                 "Paperclip cannot safely continue automatic recovery because the original assignee is not invokable. " +
                 "The source assignment is unchanged and the board must choose the next action.",
+              escalationReason: "assignee_not_invokable",
             });
             if (updated) {
               result.escalated += 1;
