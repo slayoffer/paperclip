@@ -259,6 +259,7 @@ export function shouldRouteRecoveryToOriginalAgent(
 }
 
 type StrandedPreviousStatus = "todo" | "in_progress" | "in_review";
+type StrandedEscalationReason = "assignee_not_invokable";
 
 type SuccessfulRunHandoffRecoveryEvidence = {
   sourceRunId: string | null;
@@ -2099,6 +2100,7 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     recoveryCause: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }) {
     const context = parseObject(input.latestRun?.contextSnapshot);
     const workspaceValidation =
@@ -2125,6 +2127,7 @@ export function recoveryService(
       maxHandoffAttempts:
         input.successfulRunHandoffEvidence?.maxHandoffAttempts ?? null,
       ...(workspaceValidation ? { workspaceValidation } : {}),
+      escalationReason: input.escalationReason ?? null,
     };
   }
 
@@ -2134,6 +2137,7 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }) {
     const recoveryCause = resolveStrandedRecoveryCause(
       input.latestRun,
@@ -2173,6 +2177,7 @@ export function recoveryService(
           previousStatus: input.previousStatus,
           recoveryCause,
           successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+          escalationReason: input.escalationReason,
         }),
         failureSummary:
           summarizeRunFailureForIssueComment(input.latestRun)?.trim() ?? null,
@@ -3084,6 +3089,28 @@ export function recoveryService(
     return Boolean(run || wake);
   }
 
+  // A not-invokable escalation waits for the assignee, not for a board verdict
+  // on the work. Once that agent can run again (for example a budget pause
+  // ended) and nothing else blocks the issue, hand it back as todo; the
+  // stranded sweep then dispatches it like any assigned todo issue.
+  async function restoreIssueForInvokableAssignee(
+    action: typeof issueRecoveryActions.$inferSelect,
+    issue: typeof issues.$inferSelect,
+  ) {
+    const evidence = parseObject(action.evidence);
+    if (action.ownerType !== "board" || evidence.escalationReason !== "assignee_not_invokable" ||
+        issue.status !== "blocked" || !issue.assigneeAgentId || issue.assigneeAgentId !== action.returnOwnerAgentId) return false;
+    const agent = await getAgent(issue.assigneeAgentId);
+    if (!agent || agent.companyId !== issue.companyId || !(await isAgentInvokable(agent))) return false;
+    if ((await existingUnresolvedBlockerIssueIds(issue.companyId, issue.id)).length > 0) return false;
+    if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) return false;
+    if (!(await issuesSvc.update(issue.id, { status: "todo" }))) return false;
+    return Boolean(await recoveryActionsSvc.resolveActiveForIssue({
+      companyId: action.companyId, sourceIssueId: action.sourceIssueId, actionId: action.id,
+      status: "resolved", outcome: "restored", resolutionNote: "assignee_invokable_again",
+    }));
+  }
+
   async function reconcileActiveRecoveryActions() {
     const rows = await db
       .select({ action: issueRecoveryActions, issue: issues })
@@ -3144,6 +3171,12 @@ export function recoveryService(
           // A queued wake or healthy child does not export this accepted result.
           // Only its native finalizer or an explicit board disposition can settle it.
           result.skipped += 1;
+          continue;
+        }
+
+        if (await restoreIssueForInvokableAssignee(action, issue)) {
+          result.resolved += 1;
+          result.issueIds.push(issue.id);
           continue;
         }
 
@@ -3660,6 +3693,7 @@ export function recoveryService(
     notice?: StrandedRecoveryNoticeSeed | null;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    escalationReason?: StrandedEscalationReason;
   }) {
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
@@ -3679,6 +3713,7 @@ export function recoveryService(
       latestRun: input.latestRun,
       recoveryCause,
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+      escalationReason: input.escalationReason,
     });
     const isProviderQuotaWait =
       recoveryCause === "provider_quota" &&
@@ -4292,6 +4327,7 @@ export function recoveryService(
               comment:
                 "Paperclip cannot safely continue automatic recovery because the original assignee is not invokable. " +
                 "The source assignment is unchanged and the board must choose the next action.",
+              escalationReason: "assignee_not_invokable",
             });
             if (updated) {
               result.escalated += 1;
