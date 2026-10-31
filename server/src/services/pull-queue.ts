@@ -183,8 +183,31 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
     for (const row of released) await logActivity(db, { companyId: row.companyId, actorType: "system",
       actorId: "pull-queue", action: "issue.updated", entityType: "issue", entityId: row.id,
       details: { status: "todo", reason: "pull_queue_ghost_release" } });
+    await cancelOrphanedDeferredWakes(now, cutoff);
     const activeCompanies = await db.select({ id: companies.id }).from(companies).where(eq(companies.status, "active"));
     for (const company of activeCompanies) await notify(company.id);
+  }
+
+  /**
+   * A deferred wake runs only when the wake queue drains its issue at execution release. Many writers clear the issue's
+   * execution lock without that drain, so a wake on a done or cancelled issue can be left with nothing that will ever
+   * drain it (2026-10-31: 170 such rows, the oldest from 2026-09-27; SYNA-3586). Cancel it once the issue is closed,
+   * holds no execution lock, has no live run, and the wake has not changed for 30 minutes. A wake on a closed issue whose
+   * run still holds the lock stays: that run's release drains it (a closing comment can reopen the issue).
+   */
+  async function cancelOrphanedDeferredWakes(now: Date, cutoff: Date) {
+    const rows = await db.update(agentWakeupRequests)
+      .set({ status: "cancelled", finishedAt: now, updatedAt: now,
+        error: "Issue closed with no execution left to drain this deferred wake" })
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), lt(agentWakeupRequests.updatedAt, cutoff),
+        sql`exists (select 1 from ${issues} task where task.company_id = ${agentWakeupRequests.companyId}
+          and task.id::text = ${agentWakeupRequests.payload}->>'issueId'
+          and task.status in ('done', 'cancelled') and task.execution_run_id is null
+          and not exists (select 1 from ${heartbeatRuns} r where r.company_id = task.company_id
+            and (r.native_issue_id = task.id or r.context_snapshot->>'issueId' = task.id::text)
+            and r.status in ('queued', 'running', 'scheduled_retry')))`))
+      .returning({ id: agentWakeupRequests.id });
+    if (rows.length) logger.info({ count: rows.length }, "Pull queue cancelled deferred wakes of closed issues");
   }
 
   return { notify, reconcile, async stop() { stopped = true; pending.clear(); await active; } };
