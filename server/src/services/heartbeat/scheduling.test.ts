@@ -227,9 +227,9 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
       return { ...f, driver };
     }
     function timerWake(f: Awaited<ReturnType<typeof fixture>>) {
-      const call = f.deps.enqueueWakeup.mock.calls.find(([, opts]) => opts.source === "timer");
-      expect(call).toBeDefined();
-      return call![1];
+      const call = f.deps.enqueueWakeup.mock.calls.find(([, opts]) => opts?.source === "timer");
+      expect(call?.[1]).toBeDefined();
+      return call![1]!;
     }
 
     it("gives the timer run its open, assigned driver issue as the source issue", async () => {
@@ -241,17 +241,22 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     });
 
     it("ignores a driver that is closed, assigned elsewhere, or blocked by an open issue", async () => {
-      for (const patch of [{ status: "done" }, { status: "cancelled" }, { assigneeAgentId: null }] as const) {
-        const f = await driverFixture(patch);
-        await f.scheduler.tickTimers(now);
-        expect(timerWake(f).contextSnapshot).not.toHaveProperty("issueId");
-        expect(timerWake(f)).not.toHaveProperty("payload");
-      }
       const f = await driverFixture();
+      async function tickWith(patch: Partial<typeof issues.$inferInsert>) {
+        await db.update(issues).set({ status: "in_progress", assigneeAgentId: f.agent.id, ...patch }).where(eq(issues.id, f.driver.id));
+        f.deps.enqueueWakeup.mockClear();
+        await f.scheduler.tickTimers(now);
+        return timerWake(f);
+      }
+      expect((await tickWith({})).contextSnapshot).toMatchObject({ issueId: f.driver.id });
+      for (const patch of [{ status: "done" }, { status: "cancelled" }, { assigneeAgentId: null }]) {
+        const wake = await tickWith(patch);
+        expect(wake.contextSnapshot).not.toHaveProperty("issueId");
+        expect(wake).not.toHaveProperty("payload");
+      }
       const [blocker] = await db.insert(issues).values({ companyId: f.company.id, title: "Blocker", status: "todo" }).returning();
-      await db.insert(issueRelations).values({ companyId: f.company.id, issueId: blocker.id, relatedIssueId: f.driver.id, type: "blocks" });
-      await f.scheduler.tickTimers(now);
-      expect(timerWake(f).contextSnapshot).not.toHaveProperty("issueId");
+      await db.insert(issueRelations).values({ companyId: f.company.id, issueId: blocker!.id, relatedIssueId: f.driver.id, type: "blocks" });
+      expect((await tickWith({})).contextSnapshot).not.toHaveProperty("issueId");
     });
   });
 
