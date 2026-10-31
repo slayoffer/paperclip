@@ -223,7 +223,10 @@ export async function computeObservedSpend(db: Db, policy: SpendPolicy) {
 
 function observedBlocks(policy: PolicyRow, observed: Awaited<ReturnType<typeof computeObservedSpend>>) {
   if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
-  return compareCents(observed.totalExact, policy.amount) >= 0 || (observed.pendingRunCount - observed.recoveringRunCount) > 0 || (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0);
+  // A finished run whose usage receipt is still open is not observed spend. A run that dies before it writes a
+  // receipt (an adapter failure, a cancel) can never close it, so counting it paused agents with zero spend.
+  // Only priced ledger spend over the limit, or unpriced usage the policy rejects, is a hard stop.
+  return compareCents(observed.totalExact, policy.amount) >= 0 || (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0);
 }
 export async function policyBlocks(db: Db, policy: PolicyRow) {
   if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
@@ -569,9 +572,6 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         await createIncidentIfNeeded(policy, "hard", observed);
         await pauseAndCancelScopeForBudget(policy);
         const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent" : "Project";
-        if (observed.pendingRunCount > 0) {
-          return { scopeType, scopeId, scopeName: scope.name, reason: `${title} cannot start work while completed runs await accounting.` };
-        }
         if (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0) {
           return { scopeType, scopeId, scopeName: scope.name, reason: `${title} cannot start work because recorded usage has no reliable price.` };
         }
@@ -874,7 +874,6 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         if (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0) {
           throw unprocessable("Resolve unpriced usage or explicitly allow it in the budget policy before resuming");
         }
-        if (observed.pendingRunCount > 0) throw unprocessable("Completed runs must finish accounting before resuming");
         if (compareCents(observed.totalExact, nextAmount) >= 0) {
           throw unprocessable("New budget must exceed current observed spend");
         }
