@@ -86,6 +86,9 @@ const settledNativeCoordinator = sql`exists (select 1 from ${nativeRunFinalizati
     and ((${nativeRunFinalizations.resultId} is null and ${nativeRunFinalizations.phase} = 'terminal_failure')
       or ${nativeRunFinalizations.resultId} is not null))`;
 
+const closedLegacyReceiptSource = sql`${heartbeatRuns.runtimeMode} = 'legacy'
+  and ${heartbeatRuns.status} = 'failed' and ${heartbeatRuns.errorCode} = 'process_lost'`;
+
 const closedNativeReceiptSource = sql`${heartbeatRuns.runtimeMode} = 'native'
   and ${settledNativeCoordinator}
   and ((${heartbeatRuns.status} = 'failed'
@@ -289,8 +292,11 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     // deliver it: settle the known part as unpriced usage. A later receipt
     // still posts through late-receipt reconciliation.
     const receiptUnavailable = !preProviderFailure && (captureFailed || object(run.usageJson).accountingReceiptReady === false);
-    const receiptClosure = captureFailed ? "timed_out" as const
-      : receiptUnavailable ? await readNativeReceiptClosure(tx, run.id) : null;
+    const legacyProcessLost = run.runtimeMode === "legacy" && run.status === "failed" && run.errorCode === "process_lost";
+    const receiptClosure = !receiptUnavailable ? null
+      : captureFailed ? "timed_out" as const
+      : legacyProcessLost ? "closed" as const
+      : await readNativeReceiptClosure(tx, run.id);
     if (receiptUnavailable && !receiptClosure) return false;
     const closureTimedOut = receiptClosure === "timed_out";
     if (!preProviderFailure) await ensureRuntimeAccountingBaseline(tx, run.companyId, run.agentId);
@@ -443,7 +449,7 @@ function actionableRunAccounting(at: Date = new Date()) {
           and ${heartbeatRuns.runtimeMode} = 'native' and ${nativeRunFinalizations.resultId} is null
           and ${nativeRunFinalizations.phase} <> 'terminal_failure'))`,
         sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false'
-          or (${closedNativeReceiptSource}) or (${closureEvidenceTimedOut(at)}) or (${nativeProviderWorkNeverStarted}))`,
+          or (${closedLegacyReceiptSource}) or (${closedNativeReceiptSource}) or (${closureEvidenceTimedOut(at)}) or (${nativeProviderWorkNeverStarted}))`,
       )),
     )),
   );
@@ -493,6 +499,7 @@ export async function readCostAccountingWork(db: Db, now = Date.now(), receiptDi
 export async function reconcileRunCosts(db: Db, hooks: BudgetServiceHooks = {}) {
   const pending = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(actionableRunAccounting())
     .orderBy(asc(heartbeatRuns.updatedAt), asc(heartbeatRuns.id)).limit(100);
+
   let accounted = 0;
   const receiptIndex = pending.length > 0 ? await indexPendingUsageReceipts() : undefined;
   for (const run of pending) {
