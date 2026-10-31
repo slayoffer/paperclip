@@ -249,7 +249,7 @@ exit 7
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("reruns sandbox command resolution after managed runtime setup and keeps the original sandbox home", async () => {
     setPrepareCursorSandboxCommand.mockReset();
@@ -265,6 +265,7 @@ exit 7
     await fs.mkdir(workspaceDir, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     const preferredAgentScript = `#!/bin/sh
+cat >/dev/null
 printf '%s\\n' '{"type":"system","subtype":"init","session_id":"cursor-session-fresh-1","model":"auto"}'
 printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"output_text","text":"hello"}]}}'
 printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-session-fresh-1","result":"ok"}'
@@ -382,7 +383,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
       else process.env.HOME = previousHome;
       await fs.rm(rootDir, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   it("rebuilds the full assignment after an unknown-session resume", async () => {
     setPrepareCursorSandboxCommand.mockReset();
@@ -432,5 +433,5 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

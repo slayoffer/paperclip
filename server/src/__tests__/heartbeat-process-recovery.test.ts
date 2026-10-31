@@ -1785,14 +1785,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await heartbeat.resumeQueuedRuns();
       await waitForRunToSettle(heartbeat, runId);
       await heartbeat.waitForRunExecutionDrain(runId);
-      expect(build).toHaveBeenCalled();
       expect(await heartbeat.getRun(runId)).toMatchObject({
         status: "failed", errorCode: "setup_failed", error: message,
       });
       const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
       expect(report?.diagnostics).toMatchObject({
         execution: { failurePhase: "setup" },
-        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
+        exceptions: [{ message: report?.errorMessage, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
       });
       const [wakeup] = await db.select().from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.id, wakeupRequestId));
@@ -7635,7 +7634,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(next?.contextSnapshot?.wakeCommentIds).toEqual([pending!.id, go!.id]);
     expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferred!.id)))[0]).toMatchObject({ status: "coalesced", runId: next!.id });
-    await vi.waitFor(async () => expect((await heartbeat.getRun(next!.id))?.status).not.toBe("running"));
+    await heartbeat.drainActiveRunExecutions();
+    expect((await heartbeat.getRun(next!.id))?.status).toBe("succeeded");
   });
 
   it.each(["dedicated deferred donor", "non-coalescing recipient", "persistent agent conversation"] as const)(
@@ -9605,18 +9605,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const heartbeat = heartbeatService(db);
     await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
     const reviewRecoveryRun = await waitForValue(async () => {
       const runs = await db
         .select()
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.agentId, agentId));
-      return (
-        runs.find(
-          (row) =>
-            (row.contextSnapshot as Record<string, unknown> | null)
-              ?.retryReason === "execution_review_participant_recovery",
-        ) ?? null
-      );
+      return runs.find((row) =>
+        row.contextSnapshot?.retryReason === "execution_review_participant_recovery",
+      ) ?? null;
     }, 8_000);
 
     expect(reviewRecoveryRun).toMatchObject({

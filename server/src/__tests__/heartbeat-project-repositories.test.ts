@@ -173,20 +173,21 @@ suite("task project repository provisioning", () => {
     await vi.waitFor(async () => {
       const latest = await heartbeat.getRun(run!.id);
       expect({ status: latest?.status, errorCode: latest?.errorCode }).toEqual({
-        status: explicitIsolation ? "failed" : "succeeded",
-        errorCode: explicitIsolation ? "workspace_validation_failed" : null,
+        status: "succeeded",
+        errorCode: null,
       });
     }, { timeout: 15_000 });
     const calls = execute.mock.calls.filter(([input]) => input.runId === run!.id);
-    expect(calls).toHaveLength(explicitIsolation ? 0 : 1);
-    if (!explicitIsolation) {
+    expect(calls).toHaveLength(1);
+    {
       const workspace = calls[0]![0].context.paperclipWorkspace;
-      expect(workspace.mode).toBe(configuredWorkspace ? "isolated_workspace" : "shared_workspace");
+      expect(workspace.mode).toBe("isolated_workspace");
       if (configuredWorkspace) {
         expect(workspace.strategy).toBe("git_worktree");
         expect(execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: workspace.cwd, encoding: "utf8" }).trim()).toBe("true");
       } else {
-        expect(workspace.cwd).toContain(`${projectId}/_default`);
+        expect(workspace.strategy).toBe("project_primary");
+        expect(workspace.cwd).toContain(`/isolated-workspaces/${companyId}/${issueId}`);
       }
     }
   }, 25_000);
