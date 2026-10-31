@@ -792,7 +792,7 @@ that file, not as the main completion path for deliverables.
 
 ## Default Agent Workspaces
 
-When a local agent run has no resolved project/session workspace, Paperclip falls back to an agent home workspace under the instance root:
+See [task directory rules](../docs/guides/board-operator/repository-free-task-workspaces.md). Other unresolved local runs use:
 
 - `~/.paperclip/instances/default/workspaces/<agent-id>`
 

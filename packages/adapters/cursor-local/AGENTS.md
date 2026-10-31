@@ -9,3 +9,6 @@ Forward other shell commands to the real process runner so archive staging and r
 Without the simulation, a missing `agent` starts the live Cursor installer and makes tests depend on network downloads.
 Measured on 2026-11-01 (VLAT): the managed-runtime fixture exceeded both five-second and 30-second deadlines during installation.
 The simulated agent must consume prompt stdin before it exits. An immediate exit can cause an unhandled `EPIPE` in the process runner.
+The execution fixtures perform real filesystem and subprocess operations.
+Allow 30 seconds for install and resume fixtures.
+Allow 60 seconds for the managed-runtime round trip, which runs several archive commands.

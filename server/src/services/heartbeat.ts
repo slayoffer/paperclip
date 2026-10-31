@@ -358,7 +358,9 @@ import {
   nativeChatWorkspaceCwd,
   nativeChatWorkspaceMatches,
 } from "./native-runtime/native-chat-workspace.js";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { prepareIsolatedTaskWorkspace, shouldUseIsolatedTaskDirectory, shouldUseRepositoryFreeTaskDirectory } from "./isolated-task-directory.js";
+import { WORKSPACE_VALIDATION_FAILURE_CODE, WorkspaceValidationFailure } from "./heartbeat/workspace-validation-failure.js";
+export { WorkspaceValidationFailure } from "./heartbeat/workspace-validation-failure.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import {
@@ -910,7 +912,6 @@ export {
   INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
 };
 const INTERACTION_CONTINUATION_INFRA_MAX_ATTEMPTS = 2;
-const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
@@ -1017,17 +1018,6 @@ interface MaxTurnContinuationPolicy {
   enabled: boolean;
   maxAttempts: number;
   delayMs: number;
-}
-
-export class WorkspaceValidationFailure extends Error {
-  code = WORKSPACE_VALIDATION_FAILURE_CODE;
-  resultJson: Record<string, unknown>;
-
-  constructor(message: string, resultJson: Record<string, unknown>) {
-    super(message);
-    this.name = "WorkspaceValidationFailure";
-    this.resultJson = resultJson;
-  }
 }
 
 // Pre-dispatch gate outcome: required secret/env bindings are missing, so the
@@ -21061,7 +21051,24 @@ export function heartbeatService(
           issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
           config.workspaceStrategy, projectExecutionWorkspacePolicy?.workspaceStrategy],
       });
-      if (workspaceReuseFallback) requestedExecutionWorkspaceMode = "isolated_workspace";
+      const repositoryFreeTaskDirectory = issueRef !== null && !isConversation(issueContext)
+        && shouldUseRepositoryFreeTaskDirectory({
+          isolatedWorkspacesEnabled,
+          issueId: issueRef.id,
+          mode: requestedExecutionWorkspaceMode,
+          hasProject: projectContext !== null,
+          hasProjectWorkspace: projectContext?.hasWorkspace ?? false,
+          hasPriorTaskSession: taskSession !== null && !ownerSession,
+          isRecovery: Boolean(persistedNativeExecutionInput || runOptions.legacyRestartRecovery),
+          projectWorkspaceId: issueRef.projectWorkspaceId,
+          requestedExecutionWorkspaceId,
+          existingWorkspace: reusableExistingExecutionWorkspace,
+          workspaceStrategies: [config.workspaceStrategy,
+            issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
+            projectExecutionWorkspacePolicy?.workspaceStrategy,
+            environmentExecutionWorkspaceSettings?.workspaceStrategy],
+        });
+      if (workspaceReuseFallback || repositoryFreeTaskDirectory) requestedExecutionWorkspaceMode = "isolated_workspace";
       const requestedReusableExecutionWorkspaceConfig =
         reusableExistingExecutionWorkspace?.config ?? null;
       const localEnvironment = await environmentsSvc.ensureLocalEnvironment(
@@ -21330,7 +21337,7 @@ export function heartbeatService(
           );
         }
       }
-      const useIsolatedTaskDirectory = issueRef !== null && (Boolean(workspaceReuseFallback && !projectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
+      const useIsolatedTaskDirectory = issueRef !== null && (repositoryFreeTaskDirectory || Boolean(workspaceReuseFallback && !projectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
         trustPreset: trustPreset.kind,
         environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
         mode: requestedExecutionWorkspaceMode,
@@ -21355,8 +21362,7 @@ export function heartbeatService(
         ...workspaceManagedConfig,
         ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
         ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
-        // The base below is already task-owned. Keep directory transport while
-        // preserving isolated mode and the mandatory sandbox preflight.
+        // The task directory is already isolated. Keep the sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
       };
       if (issueRef && !useIsolatedTaskDirectory && (workspaceReuseFallback || shouldKeepWorkspaceReuseIsolation({
@@ -21702,36 +21708,16 @@ export function heartbeatService(
         },
         resolveWorkspace: async () => {
           if (useIsolatedTaskDirectory && issueRef) {
-            const cwd = await materializeIsolatedTaskDirectory({
+            const anchorWorkspace = await prepareIsolatedTaskWorkspace({
               companyId: agent.companyId,
               issueId: issueRef.id,
+              projectId: issueRef.projectId,
+              recoveryCwd: persistedNativeExecutionInput?.workspace.cwd ?? null,
+              existingWorkspace: reusableExistingExecutionWorkspace,
             });
-            if (reusableExistingExecutionWorkspace && (
-              reusableExistingExecutionWorkspace.companyId !== agent.companyId ||
-              reusableExistingExecutionWorkspace.projectId !== issueRef.projectId ||
-              reusableExistingExecutionWorkspace.sourceIssueId !== issueRef.id ||
-              reusableExistingExecutionWorkspace.mode !== "isolated_workspace" ||
-              reusableExistingExecutionWorkspace.strategyType !== "project_primary" ||
-              reusableExistingExecutionWorkspace.cwd !== cwd
-            )) {
-              throw new WorkspaceValidationFailure("The existing execution workspace is not this task's isolated directory.", {
-                workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: issueRef.id },
-              });
-            }
             return resolveWorkspaceForRun(agent, context, previousSessionParams, {
               executionEnvironmentDriver: selectedEnvironmentForConfig?.driver ?? null,
-              anchorWorkspace: {
-                cwd,
-                source: "task_session",
-                projectId: issueRef.projectId,
-                workspaceId: null,
-                repoUrl: null,
-                repoRef: null,
-                workspaceHints: [],
-                warnings: [],
-                baseCwdFallback: false,
-                materializationFailures: [],
-              },
+              anchorWorkspace,
             });
           }
           if (nativeChatWorkspaceScope && !nativeChatWorkspaceScope.projectId) {
@@ -22164,6 +22150,7 @@ export function heartbeatService(
       const nextExecutionWorkspaceMetadata = {
         ...baseExecutionWorkspaceMetadata,
         ...(workspaceReuseFallback ? { workspaceReuseFallback } : {}),
+        ...(useIsolatedTaskDirectory ? { isolatedTaskDirectory: true } : {}),
         ...(separateTaskEnvironmentBinding ? {
           taskEnvironmentSourceWorkspaceId: reusableExistingExecutionWorkspace!.id,
           createdByRuntime: false,

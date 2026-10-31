@@ -15,6 +15,13 @@ The saved blocker set can differ from the current blocker set during a retry.
 Check current blocker membership before reusing a saved resolved-blocker ID.
 Use current dependency readiness and its blocked-cycle key for dispatch and duplicate checks.
 
+## Run failure diagnostics
+
+Diagnostics redact unknown inherited environment values, even ordinary words.
+On 2026-10-28 (VLAT), `XDG_SESSION_CLASS=user` caused diagnostic messages to redact `user`.
+Compare exception messages with the report's redacted message in lifecycle tests.
+The persisted run error can retain the original message.
+
 ## SSH ownership recovery
 
 Agent-home and primary workspaces can have no `executionWorkspaceId`.
