@@ -37,6 +37,7 @@ describe("bounded credential transfer", () => {
     ["shared identity", f => { f.inventory.identityExclusive = false; }],
     ["collision", f => { f.inventory.destinationCount = 1; }],
     ["unsafe removal", f => { f.inventory.safeAutomaticRemoval = false; }],
+    ["denied permission", f => { f.inventory.effectivePermission = "denied"; }],
     ["company", f => { f.operation.companyId = f.request.issueId; }],
     ["actor", f => { f.operation.userId = "other-person"; }],
     ["binding", f => { f.operation.source.connectionVersion = "2025-10-18T12:00:00.000Z"; }],

@@ -2,7 +2,10 @@
 
 This candidate contains the execution service, database journal, approval checks, and failure tests.
 The application registers `POST /api/companies/:companyId/credential-transfers`.
-The default route returns `503`. No live provider adapter is registered.
+The application connects the production adapter factory to this route.
+It ships without a qualified provider registry, so the route returns `422 provider_guarantees_unqualified`.
+That refusal happens before any gateway call, credential read, or provider call.
+The route without a factory still returns `503`.
 The tests use fake providers. They create no live credential or permission.
 
 The request accepts an issue, two saved connection bindings, and two approval revision references.
@@ -58,7 +61,87 @@ An adapter must reject execution when it cannot guarantee these properties.
 
 These guarantees are exercised with fake providers. Real provider guarantees remain unqualified.
 This candidate does not authorize provider access, permission changes, publication, or deployment.
-Live integration requires a separately reviewed adapter and exact operation approval.
+Live integration requires a qualified provider registry, separate review, and exact operation approval.
+
+## Production adapter
+
+`server/src/services/credential-transfer-providers.ts` implements `TransferProviders`.
+`server/src/services/credential-transfer-cleanup.ts` holds the cleanup contract and the provider-enforced ticket protocol.
+`credentialTransferServiceFactory` in the providers file connects both to the existing authority checks and journal.
+
+A provider registry has three parts:
+
+1. `clients`: reviewed in-process clients for Cloudflare (`R2Admin`), Infisical (`VaultAdmin`), and the cleanup controller.
+2. `tools`: the server-owned gateway tool mapping for each provider operation.
+3. `contract`: evidence and a numerical bound for each provider guarantee.
+
+The shipped registry is `UNQUALIFIED_PROVIDER_REGISTRY`. It has no clients, no tools, and no guarantees.
+
+### Bindings
+
+The authority binds the authenticated actor, the issue, both accepted revisions, and both connection versions.
+After that check, `resolveTransferCredentials` reads the bound personal credentials through `connection-credentials.ts`.
+It pins each secret to the version in the request binding. It refuses a grant of another person.
+Credential values stay in the server process. They never enter gateway arguments, the journal, or logs.
+
+### Inspection
+
+The adapter reads metadata only. It refuses activation when any of these checks fail:
+
+- Every inventory page is present, and no provider read was denied.
+- Both bound principals are known and exclusive.
+- The bucket exists in the approved account and jurisdiction.
+- The provider confirms permission group `6a018a9f2fc74eb6b293b0c548f38b39` as "Workers R2 Storage Bucket Item Read".
+- Neither destination name exists at `synthiq-infra/prod /clpn-ha`.
+- Every baseline grant identifier is 32 hexadecimal characters. Infisical UUIDs lose their dashes.
+
+### Issuance and storage
+
+The adapter creates one token with one policy: Object Read on the approved bucket resource.
+The token expiry equals the approved expiry, which the service limits to 90 days.
+It derives the S3 values in process. The access key ID is the token ID. The secret is the SHA-256 of the token value.
+The journal and the receipt keep only a one-way fingerprint of the token ID.
+Before issuance, the adapter reads the provider ticket. An earlier accepted issuance request prevents another one.
+Storage is create-only for the two approved names. A collision fails, and the adapter never updates or deletes an entry.
+
+### Cleanup contract
+
+The contract maps to the gaps of the SYNA-3090 qualification record:
+
+| Key | Gap | Term |
+|---|---|---|
+| `sourceGrantExpiry` | G1: Cloudflare grant expiry or bounded removal | M |
+| `destinationGrantExpiry` | G2: Infisical privilege expiry | M |
+| `completeInventory` | G3: complete inventory and effective grants | |
+| `issuanceOwnership` | G4: ticket ownership of an issued token after a lost response | M |
+| `lateEffectFence` | G5: provider fence or settlement bound for accepted requests | S |
+| `recovery`, `clockUncertainty`, `coordination` | G6: total deadline | R, C, Q |
+| `scopedRemoval` | G7: removal of only ticket-owned grants | |
+
+A missing key, empty evidence, or a bound that is not a non-negative integer is unsupported.
+An unsupported guarantee prevents activation. The sum S + R + M + C + Q must stay below 60 minutes.
+
+The protocol has these steps:
+
+1. Arm: register the provider ticket with the absolute deadline and the baseline before any grant can apply.
+   The deadline is at most 60 minutes after arming, and the complete budget must fit before it.
+2. Dispatch guard: before each activation, issuance, storage, and read call, require now < execution deadline and now + budget <= grant deadline.
+   Expiry stops these dispatches. Cleanup remains available after either deadline.
+3. Cleanup: close the provider ticket first. Then read the provider evidence for the ticket.
+   Unsettled requests, a baseline grant reported as ticket-owned, or two credentials stop cleanup without changes.
+   Otherwise remove only the ticket-owned grants. On failure, revoke only the ticket-owned credential.
+4. Recovery: `credentialTransferService.recover` calls the same cleanup. It needs no process memory.
+
+The provider controller supplies the independent guarantee. The application adds no timer and no second executor.
+Provider expiry removes the temporary grants even when this server never restarts.
+An issued but unstored credential still needs recovery cleanup for revocation. G4 bounds that step.
+
+### Remaining limits
+
+- No reviewed Cloudflare, Infisical, or cleanup-controller client exists. G1-G7 remain unqualified.
+- The exact connection versions, principals, and installed provider versions remain unverified.
+- No server startup task calls `recover`. Recovery runs only when an operator or a later change calls it.
+- The tests prove the protocol against simulated providers. They prove no real provider guarantee.
 
 ## Focused verification
 
@@ -68,10 +151,13 @@ Run each command from `server/`:
 ../node_modules/.bin/vitest run src/__tests__/credential-transfer.test.ts
 ../node_modules/.bin/vitest run src/__tests__/credential-transfer-routes.test.ts
 ../node_modules/.bin/vitest run src/__tests__/credential-transfer-authority.test.ts
+../node_modules/.bin/vitest run src/__tests__/credential-transfer-providers.test.ts
+../node_modules/.bin/vitest run src/__tests__/credential-transfer-cleanup.test.ts
 ```
 
-The last suite uses an isolated PostgreSQL database and applies the generated migration.
+The authority suite uses an isolated PostgreSQL database and applies the generated migration.
 It checks saved approvals, connection versions, company isolation, concurrency, replay, and restart cleanup.
 It also checks argument-dependent denial, delayed providers, lost lock backends, and company removal.
 The other suites check failure injection, deadlines, partial storage, and secret canaries.
+The adapter suites add wrong bindings, denied access, late effects, provider expiry, and lost issuance after restart.
 The repository test runner discovers these files for its existing continuous integration groups.

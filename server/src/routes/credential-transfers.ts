@@ -6,7 +6,10 @@ import { assertBoardOrAgent, assertCompanyAccess } from "./authz.js";
 import { CredentialTransferError, type credentialTransferService, type TransferActor } from "../services/credential-transfer.js";
 import { logActivity } from "../services/activity-log.js";
 
-/** No production adapter is registered. This candidate exposes no live credential capability. */
+/**
+ * The application passes the production adapter factory. Without a qualified provider registry it refuses
+ * every transfer with `provider_guarantees_unqualified` before any gateway or provider call.
+ */
 export function credentialTransferRoutes(db: Db, options: {
   serviceForRequest?: (sessionToken: string) => Pick<ReturnType<typeof credentialTransferService>, "execute">;
   audit?: typeof logActivity;
