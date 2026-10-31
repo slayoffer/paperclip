@@ -41,7 +41,7 @@ databaseTests("stop proof for SSH leases that closed before cleanup", () => {
     const companyId = randomUUID(), agentId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "SSH", issuePrefix: `S${companyId.slice(0, 6)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "engineer", adapterType: "codex_local" });
-    const [environment] = await db.insert(environments).values({ companyId, name: "host", driver: "ssh", config }).returning();
+    const [environment] = await db.insert(environments).values({ name: `host-${randomUUID()}`, driver: "ssh", config }).returning();
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: runStatus,
       invocationSource: "on_demand", startedAt: new Date(), finishedAt }).returning();
     const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
