@@ -6,7 +6,7 @@ import { executeIssuePostCommitActions, type IssuePostCommitAction } from "./iss
 import { createIssueBlockerAttention, createIssueDependencyReadiness, listUnresolvedBlockerDetails } from "./issue-blocker-details.js";
 import { blockedStateIntegrityEnabled, blockerIsResolved, assertRealBlockedWait, hasNonDependencyBlockedWait } from "./blocked-state-integrity.js";
 import { preserveBridgeHolds, releaseResolvedBlockedDependents } from "./blocked-dependency-release.js";
-import { assertIssueReadyToStart } from "./issue-start-readiness.js";
+import { assertCheckoutReady, assertIssueReadyToStart } from "./issue-start-readiness.js";
 import { releaseReadyDependencyWait } from "./issue-dependency-release.js";
 import { isPullQueueEnabled } from "./pull-queue-policy.js";
 import { recordPullQueueParking } from "./pull-queue-state.js";
@@ -10881,9 +10881,7 @@ export function issueService(db: Db) {
         .where(eq(issues.id, id))
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
-      await assertAssignableAgent(db, issueCompany.companyId, agentId, {
-        kind: "work",
-      });
+      await assertCheckoutReady(db, issueCompany.companyId, id, agentId);
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(

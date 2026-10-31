@@ -11,6 +11,7 @@ import { getExecutionBlocker } from "./execution-blocker.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "./heartbeat-policy.js";
 import { OWNER_PARKING_SKIP_REASON } from "./issue-owner-parking.js";
+import { INTAKE_SKIP_REASON } from "./issue-intake-check.js";
 
 type Issue = typeof issues.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -114,6 +115,9 @@ export async function pullQueueCandidateBlocked(db: Db, issue: Issue, agent: Age
   const [last] = await db.select().from(agentWakeupRequests).where(scope)
     .orderBy(desc(agentWakeupRequests.createdAt), desc(agentWakeupRequests.id)).limit(1);
   if (last?.status !== "skipped" || last.reason === PARKED) return false;
+  // Description, exemptions, and intake mode can change without a new fingerprint.
+  // Retry normal admission so it checks current intake eligibility before execution.
+  if (last.reason === INTAKE_SKIP_REASON) return false;
   // Recheck budget grants, rolling windows, and budget edits. A receipt alone
   // cannot keep a cleared budget gate closed.
   if (last.reason === ISSUE_TOKEN_BUDGET_SKIP_REASON) {
