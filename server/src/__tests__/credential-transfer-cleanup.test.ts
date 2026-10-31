@@ -72,11 +72,12 @@ describe("credential transfer cleanup contract", () => {
 
   it("closes dispatch once the remaining window cannot hold the budget", () => {
     const f = transferFixture();
-    let now = Date.parse(f.operation.grantDeadline) - 300_000;
+    const operation = { ...f.operation, executionDeadline: f.operation.grantDeadline };
+    let now = Date.parse(operation.grantDeadline) - 300_000;
     const cleanup = transferCleanup({ controller: controller().fake, contract: SIMULATED_CONTRACT, now: () => now });
-    expect(() => cleanup.admit(f.operation)).not.toThrow();
+    expect(() => cleanup.admit(operation)).not.toThrow();
     now += 1;
-    expect(() => cleanup.admit(f.operation)).toThrow(expect.objectContaining({ details: { code: "dispatch_window_closed" } }));
+    expect(() => cleanup.admit(operation)).toThrow(expect.objectContaining({ details: { code: "dispatch_window_closed" } }));
   });
 
   it("closes first, removes only ticket grants, revokes only the ticket credential, and is idempotent", async () => {

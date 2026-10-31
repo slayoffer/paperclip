@@ -144,6 +144,20 @@ describe("credential transfer production adapter with simulated providers", () =
       expect(s.p.secrets.size).toBe(0);
     });
 
+  it.each([0, 1])("stops destination activation %i ms after the execution deadline", async delay => {
+    const s = setup();
+    const activate = s.p.clients.r2.activate;
+    s.p.clients.r2.activate = async input => {
+      await activate(input);
+      s.advance(Date.parse(s.f.operation.executionDeadline) - s.now() + delay);
+    };
+    expect((await s.run()).state).toBe("revoked");
+    expect(s.p.trace).not.toContain("vault.activate");
+    expect(s.p.tokens.size).toBe(0);
+    expect(s.p.temporaryGrants()).toEqual([]);
+    expect([...s.p.grants.keys()].sort()).toEqual([...s.p.baseline].sort());
+  });
+
   it("stops dispatch when the remaining window cannot hold the worst-case bound", async () => {
     const s = setup();
     const activate = s.p.clients.r2.activate;

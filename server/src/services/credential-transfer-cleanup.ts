@@ -116,9 +116,12 @@ export function transferCleanup(deps: { controller: CleanupController; contract:
       await deps.controller.register({ ticketId: input.ticketId, transferId: input.transferId,
         deadline: input.operation.grantDeadline, baselineGrantIds: [...input.baselineGrantIds] });
     },
-    /** Dispatch guard: last_dispatch + S + R + M + C + Q <= D. */
+    /** Dispatch only before execution expiry and while the cleanup budget fits before the grant deadline. */
     admit(operation: CredentialTransferOperation) {
-      if (now() + budget() > Date.parse(operation.grantDeadline)) refuse(409, "dispatch_window_closed");
+      const at = now();
+      if (!(at < Date.parse(operation.executionDeadline) && at + budget() <= Date.parse(operation.grantDeadline))) {
+        refuse(409, "dispatch_window_closed");
+      }
     },
     /** Idempotent. Close, settle, remove only ticket-owned grants, and revoke only the ticket-owned credential. */
     async cleanup(ticketId: string, revokeCredential: boolean) {

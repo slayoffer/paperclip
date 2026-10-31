@@ -125,7 +125,8 @@ The protocol has these steps:
 
 1. Arm: register the provider ticket with the absolute deadline and the baseline before any grant can apply.
    The deadline is at most 60 minutes after arming, and the complete budget must fit before it.
-2. Dispatch guard: before each activation, issuance, storage, and read call, require now + budget <= deadline.
+2. Dispatch guard: before each activation, issuance, storage, and read call, require now < execution deadline and now + budget <= grant deadline.
+   Expiry stops these dispatches. Cleanup remains available after either deadline.
 3. Cleanup: close the provider ticket first. Then read the provider evidence for the ticket.
    Unsettled requests, a baseline grant reported as ticket-owned, or two credentials stop cleanup without changes.
    Otherwise remove only the ticket-owned grants. On failure, revoke only the ticket-owned credential.
