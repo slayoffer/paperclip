@@ -56,12 +56,15 @@ export function runStatsService(db: Db, now = Date.now) {
             then ${heartbeatRuns.status} else 'other' end`
           : sql<string | null>`case when ${heartbeatRuns.errorCode} ~ '^[A-Za-z][A-Za-z0-9_]{0,95}$'
             then ${heartbeatRuns.errorCode} when ${heartbeatRuns.errorCode} is null then null else 'other' end`;
-        const matches = query.errorCode ? sql`(
-          ${heartbeatRuns.errorCode} = ${query.errorCode}
-          or position(${query.errorCode} in coalesce(${heartbeatRuns.error}, '')) > 0
-          or position(${query.errorCode} in coalesce(${heartbeatRuns.resultJson}->>'errorMessage', '')) > 0
-          or position(${query.errorCode} in coalesce(${heartbeatRuns.resultJson}->>'error', '')) > 0
-        )` : sql`false`;
+        // CASE fixes the order: reading result_json detoasts the whole value (p50 205 KB on 2026-10-31), so it is read
+        // last and never for a succeeded run, which carries no error text. Before, 14 days took 34.7 s against the 5 s
+        // limit; now 0.47 s (SYNA-3580).
+        const matches = query.errorCode ? sql`(case
+          when ${heartbeatRuns.errorCode} = ${query.errorCode} then true
+          when position(${query.errorCode} in coalesce(${heartbeatRuns.error}, '')) > 0 then true
+          when ${heartbeatRuns.status} = 'succeeded' then false
+          else position(${query.errorCode} in coalesce(${heartbeatRuns.resultJson}->>'errorMessage', '')) > 0
+            or position(${query.errorCode} in coalesce(${heartbeatRuns.resultJson}->>'error', '')) > 0 end)` : sql`false`;
         const rows = await db.transaction(async (tx) => {
           await tx.execute(sql`set local statement_timeout = '5s'`);
           return tx.select({ bucket, group,
