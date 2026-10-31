@@ -45,9 +45,14 @@ databaseTests("pull queue slot accounting for deferred wakes", () => {
       title: "Work", status: "todo", ...values }).returning();
     return issue;
   }
-  async function wake(issueId: string, status = "deferred_issue_execution") {
-    await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "assignment",
-      reason: "issue_assigned", status, payload: { issueId } });
+  async function wake(issueId: string, status = "deferred_issue_execution", updatedAt = new Date()) {
+    const [row] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "assignment",
+      reason: "issue_assigned", status, payload: { issueId }, updatedAt }).returning();
+    return row;
+  }
+  async function wakeStatus(id: string) {
+    const [row] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, id));
+    return row.status;
   }
   function scheduler(admit: (options: WakeupOptions) => boolean = () => true) {
     const wakeup = vi.fn(async (owner: string, options: WakeupOptions): Promise<unknown> => {
@@ -101,4 +106,29 @@ databaseTests("pull queue slot accounting for deferred wakes", () => {
 
     expect(wakeup.mock.calls.map(([, options]) => options.payload?.issueId)).toEqual([first.id, second.id]);
   });
+
+  // SYNA-3586: nothing drains a deferred wake once its closed issue has no execution left.
+  it("reconcile cancels a stale deferred wake only on a closed issue with no execution left", async () => {
+    const now = new Date();
+    const old = new Date(now.getTime() - 60 * 60_000);
+    const done = await wake((await task({ status: "done" })).id, "deferred_issue_execution", old);
+    const cancelled = await wake((await task({ status: "cancelled" })).id, "deferred_issue_execution", old);
+    const fresh = await wake((await task({ status: "done" })).id);
+    const open = await wake((await task({ status: "in_progress" })).id, "deferred_issue_execution", old);
+    const lockedIssue = await task({ status: "done" });
+    const [lockRun] = await db.insert(heartbeatRuns).values({ companyId, agentId, nativeIssueId: lockedIssue.id,
+      invocationSource: "assignment", status: "running" }).returning();
+    await db.update(issues).set({ executionRunId: lockRun.id }).where(eq(issues.id, lockedIssue.id));
+    const locked = await wake(lockedIssue.id, "deferred_issue_execution", old);
+    const queued = await wake((await task({ status: "done" })).id, "queued", old);
+    const { queue } = scheduler();
+
+    await queue.reconcile(now);
+
+    expect(await wakeStatus(done.id)).toBe("cancelled");
+    expect(await wakeStatus(cancelled.id)).toBe("cancelled");
+    for (const kept of [fresh, open, locked]) expect(await wakeStatus(kept.id)).toBe("deferred_issue_execution");
+    expect(await wakeStatus(queued.id)).toBe("queued");
+  });
 });
+
