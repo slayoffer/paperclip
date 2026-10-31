@@ -113,6 +113,9 @@ describe("run statistics contract", () => {
       { companyId, agentId: ownerId, resultJson: { stdout: errorCode }, errorCode: "private error text" },
       { companyId: otherCompanyId, agentId: outsiderId, errorCode },
     ].map((run) => ({ ...run, createdAt: new Date(recent.from), status: "failed", stdoutExcerpt: "private output" })));
+    // A succeeded run carries no error text, so its result_json is never read (SYNA-3580).
+    await db.insert(heartbeatRuns).values({ companyId, agentId: ownerId, createdAt: new Date(recent.from),
+      status: "succeeded", resultJson: { errorMessage: errorCode } });
     await db.insert(heartbeatRuns).values([
       { companyId, agentId: ownerId, createdAt: new Date("2026-10-24T11:36:53.999Z") },
       { companyId, agentId: ownerId, createdAt: new Date(historical.to) },
@@ -180,7 +183,7 @@ describe("run statistics contract", () => {
       const response = await request({ ...recent, groupBy });
       expect(response.status).toBe(200);
       const report = await response.json();
-      expect(report.total).toBe(5);
+      expect(report.total).toBe(6);
       expect(report.matchingTotal).toBe(4);
       expect(JSON.stringify(report)).not.toContain("private error text");
       expect(JSON.stringify(report)).not.toContain(outsiderId);
