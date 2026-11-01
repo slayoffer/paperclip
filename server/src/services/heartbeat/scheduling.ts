@@ -50,6 +50,7 @@ import {
 import { logger } from "../../middleware/logger.js";
 import { failRunnerGoalAction } from "../runner-goals.js";
 import { evaluateAgentInvokability } from "../agent-invokability.js";
+import { resolveTimerDriverIssueId } from "./timer-driver-issue.js";
 import type { Db } from "@paperclipai/db";
 import type { issueService } from "../issues.js";
 import type { createHeartbeatQueue } from "./queue.js";
@@ -64,7 +65,7 @@ export interface HeartbeatSchedulingDependencies
   extends Pick<HeartbeatRetryDependencies, "getRun" | "getAgent" | "getWorktreeExecutionCutoff">,
     Pick<HeartbeatQueue, "enqueueWakeup" | "parseHeartbeatPolicy" | "claimDueTimerHeartbeat">,
     Pick<RunPreparation, "toAgentOrgRow" | "groupAgentOrgRowsByCompany"> {
-  issuesSvc: Pick<ReturnType<typeof issueService>, "listReviewAttention" | "create">;
+  issuesSvc: Pick<ReturnType<typeof issueService>, "listReviewAttention" | "create" | "listDependencyReadiness">;
   scheduleBoundedRetryForRun: ReturnType<typeof createHeartbeatRetries>["scheduleBoundedRetryForRun"];
   getSchedulingSuppression: () => Promise<{ suppressed: boolean }>;
 }
@@ -1213,17 +1214,22 @@ export function createHeartbeatScheduling(
         );
         if (!timerClaim) continue;
 
+        const driverIssueId = await resolveTimerDriverIssueId(db, issuesSvc, agent);
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
           triggerDetail: "system",
           reason: "heartbeat_timer",
           requestedByActorType: "system",
           requestedByActorId: "heartbeat_scheduler",
+          ...(driverIssueId ? { payload: { issueId: driverIssueId } } : {}),
           contextSnapshot: {
             source: "scheduler",
             reason: "interval_elapsed",
             now: now.toISOString(),
             timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+            ...(driverIssueId
+              ? { issueId: driverIssueId, taskKey: driverIssueId, timerDriverIssue: true, skipIssueComment: true }
+              : {}),
           },
         });
         if (run) enqueued += 1;
