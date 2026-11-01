@@ -1,4 +1,5 @@
 import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
+import { deferSshSetupFailure } from "./ssh-setup-deferral.js";
 import { saveOwnerSessionState } from "../owner-sessions.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
@@ -1033,9 +1034,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const ownerSession = session.ownerSession ?? null;
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
     const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
-    // A process adapter may throw while its owned Stop is joining the
-    // child. Let the cancellation write settle before attempting failure.
     await processRunCancellationSettlements.get(run.id)?.settled;
+    if (!legacyAdapterEntered && run.runtimeMode !== "native" &&
+        await deferSshSetupFailure(run, err, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
       await getCurrentUserRedactionOptions(),
@@ -1264,17 +1265,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
   async function failRunSetup(input: FailHeartbeatRunSetupInput) {
     const { run, runId, outerErr, identityRedactor, readFailureReportSecrets } = input;
-    // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
-    // The inner catch did not fire, so we must record the failure here.
+    if (await deferSshSetupFailure(run, outerErr, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(outerErr instanceof Error
         ? outerErr.message
         : "Unknown setup failure"),
       await getCurrentUserRedactionOptions(),
     );
-    // A missing secret/env binding is a known pre-dispatch configuration gap,
-    // not an opaque setup crash. Surface it with its own errorCode so the
-    // recovery path routes it to a human owner instead of looping retries.
     const workspaceValidationSetupFailure = isWorkspaceValidationFailure(
       outerErr,
     )

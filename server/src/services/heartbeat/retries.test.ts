@@ -11,6 +11,10 @@ import * as legacy from "../heartbeat.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import * as extracted from "./retries.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
+import { SshTransportError } from "@paperclipai/adapter-utils/ssh-transport";
+import { deferSshSetupFailure } from "./ssh-setup-deferral.js";
+import { terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
+import { executionFailureRetryCount } from "../execution-recovery-attempt.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -266,6 +270,38 @@ describePostgres("heartbeat retry module database wiring", () => {
     await Promise.all(reads);
     expect(committedStatuses).toEqual(["queued"]);
     expect(deps.applyRunDispatchPostCommitEffects).toHaveBeenCalledWith([expect.objectContaining({ kind: "run_queued", runId: scheduled.run.id })]);
+  });
+
+  it.each(["in_progress", "in_review"])("defers SSH setup and preserves %s and its failure budget", async status => {
+    const { run: initial, issue } = await fixture();
+    const [run] = await db.update(heartbeatRuns).set({ status: "running", runtimeMode: "legacy",
+      scheduledRetryAttempt: 2, scheduledRetryReason: "transient_failure" })
+      .where(eq(heartbeatRuns.id, initial.id)).returning();
+    if (status === "in_review") await db.update(issues).set({ status, assigneeAgentId: null, executionState: {
+      status: "pending", currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: run.agentId, userId: null },
+      returnAssignee: null, reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+    } }).where(eq(issues.id, issue.id));
+    const { retries, deps } = boundRetries();
+    const setRunStatusIfRunning: Parameters<typeof deferSshSetupFailure>[2]["setRunStatusIfRunning"] = async (_id, status, patch) => {
+      const updated = await terminalizeLegacyExecution({ db, run, status, patch,
+        fromStatuses: ["running"], reconcileIfNeeded: true });
+      return updated ? { updated: true, run: updated } : { updated: false, run };
+    };
+    expect(await deferSshSetupFailure(run, new SshTransportError(new Error("connection timeout")), {
+      ...deps, setRunStatusIfRunning, scheduleBoundedRetryForRun: retries.scheduleBoundedRetryForRun,
+      appendRunEvent: async (...args) => { await deps.appendRunEvent(...args); },
+      timerClaimWasFirstHeartbeat: () => undefined,
+    })).toBe(true);
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, run.id));
+    expect(successor).toMatchObject({ status: "scheduled_retry", scheduledRetryReason: "ssh_transport_wait",
+      scheduledRetryAttempt: 1 });
+    expect(executionFailureRetryCount(successor)).toBe(2);
+    const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(current).toMatchObject({ status, executionRunId: successor.id });
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect(await deps.getRun(run.id)).toMatchObject({ status: "cancelled", errorCode: "ssh_transport_wait" });
+    expect(await retries.promoteDueScheduledRetries(successor.scheduledRetryAt!)).toMatchObject({ promoted: 1 });
   });
 
   it("binds retry-now to the requested issue and persists its actor before promotion", async () => {
