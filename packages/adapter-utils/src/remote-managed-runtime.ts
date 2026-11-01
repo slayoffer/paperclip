@@ -200,14 +200,15 @@ async function prepareRemoteManagedRuntimeInner(input: {
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
     ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureDirectorySnapshot(input.workspaceLocalDir, {
-        exclude: [...(syncPolicy?.excluded.get(input.workspaceLocalDir) ?? []), ...(preparedWorkspace.gitBacked
+        ignoredPaths: syncPolicy?.excluded.get(input.workspaceLocalDir),
+        exclude: preparedWorkspace.gitBacked
           ? [
               ...GIT_ARCHIVE_EXCLUDES,
               ...SSH_WORKSPACE_EXCLUDES,
               ".paperclip-runtime",
               ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : []),
             ]
-          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])])],
+          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
       }))
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
@@ -215,8 +216,8 @@ async function prepareRemoteManagedRuntimeInner(input: {
     repositoryBaselines.push({
       path: repository,
       baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
-        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
-          ...(syncPolicy?.excluded.get(path.join(input.workspaceLocalDir, repository)) ?? [])],
+        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
+        ignoredPaths: syncPolicy?.excluded.get(path.join(input.workspaceLocalDir, repository)),
       })),
     });
   }

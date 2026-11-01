@@ -185,10 +185,12 @@ async function restoreWorkspaceRootFromSsh(input: {
   const filteredBaseline = suppliedBaseline && skippedPaths.length > 0 ? await selectDirectorySnapshot(suppliedBaseline, {
     omit: skippedPaths,
     exclude: [...suppliedBaseline.exclude, ...exclude], ignoredPaths: suppliedBaseline.ignoredPaths,
+    additionalIgnoredPaths: skippedPaths,
   }) : null;
   const baseline = filteredBaseline ?? suppliedBaseline ?? (gitSnapshot
     ? await captureDirectorySnapshot(input.localDir, {
       exclude: [".git", ...exclude],
+      ignoredPaths: skippedPaths,
     })
     : null);
   const restoreGitHistory = gitSnapshot !== null || input.restoreGitHistory;

@@ -87,6 +87,7 @@ export async function syncDirectoryToSsh(input: {
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
         exclude: input.exclude,
+        literalExclude: input.literalExclude,
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
@@ -302,6 +303,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+        ignoredPaths: input.literalExclude,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

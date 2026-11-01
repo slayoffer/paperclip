@@ -17,6 +17,9 @@ Otherwise, delayed file removal can repeat a completed mutation.
 Workspace filters must apply before tar creation and baseline capture.
 Filter skipped paths from supplied baselines before restore. Otherwise, an omitted remote directory can remove local files.
 Keep discovered paths literal in tar arguments. Directory names can contain glob characters.
+Store discovered paths in snapshot `ignoredPaths`, not pattern `exclude` lists.
+For example, the literal clone `foo/*` must not exclude its sibling `foo/source.txt`.
+When filtering a supplied baseline, combine its existing ignored paths with the discovered paths.
 Share one sync policy across preparation and restore to log each skipped path once per managed run.
 Do not apply workspace filters to runtime assets or in-place execution.
 The scratch regression cases register through `ssh-sync-regressions.test.ts`, which the existing fork workflow runs.

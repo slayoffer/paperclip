@@ -4,8 +4,11 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
-import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh.js";
+import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution, syncDirectoryToSsh } from "./ssh.js";
 import type { SshRemoteExecutionSpec } from "./ssh-config.js";
+import { estimateLocalDirSize } from "./ssh-transfer-progress.js";
+import { captureDirectorySnapshot, disposeDirectorySnapshot } from "./workspace-restore-merge.js";
+import { WorkspaceManifestWriter, type WorkspacePaths } from "./workspace-manifest.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", ["-C", cwd, ...args])).stdout.trim();
@@ -86,6 +89,50 @@ export function registerSshWorkspacePolicyTests(fixture: () => {
     for (const name of names) expect(await readFile(path.join(local, name, "data"), "utf8")).toBe("keep");
   });
 
+  it.each(["plain", "all", "git", "direct", "direct-git", "baseline-array", "baseline-manifest"])(
+    "restores sibling edits beside a literal star clone, mode=%s", async (mode) => {
+      const { local, remote, root, spec, repository } = fixture();
+      if (mode.includes("git") || mode === "all") await repository();
+      await mkdir(path.join(local, "foo"));
+      await writeFile(path.join(local, "foo/source.txt"), "initial");
+      if (mode.includes("git") || mode === "all") {
+        await git(local, "add", "foo/source.txt");
+        await git(local, "commit", "-m", "Track sibling source");
+      }
+      await mkdir(path.join(local, "foo/*/.git"), { recursive: true });
+      await writeFile(path.join(local, "foo/*/data"), "keep clone");
+      await writeFile(path.join(local, "protected.txt"), "keep ignored");
+      const direct = mode.startsWith("direct") || mode.startsWith("baseline");
+      const prepared = direct ? null : await prepareRemoteManagedRuntime({
+        spec: spec(), runId: "literal-star", adapterKey: "test", workspaceLocalDir: local,
+        ...(mode === "all" ? { workspaceFileMode: "all" as const } : {}),
+      });
+      if (direct) await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+      let ignoredPaths: WorkspacePaths = ["protected.txt"];
+      if (mode === "baseline-manifest") {
+        const writer = new WorkspaceManifestWriter(path.join(root, "ignored.sqlite"));
+        writer.add("ignored", "protected.txt");
+        ignoredPaths = writer.paths("ignored");
+        writer.close();
+      }
+      const baselineSnapshot = mode.startsWith("baseline")
+        ? await captureDirectorySnapshot(local, { ignoredPaths }) : undefined;
+      try {
+        const remoteRoot = prepared?.workspaceRemoteDir ?? remote;
+        await expect(stat(path.join(remoteRoot, "foo/*"))).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await readFile(path.join(remoteRoot, "foo/source.txt"), "utf8")).toBe("initial");
+        await writeFile(path.join(remoteRoot, "foo/source.txt"), "remote edit");
+        await writeFile(path.join(remoteRoot, "protected.txt"), "remote ignored edit");
+        if (prepared) await prepared.restoreWorkspace();
+        else await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
+        expect(await readFile(path.join(local, "foo/source.txt"), "utf8")).toBe("remote edit");
+        expect(await readFile(path.join(local, "foo/*/data"), "utf8")).toBe("keep clone");
+        if (baselineSnapshot) {
+          expect(await readFile(path.join(local, "protected.txt"), "utf8")).toBe("keep ignored");
+        }
+      } finally { await disposeDirectorySnapshot(baselineSnapshot ?? null); }
+    });
+
   it.each(["plain", "git"])("preserves skipped paths during a direct restore, mode=%s", async (mode) => {
     const { local, remote, spec, repository } = fixture();
     if (mode === "git") await repository();
@@ -96,6 +143,18 @@ export function registerSshWorkspacePolicyTests(fixture: () => {
     await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
     expect(await readFile(path.join(local, "clone/data"), "utf8")).toBe("keep");
     await expect(stat(path.join(local, "new-clone"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps explicit tar patterns separate from literal paths with the same spelling", async () => {
+    const { local, remote, spec } = fixture();
+    await mkdir(path.join(local, "foo/*"), { recursive: true });
+    await writeFile(path.join(local, "foo/*/data"), "clone contents");
+    await writeFile(path.join(local, "foo/source.txt"), "source");
+    expect(await estimateLocalDirSize({ localDir: local, literalExclude: ["foo/*"] })).toBe(6);
+    await syncDirectoryToSsh({ spec: spec(), localDir: local, remoteDir: remote,
+      exclude: ["foo/*"], literalExclude: ["foo/*"] });
+    await expect(stat(path.join(remote, "foo/source.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(path.join(remote, "foo/*"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("preserves a baseline directory when the remote turns it into a clone", async () => {

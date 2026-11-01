@@ -58,5 +58,5 @@ export async function sshWorkspaceExcludes(input: {
     input.policy.logged.add(key);
   }
   input.policy.excluded.set(input.localDir, [...excluded]);
-  return [...input.exclude, ...excluded];
+  return input.exclude;
 }
