@@ -1,4 +1,6 @@
 import { stageSshEnvironment } from "./ssh-environment.js";
+import { randomUUID } from "node:crypto";
+import { SshTransportError, sshConnectTimeoutSec, withSshTransportRetry } from "./ssh-transport.js";
 import { trackSshWriterCommand } from "./ssh-writer-termination.js";
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
@@ -57,6 +59,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
           startedAt,
         };
       } catch (error) {
+        if (error instanceof SshTransportError) throw error;
         const failure = error as {
           stdout?: unknown;
           stderr?: unknown;
@@ -101,6 +104,7 @@ export async function execFileText(
       {
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
+        ...(file === "ssh" ? { killSignal: "SIGKILL" as const } : {}),
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -283,7 +287,7 @@ export async function createSshAuthArgs(
     "-o",
     "BatchMode=yes",
     "-o",
-    "ConnectTimeout=10",
+    `ConnectTimeout=${sshConnectTimeoutSec()}`,
     "-o",
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
   ];
@@ -337,13 +341,26 @@ export async function runSshCommand(
     maxBuffer?: number;
   } = {},
 ): Promise<SshCommandResult> {
+  return withSshTransportRetry(
+    timeoutMs => runSshCommandOnce(config, remoteCommand, { ...options, timeoutMs }),
+    options.timeoutMs,
+  );
+}
+
+async function runSshCommandOnce(
+  config: SshConnectionConfig,
+  remoteCommand: string,
+  options: { env?: Record<string, string>; stdin?: string; timeoutMs: number; maxBuffer?: number },
+): Promise<SshCommandResult> {
+  const deadline = Date.now() + options.timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
   let cleanup: () => Promise<void> = () => Promise.resolve();
   try {
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const sshArgs = [...auth.args];
     const environment = await stageSshEnvironment(options.env ?? {}, (command, stdin) =>
-      runSshCommand(config, command, { stdin, timeoutMs: options.timeoutMs }));
+      runSshCommandOnce(config, command, { stdin, timeoutMs: remaining() }));
     cleanup = async () => { try { await environment.cleanup(); } finally { await auth.cleanup(); } };
     // Read login profiles before applying explicit environment overrides.
     const remoteScript = [
@@ -354,23 +371,45 @@ export async function runSshCommand(
       environment.wrap(`exec sh -c ${shellQuote(remoteCommand)}`),
     ].join(" && ");
 
+    const marker = `paperclip-ssh-exit-${randomUUID()}:`;
+    const startMarker = `\x1e${marker}started\x1f`;
+    const framedScript = `printf '%s' ${shellQuote(startMarker)} >&2; ( ${remoteScript} ); paperclip_status=$?; printf '\\036${marker}%s\\037' "$paperclip_status" >&2; exit "$paperclip_status"`;
     sshArgs.push(
       "-p",
       String(config.port),
       `${config.username}@${config.host}`,
-      `sh -c ${shellQuote(remoteScript)}`,
+      `sh -c ${shellQuote(framedScript)}`,
     );
 
-    return options.stdin != null
+    try {
+      const result = options.stdin != null
       ? await spawnText("ssh", sshArgs, {
           stdin: options.stdin,
-          timeout: options.timeoutMs ?? 15_000,
+          timeout: remaining(),
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         })
       : await execFileText("ssh", sshArgs, {
-          timeout: options.timeoutMs ?? 15_000,
+          timeout: remaining(),
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         });
+      result.stderr = result.stderr.replace(startMarker, "").replace(new RegExp(`\\x1e${marker}\\d+\\x1f`), "");
+      return result;
+    } catch (error) {
+      const failure = error as Error & {
+        stderr?: string; code?: string | number; killed?: boolean;
+        remoteCommandExited?: boolean; remoteCommandStarted?: boolean;
+      };
+      const frame = new RegExp(`\\x1e${marker}\\d+\\x1f`);
+      const started = failure.stderr?.includes(startMarker) ?? false;
+      failure.remoteCommandStarted = started;
+      if (!started && failure.killed) failure.code = "ETIMEDOUT";
+      if (typeof failure.stderr === "string" && frame.test(failure.stderr)) {
+        failure.remoteCommandExited = true;
+        failure.stderr = failure.stderr.replace(frame, "");
+      }
+      failure.stderr = failure.stderr?.replace(startMarker, "");
+      throw error;
+    }
   } finally {
     await cleanup();
   }
