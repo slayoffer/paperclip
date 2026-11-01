@@ -20,6 +20,7 @@ import {
   type IssueExecutionMonitorRecoveryPolicy,
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
   EXECUTION_RECONCILIATION_CAUSES,
+  ISSUE_STATUSES,
   isUuidLike,
 } from "@paperclipai/shared";
 import {
@@ -59,6 +60,7 @@ import { logger } from "../../middleware/logger.js";
 import { failRunnerGoalAction } from "../runner-goals.js";
 import { evaluateAgentInvokability } from "../agent-invokability.js";
 import { supportsUnscopedTimerHeartbeat } from "../heartbeat-policy.js";
+import { resolveTimerDriverIssueId } from "./timer-driver-issue.js";
 import type { Db } from "@paperclipai/db";
 import type { issueService } from "../issues.js";
 import type { createHeartbeatQueue } from "./queue.js";
@@ -73,7 +75,7 @@ export interface HeartbeatSchedulingDependencies
   extends Pick<HeartbeatRetryDependencies, "getRun" | "getAgent" | "getWorktreeExecutionCutoff">,
     Pick<HeartbeatQueue, "enqueueWakeup" | "parseHeartbeatPolicy" | "nextTimerHeartbeatAt" | "claimDueTimerHeartbeat">,
     Pick<RunPreparation, "toAgentOrgRow" | "groupAgentOrgRowsByCompany"> {
-  issuesSvc: Pick<ReturnType<typeof issueService>, "listReviewAttention" | "create">;
+  issuesSvc: Pick<ReturnType<typeof issueService>, "listReviewAttention" | "create" | "listDependencyReadiness">;
   scheduleBoundedRetryForRun: ReturnType<typeof createHeartbeatRetries>["scheduleBoundedRetryForRun"];
   getSchedulingSuppression: (fresh?: boolean) => Promise<{ suppressed: boolean }>;
 }
@@ -1359,13 +1361,26 @@ export function createHeartbeatScheduling(
       const deadline = await nextTimerHeartbeatAt(agent, now);
       if (deadline === null || deadline > now.getTime()) continue;
       if (!canContinue()) break;
+      const driverIssueId = await resolveTimerDriverIssueId(db, issuesSvc, agent);
+      if (!canContinue()) break;
       const timerClaim = await claimDueTimerHeartbeat(agent, now, intervalSec);
       if (!timerClaim) continue;
       const run = await enqueueWakeup(agent.id, {
         source: "timer", triggerDetail: "system", reason: "heartbeat_timer",
         requestedByActorType: "system", requestedByActorId: "heartbeat_scheduler",
+        ...(driverIssueId ? {
+          payload: { issueId: driverIssueId },
+          issueStateGuard: {
+            statuses: ISSUE_STATUSES.filter(status => status !== "done" && status !== "cancelled"),
+            assigneeAgentId: agent.id,
+          },
+        } : {}),
         contextSnapshot: { source: "scheduler", reason: "interval_elapsed", now: now.toISOString(),
-          timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat },
+          timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+          ...(driverIssueId ? {
+            issueId: driverIssueId, taskKey: driverIssueId, timerDriverIssue: true, skipIssueComment: true,
+          } : {}),
+        },
       });
       if (run) enqueued++; else skipped++;
     }
