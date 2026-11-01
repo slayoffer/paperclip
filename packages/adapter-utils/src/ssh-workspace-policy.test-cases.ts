@@ -135,8 +135,14 @@ export function registerSshWorkspacePolicyTests(fixture: () => {
     await git(local, "commit", "-m", "Track scratch fixture");
     const prepared = await prepareRemoteManagedRuntime({ spec: spec(), runId: "tracked", adapterKey: "test", workspaceLocalDir: local });
     await expect(stat(path.join(prepared.workspaceRemoteDir, ".scratch-tracked"))).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path.join(prepared.workspaceRemoteDir, "source.txt"), "remote commit\n");
+    await git(prepared.workspaceRemoteDir, "add", "-A");
+    await git(prepared.workspaceRemoteDir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Remote source edit");
+    expect(await git(prepared.workspaceRemoteDir, "show", "HEAD:.scratch-tracked/data")).toBe("keep");
     await prepared.restoreWorkspace();
     expect(await readFile(path.join(local, ".scratch-tracked/data"), "utf8")).toBe("keep");
+    expect(await git(local, "show", "HEAD:.scratch-tracked/data")).toBe("keep");
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote commit\n");
     expect(await git(local, "status", "--porcelain")).toBe("");
   });
 

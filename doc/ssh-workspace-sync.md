@@ -55,7 +55,9 @@ Direct prepare/restore callers can share a `syncPolicy` to retain this per-run s
 Runtime assets and in-place workspaces do not use this workspace filter.
 
 Git history still transfers as a bundle, including committed scratch content in that history.
-The working tree omits skipped directories. This filter reduces workspace copies, not Git history size.
+The working tree omits skipped directories. Their tracked files receive Git's `skip-worktree` index flag first.
+An ordinary `git add -A` then preserves these files in subsequent commits.
+This filter reduces workspace copies, not Git history size.
 
 Sync-back preserves symbolic link text exactly, including relative targets.
 Copies keep link text verbatim. Baseline merges preserve excluded local files.
