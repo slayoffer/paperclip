@@ -12,8 +12,10 @@ import {
 import { type SshConnectionConfig, shellQuote } from "./ssh-config.js";
 import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
 
-export function tarExcludeArgs(exclude: string[] | undefined): string[] {
-  const combined = ["._*", ...(exclude ?? [])];
+export function tarExcludeArgs(exclude: string[] | undefined, literalExclude: string[] = []): string[] {
+  const literal = new Set(literalExclude);
+  const combined = ["._*", ...(exclude ?? []).filter((entry) => !literal.has(entry)),
+    ...literalExclude.map((entry) => `./${entry.replace(/[\\*?[\]]/g, "\\$&")}`)];
   return combined.flatMap((entry) => ["--exclude", entry]);
 }
 

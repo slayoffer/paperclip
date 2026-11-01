@@ -420,6 +420,7 @@ export async function transportGitWorkspaceToSsh(input: {
   remoteDir: string;
   snapshot: LocalGitWorkspaceSnapshot;
   exclude?: string[];
+  skippedPaths?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
 }): Promise<void> {
@@ -430,11 +431,13 @@ export async function transportGitWorkspaceToSsh(input: {
     snapshot: input.snapshot,
     onProgress: input.onProgress,
   }));
+  await removeDeletedPathsOnSsh({ spec: input.spec, remoteDir: input.remoteDir, deletedPaths: input.skippedPaths ?? [] });
   await timeWorkspaceStep(input.onProgress, "Workspace sync", () => syncDirectoryToSsh({
     spec: input.spec,
     localDir: input.localDir,
     remoteDir: input.remoteDir,
     exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.exclude ?? [])],
+    literalExclude: input.skippedPaths,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   }));

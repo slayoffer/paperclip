@@ -1,11 +1,12 @@
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
+import { createSshWorkspaceSyncPolicy, sshWorkspaceExcludes, type SshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
-import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
+import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline, selectDirectorySnapshot } from "./workspace-restore-merge.js";
 import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshRemoteExecutionSpec } from "./ssh-config.js";
@@ -32,20 +33,26 @@ async function prepareWorkspaceForSshExecutionInner(input: {
   onProgress?: RuntimeProgressSink;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
+  syncPolicy?: SshWorkspaceSyncPolicy;
 }): Promise<{ gitBacked: boolean; repositories?: string[] }> {
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
+  const policy = input.syncPolicy ?? createSshWorkspaceSyncPolicy();
   const gitSnapshot = input.workspaceFileMode === "all" ? null : await timeWorkspaceStep(
     input.onProgress, "Git snapshot", () => readLocalGitWorkspaceSnapshot(input.localDir),
   );
 
   if (gitSnapshot) {
     const repositories = await listLocalProjectRepositories(input.localDir);
+    const exclude = await sshWorkspaceExcludes({ policy, localDir: input.localDir,
+      exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(repositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : [])],
+      onProgress: input.onProgress });
     await transportGitWorkspaceToSsh({
       spec: input.spec,
       localDir: input.localDir,
       remoteDir,
       snapshot: gitSnapshot,
-      exclude: repositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : [],
+      exclude,
+      skippedPaths: policy.excluded.get(input.localDir),
       onProgress: input.onProgress,
       progressLabel: "workspace",
     });
@@ -56,11 +63,15 @@ async function prepareWorkspaceForSshExecutionInner(input: {
       const localDir = path.join(input.localDir, relative);
       const snapshot = await readLocalGitWorkspaceSnapshot(localDir);
       if (!snapshot) throw new Error(`Cannot read the Git state of project repository: ${relative}`);
+      const exclude = await sshWorkspaceExcludes({ policy, localDir,
+        exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES], onProgress: input.onProgress });
       await transportGitWorkspaceToSsh({
         spec: input.spec,
         localDir,
         remoteDir: path.posix.join(remoteDir, relative),
         snapshot,
+        exclude,
+        skippedPaths: policy.excluded.get(localDir),
         onProgress: input.onProgress,
         progressLabel: relative,
       });
@@ -68,6 +79,9 @@ async function prepareWorkspaceForSshExecutionInner(input: {
     return { gitBacked: true, ...(repositories.length > 0 ? { repositories } : {}) };
   }
 
+  const exclude = await sshWorkspaceExcludes({ policy, localDir: input.localDir,
+    exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+    onProgress: input.onProgress });
   await clearRemoteDirectory({
     spec: input.spec,
     remoteDir,
@@ -77,7 +91,8 @@ async function prepareWorkspaceForSshExecutionInner(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
-    exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+    exclude,
+    literalExclude: policy.excluded.get(input.localDir),
     onProgress: input.onProgress,
     progressLabel: "workspace",
   }));
@@ -96,8 +111,10 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   restoreGitHistory?: boolean;
   onProgress?: RuntimeProgressSink;
   repositories?: Array<{ path: string; baselineSnapshot?: DirectorySnapshot }>;
+  syncPolicy?: SshWorkspaceSyncPolicy;
 }): Promise<void> {
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
+  const syncPolicy = input.syncPolicy ?? createSshWorkspaceSyncPolicy();
   const repositories = input.repositories ?? [];
   for (const repository of repositories) {
     if (
@@ -126,6 +143,7 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
       restoreGitHistory: input.restoreGitHistory,
       onProgress: input.onProgress,
       progressLabel: repository.path,
+      syncPolicy,
     });
   }
   await restoreWorkspaceRootFromSsh({
@@ -137,6 +155,7 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
     onProgress: input.onProgress,
     progressLabel: "workspace",
     hasProjectRepositories: repositories.length > 0,
+    syncPolicy,
   });
 }
 
@@ -149,15 +168,27 @@ async function restoreWorkspaceRootFromSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
   hasProjectRepositories?: boolean;
+  syncPolicy: SshWorkspaceSyncPolicy;
 }): Promise<void> {
   const remoteDir = input.remoteDir;
+  const defaultExclude = [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
+    ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : [])];
+  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
+    exclude: defaultExclude, onProgress: input.onProgress });
+  const exclude = await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
+    remote: { spec: input.spec, dir: remoteDir }, exclude: defaultExclude, onProgress: input.onProgress });
   // Direct Git restores need the same preflight as managed restores. Fetching
   // objects is safe, but resetting the working tree would remove excluded data.
   const gitSnapshot = input.baselineSnapshot ? null : await readLocalGitWorkspaceSnapshot(input.localDir);
-  const baseline = input.baselineSnapshot ?? (gitSnapshot
+  const suppliedBaseline = input.baselineSnapshot;
+  const skippedPaths = input.syncPolicy.excluded.get(input.localDir) ?? [];
+  const filteredBaseline = suppliedBaseline && skippedPaths.length > 0 ? await selectDirectorySnapshot(suppliedBaseline, {
+    omit: skippedPaths,
+    exclude: [...suppliedBaseline.exclude, ...exclude], ignoredPaths: suppliedBaseline.ignoredPaths,
+  }) : null;
+  const baseline = filteredBaseline ?? suppliedBaseline ?? (gitSnapshot
     ? await captureDirectorySnapshot(input.localDir, {
-      exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
-        ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : [])],
+      exclude: [".git", ...exclude],
     })
     : null);
   const restoreGitHistory = gitSnapshot !== null || input.restoreGitHistory;
@@ -182,6 +213,7 @@ async function restoreWorkspaceRootFromSsh(input: {
         remoteDir,
         localDir: stagingDir,
         exclude: baseline.exclude,
+        literalExclude: skippedPaths,
         onProgress: input.onProgress,
         progressLabel: input.progressLabel,
       });
@@ -209,7 +241,7 @@ async function restoreWorkspaceRootFromSsh(input: {
         }).catch(() => undefined);
       }
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-      if (!input.baselineSnapshot) await disposeDirectorySnapshot(baseline);
+      if (filteredBaseline || !suppliedBaseline) await disposeDirectorySnapshot(baseline);
     }
     return;
   }
@@ -218,7 +250,8 @@ async function restoreWorkspaceRootFromSsh(input: {
     spec: input.spec,
     remoteDir,
     localDir: input.localDir,
-    exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
+    exclude,
+    literalExclude: skippedPaths,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   });

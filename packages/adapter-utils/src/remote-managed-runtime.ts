@@ -1,5 +1,6 @@
 import path from "node:path";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
+import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
 import { sshRuntimeIsolationScript } from "./ssh-runtime-isolation.js";
 import { linkSshProviderSessionScript, sshProviderSessionDirectories } from "./ssh-provider-sessions.js";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
@@ -141,6 +142,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
 }): Promise<PreparedRemoteManagedRuntime> {
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const syncWorkspace = input.syncWorkspace !== false;
+  const syncPolicy = syncWorkspace ? createSshWorkspaceSyncPolicy() : undefined;
   const workspaceRemoteDir = syncWorkspace
     ? path.posix.join(
         baseWorkspaceRemoteDir,
@@ -192,19 +194,20 @@ async function prepareRemoteManagedRuntimeInner(input: {
         onProgress: input.onProgress,
         workspaceFileMode: input.workspaceFileMode,
         workspaceExclude: input.workspaceExclude,
+        syncPolicy,
       })
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
     ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureDirectorySnapshot(input.workspaceLocalDir, {
-        exclude: preparedWorkspace.gitBacked
+        exclude: [...(syncPolicy?.excluded.get(input.workspaceLocalDir) ?? []), ...(preparedWorkspace.gitBacked
           ? [
               ...GIT_ARCHIVE_EXCLUDES,
               ...SSH_WORKSPACE_EXCLUDES,
               ".paperclip-runtime",
               ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : []),
             ]
-          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])])],
       }))
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
@@ -212,7 +215,8 @@ async function prepareRemoteManagedRuntimeInner(input: {
     repositoryBaselines.push({
       path: repository,
       baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
-        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
+        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
+          ...(syncPolicy?.excluded.get(path.join(input.workspaceLocalDir, repository)) ?? [])],
       })),
     });
   }
@@ -249,6 +253,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
         restoreGitHistory: preparedWorkspace.gitBacked,
         onProgress: input.onProgress,
         repositories: repositoryBaselines,
+        syncPolicy,
       });
     }
     await removeExplicitRuntimeRoot().catch(() => undefined);
@@ -318,6 +323,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
           restoreGitHistory: preparedWorkspace.gitBacked,
           onProgress,
           repositories: repositoryBaselines,
+          syncPolicy,
         });
       }
       try {

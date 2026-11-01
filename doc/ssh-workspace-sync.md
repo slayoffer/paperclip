@@ -20,6 +20,43 @@ Nonconflicting local staged changes remain staged. Conflicting staged changes re
 Dirty remote edits remain unstaged above the imported commit.
 Runtime assets retain their separate transfer settings.
 
+## Nested repositories and scratch directories
+
+Before each workspace transfer, Paperclip excludes nested directories with a `.git` entry.
+The entry can be a directory, a file, or a symbolic link.
+The workspace root remains eligible for transfer.
+Explicit project repositories still transfer as separate workspace roots.
+Their nested repositories follow the same exclusion rule.
+
+Scratch directory names also match `.scratch-*` and `.cto-*` by default, at every depth.
+Set `PAPERCLIP_SSH_SCRATCH_PATTERNS` on the Paperclip server to replace these defaults:
+
+```sh
+PAPERCLIP_SSH_SCRATCH_PATTERNS='[".scratch-*", ".cto-*", "temp-*"]'
+```
+
+The value must be a JSON array of nonempty directory name patterns, without `/` or NUL characters.
+Patterns use shell glob syntax, including `*`, `?`, and character classes.
+An empty array disables scratch name exclusions. Nested repository exclusion stays active.
+Invalid configuration stops workspace preparation before remote changes.
+The selected patterns remain fixed for that managed run.
+
+The scan prunes existing generated-directory exclusions and does not follow symbolic links.
+Both transfer directions use the discovered paths as literal exclusions.
+Baseline capture omits these paths, and restore preserves their local contents.
+New nested repositories on the remote also stay out of the downloaded archive.
+If a previously ordinary directory becomes a clone, restore preserves its local version.
+Skipped paths remain excluded through the rest of the managed run, even if their `.git` marker disappears.
+
+Each skipped path produces one progress log entry per managed run, with its `du -sk` size in KiB.
+Without a progress sink, the entry goes to the server console.
+Paths use JSON quoting so a newline in a filename cannot create a second log line.
+Direct prepare/restore callers can share a `syncPolicy` to retain this per-run state.
+Runtime assets and in-place workspaces do not use this workspace filter.
+
+Git history still transfers as a bundle, including committed scratch content in that history.
+The working tree omits skipped directories. This filter reduces workspace copies, not Git history size.
+
 Sync-back preserves symbolic link text exactly, including relative targets.
 Copies keep link text verbatim. Baseline merges preserve excluded local files.
 An empty staging target uses a direct copy to avoid another manifest and file-flush pass.
