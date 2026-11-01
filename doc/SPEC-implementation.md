@@ -5,6 +5,9 @@ Date: 2026-04-28
 Audience: Product, engineering, and agent-integration authors
 Source inputs: `GOAL.md`, `PRODUCT.md`, `SPEC.md`, `DATABASE.md`, current monorepo code
 
+The Synthiq fork provides an optional [Guild intake check](issue-intake-check.md).
+`PAPERCLIP_ISSUE_INTAKE_CHECK` defaults to `off`. Operators must observe `dry_run` before enforcement.
+
 ## 1. Document Role
 
 See [details](spec-implementation/part-1.md#1-document-role).
