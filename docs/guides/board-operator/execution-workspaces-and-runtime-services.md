@@ -49,11 +49,36 @@ Issues are attached to execution workspace behavior, not to automatic runtime ma
 
 ## Execution workspace lifecycle
 
-Execution workspaces are durable until a human closes them.
+When an issue changes to `done` or `cancelled`, Paperclip attempts to close its
+isolated Git worktrees. This starts after the issue transaction commits. The
+server processes one workspace at a time, including across concurrent issue
+updates in the same server process. A cleanup failure is logged and does not
+fail the committed issue update.
+
+- Automatic close uses the same lifecycle lock, generation fence, and artifact
+  cleanup as the archive API. The workspace row and its issue links remain as history.
+- Blocked close readiness, uncommitted files, unpushed commits, live runs, and
+  live runtime services prevent automatic close. Paperclip logs the reason and
+  leaves the workspace active. A local merge alone does not prove that the
+  commits were pushed. Automatic close checks local remote-tracking refs and
+  preserves a checkout when it cannot verify publication.
+- Automatic close excludes shared workspaces, project-primary workspaces,
+  borrowed environment checkouts, and non-Git providers. It also preserves a
+  path used by a non-archived workspace of another open issue.
+- A reopened issue can rebuild its archived Git worktree through the existing
+  reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
+- This transition hook does not scan historical terminal issues. The existing
+  delayed terminal-workspace reaper retains its separate policy and schedule.
 
 - The UI can archive an execution workspace.
 - Closing an execution workspace stops its runtime services and cleans up its workspace artifacts when allowed.
 - Shared workspaces that point at the project primary checkout are treated more conservatively during cleanup than disposable isolated workspaces.
+
+Service callers that supply their own transaction must collect
+`IssuePostCommitAction` entries and call `executeIssuePostCommitActions` with the
+committed database after that transaction succeeds. Discard these actions when
+the transaction rolls back. The normal issue service and issue routes already
+use this post-commit path.
 
 ## Resolved workspace logic during heartbeat runs
 

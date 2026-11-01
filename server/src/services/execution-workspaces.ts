@@ -3254,9 +3254,11 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       id: string;
       patch: Partial<typeof executionWorkspaces.$inferInsert>;
       closedAt: Date;
+      guard?: (workspace: ExecutionWorkspace) => Promise<string[]>;
     }): Promise<
       | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
       | { outcome: "reopen_pending" }
+      | { outcome: "blocked"; reasons: string[] }
       | null
     > => {
       return db.transaction(async (tx) => {
@@ -3277,6 +3279,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           // archive and keep the flag, so the destructive path never removes the
           // rebuilt worktree. The route maps this to HTTP 409.
           return { outcome: "reopen_pending" };
+        }
+        if (input.guard) {
+          const reasons = await input.guard(toExecutionWorkspace(fresh, []));
+          if (reasons.length) return { outcome: "blocked", reasons };
         }
         const baseMetadata =
           (input.patch.metadata as Record<string, unknown> | null | undefined)
