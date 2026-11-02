@@ -34,10 +34,19 @@ does not need a specific signature. A directory named `CACHEDIR.TAG` is not
 a marker. Cargo's tagged `target/` directory is excluded. An untagged
 directory named `target` is transferred. Tag paths are literal and relative
 to the workspace, so a tag does not exclude an unrelated directory with the
-same name. Scans prune excluded directories before reading their contents.
-Tag discovery also prunes the caller's effective exclusions, including
-`workspaceExclude`, referenced-project `vendor`, and resolved Git ignore paths.
-An excluded directory can be unreadable without causing tag discovery to fail.
+same name. Discovery filters records with the same root-relative exclusion
+matcher and literal ignored-path matcher as baseline capture and restore.
+For example, `workspaceExclude: ["cache"]` excludes the root `cache` directory.
+A tag in `nested/cache` still enters the baseline's protected paths.
+
+The scan prunes tagged directories and fixed cache names that the shared
+matcher excludes at every depth. It reports other tags and unreadable
+directories as NUL-delimited records. TypeScript filters these records with
+the caller's exclusions, including `workspaceExclude`, referenced-project
+`vendor`, and resolved Git ignore paths. An excluded unreadable directory
+does not abort sync. An unreadable directory outside those exclusions does.
+Other scan failures still stop sync. Caller exclusion lists stay in TypeScript
+and never expand the scan's command-line arguments.
 
 These rules cover Git-backed workspaces, linked Git worktrees, plain folders,
 and `workspaceFileMode: "all"`. Referenced projects use the same list during

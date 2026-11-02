@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { cacheDirectoryTarExcludes, localTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import type { WorkspacePaths } from "./workspace-manifest.js";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -62,11 +63,14 @@ export async function syncDirectoryToSsh(input: {
   remoteDir: string;
   exclude?: string[];
   excludeTaggedCaches?: boolean;
+  cacheScan?: { exclude: readonly string[]; ignoredPaths?: WorkspacePaths };
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
-  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(input.localDir, input.exclude) : [];
+  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(
+    input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths,
+  ) : [];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,

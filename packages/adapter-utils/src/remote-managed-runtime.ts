@@ -286,6 +286,10 @@ async function prepareRemoteManagedRuntimeInner(input: {
         onProgress: input.onProgress,
         progressLabel: `project-${projectId}`,
         excludeTaggedCaches: true,
+        cacheScan: {
+          exclude: REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
+          ignoredPaths: ignoreResolution.kind === "git" ? ignoreResolution.ignoredPaths : undefined,
+        },
       }));
       additionalSourceDirs[projectId] = remoteDir;
     } catch (error) {

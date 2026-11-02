@@ -3,31 +3,53 @@ import { stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { shellQuote } from "./ssh-config.js";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
-import { workspacePaths, workspacePathMatcher } from "./workspace-manifest.js";
+import { shouldExcludePath } from "./exclude-patterns.js";
+import { workspacePaths, workspacePathMatcher, type WorkspacePaths } from "./workspace-manifest.js";
 import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-directory-snapshot.js";
 
 const exec = promisify(execFile);
 
-// POSIX find and test work with both GNU tar and macOS bsdtar. NUL output
-// preserves whitespace and glob characters. Pruning avoids reading cache contents.
+// Only fixed cache names and metadata roots can enter this command. Caller
+// exclusions stay in TypeScript, so a large Git ignore list cannot exceed argv.
 export function taggedCacheScanScript(root: string, exclude: readonly string[] = []): string {
-  const patterns = [...new Set([...SSH_WORKSPACE_EXCLUDES, ".git", ".paperclip-runtime", ...exclude])];
-  // Tar exclusions match at path-component boundaries unless explicitly rooted
-  // with './'. Preserve glob escapes supplied by the Git ignore resolver.
-  const prune = patterns.map((pattern) => {
-    if (!pattern.includes("/")) return `-name ${shellQuote(pattern)}`;
-    return `-path ${shellQuote(pattern)}` +
-      (pattern.startsWith("./") ? "" : ` -o -path ${shellQuote(`*/${pattern}`)}`);
-  }).join(" -o ");
-  return `cd ${shellQuote(root)} && find . -type d \\( ${prune} \\) -prune -o ` +
-    "-type d -exec test -f '{}/CACHEDIR.TAG' \\; -print0 -prune";
+  // In the shared matcher, '*/' patterns exclude a segment at every depth.
+  // Root-relative names must not prune nested directories with the same name.
+  const globalPatterns = exclude.filter((pattern) => pattern.startsWith("*/"));
+  const prune = SSH_WORKSPACE_EXCLUDES.filter((name) => !name.includes("/") && shouldExcludePath(name, globalPatterns))
+    .map((name) => `-name ${shellQuote(name)}`);
+  for (const relative of [".git", ".paperclip-runtime"]) {
+    if (shouldExcludePath(relative, exclude)) prune.push(`-path ${shellQuote(`./${relative}`)}`);
+  }
+  return `cd ${shellQuote(root)} && find . ` +
+    (prune.length ? `-type d \\( ${prune.join(" -o ")} \\) -prune -o ` : "") +
+    "-type d -exec test -f '{}/CACHEDIR.TAG' \\; -exec printf 'T%s\\0' {} \\; -prune -o " +
+    "-type d \\( ! -exec test -r {} \\; -o ! -exec test -x {} \\; \\) " +
+    "-exec printf 'U%s\\0' {} \\; -prune";
 }
 
-export function parseTaggedCacheDirectories(output: string): string[] {
-  return output.split("\0").filter(Boolean).map((entry) => entry === "." ? "." : entry.slice(2));
+export function parseTaggedCacheDirectories(
+  output: string, exclude: readonly string[] = [], ignoredPaths?: WorkspacePaths,
+): string[] {
+  const ignored = workspacePathMatcher(ignoredPaths);
+  const directories: string[] = [];
+  try {
+    for (const record of output.split("\0").filter(Boolean)) {
+      const kind = record[0];
+      const relative = record.slice(1) === "." ? "." : record.slice(3);
+      if ((kind !== "T" && kind !== "U") || (record.slice(1) !== "." && !record.slice(1).startsWith("./"))) {
+        throw new Error("Invalid cache directory scan record");
+      }
+      if (shouldExcludePath(relative, exclude) || ignored.matches(relative)) continue;
+      if (kind === "U") throw Object.assign(new Error(`Cannot read workspace directory: ${relative}`), { code: "EACCES" });
+      directories.push(relative);
+    }
+    return directories;
+  } finally { ignored.close(); }
 }
 
-export async function localTaggedCacheDirectories(root: string, exclude: readonly string[] = []): Promise<string[]> {
+export async function localTaggedCacheDirectories(
+  root: string, exclude: readonly string[] = [], ignoredPaths?: WorkspacePaths,
+): Promise<string[]> {
   const exists = await stat(root).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
@@ -36,7 +58,7 @@ export async function localTaggedCacheDirectories(root: string, exclude: readonl
   const { stdout } = await exec("sh", ["-c", taggedCacheScanScript(root, exclude)], {
     maxBuffer: 16 * 1024 * 1024,
   });
-  return parseTaggedCacheDirectories(stdout);
+  return parseTaggedCacheDirectories(stdout, exclude, ignoredPaths);
 }
 
 export function cacheDirectoryTarExcludes(directories: string[]): string[] {

@@ -90,6 +90,15 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
       expect(prepared.additionalSourceDirs.source).toBeDefined();
       expect(await readFile(path.join(prepared.additionalSourceDirs.source!, "source.txt"), "utf8")).toBe("keep");
     });
+
+    it.each(["local", "remote"])("rejects an unreadable %s directory outside the exclusions", async (side) => {
+      await put(local, "source.txt");
+      const prepared = await prepare();
+      await block(path.join(side === "local" ? local : prepared.workspaceRemoteDir, "blocked"));
+      await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+      await expect(prepared.restoreWorkspace()).rejects.toThrow();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("keep");
+    });
   });
 
   it("preserves a tagged root after its local marker is removed", async () => {
@@ -126,4 +135,40 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     });
     expect(await readFile(path.join(local, `${repository}/data`), "utf8")).toBe("keep");
   });
+
+  it("preserves nested tagged cache data with a root-relative cache exclusion", async () => {
+    await put(local, "nested/cache/CACHEDIR.TAG", "");
+    await put(local, "nested/cache/data");
+    const prepared = await prepare(["cache"]);
+    await expect(readFile(path.join(prepared.workspaceRemoteDir, "nested/cache/data")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await prepared.restoreWorkspace();
+    expect(await readFile(path.join(local, "nested/cache/data"), "utf8")).toBe("keep");
+    expect(await readFile(path.join(local, "nested/cache/CACHEDIR.TAG"), "utf8")).toBe("");
+  });
+
+  it("uploads a referenced project with 6000 resolved ignore paths", async () => {
+    const reference = path.join(root, "reference");
+    await put(reference, "source.txt");
+    await exec("git", ["init", reference]);
+    await put(reference, ".gitignore", "ignored-*.tmp\n");
+    const names = Array.from({ length: 6000 }, (_, index) =>
+      `ignored-${String(index).padStart(4, "0")}-${"x".repeat(68)}.tmp`);
+    expect(names.reduce((bytes, name) => bytes + Buffer.byteLength(name), 0)).toBe(510_000);
+    for (let offset = 0; offset < names.length; offset += 100) {
+      await Promise.all(names.slice(offset, offset + 100).map((name) => writeFile(path.join(reference, name), "ignored")));
+    }
+    const ignoreResolution = await resolveReferencedSourceIgnore(reference);
+    expect(ignoreResolution.kind).toBe("git");
+    if (ignoreResolution.kind !== "git") throw new Error("Git ignore resolution failed");
+    expect(ignoreResolution.ignoredPaths).toHaveLength(6000);
+    expect(ignoreResolution.ignoredPaths.reduce((bytes, entry) => bytes + Buffer.byteLength(entry), 0)).toBe(510_000);
+    const prepared = await prepareRemoteManagedRuntime({ spec: spec(), runId: "large-ignore", adapterKey: "test",
+      workspaceLocalDir: local, additionalSources: [{ localPath: reference, projectId: "source", ignoreResolution }],
+    });
+    expect(prepared.additionalSourceDirs.source).toBeDefined();
+    const destination = prepared.additionalSourceDirs.source!;
+    expect(await readFile(path.join(destination, "source.txt"), "utf8")).toBe("keep");
+    expect((await readdir(destination)).sort()).toEqual([".gitignore", "source.txt"]);
+  }, 60_000);
 });

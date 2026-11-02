@@ -1,6 +1,5 @@
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
-import { cacheDirectoryTarExcludes, localTaggedCacheDirectories, parseTaggedCacheDirectories, taggedCacheScanScript, withTaggedCacheDirectories } from "./ssh-cache-directories.js";
-import { workspacePaths } from "./workspace-manifest.js";
+import { localTaggedCacheDirectories, parseTaggedCacheDirectories, taggedCacheScanScript, withTaggedCacheDirectories } from "./ssh-cache-directories.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -156,15 +155,13 @@ async function restoreWorkspaceRootFromSsh(input: {
 }): Promise<void> {
   const remoteDir = input.remoteDir;
   if (input.baselineSnapshot?.exclude.includes(".")) return;
-  const scanExclude = [
-    ...(input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES]),
-    ...cacheDirectoryTarExcludes([...workspacePaths(input.baselineSnapshot?.ignoredPaths ?? [])]),
-  ];
+  const scanExclude = input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES];
+  const scanIgnored = input.baselineSnapshot?.ignoredPaths;
   const tagged = [...new Set([
-    ...await localTaggedCacheDirectories(input.localDir, scanExclude),
+    ...await localTaggedCacheDirectories(input.localDir, scanExclude, scanIgnored),
     ...parseTaggedCacheDirectories((await runSshScript(input.spec, taggedCacheScanScript(remoteDir, scanExclude), {
       timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
-    })).stdout),
+    })).stdout, scanExclude, scanIgnored),
   ])];
   if (tagged.includes(".")) return;
   // Direct Git restores need the same preflight as managed restores. Fetching
