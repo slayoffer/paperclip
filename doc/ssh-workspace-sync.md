@@ -39,6 +39,19 @@ pnpm exec vitest run --no-file-parallelism \
 
 The fork workflow `synthiq-ssh-sync.yml` also checks the existing SSH fixture,
 the managed runtime, the baseline merge, remote tracking refs, workspace scheduling, and adapter types.
+The `synthiq-ssh-workspace.yml` repository verification runs six isolated test shards
+on the exact PR head. Shard 1 also runs all-package typechecks and the full build. Its required
+`repository-verification` check succeeds only when every shard succeeds.
+This uses the passing fork release test pattern: one Vitest process per shard,
+serial test files, and isolated workers. The previous unsharded launcher exceeded
+the 150-minute test budget while tests were still passing.
+The 2026-11-02 (VLAT) coverage check found all 2,338 test files in the six shards,
+with no missing or duplicate files. All 164 serialized suites remained covered.
+The shard file counts were 390, 390, 390, 390, 389, and 389.
+The existing fork release test steps completed in 14m47s to 30m02s.
+These release timings are a baseline, not a measurement of this workflow.
+Check the aggregate gate with
+`node --test .github/scripts/tests/ssh-workspace-verification.test.mjs`.
 The snapshot tests check that hashing stays outside the main thread.
 The public SSH API remains in `ssh.ts`. Implementation modules retain the released module layout.
 The regression transport executes real Git and tar commands through a local SSH substitute.

@@ -6,6 +6,7 @@ on:
     branches: ["synthiq/**"]
     paths:
       - ".github/workflows/synthiq-ssh-workspace.yml"
+      - ".github/scripts/tests/ssh-workspace-verification.test.mjs"
       - "packages/adapter-utils/**"
       - "packages/adapters/codex-local/**"
       - "packages/adapters/claude-local/**"
@@ -65,7 +66,8 @@ jobs:
       - name: Require writer containment tests
         run: |
           sudo systemctl start "user@$(id -u).service"
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           echo "PAPERCLIP_REQUIRE_WRITER_CONTAINMENT_TESTS=1" >> "$GITHUB_ENV"
           systemd-run --user --scope --quiet --expand-environment=no true
@@ -134,11 +136,16 @@ jobs:
           server/src/__tests__/heartbeat-process-recovery.test.ts
           --testNamePattern 'cancel|shutdown|Stop'
 
-  repository-verification:
+  repository-verification-shards:
+    name: Repository verification (${{ matrix.shard }}/6)
     if: github.repository == 'slayoffer/paperclip'
     runs-on: ubuntu-24.04
-    # Match fork-release-tests.yml. The complete serial suite takes about two hours.
+    # Match the passing fork release shards; the unsharded launcher exceeded 150 minutes.
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -155,14 +162,40 @@ jobs:
         run: |
           corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
           corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check the verification workflow contract
+        run: node --test .github/scripts/tests/ssh-workspace-verification.test.mjs
       - name: Check all package types
+        if: matrix.shard == 1
         run: corepack pnpm -r typecheck
       - name: Run the repository test suite
         timeout-minutes: 150
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
         run: |
+          corepack pnpm run preflight:workspace-links
+          test_root="$(mktemp -d /tmp/pv-XXXXXX)"
+          export NODE_ENV=test
+          export PAPERCLIP_HOME="$test_root/h"
+          export PAPERCLIP_CONFIG="$PAPERCLIP_HOME/config.json"
+          export PAPERCLIP_INSTANCE_ID="vt-$GITHUB_RUN_ID-${TEST_SHARD%/*}"
+          export TMPDIR="$test_root/t"
+          mkdir -p "$PAPERCLIP_HOME" "$TMPDIR"
           # Same rule as fork-release-tests.yml (#88): skip the real-runnerd Codex
           # test only on a runner that denies unprivileged user and network namespaces.
           if ! unshare --user --map-root-user --net true 2>/dev/null; then export PAPERCLIP_TEST_NO_USERNS_SANDBOX=1; fi
-          corepack pnpm test:run
+          corepack pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-parallelism --maxWorkers=1 --pool=forks --isolate
       - name: Build the repository
+        if: matrix.shard == 1
         run: corepack pnpm build
+
+  repository-verification:
+    if: ${{ always() && github.repository == 'slayoffer/paperclip' }}
+    needs: [repository-verification-shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification shard
+        env:
+          SHARDS_RESULT: ${{ needs.repository-verification-shards.result }}
+        run: |
+          test "$SHARDS_RESULT" = success
