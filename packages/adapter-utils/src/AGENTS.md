@@ -17,6 +17,8 @@ Otherwise, delayed file removal can repeat a completed mutation.
 Workspace filters must apply before tar creation and baseline capture.
 Filter skipped paths from supplied baselines before restore. Otherwise, an omitted remote directory can remove local files.
 Keep discovered paths literal in tar arguments. Directory names can contain glob characters.
+Before remote removal, check every ancestor without following symlinks.
+Git import can restore a committed symlink where the local overlay has a directory; `rm -rf link/child` follows that link.
 Store discovered paths in snapshot `ignoredPaths`, not pattern `exclude` lists.
 For example, the literal clone `foo/*` must not exclude its sibling `foo/source.txt`.
 When filtering a supplied baseline, combine its existing ignored paths with the discovered paths.

@@ -46,6 +46,9 @@ Both transfer directions use the discovered paths as literal exclusions.
 Snapshots keep discovered paths in their literal `ignoredPaths` matcher, separately from configured exclusion patterns.
 A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt` still return normally.
 Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
+After Git import, removal checks each path ancestor and skips paths below a symlink or a non-directory.
+This protects files outside the workspace when a committed symlink differs from the local directory overlay.
+Removal still deletes a leaf symlink itself and treats names with glob characters literally.
 Baseline capture omits these paths, and restore preserves their local contents.
 New nested repositories on the remote also stay out of the downloaded archive.
 If a previously ordinary directory becomes a clone, restore preserves its local version.

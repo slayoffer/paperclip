@@ -47,8 +47,32 @@ export async function removeDeletedPathsOnSsh(input: {
   deletedPaths: string[];
 }): Promise<void> {
   if (input.deletedPaths.length === 0) return;
+  for (const entry of input.deletedPaths) {
+    if (entry.includes("\0") || entry.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Invalid workspace removal path: ${JSON.stringify(entry)}`);
+    }
+  }
   const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
-  const script = `cd ${shellQuote(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
+  // Git import can restore a committed symlink where the local overlay has a
+  // directory. Never remove a child through that link before copying the overlay.
+  const script = [
+    "set -e",
+    `cd ${shellQuote(input.remoteDir)}`,
+    `for entry in ${quotedPaths}; do`,
+    '  ancestor=.',
+    '  remaining="$entry"',
+    '  safe=1',
+    '  while [ "${remaining#*/}" != "$remaining" ]; do',
+    '    ancestor="$ancestor/${remaining%%/*}"',
+    '    remaining="${remaining#*/}"',
+    '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
+    '      safe=0',
+    '      break',
+    '    fi',
+    '  done',
+    '  if [ "$safe" = 1 ]; then rm -rf -- "./$entry"; fi',
+    'done',
+  ].join("\n");
   await runSshScript(input.spec, script, {
     timeoutMs: 30_000,
     maxBuffer: 256 * 1024,

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
@@ -9,6 +9,7 @@ import type { SshRemoteExecutionSpec } from "./ssh-config.js";
 import { estimateLocalDirSize } from "./ssh-transfer-progress.js";
 import { captureDirectorySnapshot, disposeDirectorySnapshot } from "./workspace-restore-merge.js";
 import { WorkspaceManifestWriter, type WorkspacePaths } from "./workspace-manifest.js";
+import { removeDeletedPathsOnSsh } from "./ssh-sync.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", ["-C", cwd, ...args])).stdout.trim();
@@ -53,6 +54,66 @@ export function registerSshWorkspacePolicyTests(fixture: () => {
     expect(skipLogs.every((line) => /size=\d+ KiB/.test(line))).toBe(true);
     if (mode !== "plain") expect(await git(local, "rev-parse", "HEAD")).toBeTruthy();
   });
+
+  it.each(["clone", ".scratch-keep"].flatMap((skipped) =>
+    ["absolute", "relative"].map((target) => ({ skipped, target }))))(
+    "preserves external files behind a committed ancestor symlink, skipped=$skipped target=$target", async ({ skipped, target }) => {
+      const { local, remote, root, spec, repository } = fixture();
+      await repository();
+      const outside = path.join(root, "outside");
+      await mkdir(path.join(outside, skipped), { recursive: true });
+      await writeFile(path.join(outside, skipped, "data"), "external sentinel");
+      await mkdir(path.join(local, "parent"));
+      await symlink(target === "absolute" ? outside : "../../outside", path.join(local, "parent/link"));
+      await git(local, "add", ".");
+      await git(local, "commit", "-m", "Track ancestor symlink");
+      await rm(path.join(local, "parent/link"));
+      await mkdir(path.join(local, "parent/link", skipped), { recursive: true });
+      if (skipped === "clone") await mkdir(path.join(local, "parent/link", skipped, ".git"));
+      await writeFile(path.join(local, "parent/link", skipped, "data"), "local scratch");
+      await writeFile(path.join(local, "parent/link/source.txt"), "ordinary source");
+      await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+      expect(await readFile(path.join(outside, skipped, "data"), "utf8")).toBe("external sentinel");
+      expect(await readFile(path.join(remote, "parent/link/source.txt"), "utf8")).toBe("ordinary source");
+      await expect(stat(path.join(remote, "parent/link", skipped))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(path.join(local, "parent/link", skipped, "data"), "utf8")).toBe("local scratch");
+    });
+
+  it("removes literal paths and leaf symlinks but skips unsafe ancestors", async () => {
+    const { remote, root, spec } = fixture();
+    const outside = path.join(root, "outside");
+    await mkdir(path.join(outside, "child"), { recursive: true });
+    await writeFile(path.join(outside, "child/data"), "external sentinel");
+    await mkdir(remote);
+    await symlink(outside, path.join(remote, "ancestor"));
+    await symlink(outside, path.join(remote, "leaf"));
+    await symlink(path.join(root, "absent"), path.join(remote, "dangling"));
+    await writeFile(path.join(remote, "file"), "non-directory ancestor");
+    const literal = "-parent'\n*/child?[x]";
+    await mkdir(path.join(remote, literal), { recursive: true });
+    await writeFile(path.join(remote, literal, "data"), "remove");
+    await writeFile(path.join(remote, "keep"), "keep");
+    await removeDeletedPathsOnSsh({ spec: spec(), remoteDir: remote,
+      deletedPaths: ["ancestor/child", "dangling/child", "file/child", "missing/child", "leaf", literal] });
+    expect(await readFile(path.join(outside, "child/data"), "utf8")).toBe("external sentinel");
+    expect((await lstat(path.join(remote, "ancestor"))).isSymbolicLink()).toBe(true);
+    expect((await lstat(path.join(remote, "dangling"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(path.join(remote, "file"), "utf8")).toBe("non-directory ancestor");
+    expect(await readFile(path.join(remote, "keep"), "utf8")).toBe("keep");
+    for (const removed of ["leaf", literal]) {
+      await expect(lstat(path.join(remote, removed))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
+  it.each(["", ".", "..", "../outside", "/outside", "a/../outside", "a//b", "a/", "a/./b", "a\0b"])(
+    "rejects unsafe removal paths before deleting anything: %j", async (invalid) => {
+      const { remote, spec } = fixture();
+      await mkdir(remote);
+      await writeFile(path.join(remote, "keep"), "keep");
+      await expect(removeDeletedPathsOnSsh({ spec: spec(), remoteDir: remote,
+        deletedPaths: ["keep", invalid] })).rejects.toThrow("Invalid workspace removal path");
+      expect(await readFile(path.join(remote, "keep"), "utf8")).toBe("keep");
+    });
 
   it("uses configured scratch patterns in both directions", async () => {
     const { local, remote, root, spec, repository } = fixture();
