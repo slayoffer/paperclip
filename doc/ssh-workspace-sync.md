@@ -20,6 +20,43 @@ Nonconflicting local staged changes remain staged. Conflicting staged changes re
 Dirty remote edits remain unstaged above the imported commit.
 Runtime assets retain their separate transfer settings.
 
+## Rebuildable caches
+
+Workspace file transfers use one shared exclusion list in both directions.
+The cache names are `node_modules`, `.pnpm-store`, `.turbo`, `.next`, `.cache`,
+`__pycache__`, and `.venv`. These names match at every directory depth.
+The existing `dist`, `build`, `out`, `coverage`, Git metadata, and runtime
+exclusions remain in place.
+
+A directory that contains a `CACHEDIR.TAG` file is also excluded, regardless
+of its name or Git ignore rules. File presence is sufficient. The tag content
+does not need a specific signature. A directory named `CACHEDIR.TAG` is not
+a marker. Cargo's tagged `target/` directory is excluded. An untagged
+directory named `target` is transferred. Tag paths are literal and relative
+to the workspace, so a tag does not exclude an unrelated directory with the
+same name. Scans prune excluded directories before reading their contents.
+
+These rules cover Git-backed workspaces, linked Git worktrees, plain folders,
+and `workspaceFileMode: "all"`. Referenced projects use the same list during
+upload, plus their existing `vendor`, Git metadata, and resolved ignore rules.
+Referenced projects remain read-only inputs and have no restore path.
+Runtime assets retain their existing transfer settings. Git bundles retain
+repository history. These rules do not remove objects already committed to Git.
+
+Restore preserves excluded local directories and their contents. It combines
+the tags captured before execution with tags present locally or remotely at
+restore time. Removing a remote tag does not expose a protected local cache.
+A remote tag also prevents deletion of the corresponding local directory.
+Replacing a parent that contains an excluded local directory fails before
+local changes or Git history integration.
+
+The tests in `packages/adapter-utils/src/ssh-cache-excludes.test.ts` run real
+Git and tar through a local SSH substitute. On base `b411be160`, ignored
+`node_modules` and `.cache` stayed out in both directions. An untracked,
+tagged `target/` transferred in both directions. The same prepare results
+applied to referenced projects. The homelab note that only
+`.paperclip-runtime` was excluded does not describe this base.
+
 Sync-back preserves symbolic link text exactly, including relative targets.
 Copies keep link text verbatim. Baseline merges preserve excluded local files.
 An empty staging target uses a direct copy to avoid another manifest and file-flush pass.
