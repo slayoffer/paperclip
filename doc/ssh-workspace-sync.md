@@ -35,6 +35,9 @@ a marker. Cargo's tagged `target/` directory is excluded. An untagged
 directory named `target` is transferred. Tag paths are literal and relative
 to the workspace, so a tag does not exclude an unrelated directory with the
 same name. Scans prune excluded directories before reading their contents.
+Tag discovery also prunes the caller's effective exclusions, including
+`workspaceExclude`, referenced-project `vendor`, and resolved Git ignore paths.
+An excluded directory can be unreadable without causing tag discovery to fail.
 
 These rules cover Git-backed workspaces, linked Git worktrees, plain folders,
 and `workspaceFileMode: "all"`. Referenced projects use the same list during
@@ -49,6 +52,9 @@ restore time. Removing a remote tag does not expose a protected local cache.
 A remote tag also prevents deletion of the corresponding local directory.
 Replacing a parent that contains an excluded local directory fails before
 local changes or Git history integration.
+For a tagged workspace root, the baseline records the whole-root `.` exclusion.
+Restore skips that workspace before any scan, transfer, or history integration.
+This state survives baseline serialization and removal of the local marker.
 
 The tests in `packages/adapter-utils/src/ssh-cache-excludes.test.ts` run real
 Git and tar through a local SSH substitute. On base `b411be160`, ignored

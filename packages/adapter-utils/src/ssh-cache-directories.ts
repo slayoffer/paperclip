@@ -10,9 +10,15 @@ const exec = promisify(execFile);
 
 // POSIX find and test work with both GNU tar and macOS bsdtar. NUL output
 // preserves whitespace and glob characters. Pruning avoids reading cache contents.
-export function taggedCacheScanScript(root: string): string {
-  const names = SSH_WORKSPACE_EXCLUDES.filter((entry) => !entry.includes("/"));
-  const prune = [...names, ".git", ".paperclip-runtime"].map((name) => `-name ${shellQuote(name)}`).join(" -o ");
+export function taggedCacheScanScript(root: string, exclude: readonly string[] = []): string {
+  const patterns = [...new Set([...SSH_WORKSPACE_EXCLUDES, ".git", ".paperclip-runtime", ...exclude])];
+  // Tar exclusions match at path-component boundaries unless explicitly rooted
+  // with './'. Preserve glob escapes supplied by the Git ignore resolver.
+  const prune = patterns.map((pattern) => {
+    if (!pattern.includes("/")) return `-name ${shellQuote(pattern)}`;
+    return `-path ${shellQuote(pattern)}` +
+      (pattern.startsWith("./") ? "" : ` -o -path ${shellQuote(`*/${pattern}`)}`);
+  }).join(" -o ");
   return `cd ${shellQuote(root)} && find . -type d \\( ${prune} \\) -prune -o ` +
     "-type d -exec test -f '{}/CACHEDIR.TAG' \\; -print0 -prune";
 }
@@ -21,13 +27,13 @@ export function parseTaggedCacheDirectories(output: string): string[] {
   return output.split("\0").filter(Boolean).map((entry) => entry === "." ? "." : entry.slice(2));
 }
 
-export async function localTaggedCacheDirectories(root: string): Promise<string[]> {
+export async function localTaggedCacheDirectories(root: string, exclude: readonly string[] = []): Promise<string[]> {
   const exists = await stat(root).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
   if (!exists) return [];
-  const { stdout } = await exec("sh", ["-c", taggedCacheScanScript(root)], {
+  const { stdout } = await exec("sh", ["-c", taggedCacheScanScript(root, exclude)], {
     maxBuffer: 16 * 1024 * 1024,
   });
   return parseTaggedCacheDirectories(stdout);
@@ -39,8 +45,12 @@ export function cacheDirectoryTarExcludes(directories: string[]): string[] {
 }
 
 export async function captureSshWorkspaceSnapshot(root: string, options: { exclude: string[] }): Promise<DirectorySnapshot> {
-  const ignoredPaths = await localTaggedCacheDirectories(root);
-  if (ignoredPaths.includes(".")) return { exclude: options.exclude, entries: new Map() };
+  const ignoredPaths = await localTaggedCacheDirectories(root, options.exclude);
+  // Keep the whole-root tar exclusion in serialized baselines. A later marker
+  // removal must not turn this intentionally empty snapshot into an empty tree.
+  if (options.exclude.includes(".") || ignoredPaths.includes(".")) {
+    return { exclude: [...new Set([...options.exclude, "."])], entries: new Map() };
+  }
   return captureDirectorySnapshot(root, { ...options, ignoredPaths });
 }
 

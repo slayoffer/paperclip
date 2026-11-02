@@ -1,5 +1,6 @@
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
-import { localTaggedCacheDirectories, parseTaggedCacheDirectories, taggedCacheScanScript, withTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import { cacheDirectoryTarExcludes, localTaggedCacheDirectories, parseTaggedCacheDirectories, taggedCacheScanScript, withTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import { workspacePaths } from "./workspace-manifest.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -99,6 +100,7 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   onProgress?: RuntimeProgressSink;
   repositories?: Array<{ path: string; baselineSnapshot?: DirectorySnapshot }>;
 }): Promise<void> {
+  if (input.baselineSnapshot?.exclude.includes(".")) return;
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
   const repositories = input.repositories ?? [];
   for (const repository of repositories) {
@@ -153,9 +155,14 @@ async function restoreWorkspaceRootFromSsh(input: {
   hasProjectRepositories?: boolean;
 }): Promise<void> {
   const remoteDir = input.remoteDir;
+  if (input.baselineSnapshot?.exclude.includes(".")) return;
+  const scanExclude = [
+    ...(input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES]),
+    ...cacheDirectoryTarExcludes([...workspacePaths(input.baselineSnapshot?.ignoredPaths ?? [])]),
+  ];
   const tagged = [...new Set([
-    ...await localTaggedCacheDirectories(input.localDir),
-    ...parseTaggedCacheDirectories((await runSshScript(input.spec, taggedCacheScanScript(remoteDir), {
+    ...await localTaggedCacheDirectories(input.localDir, scanExclude),
+    ...parseTaggedCacheDirectories((await runSshScript(input.spec, taggedCacheScanScript(remoteDir, scanExclude), {
       timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
     })).stdout),
   ])];

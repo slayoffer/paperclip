@@ -66,7 +66,7 @@ export async function syncDirectoryToSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
-  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(input.localDir) : [];
+  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(input.localDir, input.exclude) : [];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
