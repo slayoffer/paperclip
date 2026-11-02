@@ -435,6 +435,7 @@ export async function transportGitWorkspaceToSsh(input: {
     localDir: input.localDir,
     remoteDir: input.remoteDir,
     exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.exclude ?? [])],
+    excludeTaggedCaches: true,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   }));

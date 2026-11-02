@@ -9,18 +9,24 @@ function pathContainsSegmentOrDescendant(relative: string, segment: string): boo
     relative.includes(`/${segment}/`);
 }
 
-export function excludePatternMatches(relative: string, pattern: string): boolean {
+export function parseExcludePattern(pattern: string): { scope: "segment" | "descendants" | "path"; value: string } {
   if (pattern.startsWith("*/") && pattern.endsWith("/*")) {
-    return pathContainsSegmentOrDescendant(relative, pattern.slice(2, -2));
+    return { scope: "segment", value: pattern.slice(2, -2) };
   }
   if (pattern.startsWith("*/")) {
-    return pathContainsSegmentOrDescendant(relative, pattern.slice(2));
+    return { scope: "segment", value: pattern.slice(2) };
   }
   if (pattern.endsWith("/*")) {
-    const base = pattern.slice(0, -2);
-    return relative.startsWith(`${base}/`);
+    return { scope: "descendants", value: pattern.slice(0, -2) };
   }
-  return isRelativePathOrDescendant(relative, pattern);
+  return { scope: "path", value: pattern };
+}
+
+export function excludePatternMatches(relative: string, pattern: string): boolean {
+  const { scope, value } = parseExcludePattern(pattern);
+  if (scope === "segment") return pathContainsSegmentOrDescendant(relative, value);
+  if (scope === "descendants") return relative.startsWith(`${value}/`);
+  return isRelativePathOrDescendant(relative, value);
 }
 
 export function shouldExcludePath(relative: string, exclude: readonly string[]): boolean {

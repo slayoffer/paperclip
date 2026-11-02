@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { cacheDirectoryTarExcludes, localTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import type { WorkspacePaths } from "./workspace-manifest.js";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -60,10 +62,15 @@ export async function syncDirectoryToSsh(input: {
   localDir: string;
   remoteDir: string;
   exclude?: string[];
+  excludeTaggedCaches?: boolean;
+  cacheScan?: { exclude: readonly string[]; ignoredPaths?: WorkspacePaths };
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
+  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(
+    input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths,
+  ) : [];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
@@ -85,7 +92,7 @@ export async function syncDirectoryToSsh(input: {
       label: input.progressLabel,
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
-        exclude: input.exclude,
+        exclude: [...(input.exclude ?? []), ...tagged],
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
@@ -98,7 +105,7 @@ export async function syncDirectoryToSsh(input: {
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...tarExcludeArgs(input.exclude),
+      ...tarExcludeArgs([...(input.exclude ?? []), ...cacheDirectoryTarExcludes(tagged)]),
       "-cf",
       "-",
       ".",
@@ -188,6 +195,7 @@ export async function syncDirectoryFromSsh(input: {
   remoteDir: string;
   localDir: string;
   exclude?: string[];
+  excludedCacheDirectories?: string[];
   preserveLocalEntries?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
@@ -196,7 +204,8 @@ export async function syncDirectoryFromSsh(input: {
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
   const remoteTarScript = [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs([...(input.exclude ?? []),
+      ...cacheDirectoryTarExcludes(input.excludedCacheDirectories ?? [])]).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
@@ -300,6 +309,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+        ignoredPaths: input.excludedCacheDirectories,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }
