@@ -420,6 +420,7 @@ export async function transportGitWorkspaceToSsh(input: {
   remoteDir: string;
   snapshot: LocalGitWorkspaceSnapshot;
   exclude?: string[];
+  skippedPaths?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
 }): Promise<void> {
@@ -430,11 +431,24 @@ export async function transportGitWorkspaceToSsh(input: {
     snapshot: input.snapshot,
     onProgress: input.onProgress,
   }));
+  if (input.skippedPaths?.length) {
+    // Missing excluded files must not become deletions in the agent's next commit.
+    await runSshScript(input.spec, [
+      "set -e",
+      `cd ${shellQuote(input.remoteDir)}`,
+      'skip_index=$(mktemp)',
+      'trap \'rm -f "$skip_index"\' EXIT',
+      `git --literal-pathspecs ls-files -z -- ${input.skippedPaths.map(shellQuote).join(" ")} > "$skip_index"`,
+      'git update-index --skip-worktree -z --stdin < "$skip_index"',
+    ].join("\n"), { timeoutMs: 30_000, maxBuffer: 256 * 1024 });
+    await removeDeletedPathsOnSsh({ spec: input.spec, remoteDir: input.remoteDir, deletedPaths: input.skippedPaths });
+  }
   await timeWorkspaceStep(input.onProgress, "Workspace sync", () => syncDirectoryToSsh({
     spec: input.spec,
     localDir: input.localDir,
     remoteDir: input.remoteDir,
     exclude: [".git", ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.exclude ?? [])],
+    literalExclude: input.skippedPaths,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
   }));

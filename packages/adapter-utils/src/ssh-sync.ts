@@ -47,8 +47,32 @@ export async function removeDeletedPathsOnSsh(input: {
   deletedPaths: string[];
 }): Promise<void> {
   if (input.deletedPaths.length === 0) return;
+  for (const entry of input.deletedPaths) {
+    if (entry.includes("\0") || entry.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Invalid workspace removal path: ${JSON.stringify(entry)}`);
+    }
+  }
   const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
-  const script = `cd ${shellQuote(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
+  // Git import can restore a committed symlink where the local overlay has a
+  // directory. Never remove a child through that link before copying the overlay.
+  const script = [
+    "set -e",
+    `cd ${shellQuote(input.remoteDir)}`,
+    `for entry in ${quotedPaths}; do`,
+    '  ancestor=.',
+    '  remaining="$entry"',
+    '  safe=1',
+    '  while [ "${remaining#*/}" != "$remaining" ]; do',
+    '    ancestor="$ancestor/${remaining%%/*}"',
+    '    remaining="${remaining#*/}"',
+    '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
+    '      safe=0',
+    '      break',
+    '    fi',
+    '  done',
+    '  if [ "$safe" = 1 ]; then rm -rf -- "./$entry"; fi',
+    'done',
+  ].join("\n");
   await runSshScript(input.spec, script, {
     timeoutMs: 30_000,
     maxBuffer: 256 * 1024,
@@ -60,6 +84,7 @@ export async function syncDirectoryToSsh(input: {
   localDir: string;
   remoteDir: string;
   exclude?: string[];
+  literalExclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
@@ -86,6 +111,7 @@ export async function syncDirectoryToSsh(input: {
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
         exclude: input.exclude,
+        literalExclude: input.literalExclude,
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
@@ -98,7 +124,7 @@ export async function syncDirectoryToSsh(input: {
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...tarExcludeArgs(input.exclude),
+      ...tarExcludeArgs(input.exclude, input.literalExclude),
       "-cf",
       "-",
       ".",
@@ -188,6 +214,7 @@ export async function syncDirectoryFromSsh(input: {
   remoteDir: string;
   localDir: string;
   exclude?: string[];
+  literalExclude?: string[];
   preserveLocalEntries?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
@@ -196,7 +223,7 @@ export async function syncDirectoryFromSsh(input: {
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
   const remoteTarScript = [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs(input.exclude, input.literalExclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
@@ -300,6 +327,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+        ignoredPaths: input.literalExclude,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

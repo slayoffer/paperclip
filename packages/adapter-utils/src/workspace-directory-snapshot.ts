@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createWorkspaceManifest, WorkspaceManifestMap, type PathManifest, type WorkspacePaths } from "./workspace-manifest.js";
+import { createWorkspaceManifest, workspacePaths, WorkspaceManifestMap, type PathManifest, type WorkspacePaths } from "./workspace-manifest.js";
 import { hashWorkspaceFile } from "./workspace-file-hasher.js";
 import { scanWorkspaceSnapshot } from "./workspace-snapshot-worker-client.js";
 
@@ -206,15 +206,22 @@ export async function captureDirectorySnapshot(
 /** A disk-backed subset for independent nested-repository merges. */
 export async function selectDirectorySnapshot(snapshot: DirectorySnapshot, options: {
   prefix?: string; omit?: string[]; exclude: string[]; ignoredPaths?: WorkspacePaths;
+  additionalIgnoredPaths?: readonly string[];
 }): Promise<DirectorySnapshot> {
   const writer = await createWorkspaceManifest("paperclip-workspace-baseline-");
   try {
+    let ignoredPaths = options.ignoredPaths;
+    if (options.additionalIgnoredPaths?.length) {
+      for (const relative of workspacePaths(ignoredPaths ?? [])) writer.add("ignored", relative);
+      for (const relative of options.additionalIgnoredPaths) writer.add("ignored", relative);
+      ignoredPaths = writer.paths("ignored");
+    }
     for (const [relative, entry] of snapshot.entries) {
       if (options.prefix && !relative.startsWith(options.prefix)) continue;
       if (options.omit?.some((omit) => relative === omit || relative.startsWith(`${omit}/`))) continue;
       writer.add("baseline", options.prefix ? relative.slice(options.prefix.length) : relative, JSON.stringify(entry));
     }
-    const result: DirectorySnapshot = { exclude: options.exclude, ignoredPaths: options.ignoredPaths,
+    const result: DirectorySnapshot = { exclude: options.exclude, ignoredPaths,
       entries: new WorkspaceManifestMap(writer.paths("baseline"), parseManifestEntry) };
     writer.close();
     ownedDirectorySnapshots.set(result, path.dirname(writer.filePath));
