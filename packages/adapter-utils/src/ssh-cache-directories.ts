@@ -2,29 +2,46 @@ import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { shellQuote } from "./ssh-config.js";
-import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
-import { shouldExcludePath } from "./exclude-patterns.js";
+import { parseExcludePattern, shouldExcludePath } from "./exclude-patterns.js";
 import { workspacePaths, workspacePathMatcher, type WorkspacePaths } from "./workspace-manifest.js";
 import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-directory-snapshot.js";
 
 const exec = promisify(execFile);
 
-// Only fixed cache names and metadata roots can enter this command. Caller
-// exclusions stay in TypeScript, so a large Git ignore list cannot exceed argv.
-export function taggedCacheScanScript(root: string, exclude: readonly string[] = []): string {
-  // In the shared matcher, '*/' patterns exclude a segment at every depth.
-  // Root-relative names must not prune nested directories with the same name.
-  const globalPatterns = exclude.filter((pattern) => pattern.startsWith("*/"));
-  const prune = SSH_WORKSPACE_EXCLUDES.filter((name) => !name.includes("/") && shouldExcludePath(name, globalPatterns))
-    .map((name) => `-name ${shellQuote(name)}`);
-  for (const relative of [".git", ".paperclip-runtime"]) {
-    if (shouldExcludePath(relative, exclude)) prune.push(`-path ${shellQuote(`./${relative}`)}`);
+// Send this script through stdin, never argv. POSIX find cannot read prune
+// patterns from a file; shell builtins avoid both argv limits and a process
+// per directory. Compile the shared matcher's scopes, quoting literal values.
+export function taggedCacheScanScript(
+  root: string, exclude: readonly string[] = [], ignoredPaths?: WorkspacePaths,
+): string {
+  const prune = exclude.map((pattern) => {
+    const { scope, value } = parseExcludePattern(pattern);
+    const literal = shellQuote(value);
+    if (scope === "segment") return `${literal}|${literal}/*|*/${literal}|*/${literal}/*`;
+    if (scope === "descendants") return `${literal}/*`;
+    return `${literal}|${literal}/*`;
+  });
+  for (const relative of workspacePaths(ignoredPaths ?? [])) {
+    const literal = shellQuote(relative);
+    prune.push(`${literal}|${literal}/*`);
   }
-  return `cd ${shellQuote(root)} && find . ` +
-    (prune.length ? `-type d \\( ${prune.join(" -o ")} \\) -prune -o ` : "") +
-    "-type d -exec test -f '{}/CACHEDIR.TAG' \\; -exec printf 'T%s\\0' {} \\; -prune -o " +
-    "-type d \\( ! -exec test -r {} \\; -o ! -exec test -x {} \\; \\) " +
-    "-exec printf 'U%s\\0' {} \\; -prune";
+  return `set -e
+cache_scan_excluded() {
+  ${prune.length ? `case "$1" in ${prune.join("|")}) return 0 ;; esac` : ""}
+  return 1
+}
+cache_scan_walk() {
+  if cache_scan_excluded "${"${1#./}"}"; then return; fi
+  if [ -f "$1/CACHEDIR.TAG" ]; then printf 'T%s\\0' "$1"; return; fi
+  if [ ! -r "$1" ] || [ ! -x "$1" ]; then printf 'U%s\\0' "$1"; return; fi
+  for cache_scan_entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -d "$cache_scan_entry" ] && [ ! -L "$cache_scan_entry" ] || continue
+    cache_scan_walk "$cache_scan_entry" || return
+  done
+}
+cd ${shellQuote(root)}
+cache_scan_walk .
+`;
 }
 
 export function parseTaggedCacheDirectories(
@@ -55,9 +72,15 @@ export async function localTaggedCacheDirectories(
     throw error;
   });
   if (!exists) return [];
-  const { stdout } = await exec("sh", ["-c", taggedCacheScanScript(root, exclude)], {
+  const script = taggedCacheScanScript(root, exclude, ignoredPaths);
+  const scan = exec("sh", ["-s"], {
     maxBuffer: 16 * 1024 * 1024,
   });
+  let stdinError: Error | undefined;
+  scan.child.stdin!.on("error", (error: Error) => { stdinError = error; });
+  scan.child.stdin!.end(script);
+  const { stdout } = await scan;
+  if (stdinError) throw stdinError;
   return parseTaggedCacheDirectories(stdout, exclude, ignoredPaths);
 }
 

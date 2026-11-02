@@ -39,14 +39,15 @@ matcher and literal ignored-path matcher as baseline capture and restore.
 For example, `workspaceExclude: ["cache"]` excludes the root `cache` directory.
 A tag in `nested/cache` still enters the baseline's protected paths.
 
-The scan prunes tagged directories and fixed cache names that the shared
-matcher excludes at every depth. It reports other tags and unreadable
-directories as NUL-delimited records. TypeScript filters these records with
-the caller's exclusions, including `workspaceExclude`, referenced-project
-`vendor`, and resolved Git ignore paths. An excluded unreadable directory
-does not abort sync. An unreadable directory outside those exclusions does.
-Other scan failures still stop sync. Caller exclusion lists stay in TypeScript
-and never expand the scan's command-line arguments.
+The scan prunes caller exclusions before it reads directory contents. It uses
+the shared matcher's scopes for `workspaceExclude`, referenced-project `vendor`,
+and fixed cache names, plus literal resolved Git ignore paths. A POSIX shell
+walk uses built-in commands, without a separate process for each directory.
+The script and quoted exclusions travel through stdin on both sides; they
+never expand command-line arguments. It reports tags and unreadable directories
+as NUL-delimited records, which TypeScript checks with the same matchers.
+An excluded unreadable directory does not abort sync. An unreadable directory
+outside those exclusions does. Other scan failures still stop sync.
 
 These rules cover Git-backed workspaces, linked Git worktrees, plain folders,
 and `workspaceFileMode: "all"`. Referenced projects use the same list during

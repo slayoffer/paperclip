@@ -10,7 +10,7 @@ import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithB
 import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshRemoteExecutionSpec } from "./ssh-config.js";
-import { runLocalGit, runSshScript } from "./ssh-command.js";
+import { runLocalGit, runSshCommand } from "./ssh-command.js";
 import { clearRemoteDirectory, syncDirectoryToSsh, syncDirectoryFromSsh } from "./ssh-sync.js";
 import {
   readLocalGitWorkspaceSnapshot,
@@ -159,7 +159,8 @@ async function restoreWorkspaceRootFromSsh(input: {
   const scanIgnored = input.baselineSnapshot?.ignoredPaths;
   const tagged = [...new Set([
     ...await localTaggedCacheDirectories(input.localDir, scanExclude, scanIgnored),
-    ...parseTaggedCacheDirectories((await runSshScript(input.spec, taggedCacheScanScript(remoteDir, scanExclude), {
+    ...parseTaggedCacheDirectories((await runSshCommand(input.spec, "sh -s", {
+      stdin: taggedCacheScanScript(remoteDir, scanExclude, scanIgnored),
       timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
     })).stdout, scanExclude, scanIgnored),
   ])];
