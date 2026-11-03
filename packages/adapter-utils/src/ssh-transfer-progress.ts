@@ -47,6 +47,7 @@ export async function estimateLocalDirSize(input: {
   literalExclude?: string[];
   followSymlinks?: boolean;
 }): Promise<number> {
+  if (input.exclude?.includes(".") || input.literalExclude?.includes(".")) return 0;
   const regexes = ["._*", ...(input.exclude ?? [])].map(tarPatternToRegExp);
   const isExcluded = (relPath: string, base: string) =>
     regexes.some((regex) => regex.test(relPath) || regex.test(base)) ||

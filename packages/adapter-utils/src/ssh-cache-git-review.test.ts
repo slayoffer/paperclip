@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh.js";
 import { readLocalGitWorkspaceSnapshot, transportGitWorkspaceToSsh } from "./ssh-git.js";
+import { estimateLocalDirSize } from "./ssh-transfer-progress.js";
 import { removeDeletedPathsOnSsh } from "./ssh-sync.js";
 
 const exec = promisify(execFile);
@@ -55,9 +56,9 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     expect(await readdir(local)).toEqual(["source.txt"]);
   });
 
-  it.each(["target", "."])("omits committed tagged cache %s from the remote working tree", async (directory) => {
+  it.each(["target", ".", "__pycache__", ".venv", ".pnpm-store"])("omits committed tagged cache %s from the remote working tree", async (directory) => {
     await repository();
-    await put(local, `${directory}/CACHEDIR.TAG`, "");
+    if (directory !== ".pnpm-store") await put(local, `${directory}/CACHEDIR.TAG`, "");
     await put(local, `${directory}/data`);
     await git(local, "add", ".");
     await git(local, "commit", "-m", "Commit tagged cache");
@@ -77,6 +78,13 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     await transportGitWorkspaceToSsh({ spec: spec(), localDir: local, remoteDir: remote,
       snapshot: snapshot!, skippedPaths: largePaths(), progressLabel: "workspace" });
     expect(await readFile(path.join(remote, "source.txt"), "utf8")).toBe("keep");
+  });
+
+  it.each(["literal", "pattern"])("does not estimate content under a %s whole-root exclusion", async (kind) => {
+    await put(local, "nested/data", "excluded cache bytes");
+    expect(await estimateLocalDirSize({ localDir: local,
+      ...(kind === "literal" ? { literalExclude: ["."] } : { exclude: ["."] }),
+    })).toBe(0);
   });
 
   it("removes large literal path lists through stdin", async () => {
