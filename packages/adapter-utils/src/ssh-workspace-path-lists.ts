@@ -40,6 +40,7 @@ export function workspacePathWalkScript(input: {
   literal: readonly string[];
   followSymlinks?: boolean;
   scratchPatterns?: readonly string[];
+  pruneTaggedCaches?: boolean;
 }): string {
   const literalCases = input.literal.map((entry) => shellQuote(entry)).join("|");
   const scan = input.scratchPatterns !== undefined;
@@ -74,6 +75,7 @@ workspace_path_cycle() {
 }
 workspace_path_walk() {
   if ${scan ? '[ "$1" != . ] && ' : ""}workspace_path_excluded "$1"; then return; fi
+  ${input.pruneTaggedCaches ? 'if [ -f "$1/CACHEDIR.TAG" ]; then return; fi' : ""}
   ${scan ? `
   [ -d "$1" ] && [ ! -L "$1" ] || return 0
   if [ "$1" != . ]; then

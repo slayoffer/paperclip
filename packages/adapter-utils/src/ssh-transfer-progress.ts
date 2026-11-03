@@ -15,7 +15,7 @@ import { isRelativePathOrDescendant } from "./exclude-patterns.js";
 
 export function tarExcludeArgs(exclude: string[] | undefined, literalExclude: string[] = []): string[] {
   const combined = ["._*", ...(exclude ?? []),
-    ...literalExclude.map((entry) => `./${entry.replace(/[\\*?[\]]/g, "\\$&")}`)];
+    ...literalExclude.map((entry) => entry === "." ? "." : `./${entry.replace(/[\\*?[\]]/g, "\\$&")}`)];
   return combined.flatMap((entry) => ["--exclude", entry]);
 }
 
@@ -47,6 +47,7 @@ export async function estimateLocalDirSize(input: {
   literalExclude?: string[];
   followSymlinks?: boolean;
 }): Promise<number> {
+  if (input.exclude?.includes(".") || input.literalExclude?.includes(".")) return 0;
   const regexes = ["._*", ...(input.exclude ?? [])].map(tarPatternToRegExp);
   const isExcluded = (relPath: string, base: string) =>
     regexes.some((regex) => regex.test(relPath) || regex.test(base)) ||

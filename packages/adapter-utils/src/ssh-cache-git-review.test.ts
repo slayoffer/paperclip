@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh.js";
 import { readLocalGitWorkspaceSnapshot, transportGitWorkspaceToSsh } from "./ssh-git.js";
+import { estimateLocalDirSize } from "./ssh-transfer-progress.js";
 import { removeDeletedPathsOnSsh, syncDirectoryFromSsh, syncDirectoryToSsh } from "./ssh-sync.js";
 import { captureDirectorySnapshot } from "./workspace-directory-snapshot.js";
 import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
@@ -58,6 +59,21 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     expect(await readdir(local)).toEqual(["source.txt"]);
   });
 
+  it.each(["target", ".", "__pycache__", ".venv", ".pnpm-store"])("omits committed tagged cache %s from the remote working tree", async (directory) => {
+    await repository();
+    if (directory !== ".pnpm-store") await put(local, `${directory}/CACHEDIR.TAG`, "");
+    await put(local, `${directory}/data`);
+    await git(local, "add", ".");
+    await git(local, "commit", "-m", "Commit tagged cache");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    await expect(readFile(path.join(remote, directory, "data"))).rejects.toMatchObject({ code: "ENOENT" });
+    if (directory === ".") expect((await readdir(remote)).sort()).toEqual([".git", ".paperclip-runtime"]);
+    await put(remote, "new-source.txt", "new");
+    await git(remote, "add", "-A");
+    await git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Remote change");
+    expect(await git(remote, "show", `HEAD:${directory === "." ? "" : `${directory}/`}data`)).toBe("keep");
+  });
+
   it("preserves a nested clone whose name matches a root exclusion", async () => {
     vi.stubEnv("PAPERCLIP_HOME", path.join(root, "home"));
     await put(local, "source.txt");
@@ -80,6 +96,13 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     await transportGitWorkspaceToSsh({ spec: spec(), localDir: local, remoteDir: remote,
       snapshot: snapshot!, skippedPaths: largePaths(), progressLabel: "workspace" });
     expect(await readFile(path.join(remote, "source.txt"), "utf8")).toBe("keep");
+  });
+
+  it.each(["literal", "pattern"])("does not estimate content under a %s whole-root exclusion", async (kind) => {
+    await put(local, "nested/data", "excluded cache bytes");
+    expect(await estimateLocalDirSize({ localDir: local,
+      ...(kind === "literal" ? { literalExclude: ["."] } : { exclude: ["."] }),
+    })).toBe(0);
   });
 
   it("removes large literal path lists through stdin", async () => {
