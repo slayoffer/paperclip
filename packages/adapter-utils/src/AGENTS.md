@@ -11,3 +11,10 @@ A request remains pending until the gateway reads a complete response or the req
 An old modification time does not prove that a request with a future deadline is stale.
 Retain the worker completion guard until acknowledgement removes the pending entry.
 Otherwise, delayed file removal can repeat a completed mutation.
+
+## SSH cache restore
+
+Check workspace root cache markers before restoring nested project repositories.
+A marker can appear after baseline capture. Child scans cannot see that marker.
+Send restore archive commands through stdin. Large exclusion lists can exceed
+the operating system limit for one SSH command argument.

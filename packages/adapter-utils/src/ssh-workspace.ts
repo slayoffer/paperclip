@@ -120,6 +120,8 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   ) {
     throw new Error(`Workspace baseline must exclude ${PROJECT_REPOSITORIES_DIR} when project repositories are restored separately`);
   }
+  const taggedCacheDirectories = await readWorkspaceTaggedDirectories({ ...input, remoteDir });
+  if (taggedCacheDirectories.includes(".")) return;
   for (const repository of repositories) {
     await restoreWorkspaceRootFromSsh({
       spec: input.spec,
@@ -140,7 +142,25 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
     onProgress: input.onProgress,
     progressLabel: "workspace",
     hasProjectRepositories: repositories.length > 0,
+    taggedCacheDirectories,
   });
+}
+
+async function readWorkspaceTaggedDirectories(input: {
+  spec: SshRemoteExecutionSpec;
+  localDir: string;
+  remoteDir: string;
+  baselineSnapshot?: DirectorySnapshot;
+}): Promise<string[]> {
+  const scanExclude = input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES];
+  const scanIgnored = input.baselineSnapshot?.ignoredPaths;
+  return [...new Set([
+    ...await localTaggedCacheDirectories(input.localDir, scanExclude, scanIgnored),
+    ...parseTaggedCacheDirectories((await runSshCommand(input.spec, "sh -s", {
+      stdin: taggedCacheScanScript(input.remoteDir, scanExclude, scanIgnored),
+      timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
+    })).stdout, scanExclude, scanIgnored),
+  ])];
 }
 
 async function restoreWorkspaceRootFromSsh(input: {
@@ -152,18 +172,11 @@ async function restoreWorkspaceRootFromSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
   hasProjectRepositories?: boolean;
+  taggedCacheDirectories?: string[];
 }): Promise<void> {
   const remoteDir = input.remoteDir;
   if (input.baselineSnapshot?.exclude.includes(".")) return;
-  const scanExclude = input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES];
-  const scanIgnored = input.baselineSnapshot?.ignoredPaths;
-  const tagged = [...new Set([
-    ...await localTaggedCacheDirectories(input.localDir, scanExclude, scanIgnored),
-    ...parseTaggedCacheDirectories((await runSshCommand(input.spec, "sh -s", {
-      stdin: taggedCacheScanScript(remoteDir, scanExclude, scanIgnored),
-      timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
-    })).stdout, scanExclude, scanIgnored),
-  ])];
+  const tagged = input.taggedCacheDirectories ?? await readWorkspaceTaggedDirectories(input);
   if (tagged.includes(".")) return;
   // Direct Git restores need the same preflight as managed restores. Fetching
   // objects is safe, but resetting the working tree would remove excluded data.

@@ -65,6 +65,10 @@ local changes or Git history integration.
 For a tagged workspace root, the baseline records the whole-root `.` exclusion.
 Restore skips that workspace before any scan, transfer, or history integration.
 This state survives baseline serialization and removal of the local marker.
+Restore also checks current root markers before it restores nested project repositories.
+A marker added after preparation protects the root and its nested repositories.
+The restore archive command travels through stdin. Large cache exclusion lists
+do not become one SSH command-line argument.
 
 The tests in `packages/adapter-utils/src/ssh-cache-excludes.test.ts` run real
 Git and tar through a local SSH substitute. On base `b411be160`, ignored

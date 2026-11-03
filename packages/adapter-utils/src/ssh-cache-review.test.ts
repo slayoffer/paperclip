@@ -147,6 +147,36 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     expect(await readFile(path.join(local, "nested/cache/CACHEDIR.TAG"), "utf8")).toBe("");
   });
 
+  it.each(["local", "remote"])("protects nested repositories when the %s root gains a tag", async (side) => {
+    const repository = ".paperclip-repositories/child";
+    await put(local, `${repository}/data`);
+    const baselineSnapshot = await captureSshWorkspaceSnapshot(local, { exclude: [".paperclip-repositories"] });
+    const repositoryBaseline = await captureSshWorkspaceSnapshot(path.join(local, repository), { exclude: [] });
+    await put(remote, `${repository}/data`, "remote");
+    await put(side === "local" ? local : remote, "CACHEDIR.TAG", "");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot,
+      repositories: [{ path: repository, baselineSnapshot: repositoryBaseline }],
+    });
+    expect(await readFile(path.join(local, `${repository}/data`), "utf8")).toBe("keep");
+  });
+
+  it("restores with cache exclusions larger than one process argument", async () => {
+    await put(local, "source.txt");
+    const prepared = await prepare();
+    const directories = Array.from({ length: 2000 }, (_, index) =>
+      `cache-${String(index).padStart(4, "0")}-${"x".repeat(70)}`);
+    expect(directories.reduce((bytes, name) => bytes + Buffer.byteLength(name), 0)).toBeGreaterThan(131_072);
+    for (let offset = 0; offset < directories.length; offset += 100) {
+      await Promise.all(directories.slice(offset, offset + 100).map((name) =>
+        put(prepared.workspaceRemoteDir, `${name}/CACHEDIR.TAG`, "")));
+    }
+    await put(prepared.workspaceRemoteDir, `${directories[0]}/data`, "cache");
+    await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+    await prepared.restoreWorkspace();
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    expect((await readdir(local)).sort()).toEqual(["source.txt"]);
+  }, 60_000);
+
   it("uploads a referenced project with 6000 resolved ignore paths", async () => {
     const reference = path.join(root, "reference");
     await put(reference, "source.txt");
