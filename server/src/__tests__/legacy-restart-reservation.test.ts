@@ -45,6 +45,19 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await holds(companyId, runId)).toHaveLength(1);
   });
 
+  it("admits provider work only once for a restart claim", async () => {
+    const { companyId, runId } = await dispatchedRun({ outcome: "resuming", attempt: 1, sessionId });
+    const results = await Promise.allSettled([
+      reserveRunBudget(db, companyId, runId, null, {}, undefined, sessionId),
+      reserveRunBudget(db, companyId, runId, null, {}, undefined, sessionId),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    await expect(reserveRunBudget(db, companyId, runId, null, {}, undefined, sessionId))
+      .rejects.toThrow("Provider dispatch has already reserved this run");
+    expect(await holds(companyId, runId)).toHaveLength(1);
+  });
+
   it.each([
     ["no restart claim", null, sessionId, undefined],
     ["a claim for another session", { outcome: "resuming", attempt: 1, sessionId: randomUUID() }, sessionId, undefined],

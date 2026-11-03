@@ -47,6 +47,12 @@ An expired lease permits a restart claim. It does not permit the sweeper to remo
 Check new ownership evidence in the terminal write as well as the initial read.
 Measured 2026-10-26 (VLAT): sweeping first interrupted six checkpointed runs and prevented their restart claims.
 
+SSH restart recovery retains an active lease and its filesystem lock across shutdown.
+Confirm remote termination before releasing that exact lease and lock for a new acquisition.
+Otherwise in-place realization falls back to copy mode and changes the provider session identity.
+Measured 2026-11-03 (VLAT): the loopback SSH Codex restart test failed with `restart_session_identity_changed`.
+Consume budget admission once per restart claim, and clear the previous finalization deadline when claiming recovery.
+
 ## Pull queue stops
 
 Record an explicit backlog disposition with its parking receipt in the issue transaction.

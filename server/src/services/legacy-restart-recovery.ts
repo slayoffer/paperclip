@@ -182,7 +182,7 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
         ["done", "cancelled"].includes(issue.status)) return null;
     const [claimed] = await tx.update(heartbeatRuns).set({
       ...legacyControllerClaim("legacy"), processPid: null, processGroupId: null, processStartedAt: null,
-      error: null, errorCode: null,
+      error: null, errorCode: null, executionControlDeadlineAt: null,
       resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
         restartCheckpoint: { ...checkpoint, providerStopped: false, workspaceSettled: false },
         restartRecovery: { outcome: "resuming", attempt: attempts + 1, sessionId: checkpoint.sessionParams.sessionId },

@@ -23,3 +23,6 @@ server/src/__tests__/execution-workspaces-service.test.ts
 
 # Keep lifecycle guard and destruction callbacks in the existing service gateway.
 server/src/services/execution-workspaces.ts
+
+# The existing recovery dispatcher retains its native-blocker check before timer exemption.
+server/src/services/recovery/service.ts
