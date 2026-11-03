@@ -53,3 +53,7 @@ Git checkout precedes the file overlay. Remove tagged caches and fixed generated
 For a tagged root, retain Git metadata and runtime files while removing working-tree content.
 Upload size estimation must return zero for a whole-root exclusion before it reads directory contents.
 Combine saved baseline paths with the current policy exclusions before every scan, including consecutive local and remote scans.
+An absent local restore destination has no exclusions. Continue restore so it can create the directory.
+Send scripts with discovered path lists through stdin. Large lists can exceed the SSH argument limit.
+Stdin does not remove child-process argument limits. Batch Git pathspecs and use NUL file lists for large tar inputs.
+Prune retained policy exclusions before every discovery pass, including after clone markers disappear.

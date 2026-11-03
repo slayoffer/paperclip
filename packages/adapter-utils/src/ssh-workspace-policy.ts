@@ -5,6 +5,7 @@ import { shellQuote, type SshConnectionConfig } from "./ssh-config.js";
 import { runSshCommand } from "./ssh-command.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
 import { workspacePaths, type WorkspacePaths } from "./workspace-manifest.js";
+import { workspacePathWalkScript } from "./ssh-workspace-path-lists.js";
 
 const exec = promisify(execFile);
 
@@ -23,21 +24,6 @@ export function createSshWorkspaceSyncPolicy(): SshWorkspaceSyncPolicy {
     throw new Error("PAPERCLIP_SSH_SCRATCH_PATTERNS must be a JSON array of directory name patterns");
   }
   return { patterns, excluded: new Map(), logged: new Set(), sizeTimeoutMs: 5_000 };
-}
-
-// Both ends use the same POSIX tools. NUL records preserve spaces and newlines.
-function scanScript(root: string, exclude: string[], patterns: string[], ignoredPaths?: WorkspacePaths): string {
-  const ignored = [
-    ...[".git", "._*", ...exclude].map((pattern) => pattern.includes("/")
-      ? `-path ${shellQuote(`./${pattern}`)}` : `-name ${shellQuote(pattern)}`),
-    ...[...workspacePaths(ignoredPaths ?? [])].map((relative) =>
-      `-path ${shellQuote(`./${relative.replace(/([\\*?\[\]])/g, "\\$1")}`)}`),
-  ].join(" -o ");
-  const scratch = patterns.map((pattern) => `-name ${shellQuote(pattern)} -o `).join("");
-  return `cd ${shellQuote(root)} || exit $?; [ ! -f CACHEDIR.TAG ] || exit 0; find . -mindepth 1 \\( ${ignored} \\) -prune -o `
-    + `-type d -exec test -f '{}/CACHEDIR.TAG' \\; -prune -o `
-    + `-type d \\( ${scratch}-exec test -e '{}/.git' \\; -o -exec test -L '{}/.git' \\; \\) `
-    + `-prune -print0`;
 }
 
 async function runPolicyScript(
@@ -69,10 +55,15 @@ export async function sshWorkspaceExcludes(input: {
     });
     if (!exists) return input.exclude;
   }
-  const ignoredPaths = [...new Set([
-    ...workspacePaths(input.ignoredPaths ?? []), ...(input.policy.excluded.get(input.localDir) ?? []),
-  ])];
-  const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, ignoredPaths);
+  const script = workspacePathWalkScript({
+    root: input.remote?.dir ?? input.localDir,
+    exclude: [".git", ...input.exclude],
+    literal: [...new Set([
+      ...workspacePaths(input.ignoredPaths ?? []), ...(input.policy.excluded.get(input.localDir) ?? []),
+    ])],
+    scratchPatterns: input.policy.patterns,
+    pruneTaggedCaches: true,
+  });
   const result = await runPolicyScript(script, 60_000, input.remote);
   const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));
   input.policy.excluded.set(input.localDir, [...new Set([

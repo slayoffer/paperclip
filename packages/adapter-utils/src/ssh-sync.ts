@@ -10,6 +10,7 @@ import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } fro
 import { createSshAuthArgs, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
+import { localWorkspaceTarList, needsWorkspacePathFile, workspaceTarScript } from "./ssh-workspace-path-lists.js";
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
   await fs.mkdir(targetDir, { recursive: true });
@@ -97,6 +98,7 @@ export async function syncDirectoryToSsh(input: {
   const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(
     input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths ?? input.literalExclude,
   ) : [];
+  const literalExclude = [...(input.literalExclude ?? []), ...tagged];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
@@ -119,23 +121,28 @@ export async function syncDirectoryToSsh(input: {
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
         exclude: input.exclude,
-        literalExclude: [...(input.literalExclude ?? []), ...tagged],
+        literalExclude,
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
     })
     : null;
 
+  let pathList: Awaited<ReturnType<typeof localWorkspaceTarList>> | undefined;
   try {
+    if (needsWorkspacePathFile(input.exclude, literalExclude)) {
+      pathList = await localWorkspaceTarList({ root: input.localDir, exclude: input.exclude ?? [],
+        literal: literalExclude, followSymlinks: input.followSymlinks });
+    }
     await new Promise<void>((resolve, reject) => {
     const tarArgs = [
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...tarExcludeArgs(input.exclude, [...(input.literalExclude ?? []), ...tagged]),
+      ...(pathList ? [] : tarExcludeArgs(input.exclude, literalExclude)),
       "-cf",
       "-",
-      ".",
+      ...(pathList ? pathList.args : ["."]),
     ];
     const tar = spawn("tar", tarArgs, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -209,11 +216,14 @@ export async function syncDirectoryToSsh(input: {
       sshExitCode = code;
       maybeFinish();
     });
-    }).finally(auth.cleanup);
+    });
     await progress?.finish();
   } catch (error) {
     await progress?.fail();
     throw error;
+  } finally {
+    await pathList?.cleanup();
+    await auth.cleanup();
   }
 }
 
@@ -229,10 +239,13 @@ export async function syncDirectoryFromSsh(input: {
   progressLabel?: string;
 }): Promise<void> {
   const auth = await createSshAuthArgs(input.spec);
+  const literalExclude = [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])];
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
-  const remoteTarScript = [
+  const remoteTarScript = needsWorkspacePathFile(input.exclude, literalExclude)
+    ? workspaceTarScript({ root: input.remoteDir, exclude: input.exclude ?? [], literal: literalExclude })
+    : [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude, [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])]).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs(input.exclude, literalExclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
@@ -338,7 +351,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
-        ignoredPaths: [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])],
+        ignoredPaths: literalExclude,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

@@ -1,3 +1,4 @@
+import { workspacePathBatches } from "./ssh-workspace-path-lists.js";
 import { shouldExcludePath } from "./exclude-patterns.js";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { shellQuote, type SshRemoteExecutionSpec } from "./ssh-config.js";
@@ -35,7 +36,8 @@ export async function filterGitWorkspaceOnSsh(input: {
     `cd ${shellQuote(input.remoteDir)}`,
     'skip_index=$(mktemp)',
     'trap \'rm -f "$skip_index"\' EXIT',
-    `git --literal-pathspecs ls-files -z -- ${skippedPaths.map(shellQuote).join(" ")} > "$skip_index"`,
+    ...workspacePathBatches(skippedPaths).map((batch) =>
+      `git --literal-pathspecs ls-files -z -- ${batch.map(shellQuote).join(" ")} >> "$skip_index"`),
     'git update-index --skip-worktree -z --stdin < "$skip_index"',
   ].join("\n"), timeoutMs: 30_000, maxBuffer: 256 * 1024 });
   if (skippedPaths.includes(".")) {

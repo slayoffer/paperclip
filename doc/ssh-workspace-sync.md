@@ -119,6 +119,12 @@ A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt
 Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
 Restore scans also retain caller exclusions from the supplied baseline.
 Saved literal exclusions reach the download archive before data enters the staging directory.
+Restore creates an absent local destination after it checks the remote workspace.
+Discovery, index protection, path removal, and download scripts use standard input for large exclusion lists.
+Git index protection uses bounded path batches. Large archives use NUL-delimited input files instead of exclusion arguments.
+The file-list scan prunes exclusions before it reads directories and preserves literal newline names.
+Uploads retain their selected symlink behavior. A followed directory cycle stops the transfer.
+Discovery also prunes exclusions already recorded by the run policy.
 After Git import, removal checks each path ancestor and skips paths below a symlink or a non-directory.
 This protects files outside the workspace when a committed symlink differs from the local directory overlay.
 Removal still deletes a leaf symlink itself and treats names with glob characters literally.
@@ -155,7 +161,8 @@ Run the regression checks with Node.js 24:
 ```sh
 pnpm exec vitest run --no-file-parallelism \
   packages/adapter-utils/src/ssh-download.test.ts \
-  packages/adapter-utils/src/ssh-sync-regressions.test.ts
+  packages/adapter-utils/src/ssh-sync-regressions.test.ts \
+  packages/adapter-utils/src/ssh-cache-git-review.test.ts
 ```
 
 The fork workflow `synthiq-ssh-sync.yml` also checks the existing SSH fixture,
