@@ -230,6 +230,7 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
       const f = await nestedFixture(false);
       const unpushed = await unpushedNestedWork(f.nested.cwd);
+      await fs.chmod(path.join(f.nested.cwd, "draft.md"), 0o750);
       expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "dirty_or_untracked_files" });
       const result = await f.expire({ expireBase: false, restorePoint: restorePoint() });
       expect(result).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
@@ -237,7 +238,7 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       expect(recipe.schema).toBe("paperclip.git-cache-restoration.v2");
       expect(recipe.restorePoint).toBeUndefined();
       expect(recipe.contents.checkouts[0].restorePoint).toMatchObject({ head: unpushed, headOnRemote: false });
-      expect(recipe.contents.checkouts[0].restorePoint.modes.length).toBeGreaterThan(0);
+      expect(recipe.contents.checkouts[0].restorePoint.modes).toContainEqual({ path: "draft.md", mode: 0o750 });
       const savedRestorePoint = recipe.contents.checkouts[0].restorePoint;
       const loadInput = { storage: getStorageService(), workspace: { companyId: f.companyId, id: f.workspaceId } };
       await loadGitRestorePoint({ ...loadInput, ref: savedRestorePoint });
@@ -250,6 +251,7 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
       expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(unpushed);
       expect(await fs.readFile(path.join(f.nested.cwd, "draft.md"), "utf8")).toBe("nested untracked work\n");
+      expect((await fs.stat(path.join(f.nested.cwd, "draft.md"))).mode & 0o777).toBe(0o750);
       expect(await fs.readFile(f.nestedSettingsPath)).toEqual(f.settings);
       vi.unstubAllEnvs();
     });
