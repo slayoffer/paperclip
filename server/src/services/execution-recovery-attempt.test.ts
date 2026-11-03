@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import { accountingForScheduledRetry, executionFailureRetryCount, executionRetryAttemptCount } from "./execution-recovery-attempt.js";
 
 describe("failure attempts across resource waits", () => {
   it("preserves prior failures through subscription waits without trusting unrelated context", () => {
@@ -27,6 +27,15 @@ describe("failure attempts across resource waits", () => {
 });
 
 describe("persisted independent accounting", () => {
+  it("keeps SSH setup waits separate from failures", () => {
+    const run = { scheduledRetryReason: "transient_failure", scheduledRetryAttempt: 2 };
+    const reason = "ssh_transport_wait";
+    expect(executionRetryAttemptCount(run, reason)).toBe(0);
+    const accounting = accountingForScheduledRetry(run, reason, 8);
+    expect(accounting.failureRetries).toBe(2);
+    expect(executionFailureRetryCount({ scheduledRetryReason: reason, scheduledRetryAttempt: 8,
+      contextSnapshot: { executionRetryAccounting: accounting } })).toBe(2);
+  });
   it.each(["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait"])("%s cannot erase prior infrastructure debits or spend more", scheduledRetryReason => {
     expect(executionFailureRetryCount({ scheduledRetryReason, scheduledRetryAttempt: 20,
       contextSnapshot: { executionRetryAccounting: { version: 1, failureRetries: 2, maxTurnContinuations: 1 } },

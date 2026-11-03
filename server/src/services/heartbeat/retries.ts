@@ -5,6 +5,7 @@ import {
   readWorkspaceValidationPayloadFromRun,
 } from "./workspaces.js";
 import { admitExplicitContinuationRetry } from "../explicit-native-continuation.js";
+import { isSshSetupWait } from "../run-cancellation.js";
 import {
   CONVERSATION_CONTINUATION_POLICY,
   hasConversationContinuationPolicy,
@@ -14,6 +15,7 @@ import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
   accountingForScheduledRetry,
+  SSH_TRANSPORT_WAIT,
 } from "../execution-recovery-attempt.js";
 import { WORKSPACE_GIT_SCAN_ERROR_CODES } from "../workspace-git-operation-scheduler.js";
 import { randomUUID } from "node:crypto";
@@ -951,8 +953,6 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
           (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) && issueId &&
           !isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)
         ) {
-          // The issue row is locked above. Recheck after the preflight gate so
-          // cancellation or recovery cannot leave a successor without its lock.
           const [lockedIssue] = await tx.select({ executionRunId: issues.executionRunId })
             .from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
           if (lockedIssue?.executionRunId !== run.id) {
@@ -966,7 +966,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {
-          const continuation = issueId && retryReason === "transient_failure" ? await admitExplicitContinuationRetry({
+          const continuation = issueId && (retryReason === "transient_failure" ||
+            (retryReason === SSH_TRANSPORT_WAIT && isSshSetupWait(run))) ? await admitExplicitContinuationRetry({
             db: tx as unknown as Db, companyId: run.companyId, issueId, agentId: run.agentId,
             parentRunId: run.id, successorRunId: scheduledRunId, now,
           }) : null;
