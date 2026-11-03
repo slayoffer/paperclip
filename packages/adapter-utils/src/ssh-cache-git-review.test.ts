@@ -69,10 +69,16 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
 
   it("removes large literal path lists through stdin", async () => {
     await put(remote, "source.txt");
-    const deletedPaths = largePaths();
+    const literalPath = "literal\n[cache]*";
+    const deletedPaths = [...largePaths(), literalPath, "escape/keep"];
     await put(remote, `${deletedPaths[0]}/data`);
+    await symlink("missing", path.join(remote, deletedPaths[1]));
+    await put(remote, `${literalPath}/data`);
+    await put(root, "outside/keep");
+    await symlink(path.join(root, "outside"), path.join(remote, "escape"));
     await removeDeletedPathsOnSsh({ spec: spec(), remoteDir: remote, deletedPaths });
-    expect(await readdir(remote)).toEqual(["source.txt"]);
+    expect(await readdir(remote)).toEqual(["escape", "source.txt"]);
+    expect(await readFile(path.join(root, "outside/keep"), "utf8")).toBe("keep");
   });
 
   it("restores with large newly discovered scratch exclusions", async () => {
