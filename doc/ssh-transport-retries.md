@@ -5,6 +5,8 @@ It waits one second before the second attempt and two seconds before the third.
 SSH exit 255, connection timeout, connection reset, connection refusal, and
 key-exchange failures are transport failures. A completed remote command's
 nonzero exit is not retried, including exit 255.
+Once the remote shell starts, the runner does not retry a lost connection.
+The command can already have changed remote files before that connection fails.
 
 Set `PAPERCLIP_SSH_CONNECT_TIMEOUT_SEC` on the Paperclip server to change the
 connection timeout. The default is 30 seconds. Positive integer values are
@@ -28,6 +30,7 @@ five minutes. The scheduled run inherits the existing failure-retry accounting.
 Transport waits do not spend that budget or block the issue. Normal dispatch
 gates still apply, including cancellation, ownership, pause, and budget checks.
 An existing workspace-restore or restart-reconciliation hold still applies.
+Setup deferral flushes and finalizes an opened run log before it returns.
 
 This change does not alter SSH credentials, host-key checks, or deployment.
 Validation under load on home-pc belongs to homelab after merge.

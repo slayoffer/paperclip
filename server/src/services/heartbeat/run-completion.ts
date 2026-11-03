@@ -1035,6 +1035,32 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
     const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
     await processRunCancellationSettlements.get(run.id)?.settled;
+    let logSummary: {
+      bytes: number | null;
+      sha256?: string | null;
+      compressed: boolean;
+    } | null = null;
+    if (handle) {
+      try {
+        await flushRunLog?.();
+        logSummary = await runLogStore.finalize(handle);
+      } catch (finalizeErr) {
+        logger.warn(
+          { err: finalizeErr, runId },
+          "failed to finalize run log after error",
+        );
+      }
+    }
+    const finalLogBytes = logSummary?.bytes;
+    if (outputProgressState.pending && typeof finalLogBytes === "number") {
+      outputProgressState.pending.bytes = finalLogBytes;
+    }
+    await flushOutputProgress({ force: true }).catch((flushErr) => {
+      logger.warn(
+        { err: flushErr, runId },
+        "failed to flush run output progress after error",
+      );
+    });
     if (!legacyAdapterEntered && run.runtimeMode !== "native" &&
         await deferSshSetupFailure(run, err, dependencies)) return;
     const message = redactCurrentUserText(
@@ -1087,33 +1113,6 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : { message: String(err) }),
     });
     logger.error({ err: safeError?.resultJson, runId }, "heartbeat execution failed");
-
-    let logSummary: {
-      bytes: number | null;
-      sha256?: string | null;
-      compressed: boolean;
-    } | null = null;
-    if (handle) {
-      try {
-        await flushRunLog?.();
-        logSummary = await runLogStore.finalize(handle);
-      } catch (finalizeErr) {
-        logger.warn(
-          { err: finalizeErr, runId },
-          "failed to finalize run log after error",
-        );
-      }
-    }
-    const finalLogBytes = logSummary?.bytes;
-    if (outputProgressState.pending && typeof finalLogBytes === "number") {
-      outputProgressState.pending.bytes = finalLogBytes;
-    }
-    await flushOutputProgress({ force: true }).catch((flushErr) => {
-      logger.warn(
-        { err: flushErr, runId },
-        "failed to flush run output progress after error",
-      );
-    });
 
     const stoppedDuringFailure = signal.aborted;
     const stopSnapshot = stoppedDuringFailure ? await getRun(run.id) : null;

@@ -83,8 +83,8 @@ it("bounds total retry time even when individual attempts need 65 seconds", asyn
   expect(timeouts).toEqual([65_000, 54_000]);
 });
 
-it("does not retry a timeout after the remote shell starts", async () => {
-  const error = { code: "ETIMEDOUT", remoteCommandStarted: true, stderr: "kex_exchange_identification: failed" };
+it.each(["ETIMEDOUT", 255])("does not retry error %s after the remote shell starts", async code => {
+  const error = { code, remoteCommandStarted: true, stderr: "kex_exchange_identification: failed" };
   const command = vi.fn(async () => { throw error; });
   await expect(withSshTransportRetry(command)).rejects.toBe(error);
   expect(command).toHaveBeenCalledOnce();

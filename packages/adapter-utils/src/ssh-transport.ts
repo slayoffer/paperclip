@@ -16,10 +16,9 @@ export function isSshTransportFailure(error: unknown): boolean {
   const failure = error as {
     code?: unknown; stderr?: unknown; remoteCommandExited?: boolean; remoteCommandStarted?: boolean;
   };
-  if (failure.remoteCommandExited) return false;
+  if (failure.remoteCommandExited || failure.remoteCommandStarted) return false;
   // A remote command can print transport words. Its exit status takes precedence.
   if (typeof failure.code === "number") return failure.code === 255;
-  if (failure.remoteCommandStarted) return false;
   if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED"].includes(String(failure.code))) return true;
   return typeof failure.stderr === "string" &&
     /(?:ssh:.*(?:connection (?:timed out|reset|refused)|operation timed out)|(?:kex_exchange_identification|ssh_exchange_identification):)/i.test(failure.stderr);
