@@ -77,6 +77,7 @@ The same protection applies to a tagged `.paperclip-repositories` container.
 Clone and scratch discovery prunes tagged caches before reading their children.
 Cache discovery then prunes the discovered clone and scratch paths.
 Both policies retain saved literal exclusions during baseline capture and restore.
+Each scan also prunes paths that an earlier scan recorded in the same policy.
 Policy discovery scripts also travel through stdin, so large saved exclusion lists remain valid.
 Remote text output retains UTF-8 characters split across transport chunks.
 The restore archive command travels through stdin. Large cache exclusion lists

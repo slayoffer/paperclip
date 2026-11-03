@@ -438,7 +438,8 @@ export async function transportGitWorkspaceToSsh(input: {
     snapshot: input.snapshot,
     onProgress: input.onProgress,
   }));
-  await filterGitWorkspaceOnSsh({ spec: input.spec, remoteDir: input.remoteDir, skippedPaths });
+  await filterGitWorkspaceOnSsh({ spec: input.spec, remoteDir: input.remoteDir,
+    localDir: input.localDir, headCommit: input.snapshot.headCommit, skippedPaths });
   await timeWorkspaceStep(input.onProgress, "Workspace sync", () => syncDirectoryToSsh({
     spec: input.spec,
     localDir: input.localDir,

@@ -52,3 +52,4 @@ Send policy scan scripts through stdin. Serialized exclusions can exceed the lim
 Git checkout precedes the file overlay. Remove tagged caches and fixed generated paths after checkout. Protect their index entries.
 For a tagged root, retain Git metadata and runtime files while removing working-tree content.
 Upload size estimation must return zero for a whole-root exclusion before it reads directory contents.
+Combine saved baseline paths with the current policy exclusions before every scan, including consecutive local and remote scans.

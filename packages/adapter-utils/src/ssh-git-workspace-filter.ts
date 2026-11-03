@@ -1,20 +1,21 @@
 import { shouldExcludePath } from "./exclude-patterns.js";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { shellQuote, type SshRemoteExecutionSpec } from "./ssh-config.js";
-import { runSshCommand } from "./ssh-command.js";
+import { runLocalGit, runSshCommand } from "./ssh-command.js";
 import { clearRemoteDirectory, removeDeletedPathsOnSsh } from "./ssh-sync.js";
 
 export async function filterGitWorkspaceOnSsh(input: {
   spec: SshRemoteExecutionSpec;
   remoteDir: string;
+  localDir: string;
+  headCommit: string;
   skippedPaths: string[];
 }): Promise<void> {
   const skipped = new Set(input.skippedPaths);
   if (!skipped.has(".")) {
-    const tracked = await runSshCommand(input.spec, "sh -s", {
-      stdin: `cd ${shellQuote(input.remoteDir)} && git ls-files -z`,
-      timeoutMs: 30_000, maxBuffer: 16 * 1024 * 1024,
-    });
+    const tracked = await runLocalGit(input.localDir,
+      ["ls-tree", "-r", "--name-only", "-z", input.headCommit],
+      { timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
     for (const relative of tracked.stdout.split("\0").filter(Boolean)) {
       const parts = relative.split("/");
       for (let count = 1; count <= parts.length; count++) {

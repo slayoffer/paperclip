@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureSshWorkspaceSnapshot } from "./ssh-cache-directories.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
-import { restoreWorkspaceFromSshExecution } from "./ssh.js";
+import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
+import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh.js";
 import { parseDirectorySnapshot, serializeDirectorySnapshot } from "./workspace-directory-snapshot.js";
 
 const exec = promisify(execFile);
@@ -120,6 +121,28 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
       await block(path.join(prepared.workspaceRemoteDir, ".scratch-new/private"));
       await put(prepared.workspaceRemoteDir, "source.txt", "remote");
       await prepared.restoreWorkspace();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    });
+
+    it("prunes a newly discovered local clone during the remote scan", async () => {
+      await put(local, "source.txt");
+      const prepared = await prepare();
+      await mkdir(path.join(local, "work/.git"), { recursive: true });
+      await block(path.join(prepared.workspaceRemoteDir, "work/private"));
+      await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+      await prepared.restoreWorkspace();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    });
+
+    it("prunes retained policy paths after a clone marker disappears", async () => {
+      await put(local, "source.txt");
+      await mkdir(path.join(local, "work/.git"), { recursive: true });
+      const syncPolicy = createSshWorkspaceSyncPolicy();
+      await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local, syncPolicy });
+      await rm(path.join(local, "work/.git"), { recursive: true });
+      await block(path.join(local, "work/private"));
+      await put(remote, "source.txt", "remote");
+      await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, syncPolicy });
       expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
     });
 

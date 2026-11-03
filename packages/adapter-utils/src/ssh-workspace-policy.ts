@@ -69,7 +69,10 @@ export async function sshWorkspaceExcludes(input: {
     });
     if (!exists) return input.exclude;
   }
-  const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, input.ignoredPaths);
+  const ignoredPaths = [...new Set([
+    ...workspacePaths(input.ignoredPaths ?? []), ...(input.policy.excluded.get(input.localDir) ?? []),
+  ])];
+  const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, ignoredPaths);
   const result = await runPolicyScript(script, 60_000, input.remote);
   const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));
   input.policy.excluded.set(input.localDir, [...new Set([
