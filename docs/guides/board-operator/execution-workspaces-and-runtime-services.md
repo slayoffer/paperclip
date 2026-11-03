@@ -72,6 +72,11 @@ fail the committed issue update.
 - Multiple non-archived workspace rows for one physical checkout prevent automatic
   close, even when all source issues are terminal. Resolve duplicate ownership
   manually before cleanup. The close workflow controls one row and its artifacts.
+- A failed run can still have a live provider process or controller lease. Automatic
+  close checks those signals for terminal runs too. A failed status alone does
+  not permit removal.
+- Native completion-review acceptance queues cleanup through its commit effects.
+  An outer transaction must commit before those effects run.
 - A reopened issue can rebuild its archived Git worktree through the existing
   reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
 - This transition hook does not scan historical terminal issues. The existing

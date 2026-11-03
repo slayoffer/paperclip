@@ -1,26 +1,26 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agents, companies, createDb, executionWorkspaces, heartbeatRuns, issues, projects, projectWorkspaces,
+  agents, createDb, executionWorkspaces, heartbeatRuns, issues, projects, projectWorkspaces,
+  issueThreadInteractions, nativeRunFinalizations,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
+import { git, terminalWorkspaceFixture } from "./helpers/terminal-workspace-fixture.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../services/issues.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
 import { logger } from "../middleware/logger.js";
+import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 
 describe("issue terminal workspace cleanup", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
   const directories: string[] = [];
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-terminal-close-");
@@ -33,44 +33,7 @@ describe("issue terminal workspace cleanup", () => {
   });
   afterAll(async () => { await database?.cleanup(); });
 
-  async function fixture() {
-    const root = await mkdtemp(join(tmpdir(), "terminal-workspace-"));
-    directories.push(root);
-    const repo = join(root, "repo");
-    git(root, "init", "-b", "main", repo);
-    // These disposable repositories must not run the host's installed Git hooks.
-    git(repo, "config", "core.hooksPath", "/dev/null");
-    git(repo, "config", "user.name", "Test");
-    git(repo, "config", "user.email", "test@example.test");
-    await writeFile(join(repo, "tracked"), "initial\n");
-    git(repo, "add", ".");
-    git(repo, "commit", "-m", "initial");
-    const remote = join(root, "remote.git");
-    git(root, "clone", "--bare", repo, remote);
-    git(repo, "remote", "add", "origin", remote);
-    git(repo, "fetch", "origin");
-    const [company] = await db.insert(companies).values({ name: "Terminal close", issuePrefix: randomUUID() }).returning();
-    const [project] = await db.insert(projects).values({ companyId: company.id, name: "Close test" }).returning();
-    const [primary] = await db.insert(projectWorkspaces).values({
-      companyId: company.id, projectId: project.id, name: "Primary", cwd: repo, isPrimary: true,
-    }).returning();
-    const [issue] = await db.insert(issues).values({
-      companyId: company.id, projectId: project.id, title: "Close workspaces", status: "in_progress",
-    }).returning();
-    async function workspace(patch: Partial<typeof executionWorkspaces.$inferInsert> = {}) {
-      const branch = `task-${randomUUID()}`;
-      const cwd = join(root, branch);
-      git(repo, "worktree", "add", "-b", branch, cwd, "main");
-      const [row] = await db.insert(executionWorkspaces).values({
-        companyId: company.id, projectId: project.id, projectWorkspaceId: primary.id,
-        sourceIssueId: issue.id, name: branch, mode: "isolated_workspace", strategyType: "git_worktree",
-        providerType: "git_worktree", cwd, providerRef: cwd, baseRef: "main", branchName: branch,
-        ...patch,
-      }).returning();
-      return row;
-    }
-    return { root, repo, company, project, primary, issue, workspace };
-  }
+  const fixture = () => terminalWorkspaceFixture(db, directories);
   const readWorkspace = (id: string) => db.select().from(executionWorkspaces)
     .where(eq(executionWorkspaces.id, id)).then(([row]) => row);
 
@@ -104,7 +67,8 @@ describe("issue terminal workspace cleanup", () => {
     }
   });
 
-  it.each(["dirty", "untracked", "unpushed", "unpushed merged", "runtime", "open link", "active run"])("keeps %s workspaces active and logs the reason", async (blocker) => {
+  it.each(["dirty", "untracked", "unpushed", "unpushed merged", "runtime", "open link", "active run",
+    "failed pid", "failed group", "failed controller", "failed native lease"])("keeps %s workspaces active and logs the reason", async (blocker) => {
     const f = await fixture();
     const row = await f.workspace();
     if (blocker === "dirty") await writeFile(join(row.cwd!, "tracked"), "changed\n");
@@ -121,9 +85,19 @@ describe("issue terminal workspace cleanup", () => {
     if (blocker === "open link") await db.insert(issues).values({
       companyId: f.company.id, title: "Still working", status: "todo", executionWorkspaceId: row.id,
     });
-    if (blocker === "active run") {
+    if (blocker === "active run" || blocker.startsWith("failed")) {
       const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Worker" }).returning();
-      await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id, issueId: f.issue.id, status: "running" });
+      const [run] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id, issueId: f.issue.id,
+        status: blocker === "active run" ? "running" : "failed",
+        ...(blocker === "failed native lease" ? { runtimeMode: "native", nativeIssueId: f.issue.id } : {}),
+        ...(blocker === "failed pid" ? { processPid: process.pid } : {}),
+        ...(blocker === "failed group" ? { processGroupId: Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }).trim()) } : {}),
+        ...(blocker === "failed controller" ? { controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) } : {}),
+      }).returning();
+      if (blocker === "failed native lease") await db.insert(nativeRunFinalizations).values({
+        runId: run.id, companyId: f.company.id, issueId: f.issue.id, phase: "retryable_failure",
+        leaseOwner: "test-controller", leaseExpiresAt: new Date(Date.now() + 60_000),
+      });
     }
     const log = vi.spyOn(logger, "warn");
     await issueService(db).update(f.issue.id, { status: "done" });
@@ -205,6 +179,45 @@ describe("issue terminal workspace cleanup", () => {
       expect(await db.select({ status: workspaceRuntimeServices.status }).from(workspaceRuntimeServices)
         .where(eq(workspaceRuntimeServices.executionWorkspaceId, alias.id))).toEqual([{ status: "running" }]);
     }
+  });
+
+  it.each(["direct", "deferred", "rollback"])("applies native review cleanup after %s commit effects", async (mode) => {
+    const f = await fixture();
+    const row = await f.workspace();
+    await db.update(issues).set({ status: "in_review", executionWorkspaceId: row.id }).where(eq(issues.id, f.issue.id));
+    const [review] = await db.insert(issueThreadInteractions).values({
+      companyId: f.company.id, issueId: f.issue.id, kind: "request_confirmation", status: "pending",
+      addresseeUserId: "local-board", effectiveResolverPolicy: "human_only",
+      payload: { version: 1, prompt: "Review completed work.", target: {
+        type: "custom", key: "native_completion_review", revisionId: randomUUID(),
+      } },
+    }).returning();
+    const effects: Array<(committedDb: typeof db) => Promise<void>> = [];
+    const accept = (target: typeof db) => issueThreadInteractionService(target).acceptInteraction(
+      { ...f.issue, status: "in_review" }, review.id, {}, { userId: "local-board" },
+      mode === "direct" ? undefined : { deferConfirmationCommitEffects: (effect) => effects.push(effect) },
+    );
+    if (mode === "direct") await accept(db);
+    else {
+      const transaction = db.transaction(async (tx) => {
+        await accept(tx as unknown as typeof db);
+        expect((await readWorkspace(row.id)).status).toBe("active");
+        expect(existsSync(row.cwd!)).toBe(true);
+        if (mode === "rollback") throw new Error("rollback review");
+      });
+      if (mode === "rollback") {
+        await expect(transaction).rejects.toThrow("rollback review");
+        expect((await readWorkspace(row.id)).status).toBe("active");
+        expect(existsSync(row.cwd!)).toBe(true);
+        expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].status).toBe("in_review");
+        return;
+      }
+      await transaction;
+      for (const effect of effects) await effect(db);
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].status).toBe("done");
+    expect((await readWorkspace(row.id)).status).toBe("archived");
+    expect(existsSync(row.cwd!)).toBe(false);
   });
 
   it("waits for the caller transaction to commit", async () => {

@@ -2,12 +2,14 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { executionWorkspaces, heartbeatRuns, issues, projectWorkspaces, type Db } from "@paperclipai/db";
+import { executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, projectWorkspaces, type Db } from "@paperclipai/db";
 import type { ExecutionWorkspace } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { closeExecutionWorkspace } from "./execution-workspace-close.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
+import { isProcessAlive } from "./heartbeat/recovery.js";
+import { isProcessGroupAlive } from "./local-service-supervisor.js";
 
 const execFileAsync = promisify(execFile);
 const terminalStatuses = ["done", "cancelled"];
@@ -121,16 +123,23 @@ async function automaticCloseReasons(
   ));
   const owner = relatedIssues.find((related) => !terminalStatuses.includes(related.status));
   if (owner) reasons.push("Another open issue uses this workspace path.");
-  const [activeRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-    inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+  const relatedRuns = await db.select({ run: heartbeatRuns, coordinator: nativeRunFinalizations }).from(heartbeatRuns)
+    .leftJoin(nativeRunFinalizations, eq(nativeRunFinalizations.runId, heartbeatRuns.id)).where(
     sql`exists (select 1 from ${issues} run_issue
       where run_issue.company_id = ${heartbeatRuns.companyId}
         and ${inArray(sql`run_issue.id`, relatedIssues.map((related) => related.id))}
         and (run_issue.id = ${heartbeatRuns.issueId} or run_issue.id = ${heartbeatRuns.nativeIssueId}
           or run_issue.id::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
           or run_issue.execution_run_id = ${heartbeatRuns.id} or run_issue.checkout_run_id = ${heartbeatRuns.id}))`,
-  )).limit(1);
-  if (activeRun) reasons.push("An issue run still uses this workspace.");
+  );
+  const now = new Date();
+  if (relatedRuns.some(({ run, coordinator }) =>
+    ["queued", "running", "scheduled_retry"].includes(run.status)
+    || isProcessAlive(run.processPid) || isProcessGroupAlive(run.processGroupId)
+    || (run.controllerBootId && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > now)
+    || isProcessAlive(coordinator?.controllerPid)
+    || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now)
+  )) reasons.push("An issue run still uses this workspace.");
   // Cleanup acts on a physical checkout, so every alias must satisfy readiness.
   const svc = executionWorkspaceService(db);
   for (const workspaceId of workspaceIds) {

@@ -9,6 +9,9 @@ when another company's row prevents cleanup. A terminal source issue does not
 prove that its runtime service or provider run stopped.
 Hold automatic close when multiple non-archived rows own the checkout. The close
 workflow must retain control of both the archive and artifact lifecycle.
+Check provider process and controller ownership after terminal run statuses too.
+An issue update inside a transaction must pass its post-commit actions to the caller's
+commit-effects queue. Never run physical cleanup before the outer commit.
 
 ## Deferred dependency wakes
 

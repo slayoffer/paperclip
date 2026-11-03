@@ -11,3 +11,6 @@ packages/adapter-utils/src/sandbox-callback-bridge.ts
 # Existing integration suites retain their shared fixtures for terminal-action assertions.
 server/src/__tests__/chat-completion-delivery.test.ts
 server/src/services/native-runtime/native-question-bridge.test.ts
+
+# The existing interaction service passes terminal cleanup through its commit-effects queue.
+server/src/services/issue-thread-interactions.ts
