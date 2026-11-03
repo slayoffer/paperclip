@@ -8,6 +8,8 @@ import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithB
 import { writeCheckpointBaseline, workspaceCheckpointScript, readCheckpointSnapshot, validateCheckpointPayload } from "./workspace-checkpoint.js";
 import { publishWorkspaceSeedGeneration, readWorkspaceSeedGeneration, workspaceSeedGeneration } from "./workspace-seed-cache.js";
 import { WorkspaceManifestWriter } from "./workspace-manifest.js";
+// Resolve the lock helper's runtime module graph during test collection.
+import "./server-utils.js";
 const execute = promisify(execFile);
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });

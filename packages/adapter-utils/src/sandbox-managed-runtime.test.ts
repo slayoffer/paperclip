@@ -450,7 +450,7 @@ describe("sandbox managed runtime", () => {
       expect(merge.mock.calls.every(([input]) => input.workspaceSnapshotIsolation === isolation)).toBe(true);
       expect(await readFile(path.join(local, "file.txt"), "utf8")).toBe("after");
     } finally { capture.mockRestore(); merge.mockRestore(); }
-  });
+  }, 15_000); // Real checkpoint restore starts child processes and can exceed the unit-test default.
 
   it.each(["host_current", "adopt_remote", "durable_seed"] as const)("stages and restores both project repositories with independent Git histories (%s)", async (mode) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-multi-repo-"));
@@ -474,6 +474,7 @@ describe("sandbox managed runtime", () => {
       await git(cwd, ["commit", "-m", contents!]);
       await writeFile(path.join(cwd, "secret.txt"), "must stay local");
     }
+    await mkdir(path.join(local, ".git/info"), { recursive: true });
     await writeFile(path.join(local, ".git/info/exclude"), ".paperclip-repositories/\n");
     await writeFile(path.join(local, secondPath, "dirty.txt"), "local edit");
     await writeFile(path.join(local, secondPath, "host-config.txt"), "excluded by operator");

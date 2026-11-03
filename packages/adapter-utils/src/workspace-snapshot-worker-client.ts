@@ -39,7 +39,7 @@ import(workerData.moduleUrl).catch((error) => { throw error; });
 `;
 
 export async function scanWorkspaceSnapshot(input: WorkspaceSnapshotScanInput): Promise<WorkspaceSnapshotScanResult> {
-  const source = import.meta.url.endsWith(".ts");
+  const source = new URL(import.meta.url).pathname.endsWith(".ts");
   const moduleUrl = new URL(source ? "./workspace-snapshot-worker.ts" : "./workspace-snapshot-worker.js", import.meta.url).href;
   return new Promise((resolve, reject) => {
     const memory = new Map<string, SnapshotEntry>();

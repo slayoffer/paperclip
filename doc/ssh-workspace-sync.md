@@ -20,6 +20,78 @@ Nonconflicting local staged changes remain staged. Conflicting staged changes re
 Dirty remote edits remain unstaged above the imported commit.
 Runtime assets retain their separate transfer settings.
 
+## Rebuildable caches
+
+Workspace file transfers use one shared exclusion list in both directions.
+The cache names are `node_modules`, `.pnpm-store`, `.turbo`, `.next`, `.cache`,
+`__pycache__`, and `.venv`. These names match at every directory depth.
+The existing `dist`, `build`, `out`, `coverage`, Git metadata, and runtime
+exclusions remain in place.
+
+A directory that contains a `CACHEDIR.TAG` file is also excluded, regardless
+of its name or Git ignore rules. File presence is sufficient. The tag content
+does not need a specific signature. A directory named `CACHEDIR.TAG` is not
+a marker. Cargo's tagged `target/` directory is excluded. An untagged
+directory named `target` is transferred. Tag paths are literal and relative
+to the workspace, so a tag does not exclude an unrelated directory with the
+same name. Discovery filters records with the same root-relative exclusion
+matcher and literal ignored-path matcher as baseline capture and restore.
+For example, `workspaceExclude: ["cache"]` excludes the root `cache` directory.
+A tag in `nested/cache` still enters the baseline's protected paths.
+
+The scan prunes caller exclusions before it reads directory contents. It uses
+the shared matcher's scopes for `workspaceExclude`, referenced-project `vendor`,
+and fixed cache names, plus literal resolved Git ignore paths. A POSIX shell
+walk uses built-in commands, without a separate process for each directory.
+The script and quoted exclusions travel through stdin on both sides; they
+never expand command-line arguments. It reports tags and unreadable directories
+as NUL-delimited records, which TypeScript checks with the same matchers.
+An excluded unreadable directory does not abort sync. An unreadable directory
+outside those exclusions does. Other scan failures still stop sync.
+
+These rules cover Git-backed workspaces, linked Git worktrees, plain folders,
+and `workspaceFileMode: "all"`. Referenced projects use the same list during
+upload, plus their existing `vendor`, Git metadata, and resolved ignore rules.
+Referenced projects remain read-only inputs and have no restore path.
+Runtime assets retain their existing transfer settings. Git bundles retain
+repository history. These rules do not remove objects already committed to Git.
+After Git checkout, preparation removes tagged caches and fixed generated-directory paths from the remote working tree.
+Their index entries use `skip-worktree`, so ordinary staging does not commit their removal.
+A tagged root retains only Git metadata and managed runtime files.
+Upload size estimation returns zero for a whole-root exclusion without scanning its contents.
+
+Restore preserves excluded local directories and their contents. It combines
+the tags captured before execution with tags present locally or remotely at
+restore time. Removing a remote tag does not expose a protected local cache.
+A remote tag also prevents deletion of the corresponding local directory.
+Replacing a parent that contains an excluded local directory fails before
+local changes or Git history integration.
+For a tagged workspace root, the baseline records the whole-root `.` exclusion.
+Restore skips that workspace before any scan, transfer, or history integration.
+This state survives baseline serialization and removal of the local marker.
+Serialized in-memory baselines also retain literal paths for nested tagged caches.
+Restore also checks current root markers before it restores nested project repositories.
+A marker added after preparation protects the root and its nested repositories.
+Preparation also skips separate nested repository uploads when the workspace root is tagged.
+The same protection applies to a tagged `.paperclip-repositories` container.
+Clone and scratch discovery prunes tagged caches before reading their children.
+Cache discovery then prunes the discovered clone and scratch paths.
+Restore discovers local cache markers before remote discovery. Both remote scans
+prune those literal paths, even when the remote directory has no cache marker.
+Both policies retain saved literal exclusions during baseline capture and restore.
+Each scan also prunes paths that an earlier scan recorded in the same policy.
+Policy discovery scripts also travel through stdin, so large saved exclusion lists remain valid.
+Remote text output retains UTF-8 characters split across transport chunks.
+The restore archive command travels through stdin. Large cache exclusion lists
+do not become one SSH command-line argument.
+
+The tests in `packages/adapter-utils/src/ssh-cache-excludes.test.ts` run real
+Git and tar through a local SSH substitute. On base `b411be160`, ignored
+`node_modules` and `.cache` stayed out in both directions. An untracked,
+tagged `target/` transferred in both directions. The same prepare results
+applied to referenced projects. The homelab note that only
+`.paperclip-runtime` was excluded does not describe this base.
+
 ## Nested repositories and scratch directories
 
 Before each workspace transfer, Paperclip excludes nested directories with a `.git` entry.
@@ -115,6 +187,11 @@ The restart-stop test waits for the provider to report readiness before stopping
 A writer marker exists before its systemd scope starts, so marker presence is not readiness proof.
 The continuation fixture uses the full company UUID in its issue prefix to prevent collisions from truncated IDs.
 The snapshot tests check that hashing stays outside the main thread.
+The snapshot worker reads at most 16 entries at once. It waits for every started
+read before reporting a batch failure or closing the manifest. Manifest writes
+and batch acknowledgements stay serial. Metadata reuse keeps its nanosecond
+identity checks. Tests inject read failures into the worker's scanner and also
+exercise the complete worker path for snapshot contents and main-thread responsiveness.
 The public SSH API remains in `ssh.ts`. Implementation modules retain the released module layout.
 The regression transport executes real Git and tar commands through a local SSH substitute.
 Separate stream tests control the sink speed and the SSH exit order.

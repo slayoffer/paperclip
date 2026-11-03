@@ -14,21 +14,17 @@ vi.mock("node:worker_threads", async (importOriginal) => {
       const readFailure = process.env.PAPERCLIP_TEST_SNAPSHOT_READ_FAILURE;
       if (!workerData.input.cacheMetadata && !readFailure) return;
       const fs = require("node:fs");
-      const original = fs.lstatSync;
+      const original = fs.promises.lstat;
       let replaced = false;
-      fs.lstatSync = (file, options) => {
+      fs.promises.lstat = async (file, options) => {
         if (require("node:path").basename(file) !== "victim" || replaced) return original(file, options);
+        replaced = true;
+        if (readFailure === "EACCES") throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        if (readFailure === "before-stat") fs.rmSync(file, { recursive: true });
+        const stats = await original(file, options);
         if (readFailure) {
-          replaced = true;
-          if (readFailure === "EACCES") throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-          if (readFailure === "before-stat") fs.rmSync(file, { recursive: true });
-          const stats = original(file, options);
           fs.rmSync(file, { recursive: true });
-          return stats;
-        }
-        const stats = original(file, options);
-        if (workerData.input.cacheMetadata) {
-          replaced = true;
+        } else {
           fs.unlinkSync(file);
           if (process.env.PAPERCLIP_TEST_SCAN_REPLACEMENT === "file-to-symlink-loop") fs.symlinkSync("victim", file);
           else if (stats.isSymbolicLink()) fs.writeFileSync(file, "concurrent result");
@@ -91,6 +87,15 @@ it("still fails when the capture root is missing or an entry cannot be read", as
   vi.stubEnv("PAPERCLIP_TEST_SNAPSHOT_READ_FAILURE", "EACCES");
   await writeFile(path.join(root, "victim"), "still present");
   await expect(captureDirectorySnapshot(root)).rejects.toMatchObject({ code: "EACCES" });
+});
+
+it("refuses a partial warm cache when an entry vanishes during capture", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-restore-scan-warm-"));
+  roots.push(root);
+  vi.stubEnv("PAPERCLIP_TEST_SNAPSHOT_READ_FAILURE", "after-stat");
+  await writeFile(path.join(root, "victim"), "will disappear");
+  await expect(captureDirectorySnapshot(root, { diskBacked: true, cacheMetadata: true }))
+    .rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it.each(["file-to-directory", "symlink-to-file", "file-to-symlink-loop"])(

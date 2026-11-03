@@ -28,3 +28,22 @@ it.each(["cache", "cache/*", "*/cache", "*/cache/*", "private/*", "odd '[*]?\\\n
     );
   },
 );
+
+it.each(["foo/bar", "literal*", "literal[ab]?", "odd '[*]?\\\n"])(
+  "uses baseline exclusion scope and literal text during transfer for %j", async (pattern) => {
+    root = await mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-matcher-"));
+    const files = ["foo/bar/data", "nested/foo/bar/data", "literal*/data", "literal-other/data",
+      "literal[ab]?/data", "literalaZ/data", "odd '[*]?\\\n/data", "ordinary\nfile"];
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), "fixture");
+    }
+    const scan = exec("sh", ["-s"]);
+    scan.child.stdin!.end(workspacePathWalkScript({ root, exclude: [pattern], literal: [] }));
+    const { stdout } = await scan;
+    const paths = stdout.split("\0").filter(Boolean).map(entry => entry.slice(2));
+    expect(paths.filter(entry => files.includes(entry)).sort()).toEqual(
+      files.filter(file => !shouldExcludePath(file, [pattern])).sort(),
+    );
+  },
+);

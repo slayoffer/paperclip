@@ -1,4 +1,5 @@
 import path from "node:path";
+import { captureSshWorkspaceSnapshot } from "./ssh-cache-directories.js";
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
 import { sshRuntimeIsolationScript } from "./ssh-runtime-isolation.js";
@@ -17,7 +18,7 @@ import {
   type SandboxAdditionalSource,
   type SandboxManagedRuntimeAssetRestoreContext,
 } from "./sandbox-managed-runtime.js";
-import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-restore-merge.js";
+import { type DirectorySnapshot } from "./workspace-restore-merge.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
 import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 
@@ -26,17 +27,9 @@ import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-op
 // drops its own resolved ignored paths (see `referencedSourceIgnoreExcludeEntries`
 // and the per-project merge below); an `other` project keeps only this set.
 const REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES = [
-  "node_modules",
-  "vendor",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".cache",
-  ".git",
-].flatMap((entry) => [entry, `${entry}/*`, `*/${entry}`, `*/${entry}/*`]);
+  ...SSH_WORKSPACE_EXCLUDES,
+  ...["vendor", ".git"].flatMap((entry) => [entry, `${entry}/*`, `*/${entry}`, `*/${entry}/*`]),
+];
 
 export interface RemoteManagedRuntimeAsset {
   key: string;
@@ -199,7 +192,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
-    ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureDirectorySnapshot(input.workspaceLocalDir, {
+    ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureSshWorkspaceSnapshot(input.workspaceLocalDir, {
         ignoredPaths: syncPolicy?.excluded.get(input.workspaceLocalDir),
         exclude: preparedWorkspace.gitBacked
           ? [
@@ -215,7 +208,7 @@ async function prepareRemoteManagedRuntimeInner(input: {
   for (const repository of projectRepositories) {
     repositoryBaselines.push({
       path: repository,
-      baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
+      baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureSshWorkspaceSnapshot(path.join(input.workspaceLocalDir, repository), {
         exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
         ignoredPaths: syncPolicy?.excluded.get(path.join(input.workspaceLocalDir, repository)),
       })),
@@ -298,6 +291,11 @@ async function prepareRemoteManagedRuntimeInner(input: {
         exclude,
         onProgress: input.onProgress,
         progressLabel: `project-${projectId}`,
+        excludeTaggedCaches: true,
+        cacheScan: {
+          exclude: REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
+          ignoredPaths: ignoreResolution.kind === "git" ? ignoreResolution.ignoredPaths : undefined,
+        },
       }));
       additionalSourceDirs[projectId] = remoteDir;
     } catch (error) {

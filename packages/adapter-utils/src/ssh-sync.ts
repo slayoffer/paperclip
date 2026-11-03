@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { localTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import type { WorkspacePaths } from "./workspace-manifest.js";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,11 +91,17 @@ export async function syncDirectoryToSsh(input: {
   localDir: string;
   remoteDir: string;
   exclude?: string[];
+  excludeTaggedCaches?: boolean;
+  cacheScan?: { exclude: readonly string[]; ignoredPaths?: WorkspacePaths };
   literalExclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
+  const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(
+    input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths ?? input.literalExclude,
+  ) : [];
+  const literalExclude = [...(input.literalExclude ?? []), ...tagged];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
@@ -116,7 +124,7 @@ export async function syncDirectoryToSsh(input: {
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
         exclude: input.exclude,
-        literalExclude: input.literalExclude,
+        literalExclude,
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
@@ -125,16 +133,16 @@ export async function syncDirectoryToSsh(input: {
 
   let pathList: Awaited<ReturnType<typeof localWorkspaceTarList>> | undefined;
   try {
-    if (needsWorkspacePathFile(input.exclude, input.literalExclude)) {
+    if (needsWorkspacePathFile(input.exclude, literalExclude)) {
       pathList = await localWorkspaceTarList({ root: input.localDir, exclude: input.exclude ?? [],
-        literal: input.literalExclude ?? [], followSymlinks: input.followSymlinks });
+        literal: literalExclude, followSymlinks: input.followSymlinks });
     }
     await new Promise<void>((resolve, reject) => {
     const tarArgs = [
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...(pathList ? [] : tarExcludeArgs(input.exclude, input.literalExclude)),
+      ...(pathList ? [] : tarExcludeArgs(input.exclude, literalExclude)),
       "-cf",
       "-",
       ...(pathList ? pathList.args : ["."]),
@@ -227,18 +235,20 @@ export async function syncDirectoryFromSsh(input: {
   remoteDir: string;
   localDir: string;
   exclude?: string[];
+  excludedCacheDirectories?: string[];
   literalExclude?: string[];
   preserveLocalEntries?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
   const auth = await createSshAuthArgs(input.spec);
+  const literalExclude = [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])];
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
-  const remoteTarScript = needsWorkspacePathFile(input.exclude, input.literalExclude)
-    ? workspaceTarScript({ root: input.remoteDir, exclude: input.exclude ?? [], literal: input.literalExclude ?? [] })
+  const remoteTarScript = needsWorkspacePathFile(input.exclude, literalExclude)
+    ? workspaceTarScript({ root: input.remoteDir, exclude: input.exclude ?? [], literal: literalExclude })
     : [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude, input.literalExclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs(input.exclude, literalExclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
@@ -344,7 +354,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
-        ignoredPaths: input.literalExclude,
+        ignoredPaths: literalExclude,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

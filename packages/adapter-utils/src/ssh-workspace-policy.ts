@@ -62,6 +62,7 @@ export async function sshWorkspaceExcludes(input: {
       ...workspacePaths(input.ignoredPaths ?? []), ...(input.policy.excluded.get(input.localDir) ?? []),
     ])],
     scratchPatterns: input.policy.patterns,
+    pruneTaggedCaches: true,
   });
   const result = await runPolicyScript(script, 60_000, input.remote);
   const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));

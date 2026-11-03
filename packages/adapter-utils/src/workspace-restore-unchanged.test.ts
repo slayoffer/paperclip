@@ -4,9 +4,18 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline, withDirectoryMergeLock, WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "./workspace-restore-merge.js";
 
+import { scanWorkspaceSnapshot } from "./workspace-snapshot-worker-client.js";
+
+vi.mock("./workspace-snapshot-worker-client.js", async importOriginal => {
+  const original = await importOriginal<typeof import("./workspace-snapshot-worker-client.js")>();
+  return { ...original, scanWorkspaceSnapshot: vi.fn(original.scanWorkspaceSnapshot) };
+});
+const snapshotScanner = await vi.importActual<typeof import("./workspace-snapshot-worker-client.js")>("./workspace-snapshot-worker-client.js");
+
 const roots: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.mocked(scanWorkspaceSnapshot).mockImplementation(snapshotScanner.scanWorkspaceSnapshot);
   vi.unstubAllEnvs();
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
 });
@@ -32,7 +41,7 @@ it.each([
   await fs.writeFile(path.join(f.target, "file"), "concurrent host edit");
   await fs.mkdir(path.join(f.target, "cache"));
   await fs.writeFile(path.join(f.target, "cache", "private"), "host only");
-  const read = vi.spyOn(fs, "opendir");
+  const read = vi.mocked(scanWorkspaceSnapshot).mockClear();
   read.mockImplementation(async () => { throw new Error("Unexpected host scan"); });
   const callbacks: string[] = [];
   const hook = async (name: string) => {
@@ -52,9 +61,9 @@ it.each([
 
 it("skips the target scan when a captured full export is unchanged", async () => {
   const f = await fixture(false);
-  const read = vi.spyOn(fs, "opendir");
+  const read = vi.mocked(scanWorkspaceSnapshot).mockClear();
   await mergeDirectoryWithBaseline({ baseline: f.baseline, sourceDir: f.source, targetDir: f.target, conflictPolicy: "reject" });
-  expect(read.mock.calls.map(call => path.resolve(String(call[0])))).toEqual([path.resolve(f.source)]);
+  expect(read.mock.calls.map(call => path.resolve(call[0].rootDir))).toEqual([path.resolve(f.source)]);
 });
 
 it.each(["before", "after"])("propagates %s-hook denial for an unchanged checkpoint", async denied => {
@@ -82,11 +91,11 @@ async function assertIncomingChange(change: string) {
   if (change === "add") await fs.writeFile(path.join(f.source, "added"), "new");
   if (change === "delete") await fs.rm(path.join(f.source, "file"));
   const incoming = await captureDirectorySnapshot(f.source, { diskBacked: true, exclude: ["cache"] });
-  const read = vi.spyOn(fs, "opendir");
+  const read = vi.mocked(scanWorkspaceSnapshot).mockClear();
   try {
     await mergeDirectoryWithBaseline({ baseline: f.baseline, sourceDir: f.source, targetDir: f.target,
       snapshots: { source: incoming }, conflictPolicy: "reject" });
-    expect(read).toHaveBeenCalled();
+    expect(read).toHaveBeenCalledWith(expect.objectContaining({ rootDir: await fs.realpath(f.target) }));
     if (change === "hash") expect(await fs.readFile(path.join(f.target, "file"), "utf8")).toBe("changed");
     if (change === "mode") expect((await fs.stat(path.join(f.target, "file"))).mode & 0o777).toBe(0o755);
     if (change === "kind") expect((await fs.stat(path.join(f.target, "file"))).isDirectory()).toBe(true);

@@ -10,6 +10,9 @@ import {
   type SnapshotEntry,
 } from "./workspace-restore-merge.js";
 
+import { scanWorkspaceSnapshotFiles } from "./workspace-snapshot-scan.js";
+import { WorkspaceManifestMap } from "./workspace-manifest.js";
+
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
   return { ...original, createReadStream: vi.fn(original.createReadStream) };
@@ -22,6 +25,13 @@ async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-snapshot-concurrency-"));
   roots.push(root);
   return root;
+}
+
+// Inject faults into the actual worker scanner; parent-thread fs mocks cannot cross a worker boundary.
+async function captureScanner(root: string) {
+  const manifestDirectory = await fixture();
+  const result = await scanWorkspaceSnapshotFiles({ rootDir: root, exclude: [], manifestDirectory }, async () => {});
+  return { exclude: [], entries: new WorkspaceManifestMap<SnapshotEntry>(result.manifest!, JSON.parse) };
 }
 
 afterEach(async () => {
@@ -89,7 +99,7 @@ describe("bounded workspace snapshot reads", () => {
       setTimeout(() => stream.resume(), 10);
       return stream;
     });
-    const snapshot = await captureDirectorySnapshot(root, { diskBacked: true });
+    const snapshot = await captureScanner(root);
     try {
       expect(snapshot.entries.size).toBe(107);
       expect(peak).toBeGreaterThan(1);
@@ -121,7 +131,7 @@ describe("bounded workspace snapshot reads", () => {
       }
     });
     let settled = false;
-    const result = captureDirectorySnapshot(root, { diskBacked: true }).then(
+    const result = captureScanner(root).then(
       () => { settled = true; return null; },
       error => { settled = true; return error; },
     );
@@ -159,7 +169,7 @@ describe("bounded workspace snapshot reads", () => {
       return stream;
     });
     let settled = false;
-    const result = captureDirectorySnapshot(root, { diskBacked: true }).then(
+    const result = captureScanner(root).then(
       () => { settled = true; return null; },
       error => { settled = true; return error; },
     );

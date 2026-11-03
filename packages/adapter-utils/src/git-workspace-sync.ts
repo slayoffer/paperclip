@@ -629,7 +629,7 @@ export async function withShallowGitWorkspaceClone<T>(
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
-    await runLocalGit(cloneDir, ["init"], {
+    await runLocalGit(cloneDir, ["init", "--template="], {
       timeout: 10_000,
       maxBuffer: 64 * 1024,
     });
@@ -676,6 +676,7 @@ export async function withShallowGitWorkspaceClone<T>(
       });
     }
     if (input.snapshot.repositories?.length) {
+      await fs.mkdir(path.join(cloneDir, ".git/info"), { recursive: true });
       await fs.appendFile(path.join(cloneDir, ".git/info/exclude"), `\n/${PROJECT_REPOSITORIES_DIR}/\n`);
     }
     return await fn(cloneDir);
