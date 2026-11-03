@@ -5647,6 +5647,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await f.service.handleWebhook(f.endpoint.publicId, "github", signedGitHubWebhookRequest({ event, delivery: randomUUID(), payload, webhookSecret: f.webhookSecret }));
       await expect.poll(async () => (await readChatConversationsByEndpointId(f.endpoint.id)).length, { timeout: 10_000 }).toBe(1);
       const deliveries = await readChatDeliveriesByEndpointId(f.endpoint.id);
+
       expect(deliveries).toEqual(expect.arrayContaining([
         expect.objectContaining({ eventKind: "message_updated" }),
         expect.objectContaining({ eventKind: "mention", normalizedEvent: expect.objectContaining({ githubManual: expect.objectContaining({ event: "mention" }) }) }),

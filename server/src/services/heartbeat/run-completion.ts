@@ -1,6 +1,7 @@
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
+import { deferSshSetupFailure } from "./ssh-setup-deferral.js";
 import { saveOwnerSessionState } from "../owner-sessions.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
@@ -1069,9 +1070,35 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const ownerSession = session.ownerSession ?? null;
     const sessionStorageKey = session.sessionStorageKey ?? taskKey;
     const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
-    // A process adapter may throw while its owned Stop is joining the
-    // child. Let the cancellation write settle before attempting failure.
     await processRunCancellationSettlements.get(run.id)?.settled;
+    let logSummary: {
+      bytes: number | null;
+      sha256?: string | null;
+      compressed: boolean;
+    } | null = null;
+    if (handle) {
+      try {
+        await flushRunLog?.();
+        logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
+      } catch (finalizeErr) {
+        logger.warn(
+          { err: finalizeErr, runId },
+          "failed to finalize run log after error",
+        );
+      }
+    }
+    const finalLogBytes = logSummary?.bytes;
+    if (outputProgressState.pending && typeof finalLogBytes === "number") {
+      outputProgressState.pending.bytes = finalLogBytes;
+    }
+    await flushOutputProgress({ force: true }).catch((flushErr) => {
+      logger.warn(
+        { err: flushErr, runId },
+        "failed to flush run output progress after error",
+      );
+    });
+    if (!legacyAdapterEntered && !signal.aborted && run.runtimeMode !== "native" &&
+        await deferSshSetupFailure(run, err, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
       await getCurrentUserRedactionOptions(),
@@ -1122,33 +1149,6 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : { message: String(err) }),
     });
     logger.error({ err: safeError?.resultJson, runId }, "heartbeat execution failed");
-
-    let logSummary: {
-      bytes: number | null;
-      sha256?: string | null;
-      compressed: boolean;
-    } | null = null;
-    if (handle) {
-      try {
-        await flushRunLog?.();
-        logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
-      } catch (finalizeErr) {
-        logger.warn(
-          { err: finalizeErr, runId },
-          "failed to finalize run log after error",
-        );
-      }
-    }
-    const finalLogBytes = logSummary?.bytes;
-    if (outputProgressState.pending && typeof finalLogBytes === "number") {
-      outputProgressState.pending.bytes = finalLogBytes;
-    }
-    await flushOutputProgress({ force: true }).catch((flushErr) => {
-      logger.warn(
-        { err: flushErr, runId },
-        "failed to flush run output progress after error",
-      );
-    });
 
     const stoppedDuringFailure = signal.aborted;
     const stopSnapshot = stoppedDuringFailure ? await getRun(run.id) : null;
@@ -1315,15 +1315,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       signal.reason instanceof LegacyControllerLeaseLostError;
     // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
     // The inner catch did not fire, so we must record the failure here.
+    if (!providerDispatchStarted && !signal.aborted && run.runtimeMode !== "native" &&
+        await deferSshSetupFailure(run, outerErr, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(outerErr instanceof Error
         ? outerErr.message
         : "Unknown setup failure"),
       await getCurrentUserRedactionOptions(),
     );
-    // A missing secret/env binding is a known pre-dispatch configuration gap,
-    // not an opaque setup crash. Surface it with its own errorCode so the
-    // recovery path routes it to a human owner instead of looping retries.
     const workspaceValidationSetupFailure = isWorkspaceValidationFailure(
       outerErr,
     )

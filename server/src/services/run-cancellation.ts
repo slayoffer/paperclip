@@ -1,4 +1,5 @@
 import type { heartbeatRuns } from "@paperclipai/db";
+import { SSH_TRANSPORT_WAIT } from "./execution-recovery-attempt.js";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect, "status" | "startedAt" | "finishedAt" | "runtimeMode" | "errorCode" | "error" | "resultJson">;
 const SOURCES = ["operator", "queued_message", "shutdown", "provider", "transport", "control_plane", "controller_lease", "unknown"] as const;
@@ -124,6 +125,15 @@ export function canContinueCancelledRun(run: Run): boolean {
   return run.status === "cancelled" && run.runtimeMode === "legacy" && Boolean(run.startedAt && run.finishedAt) &&
     cancellation?.expected === false && ["provider", "transport"].includes(cancellation.source) &&
     run.resultJson?.acpToolInventoryComplete === true && run.resultJson?.acpPendingToolCount === 0;
+}
+
+export function isSshSetupWait(run: Run): boolean {
+  const cancellation = readRunCancellation(run.resultJson);
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  return run.status === "cancelled" && run.errorCode === SSH_TRANSPORT_WAIT &&
+    cancellation?.source === "control_plane" && cancellation.expected &&
+    cancellation.initiator.type === "system" && recovery?.kind === SSH_TRANSPORT_WAIT &&
+    recovery.providerWorkStarted === false;
 }
 
 export function isUnexpectedRunCancellation(run: Run): boolean {
