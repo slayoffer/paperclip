@@ -40,7 +40,13 @@ async function prepareWorkspaceForSshExecutionInner(input: {
   );
 
   if (gitSnapshot) {
-    const repositories = await listLocalProjectRepositories(input.localDir);
+    const taggedRoot = await fs.stat(path.join(input.localDir, "CACHEDIR.TAG"))
+      .then((entry) => entry.isFile())
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      });
+    const repositories = taggedRoot ? [] : await listLocalProjectRepositories(input.localDir);
     await transportGitWorkspaceToSsh({
       spec: input.spec,
       localDir: input.localDir,

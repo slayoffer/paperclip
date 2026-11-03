@@ -15,6 +15,7 @@ Otherwise, delayed file removal can repeat a completed mutation.
 ## SSH cache restore
 
 Check workspace root cache markers before restoring nested project repositories.
+Skip separate nested repository uploads when their workspace root is tagged.
 A marker can appear after baseline capture. Child scans cannot see that marker.
 Send restore archive commands through stdin. Large exclusion lists can exceed
 the operating system limit for one SSH command argument.

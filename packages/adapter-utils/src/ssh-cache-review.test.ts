@@ -160,6 +160,23 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     expect(await readFile(path.join(local, `${repository}/data`), "utf8")).toBe("keep");
   });
 
+  it("does not upload nested repository files from a tagged workspace root", async () => {
+    const repository = ".paperclip-repositories/child";
+    for (const directory of [local, path.join(local, repository)]) {
+      await put(directory, "source.txt");
+      await exec("git", ["init", "-b", "fixture", directory]);
+      await exec("git", ["-C", directory, "add", "source.txt"]);
+      await exec("git", ["-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-m", "Initial fixture"]);
+    }
+    await put(local, `${repository}/untracked-data`, "cache");
+    await put(local, "CACHEDIR.TAG", "");
+    const prepared = await prepareRemoteManagedRuntime({ spec: spec(), runId: "tagged-git-root",
+      adapterKey: "test", workspaceLocalDir: local });
+    await expect(readFile(path.join(prepared.workspaceRemoteDir, repository, "untracked-data")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("restores with cache exclusions larger than one process argument", async () => {
     await put(local, "source.txt");
     const prepared = await prepare();
