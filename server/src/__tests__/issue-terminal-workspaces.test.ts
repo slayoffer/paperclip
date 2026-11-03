@@ -10,7 +10,7 @@ import {
   issueThreadInteractions, nativeRunFinalizations,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
-import { git, terminalWorkspaceFixture } from "./helpers/terminal-workspace-fixture.js";
+import { addReleasedNativeController, git, terminalWorkspaceFixture } from "./helpers/terminal-workspace-fixture.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService, executeIssuePostCommitActions, type IssuePostCommitAction } from "../services/issues.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
@@ -184,6 +184,7 @@ describe("issue terminal workspace cleanup", () => {
   it.each(["direct", "deferred", "rollback"])("applies native review cleanup after %s commit effects", async (mode) => {
     const f = await fixture();
     const row = await f.workspace();
+    await addReleasedNativeController(db, f.company.id, f.issue.id);
     await db.update(issues).set({ status: "in_review", executionWorkspaceId: row.id }).where(eq(issues.id, f.issue.id));
     const [review] = await db.insert(issueThreadInteractions).values({
       companyId: f.company.id, issueId: f.issue.id, kind: "request_confirmation", status: "pending",

@@ -3,10 +3,22 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { companies, executionWorkspaces, issues, projects, projectWorkspaces, type Db } from "@paperclipai/db";
+import { agents, companies, executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations,
+  projects, projectWorkspaces, type Db } from "@paperclipai/db";
 
 export const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+export async function addReleasedNativeController(db: Db, companyId: string, issueId: string) {
+  const [agent] = await db.insert(agents).values({ companyId, name: "Completed worker" }).returning();
+  const [run] = await db.insert(heartbeatRuns).values({
+    companyId, agentId: agent.id, nativeIssueId: issueId, runtimeMode: "native", status: "succeeded",
+  }).returning();
+  await db.insert(nativeRunFinalizations).values({
+    runId: run.id, companyId, issueId, phase: "committed", controllerPid: process.pid,
+    leaseOwner: null, leaseExpiresAt: null,
+  });
+}
 
 export async function terminalWorkspaceFixture(db: Db, directories: string[]) {
   const root = await mkdtemp(join(tmpdir(), "terminal-workspace-"));

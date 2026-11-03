@@ -133,11 +133,11 @@ async function automaticCloseReasons(
           or run_issue.execution_run_id = ${heartbeatRuns.id} or run_issue.checkout_run_id = ${heartbeatRuns.id}))`,
   );
   const now = new Date();
+  // Native coordinator PIDs identify the server and survive lease release.
   if (relatedRuns.some(({ run, coordinator }) =>
     ["queued", "running", "scheduled_retry"].includes(run.status)
     || isProcessAlive(run.processPid) || isProcessGroupAlive(run.processGroupId)
     || (run.controllerBootId && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > now)
-    || isProcessAlive(coordinator?.controllerPid)
     || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now)
   )) reasons.push("An issue run still uses this workspace.");
   // Cleanup acts on a physical checkout, so every alias must satisfy readiness.
