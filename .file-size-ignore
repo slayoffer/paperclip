@@ -7,3 +7,7 @@ packages/adapter-utils/src/sandbox-callback-bridge.ts
 .github/workflows/release.yml
 .github/workflows/runner-full-stack-e2e.yml
 .github/workflows/runner-protocol-live-evals.yml
+
+# Existing integration suites retain their shared fixtures for terminal-action assertions.
+server/src/__tests__/chat-completion-delivery.test.ts
+server/src/services/native-runtime/native-question-bridge.test.ts
