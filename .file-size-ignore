@@ -12,3 +12,6 @@ server/src/services/explicit-native-continuation.test.ts
 .github/workflows/runner-protocol-live-evals.yml
 # Keep the existing workspace fixture while fixing its asynchronous exit cleanup.
 server/src/__tests__/execution-workspaces-service.test.ts
+
+# The existing recovery dispatcher retains its native-blocker check before timer exemption.
+server/src/services/recovery/service.ts
