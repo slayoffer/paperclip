@@ -5,7 +5,7 @@ import path from "node:path";
 import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } from "./ssh-config.js";
-import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { createSshAuthArgs, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
 
@@ -73,7 +73,8 @@ export async function removeDeletedPathsOnSsh(input: {
     '  if [ "$safe" = 1 ]; then rm -rf -- "./$entry"; fi',
     'done',
   ].join("\n");
-  await runSshScript(input.spec, script, {
+  await runSshCommand(input.spec, "sh -s", {
+    stdin: script,
     timeoutMs: 30_000,
     maxBuffer: 256 * 1024,
   });

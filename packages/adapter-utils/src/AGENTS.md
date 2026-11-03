@@ -32,3 +32,5 @@ Pass saved literal exclusions to tar as well as the final merge.
 Prune saved literal exclusions before discovery reads them.
 Optional size collection must not fail a transfer or remove an exclusion.
 Record exclusions first. Give size collection its own bounded command and catch its failures.
+An absent local restore destination has no exclusions. Continue restore so it can create the directory.
+Send scripts with discovered path lists through stdin. Large lists can exceed the SSH argument limit.
