@@ -29,7 +29,7 @@ async function allocateLoopbackPort(host: string): Promise<number> {
 }
 
 async function waitForCondition(
-  fn: () => Promise<void>,
+  fn: (remainingMs: number) => Promise<void>,
   options: {
     timeoutMs?: number;
     intervalMs?: number;
@@ -40,11 +40,14 @@ async function waitForCondition(
   let lastError: unknown = null;
   while (Date.now() < timeoutAt) {
     try {
-      await fn();
+      await fn(Math.max(1, timeoutAt - Date.now()));
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      const remainingMs = timeoutAt - Date.now();
+      if (remainingMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingMs)));
+      }
     }
   }
   throw lastError instanceof Error
@@ -397,13 +400,13 @@ export async function startSshEnvLabFixture(input: {
   }
 
   try {
-    await waitForCondition(async () => {
+    await waitForCondition(async (remainingMs) => {
       if (!(await isPidRunning(state.pid))) {
         const logOutput = await fs.readFile(sshdLogPath, "utf8").catch(() => "");
         throw new Error(logOutput || "SSH env-lab fixture exited before becoming ready.");
       }
       const config = await buildSshEnvLabFixtureConfig(state);
-      await ensureSshWorkspaceReady(config);
+      await ensureSshWorkspaceReady(config, { timeoutMs: remainingMs });
     }, { timeoutMs: input.readinessTimeoutMs ?? 10_000, intervalMs: 250 });
     await fs.writeFile(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     return state;

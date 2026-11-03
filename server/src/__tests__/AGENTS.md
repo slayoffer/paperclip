@@ -6,3 +6,7 @@
 Await the fixture's process readiness signal before checking `runningProcesses`.
 A short registry poll can fail before the process starts and skip the Stop assertions.
 Keep the test timeout and all cancellation settlement assertions.
+
+SSH writer markers exist before the systemd scope and provider start.
+Await a provider readiness signal before testing restart termination of a live writer.
+Marker presence alone does not prove that the provider started.

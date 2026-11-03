@@ -1316,6 +1316,19 @@ describe("PaperclipRunnerToolAuthority", () => {
       ...call,
       arguments: { ...call.arguments, body: body.replace(/Bearer .+$/, "Bearer different-document-credential") },
     })).rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
+
+    const [stored] = await db.select({ resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const resultJson = stored!.resultJson!;
+    const receipts = resultJson.semanticToolReceipts as Record<string, { input: typeof call.arguments; inputDigest?: string }>;
+    const { inputDigest: _inputDigest, ...oldReceipt } = receipts[call.arguments.idempotencyKey]!;
+    const oldResult = { ...resultJson, semanticToolReceipts: { ...receipts, [call.arguments.idempotencyKey]: oldReceipt } };
+    try {
+      await db.update(heartbeatRuns).set({ resultJson: oldResult }).where(eq(heartbeatRuns.id, runId));
+      await expect(authority.execute({ ...call, arguments: oldReceipt.input }))
+        .rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
+    } finally {
+      await db.update(heartbeatRuns).set({ resultJson }).where(eq(heartbeatRuns.id, runId));
+    }
   });
 
   it("returns the exact accepted plan revision in task context", async () => {

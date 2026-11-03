@@ -1,2 +1,5 @@
 # The callback gateway generator retains the merged progress policy and shrinks from the release base.
 packages/adapter-utils/src/sandbox-callback-bridge.ts
+
+# SSH retry authorization reuses the existing database fixture.
+server/src/services/explicit-native-continuation.test.ts

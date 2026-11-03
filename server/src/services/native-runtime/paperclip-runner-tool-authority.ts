@@ -1,3 +1,4 @@
+import { REDACTED_EVENT_VALUE } from "../../redaction.js";
 import { budgetServiceInTransaction } from "../budgets.js";
 import { resolveTaskWatchdogMutationScope, taskWatchdogScopeAllowsIssueMutation } from "../task-watchdog-scope.js";
 import { resolveNewTaskParent } from "../issue-hierarchy.js";
@@ -329,9 +330,10 @@ function hireAgentResult(value: unknown, provider: unknown) {
 
 // Compare exact identities even when the output column masks the stored input.
 function sameReceiptInput(receipt: ToolReceipt, input: unknown): boolean {
-  return receipt.inputDigest === undefined
-    ? canonicalJson(receipt.input) === canonicalJson(input)
-    : receipt.inputDigest === toolInputDigest(input);
+  if (receipt.inputDigest !== undefined) return receipt.inputDigest === toolInputDigest(input);
+  const stored = canonicalJson(receipt.input);
+  // A legacy masked input cannot prove the exact original mutation.
+  return !stored.includes(REDACTED_EVENT_VALUE) && stored === canonicalJson(input);
 }
 
 export class PaperclipRunnerToolAuthority {

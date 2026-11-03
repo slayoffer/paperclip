@@ -1,4 +1,5 @@
 import type { heartbeatRuns } from "@paperclipai/db";
+import { SSH_TRANSPORT_WAIT } from "./execution-recovery-attempt.js";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect, "status" | "startedAt" | "finishedAt" | "runtimeMode" | "errorCode" | "error" | "resultJson">;
 const SOURCES = ["operator", "queued_message", "shutdown", "provider", "transport", "control_plane", "controller_lease", "unknown"] as const;
@@ -161,6 +162,15 @@ export function userStopBoundaryAt(run: Pick<Run, "status" | "finishedAt" | "res
   if (!cancellation) return run.finishedAt;
   const requestedAt = new Date(cancellation.recordedAt);
   return Number.isFinite(requestedAt.getTime()) && requestedAt < run.finishedAt ? requestedAt : run.finishedAt;
+}
+
+export function isSshSetupWait(run: Run): boolean {
+  const cancellation = readRunCancellation(run.resultJson);
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  return run.status === "cancelled" && run.errorCode === SSH_TRANSPORT_WAIT &&
+    cancellation?.source === "control_plane" && cancellation.expected &&
+    cancellation.initiator.type === "system" && recovery?.kind === SSH_TRANSPORT_WAIT &&
+    recovery.providerWorkStarted === false;
 }
 
 export function isUnexpectedRunCancellation(run: Run): boolean {
