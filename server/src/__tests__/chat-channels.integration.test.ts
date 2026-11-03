@@ -14164,114 +14164,122 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   });
 
   it("stops a Discord Gateway on lease loss and lets a standby take over", async () => {
-    const fixture = await seedCompany();
-    const applicationId = uniqueDiscordApplicationId();
-    const guildId = "1457808928258658549";
-    const providerFetch = fakeDiscordFetch(
-      applicationId,
-      guildId,
-    ) as typeof globalThis.fetch;
-    const ownerRuntime = new FakeChatSdkRuntime();
-    const owner = createService(ownerRuntime, providerFetch, {
-      discordGatewayLeaseRenewalIntervalMs: 60_000,
-      discordGatewayLeaseTtlMs: 200,
-    });
-    const endpoint = await owner.service.create(
-      fixture.companyId,
-      { provider: "discord", assignedAgentId: fixture.assignedAgentId },
-      "owner-user",
-    );
-    await owner.service.configure(
-      endpoint.id,
-      {
-        action: "configure",
-        credentials: {
-          applicationId,
-          botToken: "discord-secret",
-          guildId,
-        },
-      },
-      "owner-user",
-    );
-    const staleRuntime = ownerRuntime.endpoints.get(endpoint.id);
-    const staleAdmission = ownerRuntime.configurations.get(endpoint.id)
-      ?.callbacks.onDiscordRootMentionAdmission;
-    const staleCallbacks = ownerRuntime.configurations.get(
-      endpoint.id,
-    )?.callbacks;
-    if (!staleAdmission || !staleCallbacks)
-      throw new Error("Expected Discord admission callbacks");
-
-    const standbyRuntime = new FakeChatSdkRuntime();
-    const standby = createService(standbyRuntime, providerFetch);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    const reconciled = await standby.service.reconcileProviderRuntimes();
-    expect(reconciled).toMatchObject({ ownedElsewhere: 0, failed: 0 });
-    expect(reconciled.local).toBe(reconciled.eligible);
-    expect(reconciled.local).toBeGreaterThanOrEqual(1);
-    expect(
-      standbyRuntime.configurations.get(endpoint.id)?.enableDiscordGateway,
-    ).toBe(true);
-    await expect(
-      staleAdmission({
-        channelId: "333333333333333333",
-        endpointId: endpoint.id,
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const fixture = await seedCompany();
+      const applicationId = uniqueDiscordApplicationId();
+      const guildId = "1457808928258658549";
+      const providerFetch = fakeDiscordFetch(
+        applicationId,
         guildId,
-        messageId: "555555555555555555",
-        threadId: `discord:${guildId}:333333333333333333:555555555555555555`,
-        userId: "444444444444444444",
-      }),
-    ).resolves.toBe(false);
-    expect(staleRuntime?.shutdown).toHaveBeenCalledOnce();
+      ) as typeof globalThis.fetch;
+      const ownerRuntime = new FakeChatSdkRuntime();
+      ownerRuntime.initializeHook = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      };
+      const owner = createService(ownerRuntime, providerFetch, {
+        discordGatewayLeaseRenewalIntervalMs: 60_000,
+        discordGatewayLeaseTtlMs: 200,
+      });
+      const endpoint = await owner.service.create(
+        fixture.companyId,
+        { provider: "discord", assignedAgentId: fixture.assignedAgentId },
+        "owner-user",
+      );
+      await owner.service.configure(
+        endpoint.id,
+        {
+          action: "configure",
+          credentials: {
+            applicationId,
+            botToken: "discord-secret",
+            guildId,
+          },
+        },
+        "owner-user",
+      );
+      const staleRuntime = ownerRuntime.endpoints.get(endpoint.id);
+      const staleAdmission = ownerRuntime.configurations.get(endpoint.id)
+        ?.callbacks.onDiscordRootMentionAdmission;
+      const staleCallbacks = ownerRuntime.configurations.get(
+        endpoint.id,
+      )?.callbacks;
+      if (!staleAdmission || !staleCallbacks)
+        throw new Error("Expected Discord admission callbacks");
 
-    const freshCallbacks = standbyRuntime.configurations.get(
-      endpoint.id,
-    )?.callbacks;
-    if (!freshCallbacks)
-      throw new Error("Expected standby Discord admission callbacks");
-    const messageId = "555555555555555602";
-    const channel = makeThread({
-      channelId: "333333333333333333",
-      id: `discord:${guildId}:333333333333333333:${messageId}`,
-      name: "discord-standby-takeover",
-    });
-    const message = makeMessage({
-      id: messageId,
-      mentioned: true,
-      text: "@maya accept this once after Gateway takeover",
-      userId: "444444444444444444",
-    });
-    await deliverMessage({
-      callbacks: staleCallbacks,
-      endpointId: endpoint.id,
-      provider: "discord",
-      thread: channel.thread,
-      message,
-      trigger: "mention",
-    });
-    await deliverMessage({
-      callbacks: freshCallbacks,
-      endpointId: endpoint.id,
-      provider: "discord",
-      thread: channel.thread,
-      message,
-      trigger: "mention",
-    });
-    await expect(
-      db
-        .select({ id: chatDeliveries.id })
-        .from(chatDeliveries)
-        .where(
-          and(
-            eq(chatDeliveries.endpointId, endpoint.id),
-            eq(
-              chatDeliveries.providerEventId,
-              `${channel.thread.id}:${messageId}`,
+      const standbyRuntime = new FakeChatSdkRuntime();
+      const standby = createService(standbyRuntime, providerFetch);
+      vi.setSystemTime(Date.now() + 250);
+      const reconciled = await standby.service.reconcileProviderRuntimes();
+      expect(reconciled).toMatchObject({ ownedElsewhere: 0, failed: 0 });
+      expect(reconciled.local).toBe(reconciled.eligible);
+      expect(reconciled.local).toBeGreaterThanOrEqual(1);
+      expect(
+        standbyRuntime.configurations.get(endpoint.id)?.enableDiscordGateway,
+      ).toBe(true);
+      await expect(
+        staleAdmission({
+          channelId: "333333333333333333",
+          endpointId: endpoint.id,
+          guildId,
+          messageId: "555555555555555555",
+          threadId: `discord:${guildId}:333333333333333333:555555555555555555`,
+          userId: "444444444444444444",
+        }),
+      ).resolves.toBe(false);
+      expect(staleRuntime?.shutdown).toHaveBeenCalledOnce();
+
+      const freshCallbacks = standbyRuntime.configurations.get(
+        endpoint.id,
+      )?.callbacks;
+      if (!freshCallbacks)
+        throw new Error("Expected standby Discord admission callbacks");
+      const messageId = "555555555555555602";
+      const channel = makeThread({
+        channelId: "333333333333333333",
+        id: `discord:${guildId}:333333333333333333:${messageId}`,
+        name: "discord-standby-takeover",
+      });
+      const message = makeMessage({
+        id: messageId,
+        mentioned: true,
+        text: "@maya accept this once after Gateway takeover",
+        userId: "444444444444444444",
+      });
+      await deliverMessage({
+        callbacks: staleCallbacks,
+        endpointId: endpoint.id,
+        provider: "discord",
+        thread: channel.thread,
+        message,
+        trigger: "mention",
+      });
+      await deliverMessage({
+        callbacks: freshCallbacks,
+        endpointId: endpoint.id,
+        provider: "discord",
+        thread: channel.thread,
+        message,
+        trigger: "mention",
+      });
+      await expect(
+        db
+          .select({ id: chatDeliveries.id })
+          .from(chatDeliveries)
+          .where(
+            and(
+              eq(chatDeliveries.endpointId, endpoint.id),
+              eq(
+                chatDeliveries.providerEventId,
+                `${channel.thread.id}:${messageId}`,
+              ),
             ),
           ),
-        ),
-    ).resolves.toHaveLength(1);
-    await Promise.all([owner.service.shutdown(), standby.service.shutdown()]);
+      ).resolves.toHaveLength(1);
+      await Promise.all([owner.service.shutdown(), standby.service.shutdown()]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fences message and reaction callbacks that resume after Discord Gateway takeover", async () => {
