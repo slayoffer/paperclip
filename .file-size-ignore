@@ -10,3 +10,6 @@ server/src/services/explicit-native-continuation.test.ts
 .github/workflows/release.yml
 .github/workflows/runner-full-stack-e2e.yml
 .github/workflows/runner-protocol-live-evals.yml
+
+# The existing recovery dispatcher retains its native-blocker check before timer exemption.
+server/src/services/recovery/service.ts
