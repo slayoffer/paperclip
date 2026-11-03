@@ -47,6 +47,8 @@ Snapshots keep discovered paths in their literal `ignoredPaths` matcher, separat
 Serialized in-memory baselines retain these paths when a clone marker or scratch policy later changes.
 A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt` still return normally.
 Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
+Restore scans also retain caller exclusions from the supplied baseline.
+Saved literal exclusions reach the download archive before data enters the staging directory.
 After Git import, removal checks each path ancestor and skips paths below a symlink or a non-directory.
 This protects files outside the workspace when a committed symlink differs from the local directory overlay.
 Removal still deletes a leaf symlink itself and treats names with glob characters literally.

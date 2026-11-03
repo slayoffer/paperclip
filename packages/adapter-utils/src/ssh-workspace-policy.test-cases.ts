@@ -10,8 +10,7 @@ import { estimateLocalDirSize } from "./ssh-transfer-progress.js";
 import { captureDirectorySnapshot, disposeDirectorySnapshot } from "./workspace-restore-merge.js";
 import { WorkspaceManifestWriter, type WorkspacePaths } from "./workspace-manifest.js";
 import { removeDeletedPathsOnSsh } from "./ssh-sync.js";
-import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
-import { parseDirectorySnapshot, serializeDirectorySnapshot } from "./workspace-directory-snapshot.js";
+import { registerSshPolicyRestoreTests } from "./ssh-workspace-policy-restore.test-cases.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", ["-C", cwd, ...args])).stdout.trim();
@@ -20,25 +19,7 @@ export function registerSshWorkspacePolicyTests(fixture: () => {
   local: string; remote: string; root: string;
   spec: () => SshRemoteExecutionSpec; repository: () => Promise<void>;
 }): void {
-  it.each(["clone [saved]*", ".scratch-saved"])("retains literal exclusion %s across baseline serialization", async (directory) => {
-    const { local, remote, spec } = fixture();
-    const nestedClone = directory.startsWith("clone");
-    await mkdir(path.join(local, directory), { recursive: true });
-    await writeFile(path.join(local, directory, "data"), "keep");
-    if (nestedClone) await mkdir(path.join(local, directory, ".git"));
-    const syncPolicy = createSshWorkspaceSyncPolicy();
-    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local, syncPolicy });
-    const snapshot = await captureDirectorySnapshot(local, {
-      ignoredPaths: syncPolicy.excluded.get(local),
-    });
-    const baselineSnapshot = parseDirectorySnapshot(serializeDirectorySnapshot(snapshot))!;
-    if (nestedClone) await rm(path.join(local, directory, ".git"), { recursive: true });
-    vi.stubEnv("PAPERCLIP_SSH_SCRATCH_PATTERNS", "[]");
-    await mkdir(path.join(remote, directory), { recursive: true });
-    await writeFile(path.join(remote, directory, "data"), "remote");
-    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
-    expect(await readFile(path.join(local, directory, "data"), "utf8")).toBe("keep");
-  });
+  registerSshPolicyRestoreTests(fixture);
 
   it.each(["plain", "all", "git"] as const)("skips scratch directories and nested repositories in both directions, mode=%s", async (mode) => {
     const { local, remote, spec, repository } = fixture();

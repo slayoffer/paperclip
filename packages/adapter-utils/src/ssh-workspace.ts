@@ -12,6 +12,7 @@ import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshRemoteExecutionSpec } from "./ssh-config.js";
 import { runLocalGit } from "./ssh-command.js";
 import { clearRemoteDirectory, syncDirectoryToSsh, syncDirectoryFromSsh } from "./ssh-sync.js";
+import { workspacePaths } from "./workspace-manifest.js";
 import {
   readLocalGitWorkspaceSnapshot,
   exportGitWorkspaceFromSsh,
@@ -172,7 +173,8 @@ async function restoreWorkspaceRootFromSsh(input: {
 }): Promise<void> {
   const remoteDir = input.remoteDir;
   const defaultExclude = [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
-    ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : [])];
+    ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : []),
+    ...(input.baselineSnapshot?.exclude ?? [])];
   await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
     exclude: defaultExclude, onProgress: input.onProgress });
   const exclude = await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
@@ -215,7 +217,7 @@ async function restoreWorkspaceRootFromSsh(input: {
         remoteDir,
         localDir: stagingDir,
         exclude: baseline.exclude,
-        literalExclude: skippedPaths,
+        literalExclude: [...workspacePaths(baseline.ignoredPaths ?? [])],
         onProgress: input.onProgress,
         progressLabel: input.progressLabel,
       });

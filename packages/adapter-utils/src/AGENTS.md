@@ -27,3 +27,5 @@ Do not apply workspace filters to runtime assets or in-place execution.
 The scratch regression cases register through `ssh-sync-regressions.test.ts`, which the existing fork workflow runs.
 Preserve literal ignored paths in serialized baselines. A later policy or marker
 change must not expose previously excluded local files to restore.
+Use baseline caller exclusions during restore discovery.
+Pass saved literal exclusions to tar as well as the final merge.
