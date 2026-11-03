@@ -58,6 +58,7 @@ jobs:
           packages/adapter-utils/src/ssh-cache-pruning.test.ts
           packages/adapter-utils/src/ssh-cache-review.test.ts
           packages/adapter-utils/src/ssh-cache-git-review.test.ts
+          packages/adapter-utils/src/ssh-workspace-matcher.test.ts
           packages/adapter-utils/src/ssh-fixture.test.ts
           packages/adapter-utils/src/remote-managed-runtime.test.ts
           packages/adapter-utils/src/workspace-restore-merge.test.ts
