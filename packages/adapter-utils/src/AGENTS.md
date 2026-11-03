@@ -25,3 +25,5 @@ When filtering a supplied baseline, combine its existing ignored paths with the 
 Share one sync policy across preparation and restore to log each skipped path once per managed run.
 Do not apply workspace filters to runtime assets or in-place execution.
 The scratch regression cases register through `ssh-sync-regressions.test.ts`, which the existing fork workflow runs.
+Preserve literal ignored paths in serialized baselines. A later policy or marker
+change must not expose previously excluded local files to restore.

@@ -44,6 +44,7 @@ The selected patterns remain fixed for that managed run.
 The scan prunes existing generated-directory exclusions and does not follow symbolic links.
 Both transfer directions use the discovered paths as literal exclusions.
 Snapshots keep discovered paths in their literal `ignoredPaths` matcher, separately from configured exclusion patterns.
+Serialized in-memory baselines retain these paths when a clone marker or scratch policy later changes.
 A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt` still return normally.
 Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
 After Git import, removal checks each path ancestor and skips paths below a symlink or a non-directory.

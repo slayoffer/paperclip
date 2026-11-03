@@ -21,6 +21,7 @@ export interface LegacySerializedDirectorySnapshot {
   version: 1;
   exclude: string[];
   entries: Array<[string, SnapshotEntry]>;
+  ignoredPaths?: string[];
 }
 
 export type SerializedDirectorySnapshot = LegacySerializedDirectorySnapshot | {
@@ -95,6 +96,7 @@ export function serializeDirectorySnapshot(
     entries: [...snapshot.entries.entries()].sort(([left], [right]) =>
       left.localeCompare(right),
     ),
+    ...(snapshot.ignoredPaths ? { ignoredPaths: [...workspacePaths(snapshot.ignoredPaths)] } : {}),
   };
 }
 
@@ -111,6 +113,10 @@ export function parseDirectorySnapshot(
   ) {
     return null;
   }
+  if (candidate.ignoredPaths !== undefined && (
+    !Array.isArray(candidate.ignoredPaths) ||
+    !candidate.ignoredPaths.every((entry) => typeof entry === "string" && isSafeSnapshotRelativePath(entry))
+  )) return null;
   const entries = new Map<string, SnapshotEntry>();
   for (const rawEntry of candidate.entries) {
     if (!Array.isArray(rawEntry) || rawEntry.length !== 2) return null;
@@ -125,6 +131,7 @@ export function parseDirectorySnapshot(
   return {
     exclude: [...new Set(candidate.exclude as string[])],
     entries,
+    ...(candidate.ignoredPaths ? { ignoredPaths: [...new Set(candidate.ignoredPaths as string[])] } : {}),
   };
 }
 
