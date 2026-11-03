@@ -23,6 +23,10 @@ afterEach(async () => {
 it.each([undefined, "all"] as const)("keeps nested Git metadata sanitized in cold, cached and recovered seeds (file mode %s)", async (workspaceFileMode) => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "managed-seed-sanitized-")); roots.push(temp);
   vi.stubEnv("PAPERCLIP_HOME", path.join(temp, "home"));
+  const template = path.join(temp, "git-template");
+  await fs.mkdir(path.join(template, "hooks"), { recursive: true });
+  await fs.writeFile(path.join(template, "hooks/post-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  vi.stubEnv("GIT_TEMPLATE_DIR", template);
   const host = path.join(temp, "host"), remote = path.join(temp, "remote"), cache = path.join(temp, "cache");
   const relative = ".paperclip-repositories/fixture";
   const repository = path.join(host, relative); await fs.mkdir(repository, { recursive: true });
@@ -41,6 +45,7 @@ it.each([undefined, "all"] as const)("keeps nested Git metadata sanitized in col
   await git(repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-am", "selected");
   const head = await git(repository, "rev-parse", "HEAD");
   await git(repository, "remote", "add", "origin", "https://fixture-user:fixture-token@example.test/repository.git");
+  await fs.mkdir(path.join(repository, ".git/hooks"), { recursive: true });
   await fs.writeFile(path.join(repository, ".git/hooks/post-commit"), "private-hook-fixture");
   await fs.writeFile(path.join(repository, "work.txt"), "dirty\n");
   await fs.writeFile(path.join(repository, "ignored.txt"), "ordinary ignored bytes");

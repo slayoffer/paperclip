@@ -13,10 +13,10 @@ vi.mock("node:worker_threads", async (importOriginal) => {
       const { workerData } = require("node:worker_threads");
       if (!workerData.input.cacheMetadata) return;
       const fs = require("node:fs");
-      const original = fs.lstatSync;
+      const original = fs.promises.lstat;
       let replaced = false;
-      fs.lstatSync = (file, options) => {
-        const stats = original(file, options);
+      fs.promises.lstat = async (file, options) => {
+        const stats = await original(file, options);
         if (require("node:path").basename(file) === "victim" && !replaced) {
           replaced = true;
           fs.unlinkSync(file);

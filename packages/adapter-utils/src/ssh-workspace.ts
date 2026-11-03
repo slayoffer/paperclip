@@ -1,4 +1,5 @@
 import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
+import { localTaggedCacheDirectories, parseTaggedCacheDirectories, taggedCacheScanScript } from "./ssh-cache-directories.js";
 import { createSshWorkspaceSyncPolicy, sshWorkspaceExcludes, type SshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -9,8 +10,8 @@ import type { DirectorySnapshot } from "./workspace-restore-merge.js";
 import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline, selectDirectorySnapshot } from "./workspace-restore-merge.js";
 import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
-import { type SshRemoteExecutionSpec } from "./ssh-config.js";
-import { runLocalGit } from "./ssh-command.js";
+import { shellQuote, type SshRemoteExecutionSpec } from "./ssh-config.js";
+import { runLocalGit, runSshCommand } from "./ssh-command.js";
 import { clearRemoteDirectory, syncDirectoryToSsh, syncDirectoryFromSsh } from "./ssh-sync.js";
 import { workspacePaths } from "./workspace-manifest.js";
 import {
@@ -25,6 +26,15 @@ import {
 
 export function prepareWorkspaceForSshExecution(input: Parameters<typeof prepareWorkspaceForSshExecutionInner>[0]): Promise<{ gitBacked: boolean; repositories?: string[] }> {
   return scheduleSshWorkspaceOperation(input.onProgress, "prepare", () => prepareWorkspaceForSshExecutionInner(input));
+}
+
+async function hasLocalCacheMarker(directory: string): Promise<boolean> {
+  return fs.stat(path.join(directory, "CACHEDIR.TAG"))
+    .then((entry) => entry.isFile())
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
 }
 
 async function prepareWorkspaceForSshExecutionInner(input: {
@@ -43,7 +53,9 @@ async function prepareWorkspaceForSshExecutionInner(input: {
   );
 
   if (gitSnapshot) {
-    const repositories = await listLocalProjectRepositories(input.localDir);
+    const taggedAncestor = await hasLocalCacheMarker(input.localDir)
+      || await hasLocalCacheMarker(path.join(input.localDir, PROJECT_REPOSITORIES_DIR));
+    const repositories = taggedAncestor ? [] : await listLocalProjectRepositories(input.localDir);
     const exclude = await sshWorkspaceExcludes({ policy, localDir: input.localDir,
       exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(repositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : [])],
       onProgress: input.onProgress });
@@ -92,6 +104,7 @@ async function prepareWorkspaceForSshExecutionInner(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
+    excludeTaggedCaches: true,
     exclude,
     literalExclude: policy.excluded.get(input.localDir),
     onProgress: input.onProgress,
@@ -114,6 +127,7 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   repositories?: Array<{ path: string; baselineSnapshot?: DirectorySnapshot }>;
   syncPolicy?: SshWorkspaceSyncPolicy;
 }): Promise<void> {
+  if (input.baselineSnapshot?.exclude.includes(".")) return;
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
   const syncPolicy = input.syncPolicy ?? createSshWorkspaceSyncPolicy();
   const repositories = input.repositories ?? [];
@@ -135,7 +149,16 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   ) {
     throw new Error(`Workspace baseline must exclude ${PROJECT_REPOSITORIES_DIR} when project repositories are restored separately`);
   }
-  for (const repository of repositories) {
+  const taggedCacheDirectories = await readWorkspaceTaggedDirectories({ ...input, remoteDir, syncPolicy });
+  if (taggedCacheDirectories.includes(".")) return;
+  const taggedRepositoryContainer = repositories.length > 0 && (
+    await hasLocalCacheMarker(path.join(input.localDir, PROJECT_REPOSITORIES_DIR)) ||
+    (await runSshCommand(input.spec,
+      `if [ -f ${shellQuote(path.posix.join(remoteDir, PROJECT_REPOSITORIES_DIR, "CACHEDIR.TAG"))} ]; then printf tagged; fi`,
+      { timeoutMs: 60_000, maxBuffer: 1024 },
+    )).stdout === "tagged"
+  );
+  for (const repository of taggedRepositoryContainer ? [] : repositories) {
     await restoreWorkspaceRootFromSsh({
       spec: input.spec,
       localDir: path.join(input.localDir, repository.path),
@@ -156,8 +179,42 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
     onProgress: input.onProgress,
     progressLabel: "workspace",
     hasProjectRepositories: repositories.length > 0,
+    taggedCacheDirectories,
     syncPolicy,
   });
+}
+
+async function readWorkspaceTaggedDirectories(input: {
+  spec: SshRemoteExecutionSpec;
+  localDir: string;
+  remoteDir: string;
+  baselineSnapshot?: DirectorySnapshot;
+  syncPolicy: SshWorkspaceSyncPolicy;
+  onProgress?: RuntimeProgressSink;
+}): Promise<string[]> {
+  const scanExclude = input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES];
+  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
+    exclude: scanExclude, ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
+  const localIgnored = [...new Set([
+    ...workspacePaths(input.baselineSnapshot?.ignoredPaths ?? []),
+    ...(input.syncPolicy.excluded.get(input.localDir) ?? []),
+  ])];
+  const localTagged = await localTaggedCacheDirectories(input.localDir, scanExclude, localIgnored);
+  if (localTagged.includes(".")) return localTagged;
+  const remoteIgnored = [...new Set([...localIgnored, ...localTagged])];
+  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
+    remote: { spec: input.spec, dir: input.remoteDir }, exclude: scanExclude,
+    ignoredPaths: remoteIgnored, onProgress: input.onProgress });
+  const scanIgnored = [...new Set([
+    ...remoteIgnored, ...(input.syncPolicy.excluded.get(input.localDir) ?? []),
+  ])];
+  return [...new Set([
+    ...localTagged,
+    ...parseTaggedCacheDirectories((await runSshCommand(input.spec, "sh -s", {
+      stdin: taggedCacheScanScript(input.remoteDir, scanExclude, scanIgnored),
+      timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,
+    })).stdout, scanExclude, scanIgnored),
+  ])];
 }
 
 async function restoreWorkspaceRootFromSsh(input: {
@@ -169,22 +226,21 @@ async function restoreWorkspaceRootFromSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
   hasProjectRepositories?: boolean;
+  taggedCacheDirectories?: string[];
   syncPolicy: SshWorkspaceSyncPolicy;
 }): Promise<void> {
   const remoteDir = input.remoteDir;
-  const defaultExclude = [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
+  if (input.baselineSnapshot?.exclude.includes(".")) return;
+  const tagged = input.taggedCacheDirectories ?? await readWorkspaceTaggedDirectories(input);
+  if (tagged.includes(".")) return;
+  const exclude = [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES,
     ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : []),
     ...(input.baselineSnapshot?.exclude ?? [])];
-  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
-    exclude: defaultExclude, ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
-  const exclude = await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
-    remote: { spec: input.spec, dir: remoteDir }, exclude: defaultExclude,
-    ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
   // Direct Git restores need the same preflight as managed restores. Fetching
   // objects is safe, but resetting the working tree would remove excluded data.
   const gitSnapshot = input.baselineSnapshot ? null : await readLocalGitWorkspaceSnapshot(input.localDir);
   const suppliedBaseline = input.baselineSnapshot;
-  const skippedPaths = input.syncPolicy.excluded.get(input.localDir) ?? [];
+  const skippedPaths = [...new Set([...(input.syncPolicy.excluded.get(input.localDir) ?? []), ...tagged])];
   const filteredBaseline = suppliedBaseline && skippedPaths.length > 0 ? await selectDirectorySnapshot(suppliedBaseline, {
     omit: skippedPaths,
     exclude: [...suppliedBaseline.exclude, ...exclude], ignoredPaths: suppliedBaseline.ignoredPaths,

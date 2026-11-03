@@ -40,10 +40,11 @@ export function workspacePathWalkScript(input: {
   literal: readonly string[];
   followSymlinks?: boolean;
   scratchPatterns?: readonly string[];
+  pruneTaggedCaches?: boolean;
 }): string {
   const literalCases = input.literal.map((entry) => shellQuote(entry)).join("|");
   const scan = input.scratchPatterns !== undefined;
-  const discoveryCases = input.exclude.map((pattern) => {
+  const exclusionCases = input.exclude.map((pattern) => {
     const { scope, value } = parseExcludePattern(pattern);
     const literal = shellQuote(value);
     if (scope === "segment") return `${literal}|${literal}/*|*/${literal}|*/${literal}/*`;
@@ -53,15 +54,9 @@ export function workspacePathWalkScript(input: {
   return `set -e
 workspace_path_excluded() {
   ${literalCases ? `case "\${1#./}" in ${literalCases}) return 0 ;; esac` : ""}
-  ${scan ? (discoveryCases.length
-    ? `case "\${1#./}" in ${discoveryCases.join("|")}) return 0 ;; esac` : "") : `
-  for workspace_pattern in ${["._*", ...input.exclude].map(shellQuote).join(" ")}; do
-    workspace_candidate="$1"
-    while :; do
-      case "$workspace_candidate" in $workspace_pattern) return 0 ;; esac
-      case "$workspace_candidate" in */*) workspace_candidate="\${workspace_candidate#*/}" ;; *) break ;; esac
-    done
-  done`}
+  ${scan ? "" : 'case "${1##*/}" in ._*) return 0 ;; esac'}
+  ${exclusionCases.length
+    ? `case "\${1#./}" in ${exclusionCases.join("|")}) return 0 ;; esac` : ""}
   return 1
 }
 workspace_path_cycle() {
@@ -74,6 +69,7 @@ workspace_path_cycle() {
 }
 workspace_path_walk() {
   if ${scan ? '[ "$1" != . ] && ' : ""}workspace_path_excluded "$1"; then return; fi
+  ${input.pruneTaggedCaches ? 'if [ -f "$1/CACHEDIR.TAG" ]; then return; fi' : ""}
   ${scan ? `
   [ -d "$1" ] && [ ! -L "$1" ] || return 0
   if [ "$1" != . ]; then

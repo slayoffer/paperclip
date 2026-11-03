@@ -875,6 +875,7 @@ describe("ssh env-lab fixture", () => {
     await writeFile(path.join(localRepo, "backend.txt"), "backend base\n", "utf8");
     await git(localRepo, ["add", "backend.txt"]);
     await git(localRepo, ["commit", "-m", "backend initial"]);
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
 
     await mkdir(nestedRepo, { recursive: true });
@@ -978,6 +979,7 @@ describe("ssh env-lab fixture", () => {
       await git(repo, ["add", "tracked.txt"]);
       await git(repo, ["commit", "-m", "initial"]);
     }
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
 
     const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH direct restore with project repositories test");
