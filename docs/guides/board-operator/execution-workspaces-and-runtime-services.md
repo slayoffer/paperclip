@@ -63,6 +63,7 @@ fail the committed issue update.
   commits were pushed. Automatic close checks local remote-tracking refs and
   preserves a checkout when it cannot verify publication.
 - Automatic close excludes shared workspaces, project-primary workspaces,
+  symbolic-link aliases used by open issues, and shared paths with live issue runs,
   borrowed environment checkouts, and non-Git providers. It also preserves a
   path used by a non-archived workspace of another open issue.
 - A reopened issue can rebuild its archived Git worktree through the existing

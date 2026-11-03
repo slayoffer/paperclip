@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { executionWorkspaces, heartbeatRuns, issues, type Db } from "@paperclipai/db";
@@ -76,29 +77,45 @@ async function automaticCloseReasons(
   if (typeof workspace.metadata?.taskEnvironmentSourceWorkspaceId === "string") {
     reasons.push("This environment borrows another workspace.");
   }
-  // Paths are host resources. Check aliases across companies without exposing
-  // the other company's issue or workspace details in logs or responses.
-  const [owner] = await db.select({ id: executionWorkspaces.id }).from(executionWorkspaces)
-    .where(and(
-      sql`${executionWorkspaces.status} <> 'archived'`,
-      or(
-        ...(workspace.cwd ? [eq(executionWorkspaces.cwd, workspace.cwd)] : []),
-        ...(workspace.providerRef ? [eq(executionWorkspaces.cwd, workspace.providerRef),
-          eq(executionWorkspaces.providerRef, workspace.providerRef)] : []),
-      ),
-      sql`exists (select 1 from ${issues} owner_issue
-        where (owner_issue.id = ${executionWorkspaces.sourceIssueId}
-          or owner_issue.execution_workspace_id = ${executionWorkspaces.id})
-        and owner_issue.status not in ('done', 'cancelled'))`,
-    )).limit(1);
+  // Paths are host resources. Resolve aliases across companies without exposing
+  // another company's details. Cache identities only for this close check.
+  const identities = new Map<string, Promise<string>>();
+  const identity = (value: string) => {
+    let resolved = identities.get(value);
+    if (!resolved) {
+      resolved = realpath(value).catch(() => value);
+      identities.set(value, resolved);
+    }
+    return resolved;
+  };
+  const paths = new Set(await Promise.all(
+    [workspace.cwd, workspace.providerRef].filter((value): value is string => Boolean(value)).map(identity),
+  ));
+  const candidates = await db.select({
+    id: executionWorkspaces.id, sourceIssueId: executionWorkspaces.sourceIssueId,
+    cwd: executionWorkspaces.cwd, providerRef: executionWorkspaces.providerRef,
+  }).from(executionWorkspaces).where(sql`${executionWorkspaces.status} <> 'archived'`);
+  const workspaceIds = new Set([workspace.id]);
+  const sourceIssueIds = new Set([input.issueId, ...(workspace.sourceIssueId ? [workspace.sourceIssueId] : [])]);
+  for (const candidate of candidates) {
+    for (const value of [candidate.cwd, candidate.providerRef]) {
+      if (value && paths.has(await identity(value))) {
+        workspaceIds.add(candidate.id);
+        if (candidate.sourceIssueId) sourceIssueIds.add(candidate.sourceIssueId);
+        break;
+      }
+    }
+  }
+  const relatedIssues = await db.select({ id: issues.id, status: issues.status }).from(issues).where(or(
+    inArray(issues.id, [...sourceIssueIds]), inArray(issues.executionWorkspaceId, [...workspaceIds]),
+  ));
+  const owner = relatedIssues.find((related) => !terminalStatuses.includes(related.status));
   if (owner) reasons.push("Another open issue uses this workspace path.");
   const [activeRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-    eq(heartbeatRuns.companyId, input.companyId),
     inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
     sql`exists (select 1 from ${issues} run_issue
-      where run_issue.company_id = ${input.companyId}
-        and (run_issue.id = ${input.issueId} or run_issue.id = ${workspace.sourceIssueId}
-          or run_issue.execution_workspace_id = ${workspace.id})
+      where run_issue.company_id = ${heartbeatRuns.companyId}
+        and ${inArray(sql`run_issue.id`, relatedIssues.map((related) => related.id))}
         and (run_issue.id = ${heartbeatRuns.issueId} or run_issue.id = ${heartbeatRuns.nativeIssueId}
           or run_issue.id::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
           or run_issue.execution_run_id = ${heartbeatRuns.id} or run_issue.checkout_run_id = ${heartbeatRuns.id}))`,

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -125,16 +125,38 @@ describe("issue terminal workspace cleanup", () => {
     expect(existsSync(row.cwd!)).toBe(true);
   });
 
-  it.each(["source", "linked"])("keeps a cwd used by another open issue through its %s workspace", async (association) => {
+  it.each([
+    ["source", false], ["linked", false], ["source", true], ["linked", true],
+  ])("keeps an open %s owner with symlink=%s", async (association, useSymlink) => {
     const f = await fixture();
     const row = await f.workspace();
     const [other] = await db.insert(issues).values({ companyId: f.company.id, title: "Open owner", status: "todo" }).returning();
-    const alias = await f.workspace({ cwd: row.cwd, providerRef: row.cwd,
+    const aliasPath = useSymlink ? join(f.root, "alias") : row.cwd!;
+    if (useSymlink) await symlink(row.cwd!, aliasPath);
+    const alias = await f.workspace({ cwd: aliasPath, providerRef: aliasPath,
       sourceIssueId: association === "source" ? other.id : null });
     if (association === "linked") await db.update(issues).set({ executionWorkspaceId: alias.id }).where(eq(issues.id, other.id));
     await issueService(db).update(f.issue.id, { status: "cancelled" });
     expect((await readWorkspace(row.id)).status).toBe("active");
     expect(existsSync(row.cwd!)).toBe(true);
+  });
+
+  it.each([false, true])("keeps a terminal owner's live run with symlink=%s", async (useSymlink) => {
+    const f = await fixture();
+    const row = await f.workspace();
+    const [other] = await db.insert(issues).values({
+      companyId: f.company.id, title: "Finishing owner", status: "done",
+    }).returning();
+    const aliasPath = useSymlink ? join(f.root, "alias") : row.cwd!;
+    if (useSymlink) await symlink(row.cwd!, aliasPath);
+    const alias = await f.workspace({ cwd: aliasPath, providerRef: aliasPath, sourceIssueId: other.id });
+    await db.update(issues).set({ executionWorkspaceId: alias.id }).where(eq(issues.id, other.id));
+    const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Finishing" }).returning();
+    await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id, issueId: other.id, status: "running" });
+    await issueService(db).update(f.issue.id, { status: "done" });
+    expect((await readWorkspace(row.id)).status).toBe("active");
+    expect(existsSync(row.cwd!)).toBe(true);
+    expect((await readWorkspace(alias.id)).status).toBe("active");
   });
 
   it("waits for the caller transaction to commit", async () => {
