@@ -84,33 +84,15 @@ export async function localTaggedCacheDirectories(
   return parseTaggedCacheDirectories(stdout, exclude, ignoredPaths);
 }
 
-export function cacheDirectoryTarExcludes(directories: string[]): string[] {
-  return directories.map((entry) => (entry === "." ? "." : `./${entry}`)
-    .replace(/\\/g, "\\\\").replace(/([*?[])/g, "\\$1"));
-}
-
-export async function captureSshWorkspaceSnapshot(root: string, options: { exclude: string[] }): Promise<DirectorySnapshot> {
-  const ignoredPaths = await localTaggedCacheDirectories(root, options.exclude);
+export async function captureSshWorkspaceSnapshot(root: string, options: { exclude: string[]; ignoredPaths?: WorkspacePaths }): Promise<DirectorySnapshot> {
+  const ignoredPaths = [...new Set([
+    ...workspacePaths(options.ignoredPaths ?? []),
+    ...await localTaggedCacheDirectories(root, options.exclude, options.ignoredPaths),
+  ])];
   // Keep the whole-root tar exclusion in serialized baselines. A later marker
   // removal must not turn this intentionally empty snapshot into an empty tree.
   if (options.exclude.includes(".") || ignoredPaths.includes(".")) {
     return { exclude: [...new Set([...options.exclude, "."])], entries: new Map() };
   }
   return captureDirectorySnapshot(root, { ...options, ignoredPaths });
-}
-
-// SSH baselines are in-memory maps. Filter old entries as well as future scans:
-// a directory can gain a tag after prepare, on either side of the transfer.
-export function withTaggedCacheDirectories(
-  snapshot: DirectorySnapshot, directories: string[],
-): DirectorySnapshot & { ignoredPaths: string[] } {
-  const ignoredPaths = [...new Set([
-    ...workspacePaths(snapshot.ignoredPaths ?? []), ...directories.filter((entry) => entry !== "."),
-  ])];
-  const ignored = workspacePathMatcher(ignoredPaths);
-  try {
-    return { ...snapshot, ignoredPaths,
-      entries: new Map([...snapshot.entries].filter(([relative]) => !directories.includes(".") && !ignored.matches(relative))),
-    };
-  } finally { ignored.close(); }
 }

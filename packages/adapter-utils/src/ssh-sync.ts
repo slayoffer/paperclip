@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { cacheDirectoryTarExcludes, localTaggedCacheDirectories } from "./ssh-cache-directories.js";
+import { localTaggedCacheDirectories } from "./ssh-cache-directories.js";
 import type { WorkspacePaths } from "./workspace-manifest.js";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -49,8 +49,32 @@ export async function removeDeletedPathsOnSsh(input: {
   deletedPaths: string[];
 }): Promise<void> {
   if (input.deletedPaths.length === 0) return;
+  for (const entry of input.deletedPaths) {
+    if (entry.includes("\0") || entry.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Invalid workspace removal path: ${JSON.stringify(entry)}`);
+    }
+  }
   const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
-  const script = `cd ${shellQuote(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
+  // Git import can restore a committed symlink where the local overlay has a
+  // directory. Never remove a child through that link before copying the overlay.
+  const script = [
+    "set -e",
+    `cd ${shellQuote(input.remoteDir)}`,
+    `for entry in ${quotedPaths}; do`,
+    '  ancestor=.',
+    '  remaining="$entry"',
+    '  safe=1',
+    '  while [ "${remaining#*/}" != "$remaining" ]; do',
+    '    ancestor="$ancestor/${remaining%%/*}"',
+    '    remaining="${remaining#*/}"',
+    '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
+    '      safe=0',
+    '      break',
+    '    fi',
+    '  done',
+    '  if [ "$safe" = 1 ]; then rm -rf -- "./$entry"; fi',
+    'done',
+  ].join("\n");
   await runSshScript(input.spec, script, {
     timeoutMs: 30_000,
     maxBuffer: 256 * 1024,
@@ -64,12 +88,13 @@ export async function syncDirectoryToSsh(input: {
   exclude?: string[];
   excludeTaggedCaches?: boolean;
   cacheScan?: { exclude: readonly string[]; ignoredPaths?: WorkspacePaths };
+  literalExclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
   const tagged = input.excludeTaggedCaches ? await localTaggedCacheDirectories(
-    input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths,
+    input.localDir, input.cacheScan?.exclude ?? input.exclude, input.cacheScan?.ignoredPaths ?? input.literalExclude,
   ) : [];
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
@@ -92,7 +117,8 @@ export async function syncDirectoryToSsh(input: {
       label: input.progressLabel,
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
-        exclude: [...(input.exclude ?? []), ...tagged],
+        exclude: input.exclude,
+        literalExclude: [...(input.literalExclude ?? []), ...tagged],
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
@@ -105,7 +131,7 @@ export async function syncDirectoryToSsh(input: {
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...tarExcludeArgs([...(input.exclude ?? []), ...cacheDirectoryTarExcludes(tagged)]),
+      ...tarExcludeArgs(input.exclude, [...(input.literalExclude ?? []), ...tagged]),
       "-cf",
       "-",
       ".",
@@ -196,6 +222,7 @@ export async function syncDirectoryFromSsh(input: {
   localDir: string;
   exclude?: string[];
   excludedCacheDirectories?: string[];
+  literalExclude?: string[];
   preserveLocalEntries?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
@@ -204,8 +231,7 @@ export async function syncDirectoryFromSsh(input: {
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
   const remoteTarScript = [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs([...(input.exclude ?? []),
-      ...cacheDirectoryTarExcludes(input.excludedCacheDirectories ?? [])]).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs(input.exclude, [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])]).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
@@ -311,7 +337,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
-        ignoredPaths: input.excludedCacheDirectories,
+        ignoredPaths: [...(input.literalExclude ?? []), ...(input.excludedCacheDirectories ?? [])],
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

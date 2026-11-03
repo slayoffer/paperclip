@@ -70,6 +70,10 @@ Restore also checks current root markers before it restores nested project repos
 A marker added after preparation protects the root and its nested repositories.
 Preparation also skips separate nested repository uploads when the workspace root is tagged.
 The same protection applies to a tagged `.paperclip-repositories` container.
+Clone and scratch discovery prunes tagged caches before reading their children.
+Cache discovery then prunes the discovered clone and scratch paths.
+Both policies retain saved literal exclusions during baseline capture and restore.
+Policy discovery scripts also travel through stdin, so large saved exclusion lists remain valid.
 Remote text output retains UTF-8 characters split across transport chunks.
 The restore archive command travels through stdin. Large cache exclusion lists
 do not become one SSH command-line argument.
@@ -80,6 +84,57 @@ Git and tar through a local SSH substitute. On base `b411be160`, ignored
 tagged `target/` transferred in both directions. The same prepare results
 applied to referenced projects. The homelab note that only
 `.paperclip-runtime` was excluded does not describe this base.
+
+## Nested repositories and scratch directories
+
+Before each workspace transfer, Paperclip excludes nested directories with a `.git` entry.
+The entry can be a directory, a file, or a symbolic link.
+The workspace root remains eligible for transfer.
+Explicit project repositories still transfer as separate workspace roots.
+Their nested repositories follow the same exclusion rule.
+
+Scratch directory names also match `.scratch-*` and `.cto-*` by default, at every depth.
+Set `PAPERCLIP_SSH_SCRATCH_PATTERNS` on the Paperclip server to replace these defaults:
+
+```sh
+PAPERCLIP_SSH_SCRATCH_PATTERNS='[".scratch-*", ".cto-*", "temp-*"]'
+```
+
+The value must be a JSON array of nonempty directory name patterns, without `/` or NUL characters.
+Patterns use shell glob syntax, including `*`, `?`, and character classes.
+An empty array disables scratch name exclusions. Nested repository exclusion stays active.
+Invalid configuration stops workspace preparation before remote changes.
+The selected patterns remain fixed for that managed run.
+
+The scan prunes existing generated-directory exclusions and does not follow symbolic links.
+Both transfer directions use the discovered paths as literal exclusions.
+Snapshots keep discovered paths in their literal `ignoredPaths` matcher, separately from configured exclusion patterns.
+Serialized in-memory baselines retain these paths when a clone marker or scratch policy later changes.
+A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt` still return normally.
+Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
+Restore scans also retain caller exclusions from the supplied baseline.
+Saved literal exclusions reach the download archive before data enters the staging directory.
+After Git import, removal checks each path ancestor and skips paths below a symlink or a non-directory.
+This protects files outside the workspace when a committed symlink differs from the local directory overlay.
+Removal still deletes a leaf symlink itself and treats names with glob characters literally.
+Baseline capture omits these paths, and restore preserves their local contents.
+New nested repositories on the remote also stay out of the downloaded archive.
+If a previously ordinary directory becomes a clone, restore preserves its local version.
+Skipped paths remain excluded through the rest of the managed run, even if their `.git` marker disappears.
+
+Each skipped path produces one progress log entry per managed run, with its `du -sk` size in KiB.
+If size collection fails, the log reports `unknown` and the path stays excluded.
+Size collection uses a separate five-second budget after discovery records all exclusions.
+Restore discovery prunes saved literal exclusions before reading their contents.
+Without a progress sink, the entry goes to the server console.
+Paths use JSON quoting so a newline in a filename cannot create a second log line.
+Direct prepare/restore callers can share a `syncPolicy` to retain this per-run state.
+Runtime assets and in-place workspaces do not use this workspace filter.
+
+Git history still transfers as a bundle, including committed scratch content in that history.
+The working tree omits skipped directories. Their tracked files receive Git's `skip-worktree` index flag first.
+An ordinary `git add -A` then preserves these files in subsequent commits.
+This filter reduces workspace copies, not Git history size.
 
 Sync-back preserves symbolic link text exactly, including relative targets.
 Copies keep link text verbatim. Baseline merges preserve excluded local files.

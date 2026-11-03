@@ -101,6 +101,36 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     });
   });
 
+  describe.skipIf(process.getuid?.() === 0)("combined cache and scratch exclusions", () => {
+    it.each(["prepare", "restore"])("prunes unreadable cache children during %s", async (phase) => {
+      await put(local, "source.txt");
+      const prepared = phase === "restore" ? await prepare() : null;
+      const target = prepared?.workspaceRemoteDir ?? local;
+      await put(target, "target/CACHEDIR.TAG", "");
+      await block(path.join(target, "target/private"));
+      const run = prepared ?? await prepare();
+      await put(run.workspaceRemoteDir, "source.txt", "remote");
+      await run.restoreWorkspace();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    });
+
+    it("prunes unreadable scratch children before cache discovery on restore", async () => {
+      await put(local, "source.txt");
+      const prepared = await prepare();
+      await block(path.join(prepared.workspaceRemoteDir, ".scratch-new/private"));
+      await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+      await prepared.restoreWorkspace();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    });
+
+    it("does not scan children of a tagged workspace root", async () => {
+      await put(local, "CACHEDIR.TAG", "");
+      await block(path.join(local, "private"));
+      const prepared = await prepare();
+      await prepared.restoreWorkspace();
+    });
+  });
+
   it("preserves a tagged root after its local marker is removed", async () => {
     await put(local, "CACHEDIR.TAG", "");
     await put(local, "data");
@@ -234,6 +264,16 @@ child.on("close", (code) => {
     expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
     expect((await readdir(local)).sort()).toEqual(["source.txt"]);
   }, 60_000);
+
+  it("restores a baseline with large saved literal exclusions", async () => {
+    await put(local, "source.txt");
+    await put(remote, "source.txt", "remote");
+    const ignoredPaths = Array.from({ length: 2000 }, (_, index) =>
+      `cache-${String(index).padStart(4, "0")}-${"x".repeat(70)}`);
+    const baselineSnapshot = await captureSshWorkspaceSnapshot(local, { exclude: [], ignoredPaths });
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+  });
 
   it("uploads a referenced project with 6000 resolved ignore paths", async () => {
     const reference = path.join(root, "reference");
