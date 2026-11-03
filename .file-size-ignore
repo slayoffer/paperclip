@@ -3,3 +3,6 @@ packages/adapter-utils/src/sandbox-callback-bridge.ts
 
 # SSH retry authorization reuses the existing database fixture.
 server/src/services/explicit-native-continuation.test.ts
+
+# The recovery dispatcher checks native blockers before its timer exemption.
+server/src/services/recovery/service.ts

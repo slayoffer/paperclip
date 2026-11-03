@@ -182,6 +182,7 @@ import {
 import { withRecoveryContext } from "./status-only-context.js";
 import { currentRunFailureText } from "../native-runtime/native-exact-resume-failure.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { hasStandingTimerContinuation } from "./disposition-continuation.js";
 import { boardEscalationWait, reportReconcileFailure, skipRefusedReconcile } from "./stranded-escalation-wait.js";
 import {
   collectDispositionRepairSourceState,
@@ -1446,6 +1447,7 @@ export function recoveryService(
     issue: RecoveryIssue,
     latestRun: LatestIssueRun,
   ) {
+    if (await hasStandingTimerContinuation(db, issuesSvc, issue)) return true;
     if (issue.monitorNextCheckAt) return true;
     if (issue.status === "in_review" && latestRun?.status === "succeeded" &&
       (await listExternalReviewWaits(db, issue.companyId, [issue.id])).length > 0) return true;
@@ -4019,6 +4021,11 @@ export function recoveryService(
       return "skipped";
 
     if (await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
+    if (await hasStandingTimerContinuation(db, issuesSvc, current) &&
+        !await nativeBlockedUnblockAction(current, latestRun)) {
+      await resolveDispositionRepairActionAsCovered(current, "standing_driver_timer_continuation");
+      return "covered";
+    }
 
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
@@ -4028,6 +4035,7 @@ export function recoveryService(
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(
+        db,
         current,
         "dependency_wait_created",
       );
@@ -4046,6 +4054,7 @@ export function recoveryService(
     if (state.hasActiveExecutionPath) return "skipped";
     if (state.hasDurableWaitingPath) {
       await resolveDispositionRepairActionAsCovered(
+        db,
         current,
         `durable_path_restored:${state.durablePathReason ?? "unknown"}`,
       );
@@ -4726,6 +4735,12 @@ export function recoveryService(
     for (const issue of candidates) {
       try {
         if (skipRefusedReconcile(issue) || await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
+          result.skipped += 1;
+          continue;
+        }
+        if (await hasStandingTimerContinuation(db, issuesSvc, issue) &&
+            !await nativeBlockedUnblockAction(issue, await getLatestIssueRun(issue.companyId, issue.id))) {
+          await resolveDispositionRepairActionAsCovered(issue, "standing_driver_timer_continuation");
           result.skipped += 1;
           continue;
         }
