@@ -77,6 +77,13 @@ fail the committed issue update.
   not permit removal.
 - Native completion-review acceptance queues cleanup through its commit effects.
   An outer transaction must commit before those effects run.
+- The removal boundary includes directories below the worktree root. Primary
+  project directories and other owned workspaces inside that boundary prevent
+  removal, including symbolic-link aliases. A sibling with a common name prefix
+  does not fall inside that boundary.
+- Live runs retain ownership through saved workspace IDs and native execution
+  paths after their issue changes its current workspace. An archived workspace
+  row can still identify a live run's saved binding.
 - A reopened issue can rebuild its archived Git worktree through the existing
   reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
 - This transition hook does not scan historical terminal issues. The existing

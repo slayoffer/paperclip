@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
+import { isAbsolute, relative, sep } from "node:path";
 import { promisify } from "node:util";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, projectWorkspaces, type Db } from "@paperclipai/db";
 import type { ExecutionWorkspace } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
@@ -13,6 +14,7 @@ import { isProcessGroupAlive } from "./local-service-supervisor.js";
 
 const execFileAsync = promisify(execFile);
 const terminalStatuses = ["done", "cancelled"];
+const activeRunStatuses = ["queued", "running", "scheduled_retry"];
 // Share the queue across requests and service instances on this host process.
 let cleanupQueue: Promise<void> = Promise.resolve();
 
@@ -93,17 +95,28 @@ async function automaticCloseReasons(
   const paths = new Set(await Promise.all(
     [workspace.cwd, workspace.providerRef].filter((value): value is string => Boolean(value)).map(identity),
   ));
+  const containsPath = async (value: string) => {
+    const resolved = await identity(value);
+    return [...paths].some((root) => {
+      const suffix = relative(root, resolved);
+      return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
+    });
+  };
   const candidates = await db.select({
     id: executionWorkspaces.id, sourceIssueId: executionWorkspaces.sourceIssueId,
+    status: executionWorkspaces.status,
     cwd: executionWorkspaces.cwd, providerRef: executionWorkspaces.providerRef,
     metadata: executionWorkspaces.metadata, mode: executionWorkspaces.mode,
     strategyType: executionWorkspaces.strategyType, providerType: executionWorkspaces.providerType,
-  }).from(executionWorkspaces).where(sql`${executionWorkspaces.status} <> 'archived'`);
+  }).from(executionWorkspaces);
   const workspaceIds = new Set([workspace.id]);
+  const boundWorkspaceIds = new Set([workspace.id]);
   const sourceIssueIds = new Set([input.issueId, ...(workspace.sourceIssueId ? [workspace.sourceIssueId] : [])]);
   for (const candidate of candidates) {
     for (const value of [candidate.cwd, candidate.providerRef]) {
-      if (value && paths.has(await identity(value))) {
+      if (value && await containsPath(value)) {
+        boundWorkspaceIds.add(candidate.id);
+        if (candidate.status === "archived") break;
         workspaceIds.add(candidate.id);
         if (candidate.sourceIssueId) sourceIssueIds.add(candidate.sourceIssueId);
         if (candidate.mode !== "isolated_workspace" || candidate.strategyType !== "git_worktree"
@@ -123,23 +136,40 @@ async function automaticCloseReasons(
   ));
   const owner = relatedIssues.find((related) => !terminalStatuses.includes(related.status));
   if (owner) reasons.push("Another open issue uses this workspace path.");
-  const relatedRuns = await db.select({ run: heartbeatRuns, coordinator: nativeRunFinalizations }).from(heartbeatRuns)
-    .leftJoin(nativeRunFinalizations, eq(nativeRunFinalizations.runId, heartbeatRuns.id)).where(
+  const boundToWorkspace = or(
     sql`exists (select 1 from ${issues} run_issue
       where run_issue.company_id = ${heartbeatRuns.companyId}
         and ${inArray(sql`run_issue.id`, relatedIssues.map((related) => related.id))}
         and (run_issue.id = ${heartbeatRuns.issueId} or run_issue.id = ${heartbeatRuns.nativeIssueId}
           or run_issue.id::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
           or run_issue.execution_run_id = ${heartbeatRuns.id} or run_issue.checkout_run_id = ${heartbeatRuns.id}))`,
+    inArray(sql`${heartbeatRuns.contextSnapshot}->>'executionWorkspaceId'`, [...boundWorkspaceIds]),
+    inArray(sql`${heartbeatRuns.runnerProfileJson}#>>'{nativeExecutionInput,binding,executionWorkspaceId}'`, [...boundWorkspaceIds]),
   );
   const now = new Date();
+  const nativeCwd = sql<string | null>`${heartbeatRuns.runnerProfileJson}#>>'{nativeExecutionInput,workspace,cwd}'`;
+  const relatedRuns = await db.select({
+    run: { status: heartbeatRuns.status, processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
+      controllerBootId: heartbeatRuns.controllerBootId, controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt },
+    coordinator: { leaseOwner: nativeRunFinalizations.leaseOwner, leaseExpiresAt: nativeRunFinalizations.leaseExpiresAt },
+    bound: sql<boolean>`coalesce(${boundToWorkspace}, false)`, nativeCwd,
+  }).from(heartbeatRuns).leftJoin(nativeRunFinalizations, eq(nativeRunFinalizations.runId, heartbeatRuns.id)).where(and(
+    or(boundToWorkspace, isNotNull(nativeCwd)),
+    or(inArray(heartbeatRuns.status, activeRunStatuses), isNotNull(heartbeatRuns.processPid), isNotNull(heartbeatRuns.processGroupId),
+      and(isNotNull(heartbeatRuns.controllerBootId), gt(heartbeatRuns.controllerLeaseExpiresAt, now)),
+      and(isNotNull(nativeRunFinalizations.leaseOwner), gt(nativeRunFinalizations.leaseExpiresAt, now))),
+  ));
   // Native coordinator PIDs identify the server and survive lease release.
-  if (relatedRuns.some(({ run, coordinator }) =>
-    ["queued", "running", "scheduled_retry"].includes(run.status)
-    || isProcessAlive(run.processPid) || isProcessGroupAlive(run.processGroupId)
-    || (run.controllerBootId && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > now)
-    || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now)
-  )) reasons.push("An issue run still uses this workspace.");
+  for (const { run, coordinator, bound, nativeCwd: cwd } of relatedRuns) {
+    const live = activeRunStatuses.includes(run.status)
+      || isProcessAlive(run.processPid) || isProcessGroupAlive(run.processGroupId)
+      || (run.controllerBootId && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > now)
+      || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now);
+    if (live && (bound || (cwd && await containsPath(cwd)))) {
+      reasons.push("An issue run still uses this workspace.");
+      break;
+    }
+  }
   // Cleanup acts on a physical checkout, so every alias must satisfy readiness.
   const svc = executionWorkspaceService(db);
   for (const workspaceId of workspaceIds) {
@@ -154,7 +184,7 @@ async function automaticCloseReasons(
   const primaryPaths = await db.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces)
     .where(eq(projectWorkspaces.isPrimary, true));
   for (const primary of primaryPaths) {
-    if (primary.cwd && paths.has(await identity(primary.cwd))) {
+    if (primary.cwd && await containsPath(primary.cwd)) {
       reasons.push("This checkout is a primary project workspace.");
       break;
     }
