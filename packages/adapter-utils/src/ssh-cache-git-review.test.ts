@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { restoreWorkspaceFromSshExecution } from "./ssh.js";
+import { prepareWorkspaceForSshExecution, restoreWorkspaceFromSshExecution } from "./ssh.js";
 import { readLocalGitWorkspaceSnapshot, transportGitWorkspaceToSsh } from "./ssh-git.js";
 import { removeDeletedPathsOnSsh } from "./ssh-sync.js";
 
@@ -53,6 +53,21 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local });
     expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
     expect(await readdir(local)).toEqual(["source.txt"]);
+  });
+
+  it.each(["target", "."])("omits committed tagged cache %s from the remote working tree", async (directory) => {
+    await repository();
+    await put(local, `${directory}/CACHEDIR.TAG`, "");
+    await put(local, `${directory}/data`);
+    await git(local, "add", ".");
+    await git(local, "commit", "-m", "Commit tagged cache");
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local });
+    await expect(readFile(path.join(remote, directory, "data"))).rejects.toMatchObject({ code: "ENOENT" });
+    if (directory === ".") expect((await readdir(remote)).sort()).toEqual([".git", ".paperclip-runtime"]);
+    await put(remote, "new-source.txt", "new");
+    await git(remote, "add", "-A");
+    await git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Remote change");
+    expect(await git(remote, "show", `HEAD:${directory === "." ? "" : `${directory}/`}data`)).toBe("keep");
   });
 
   it("prepares Git workspaces with large literal exclusion lists", async () => {

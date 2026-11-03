@@ -55,6 +55,9 @@ upload, plus their existing `vendor`, Git metadata, and resolved ignore rules.
 Referenced projects remain read-only inputs and have no restore path.
 Runtime assets retain their existing transfer settings. Git bundles retain
 repository history. These rules do not remove objects already committed to Git.
+After Git checkout, preparation removes tagged cache files from the remote working tree.
+Their index entries use `skip-worktree`, so ordinary staging does not commit their removal.
+A tagged root retains only Git metadata and managed runtime files.
 
 Restore preserves excluded local directories and their contents. It combines
 the tags captured before execution with tags present locally or remotely at

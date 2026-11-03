@@ -48,3 +48,6 @@ Record exclusions first. Give size collection its own bounded command and catch 
 Run clone and scratch discovery before cache discovery. Prune tagged caches during clone discovery.
 Both scanners must skip the other policy's excluded trees before reading their children.
 Send policy scan scripts through stdin. Serialized exclusions can exceed the limit for one process argument.
+
+Git checkout precedes the file overlay. Remove tagged cache files after checkout and protect their index entries.
+For a tagged root, retain Git metadata and runtime files while removing working-tree content.
