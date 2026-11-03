@@ -59,6 +59,8 @@ Send scripts with discovered path lists through stdin. Large lists can exceed th
 Stdin does not remove child-process argument limits. Batch Git pathspecs and removal operands, and use NUL file lists for large tar inputs.
 Do not start one removal process per path. Large exclusion lists can exceed the command deadline even when most paths are absent.
 Prune retained policy exclusions before every discovery pass, including after clone markers disappear.
+Discovery must use the baseline matcher's root-relative exclusion scopes and literal text.
+Tar-style suffix matching can hide a nested clone from discovery while its files remain in the baseline and are deleted during restore.
 
 ## SSH setup failures
 
