@@ -10,6 +10,21 @@ server/src/services/explicit-native-continuation.test.ts
 .github/workflows/release.yml
 .github/workflows/runner-full-stack-e2e.yml
 .github/workflows/runner-protocol-live-evals.yml
+# Keep the existing Discord fixture while making its lease clock deterministic.
+server/src/__tests__/chat-channels.integration.test.ts
+
+# Existing integration suites retain their shared fixtures for terminal-action assertions.
+server/src/__tests__/chat-completion-delivery.test.ts
+server/src/services/native-runtime/native-question-bridge.test.ts
+
+# The existing interaction service passes terminal cleanup through its commit-effects queue.
+server/src/services/issue-thread-interactions.ts
+
+# Keep the existing workspace fixture while fixing its asynchronous exit cleanup.
+server/src/__tests__/execution-workspaces-service.test.ts
+
+# Keep lifecycle guard and destruction callbacks in the existing service gateway.
+server/src/services/execution-workspaces.ts
 
 # The existing recovery dispatcher retains its native-blocker check before timer exemption.
 server/src/services/recovery/service.ts

@@ -92,7 +92,9 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(notified).not.toHaveBeenCalled();
       });
       expect(notified).toHaveBeenCalledTimes(1);
-      expect(actions).toEqual([]);
+      expect(actions).toEqual([
+        { type: "close_terminal_workspaces", companyId: f.companyId, issueId: f.task.id },
+      ]);
       await executeIssuePostCommitActions(db, actions);
       expect(notified).toHaveBeenCalledTimes(1);
       const rolledBack: IssuePostCommitAction[] = [];
