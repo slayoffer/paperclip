@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { shellQuote, type SshConnectionConfig } from "./ssh-config.js";
-import { runSshScript } from "./ssh-command.js";
+import { runSshCommand } from "./ssh-command.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
 import { workspacePaths, type WorkspacePaths } from "./workspace-manifest.js";
 
@@ -39,6 +39,20 @@ function scanScript(root: string, exclude: string[], patterns: string[], ignored
     + `-prune -print0`;
 }
 
+async function runPolicyScript(
+  script: string, timeout: number, remote?: { spec: SshConnectionConfig },
+): Promise<{ stdout: string }> {
+  const maxBuffer = 4 * 1024 * 1024;
+  if (remote) return runSshCommand(remote.spec, "sh -s", { stdin: script, timeoutMs: timeout, maxBuffer });
+  const command = exec("sh", ["-s"], { timeout, maxBuffer });
+  let stdinError: Error | undefined;
+  command.child.stdin!.on("error", (error: Error) => { stdinError = error; });
+  command.child.stdin!.end(script);
+  const result = await command;
+  if (stdinError) throw stdinError;
+  return result;
+}
+
 export async function sshWorkspaceExcludes(input: {
   policy: SshWorkspaceSyncPolicy;
   localDir: string;
@@ -55,10 +69,7 @@ export async function sshWorkspaceExcludes(input: {
     if (!exists) return input.exclude;
   }
   const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, input.ignoredPaths);
-  const options = { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 };
-  const result = input.remote
-    ? await runSshScript(input.remote.spec, script, { timeoutMs: options.timeout, maxBuffer: options.maxBuffer })
-    : await exec("sh", ["-c", script], options);
+  const result = await runPolicyScript(script, 60_000, input.remote);
   const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));
   input.policy.excluded.set(input.localDir, [...new Set([
     ...(input.policy.excluded.get(input.localDir) ?? []), ...entries,
@@ -70,10 +81,7 @@ export async function sshWorkspaceExcludes(input: {
       + `for entry in ${pending.map((entry) => shellQuote(`./${entry}`)).join(" ")}; do `
       + 'if size=$(du -sk "$entry" 2>/dev/null); then size=${size%%[[:space:]]*}; else size=unknown; fi; '
       + 'printf "%s\\0%s\\0" "$entry" "$size"; done';
-    const measured = await (input.remote
-      ? runSshScript(input.remote.spec, sizeScript, { timeoutMs: input.policy.sizeTimeoutMs, maxBuffer: options.maxBuffer })
-      : exec("sh", ["-c", sizeScript], { ...options, timeout: input.policy.sizeTimeoutMs }))
-      .catch(() => null);
+    const measured = await runPolicyScript(sizeScript, input.policy.sizeTimeoutMs, input.remote).catch(() => null);
     const records = measured?.stdout.split("\0") ?? [];
     for (let index = 0; index + 1 < records.length; index += 2) {
       sizes.set(records[index]!.slice(2), records[index + 1]!);

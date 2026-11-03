@@ -231,7 +231,7 @@ export async function syncDirectoryFromSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteTarScript)}`,
+    "sh -s",
   ];
 
   // The remote tar size isn't known locally, so probe the remote directory for
@@ -252,7 +252,7 @@ export async function syncDirectoryFromSsh(input: {
   try {
     await new Promise<void>((resolve, reject) => {
       const ssh = spawn("ssh", sshArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
         stdio: ["pipe", "ignore", "pipe"],
@@ -292,6 +292,7 @@ export async function syncDirectoryFromSsh(input: {
       };
 
       ssh.stdout?.on("error", fail);
+      ssh.stdin?.on("error", fail);
       tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
@@ -318,6 +319,7 @@ export async function syncDirectoryFromSsh(input: {
         tarExitCode = code;
         maybeFinish();
       });
+      ssh.stdin?.end(`${remoteTarScript}\n`);
     });
     await progress?.finish();
 

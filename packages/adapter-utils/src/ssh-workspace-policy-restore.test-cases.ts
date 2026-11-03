@@ -33,6 +33,7 @@ export function registerSshPolicyRestoreTests(fixture: () => {
     await writeFile(path.join(root, "bin/ssh"), `#!/usr/bin/env bash
 set -eu
 script="\${!#}"
+if [[ "$script" == "sh -s" ]]; then script="$(cat)"; fi
 if [[ "$script" == *'tar '* ]]; then
   sh -c "$script" > "$SYNC_TEST_ROOT/download.tar"
   cat "$SYNC_TEST_ROOT/download.tar"

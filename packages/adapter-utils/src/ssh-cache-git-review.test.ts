@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { restoreWorkspaceFromSshExecution } from "./ssh.js";
 import { readLocalGitWorkspaceSnapshot, transportGitWorkspaceToSsh } from "./ssh-git.js";
 import { removeDeletedPathsOnSsh } from "./ssh-sync.js";
+import { captureDirectorySnapshot } from "./workspace-directory-snapshot.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", ["-C", cwd, ...args])).stdout.trim();
@@ -70,5 +71,27 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     await put(remote, `${deletedPaths[0]}/data`);
     await removeDeletedPathsOnSsh({ spec: spec(), remoteDir: remote, deletedPaths });
     expect(await readdir(remote)).toEqual(["source.txt"]);
+  });
+
+  it("restores with large newly discovered scratch exclusions", async () => {
+    await put(remote, "source.txt", "remote");
+    const directories = largePaths();
+    expect(directories.reduce((bytes, name) => bytes + Buffer.byteLength(name), 0)).toBeGreaterThan(131_072);
+    for (let offset = 0; offset < directories.length; offset += 100) {
+      await Promise.all(directories.slice(offset, offset + 100).map((name) =>
+        mkdir(path.join(remote, name))));
+    }
+    await put(remote, `${directories[0]}/data`, "excluded");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, onProgress: async () => {} });
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+    expect(await readdir(local)).toEqual(["source.txt"]);
+  });
+
+  it("restores a baseline with large saved literal exclusions", async () => {
+    await put(local, "source.txt");
+    await put(remote, "source.txt", "remote");
+    const baselineSnapshot = await captureDirectorySnapshot(local, { ignoredPaths: largePaths() });
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
   });
 });
