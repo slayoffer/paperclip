@@ -13,6 +13,10 @@ prove that its runtime service or provider run stopped.
 Hold automatic close when multiple non-archived rows own the checkout. The close
 workflow must retain control of both the archive and artifact lifecycle.
 Check provider process and controller ownership after terminal run statuses too.
+Read saved legacy working directories as well as workspace IDs. Inspect persisted
+runtime rows even when configuration no longer displays them. For local native
+providers, use saved process start times and the restart recovery identity check;
+remote PIDs and expired coordinator leases do not prove local ownership.
 An issue update inside a transaction must pass its post-commit actions to the caller's
 commit-effects queue. Never run physical cleanup before the outer commit.
 

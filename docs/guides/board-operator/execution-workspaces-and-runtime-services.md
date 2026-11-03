@@ -82,8 +82,13 @@ fail the committed issue update.
   removal, including symbolic-link aliases. A sibling with a common name prefix
   does not fall inside that boundary.
 - Live runs retain ownership through saved workspace IDs and native execution
-  paths after their issue changes its current workspace. An archived workspace
+  paths, including the saved legacy working directory, after their issue changes its current workspace. An archived workspace
   row can still identify a live run's saved binding.
+- Active persisted runtime services protect their checkout even when their command
+  is removed from the current configuration.
+- Local native provider processes can outlive their runner. Saved checkpoint and
+  event identities protect the checkout until the provider exits. Process start
+  times distinguish retained owners from recycled process IDs.
 - A reopened issue can rebuild its archived Git worktree through the existing
   reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
 - This transition hook does not scan historical terminal issues. The existing

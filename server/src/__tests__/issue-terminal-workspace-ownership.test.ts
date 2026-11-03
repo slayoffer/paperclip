@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, createDb, executionWorkspaces, heartbeatRuns, issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { agents, createDb, executionWorkspaces, heartbeatRunEvents, heartbeatRuns, issues, projects, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import { readProcessStartedAt } from "../services/hot-restart.js";
 import { issueService } from "../services/issues.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { git, terminalWorkspaceFixture } from "./helpers/terminal-workspace-fixture.js";
@@ -33,10 +35,10 @@ describe("terminal workspace removal boundary", () => {
     return child;
   }
 
-  it.each(["context", "archived context", "native", "native path", "native nested path"])("keeps a live saved %s binding after the issue moves", async (binding) => {
+  it.each(["context", "archived context", "legacy path", "legacy nested path", "native", "native path", "native nested path"])("keeps a live saved %s binding after the issue moves", async (binding) => {
     const f = await fixture();
     const workspace = await f.workspace();
-    const cwd = binding === "native nested path" ? await publishChild(workspace.cwd!) : workspace.cwd!;
+    const cwd = binding.endsWith("nested path") ? await publishChild(workspace.cwd!) : workspace.cwd!;
     const savedId = binding === "archived context" ? (await f.workspace({
       cwd, providerRef: cwd, status: "archived", sourceIssueId: null,
     })).id : workspace.id;
@@ -45,7 +47,7 @@ describe("terminal workspace removal boundary", () => {
     const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Owner" }).returning();
     await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id,
       issueId: other.id, status: "running",
-      ...(binding.includes("context") ? { contextSnapshot: { executionWorkspaceId: savedId } } : {
+      ...(binding.startsWith("legacy") ? { contextSnapshot: { paperclipWorkspace: { cwd } } } : binding.includes("context") ? { contextSnapshot: { executionWorkspaceId: savedId } } : {
         runtimeMode: "native", runnerProfileJson: { nativeExecutionInput: binding === "native"
           ? { binding: { executionWorkspaceId: workspace.id } }
           : { workspace: { cwd } } },
@@ -55,6 +57,54 @@ describe("terminal workspace removal boundary", () => {
     await issueService(db).update(f.issue.id, { status: "done" });
     expect(await status(workspace.id)).toBe("active");
     expect(existsSync(cwd)).toBe(true);
+  });
+
+  it.each(["provider", "codex", "sidecar", "agent", "event", "ambiguous", "recycled", "remote"])(
+    "checks retained native provider ownership: %s", async (kind) => {
+      const f = await fixture();
+      const workspace = await f.workspace();
+      const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Native owner" }).returning();
+      const startedAt = await readProcessStartedAt(process.pid);
+      expect(startedAt).not.toBeNull();
+      const prefix = ["event", "ambiguous", "recycled", "remote"].includes(kind) ? "provider" : kind;
+      const expectedStart = kind === "recycled" ? "2000-01-01T00:00:00.000Z" : startedAt!;
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.company.id, agentId: agent.id, status: "failed", runtimeMode: "native",
+        runnerProfileJson: {
+          nativeExecutionInput: { workspace: { cwd: workspace.cwd },
+            paperclipEnvironment: { driver: kind === "remote" ? "sandbox" : "local" } },
+          sessionCheckpoint: { process: kind === "event" ? {} : {
+            [`${prefix}Pid`]: process.pid,
+            ...(kind === "ambiguous" ? {} : { [`${prefix}ProcessStartedAt`]: expectedStart }),
+          } },
+        },
+      }).returning();
+      if (kind === "event") await db.insert(heartbeatRunEvents).values({
+        companyId: f.company.id, agentId: agent.id, runId: run.id, seq: 1,
+        eventType: "session.started", payload: { prpEvent: { payload: {
+          processId: process.pid, processStartedAt: expectedStart,
+        } } },
+      });
+      await issueService(db).update(f.issue.id, { status: "done" });
+      const holds = kind !== "recycled" && kind !== "remote";
+      expect(await status(workspace.id)).toBe(holds ? "active" : "archived");
+      expect(existsSync(workspace.cwd!)).toBe(holds);
+    },
+  );
+
+  it.each(["removed config", "nested path", "stopped"])("checks persisted runtime ownership: %s", async (kind) => {
+    const f = await fixture();
+    const workspace = await f.workspace({ metadata: { config: { workspaceRuntime: { services: [] } } } });
+    const cwd = kind === "nested path" ? await publishChild(workspace.cwd!) : workspace.cwd;
+    await db.insert(workspaceRuntimeServices).values({
+      id: randomUUID(), companyId: f.company.id,
+      executionWorkspaceId: kind === "nested path" ? null : workspace.id,
+      scopeType: "execution_workspace", serviceName: "removed-preview", cwd,
+      status: kind === "stopped" ? "stopped" : "running", lifecycle: "persistent", provider: "process",
+    });
+    await issueService(db).update(f.issue.id, { status: "done" });
+    expect(await status(workspace.id)).toBe(kind === "stopped" ? "archived" : "active");
+    expect(existsSync(workspace.cwd!)).toBe(kind !== "stopped");
   });
 
   it.each([

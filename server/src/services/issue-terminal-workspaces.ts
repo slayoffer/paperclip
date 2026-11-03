@@ -2,14 +2,15 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { promisify } from "node:util";
-import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
-import { executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, projectWorkspaces, type Db } from "@paperclipai/db";
+import { and, eq, gt, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
+import { executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, projectWorkspaces, workspaceRuntimeServices, type Db } from "@paperclipai/db";
 import type { ExecutionWorkspace } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { closeExecutionWorkspace } from "./execution-workspace-close.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { isProcessAlive } from "./heartbeat/recovery.js";
+import { hasRetainedNativeProvider } from "./issue-terminal-native-owners.js";
 import { isProcessGroupAlive } from "./local-service-supervisor.js";
 
 const execFileAsync = promisify(execFile);
@@ -148,25 +149,39 @@ async function automaticCloseReasons(
   );
   const now = new Date();
   const nativeCwd = sql<string | null>`${heartbeatRuns.runnerProfileJson}#>>'{nativeExecutionInput,workspace,cwd}'`;
+  const legacyCwd = sql<string | null>`${heartbeatRuns.contextSnapshot}#>>'{paperclipWorkspace,cwd}'`;
   const relatedRuns = await db.select({
-    run: { status: heartbeatRuns.status, processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
+    run: { id: heartbeatRuns.id, runtimeMode: heartbeatRuns.runtimeMode, runnerProfileJson: heartbeatRuns.runnerProfileJson, status: heartbeatRuns.status, processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
       controllerBootId: heartbeatRuns.controllerBootId, controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt },
     coordinator: { leaseOwner: nativeRunFinalizations.leaseOwner, leaseExpiresAt: nativeRunFinalizations.leaseExpiresAt },
-    bound: sql<boolean>`coalesce(${boundToWorkspace}, false)`, nativeCwd,
+    bound: sql<boolean>`coalesce(${boundToWorkspace}, false)`, nativeCwd, legacyCwd,
   }).from(heartbeatRuns).leftJoin(nativeRunFinalizations, eq(nativeRunFinalizations.runId, heartbeatRuns.id)).where(and(
-    or(boundToWorkspace, isNotNull(nativeCwd)),
-    or(inArray(heartbeatRuns.status, activeRunStatuses), isNotNull(heartbeatRuns.processPid), isNotNull(heartbeatRuns.processGroupId),
+    or(boundToWorkspace, isNotNull(nativeCwd), isNotNull(legacyCwd)),
+    or(eq(heartbeatRuns.runtimeMode, "native"), inArray(heartbeatRuns.status, activeRunStatuses), isNotNull(heartbeatRuns.processPid), isNotNull(heartbeatRuns.processGroupId),
       and(isNotNull(heartbeatRuns.controllerBootId), gt(heartbeatRuns.controllerLeaseExpiresAt, now)),
       and(isNotNull(nativeRunFinalizations.leaseOwner), gt(nativeRunFinalizations.leaseExpiresAt, now))),
   ));
   // Native coordinator PIDs identify the server and survive lease release.
-  for (const { run, coordinator, bound, nativeCwd: cwd } of relatedRuns) {
+  for (const { run, coordinator, bound, nativeCwd: cwd, legacyCwd: savedCwd } of relatedRuns) {
+    if (!bound && !(cwd && await containsPath(cwd)) && !(savedCwd && await containsPath(savedCwd))) continue;
     const live = activeRunStatuses.includes(run.status)
       || isProcessAlive(run.processPid) || isProcessGroupAlive(run.processGroupId)
       || (run.controllerBootId && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > now)
-      || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now);
-    if (live && (bound || (cwd && await containsPath(cwd)))) {
+      || (coordinator?.leaseOwner && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > now)
+      || await hasRetainedNativeProvider(db, run);
+    if (live) {
       reasons.push("An issue run still uses this workspace.");
+      break;
+    }
+  }
+  // Display readiness excludes services removed from the current configuration.
+  const persistedServices = await db.select({
+    executionWorkspaceId: workspaceRuntimeServices.executionWorkspaceId, cwd: workspaceRuntimeServices.cwd,
+  }).from(workspaceRuntimeServices).where(ne(workspaceRuntimeServices.status, "stopped"));
+  for (const service of persistedServices) {
+    if ((service.executionWorkspaceId && boundWorkspaceIds.has(service.executionWorkspaceId))
+      || (service.cwd && await containsPath(service.cwd))) {
+      reasons.push("A runtime service still uses this checkout.");
       break;
     }
   }
