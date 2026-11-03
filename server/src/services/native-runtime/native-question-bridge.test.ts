@@ -599,7 +599,10 @@ describeEmbeddedPostgres("native question bridge", () => {
       expect(runInsideTransaction?.status).toBe("running");
     });
 
-    expect(postCommitActions).toHaveLength(1);
+    expect(postCommitActions).toEqual([
+      { type: "cancel_native_question_run", runId, issueId, issueStatus: "done" },
+      { type: "close_terminal_workspaces", companyId, issueId },
+    ]);
     await executeIssuePostCommitActions(db, postCommitActions);
     const [persistedRun] = await db.select({ status: heartbeatRuns.status })
       .from(heartbeatRuns)

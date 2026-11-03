@@ -49,11 +49,60 @@ Issues are attached to execution workspace behavior, not to automatic runtime ma
 
 ## Execution workspace lifecycle
 
-Execution workspaces are durable until a human closes them.
+When an issue changes to `done` or `cancelled`, Paperclip attempts to close its
+isolated Git worktrees. This starts after the issue transaction commits. The
+server processes one workspace at a time, including across concurrent issue
+updates in the same server process. A cleanup failure is logged and does not
+fail the committed issue update.
+
+- Automatic close uses the same lifecycle lock, generation fence, and artifact
+  cleanup as the archive API. The workspace row and its issue links remain as history.
+- Blocked close readiness, uncommitted files, unpushed commits, live runs, and
+  live runtime services prevent automatic close. Paperclip logs the reason and
+  leaves the workspace active. A local merge alone does not prove that the
+  commits were pushed. Automatic close checks local remote-tracking refs and
+  preserves a checkout when it cannot verify publication.
+- Automatic close excludes shared workspaces, project-primary workspaces,
+  symbolic-link aliases used by open issues, and shared paths with live issue runs,
+  borrowed environment checkouts, and non-Git providers. It also preserves a
+  path used by a non-archived workspace of another open issue.
+- Each workspace row for the same physical checkout must pass automatic-close
+  readiness. Another row's live service, shared mode, or primary-project path
+  prevents removal, including through symbolic links.
+- Multiple non-archived workspace rows for one physical checkout prevent automatic
+  close, even when all source issues are terminal. Resolve duplicate ownership
+  manually before cleanup. The close workflow controls one row and its artifacts.
+- A failed run can still have a live provider process or controller lease. Automatic
+  close checks those signals for terminal runs too. A failed status alone does
+  not permit removal.
+- Native completion-review acceptance queues cleanup through its commit effects.
+  An outer transaction must commit before those effects run.
+- The removal boundary includes directories below the worktree root. Primary
+  project directories and other owned workspaces inside that boundary prevent
+  removal, including symbolic-link aliases. A sibling with a common name prefix
+  does not fall inside that boundary.
+- Live runs retain ownership through saved workspace IDs and native execution
+  paths, including the saved legacy working directory, after their issue changes its current workspace. An archived workspace
+  row can still identify a live run's saved binding.
+- Active persisted runtime services protect their checkout even when their command
+  is removed from the current configuration.
+- Local native provider processes can outlive their runner. Saved checkpoint and
+  event identities protect the checkout until the provider exits. Process start
+  times distinguish retained owners from recycled process IDs.
+- A reopened issue can rebuild its archived Git worktree through the existing
+  reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
+- This transition hook does not scan historical terminal issues. The existing
+  delayed terminal-workspace reaper retains its separate policy and schedule.
 
 - The UI can archive an execution workspace.
 - Closing an execution workspace stops its runtime services and cleans up its workspace artifacts when allowed.
 - Shared workspaces that point at the project primary checkout are treated more conservatively during cleanup than disposable isolated workspaces.
+
+Service callers that supply their own transaction must collect
+`IssuePostCommitAction` entries and call `executeIssuePostCommitActions` with the
+committed database after that transaction succeeds. Discard these actions when
+the transaction rolls back. The normal issue service and issue routes already
+use this post-commit path.
 
 ## Resolved workspace logic during heartbeat runs
 
