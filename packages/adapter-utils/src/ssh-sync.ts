@@ -5,9 +5,10 @@ import path from "node:path";
 import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
 import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } from "./ssh-config.js";
-import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { createSshAuthArgs, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
+import { localWorkspaceTarList, needsWorkspacePathFile, workspacePathBatches, workspaceTarScript } from "./ssh-workspace-path-lists.js";
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
   await fs.mkdir(targetDir, { recursive: true });
@@ -47,9 +48,37 @@ export async function removeDeletedPathsOnSsh(input: {
   deletedPaths: string[];
 }): Promise<void> {
   if (input.deletedPaths.length === 0) return;
-  const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
-  const script = `cd ${shellQuote(input.remoteDir)} && rm -rf -- ${quotedPaths}`;
-  await runSshScript(input.spec, script, {
+  for (const entry of input.deletedPaths) {
+    if (entry.includes("\0") || entry.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Invalid workspace removal path: ${JSON.stringify(entry)}`);
+    }
+  }
+  // Git import can restore a committed symlink where the local overlay has a
+  // directory. Never remove a child through that link before copying the overlay.
+  const script = [
+    "set -e",
+    `cd ${shellQuote(input.remoteDir)}`,
+    ...workspacePathBatches(input.deletedPaths).flatMap((batch) => [
+      'set --',
+      `for entry in ${batch.map(shellQuote).join(" ")}; do`,
+      '  ancestor=.',
+      '  remaining="$entry"',
+      '  safe=1',
+      '  while [ "${remaining#*/}" != "$remaining" ]; do',
+      '    ancestor="$ancestor/${remaining%%/*}"',
+      '    remaining="${remaining#*/}"',
+      '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
+      '      safe=0',
+      '      break',
+      '    fi',
+      '  done',
+      '  if [ "$safe" = 1 ]; then set -- "$@" "./$entry"; fi',
+      'done',
+      'if [ "$#" -gt 0 ]; then rm -rf -- "$@"; fi',
+    ]),
+  ].join("\n");
+  await runSshCommand(input.spec, "sh -s", {
+    stdin: script,
     timeoutMs: 30_000,
     maxBuffer: 256 * 1024,
   });
@@ -60,6 +89,7 @@ export async function syncDirectoryToSsh(input: {
   localDir: string;
   remoteDir: string;
   exclude?: string[];
+  literalExclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
@@ -86,22 +116,28 @@ export async function syncDirectoryToSsh(input: {
       totalBytes: estimateLocalDirSize({
         localDir: input.localDir,
         exclude: input.exclude,
+        literalExclude: input.literalExclude,
         followSymlinks: input.followSymlinks,
       }),
       estimated: true,
     })
     : null;
 
+  let pathList: Awaited<ReturnType<typeof localWorkspaceTarList>> | undefined;
   try {
+    if (needsWorkspacePathFile(input.exclude, input.literalExclude)) {
+      pathList = await localWorkspaceTarList({ root: input.localDir, exclude: input.exclude ?? [],
+        literal: input.literalExclude ?? [], followSymlinks: input.followSymlinks });
+    }
     await new Promise<void>((resolve, reject) => {
     const tarArgs = [
       ...(input.followSymlinks ? ["-h"] : []),
       "-C",
       input.localDir,
-      ...tarExcludeArgs(input.exclude),
+      ...(pathList ? [] : tarExcludeArgs(input.exclude, input.literalExclude)),
       "-cf",
       "-",
-      ".",
+      ...(pathList ? pathList.args : ["."]),
     ];
     const tar = spawn("tar", tarArgs, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -175,11 +211,14 @@ export async function syncDirectoryToSsh(input: {
       sshExitCode = code;
       maybeFinish();
     });
-    }).finally(auth.cleanup);
+    });
     await progress?.finish();
   } catch (error) {
     await progress?.fail();
     throw error;
+  } finally {
+    await pathList?.cleanup();
+    await auth.cleanup();
   }
 }
 
@@ -188,22 +227,25 @@ export async function syncDirectoryFromSsh(input: {
   remoteDir: string;
   localDir: string;
   exclude?: string[];
+  literalExclude?: string[];
   preserveLocalEntries?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
   const auth = await createSshAuthArgs(input.spec);
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
-  const remoteTarScript = [
+  const remoteTarScript = needsWorkspacePathFile(input.exclude, input.literalExclude)
+    ? workspaceTarScript({ root: input.remoteDir, exclude: input.exclude ?? [], literal: input.literalExclude ?? [] })
+    : [
     `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
+    `tar ${[...tarExcludeArgs(input.exclude, input.literalExclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
   ].join(" && ");
   const sshArgs = [
     ...auth.args,
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteTarScript)}`,
+    "sh -s",
   ];
 
   // The remote tar size isn't known locally, so probe the remote directory for
@@ -224,7 +266,7 @@ export async function syncDirectoryFromSsh(input: {
   try {
     await new Promise<void>((resolve, reject) => {
       const ssh = spawn("ssh", sshArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
         stdio: ["pipe", "ignore", "pipe"],
@@ -264,6 +306,7 @@ export async function syncDirectoryFromSsh(input: {
       };
 
       ssh.stdout?.on("error", fail);
+      ssh.stdin?.on("error", fail);
       tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
@@ -290,6 +333,7 @@ export async function syncDirectoryFromSsh(input: {
         tarExitCode = code;
         maybeFinish();
       });
+      ssh.stdin?.end(`${remoteTarScript}\n`);
     });
     await progress?.finish();
 
@@ -300,6 +344,7 @@ export async function syncDirectoryFromSsh(input: {
     } else {
       const baseline = await captureDirectorySnapshot(input.localDir, {
         exclude: [...(input.exclude ?? []), ...(input.preserveLocalEntries ?? [])],
+        ignoredPaths: input.literalExclude,
       });
       await mergeDirectoryWithBaseline({ baseline, sourceDir: stagingDir, targetDir: input.localDir });
     }

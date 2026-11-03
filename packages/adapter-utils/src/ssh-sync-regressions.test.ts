@@ -1,3 +1,4 @@
+import { registerSshWorkspacePolicyTests } from "./ssh-workspace-policy.test-cases.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -59,6 +60,8 @@ describe("SSH workspace sync regressions", { timeout: 30_000 }, () => {
     await git(local, "add", ".");
     await git(local, "commit", "-m", "Initial fixture");
   }
+
+  registerSshWorkspacePolicyTests(() => ({ local, remote, root, spec, repository }));
 
   it.each(["plain", "all", "git"] as const)("excludes generated files in both directions and preserves local copies, mode=%s", async (mode) => {
     if (mode === "git") await repository();
