@@ -16,6 +16,8 @@ Otherwise, delayed file removal can repeat a completed mutation.
 
 Check workspace root cache markers before restoring nested project repositories.
 Skip separate nested repository uploads when their workspace root is tagged.
+Check the `.paperclip-repositories` container marker before separate child transfers.
+Decode SSH text as a stream so split UTF-8 characters retain their original paths.
 A marker can appear after baseline capture. Child scans cannot see that marker.
 Send restore archive commands through stdin. Large exclusion lists can exceed
 the operating system limit for one SSH command argument.

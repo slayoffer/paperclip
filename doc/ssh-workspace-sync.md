@@ -69,6 +69,8 @@ Serialized in-memory baselines also retain literal paths for nested tagged cache
 Restore also checks current root markers before it restores nested project repositories.
 A marker added after preparation protects the root and its nested repositories.
 Preparation also skips separate nested repository uploads when the workspace root is tagged.
+The same protection applies to a tagged `.paperclip-repositories` container.
+Remote text output retains UTF-8 characters split across transport chunks.
 The restore archive command travels through stdin. Large cache exclusion lists
 do not become one SSH command-line argument.
 

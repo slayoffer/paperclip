@@ -189,6 +189,8 @@ async function spawnText(
       if (killEscalation) clearTimeout(killEscalation);
     };
 
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
       append("stdout", chunk);
     });

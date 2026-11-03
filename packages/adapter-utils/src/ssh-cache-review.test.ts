@@ -162,20 +162,22 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     expect(await readFile(path.join(local, "nested/cache/CACHEDIR.TAG"), "utf8")).toBe("");
   });
 
-  it.each(["local", "remote"])("protects nested repositories when the %s root gains a tag", async (side) => {
+  it.each(["local", "remote"].flatMap((side) =>
+    ["", ".paperclip-repositories"].map((ancestor) => ({ side, ancestor }))))(
+    "protects nested repositories when $side ancestor '$ancestor' gains a tag", async ({ side, ancestor }) => {
     const repository = ".paperclip-repositories/child";
     await put(local, `${repository}/data`);
     const baselineSnapshot = await captureSshWorkspaceSnapshot(local, { exclude: [".paperclip-repositories"] });
     const repositoryBaseline = await captureSshWorkspaceSnapshot(path.join(local, repository), { exclude: [] });
     await put(remote, `${repository}/data`, "remote");
-    await put(side === "local" ? local : remote, "CACHEDIR.TAG", "");
+    await put(side === "local" ? local : remote, path.join(ancestor, "CACHEDIR.TAG"), "");
     await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot,
       repositories: [{ path: repository, baselineSnapshot: repositoryBaseline }],
     });
     expect(await readFile(path.join(local, `${repository}/data`), "utf8")).toBe("keep");
   });
 
-  it("does not upload nested repository files from a tagged workspace root", async () => {
+  it.each(["", ".paperclip-repositories"])("does not upload nested repository files under tagged ancestor '%s'", async (ancestor) => {
     const repository = ".paperclip-repositories/child";
     for (const directory of [local, path.join(local, repository)]) {
       await put(directory, "source.txt");
@@ -185,11 +187,35 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
         "commit", "-m", "Initial fixture"]);
     }
     await put(local, `${repository}/untracked-data`, "cache");
-    await put(local, "CACHEDIR.TAG", "");
+    await put(local, path.join(ancestor, "CACHEDIR.TAG"), "");
     const prepared = await prepareRemoteManagedRuntime({ spec: spec(), runId: "tagged-git-root",
       adapterKey: "test", workspaceLocalDir: local });
     await expect(readFile(path.join(prepared.workspaceRemoteDir, repository, "untracked-data")))
       .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains remote cache names split inside a UTF-8 character", async () => {
+    await put(local, "café/data");
+    const prepared = await prepare();
+    await put(prepared.workspaceRemoteDir, "café/CACHEDIR.TAG", "");
+    await put(prepared.workspaceRemoteDir, "café/data", "remote");
+    const fragmenter = path.join(root, "fragment-ssh.mjs");
+    await writeFile(fragmenter, `import { spawn } from "node:child_process";
+const child = spawn("sh", ["-c", process.argv.at(-1)], { stdio: ["pipe", "pipe", "inherit"] });
+process.stdin.pipe(child.stdin);
+const chunks = [];
+child.stdout.on("data", (chunk) => chunks.push(chunk));
+child.on("close", (code) => {
+  const output = Buffer.concat(chunks);
+  const index = output.indexOf(Buffer.from("é"));
+  if (index < 0) { process.stdout.write(output); process.exitCode = code; return; }
+  process.stdout.write(output.subarray(0, index + 1));
+  setTimeout(() => { process.stdout.write(output.subarray(index + 1)); process.exitCode = code; }, 30);
+});
+`);
+    await writeFile(path.join(root, "bin/ssh"), `#!/usr/bin/env bash\nexec "${process.execPath}" "${fragmenter}" "$@"\n`);
+    await prepared.restoreWorkspace();
+    expect(await readFile(path.join(local, "café/data"), "utf8")).toBe("keep");
   });
 
   it("restores with cache exclusions larger than one process argument", async () => {

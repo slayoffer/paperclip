@@ -9,7 +9,7 @@ import type { DirectorySnapshot } from "./workspace-restore-merge.js";
 import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 import { type RuntimeProgressSink } from "./runtime-progress.js";
-import { type SshRemoteExecutionSpec } from "./ssh-config.js";
+import { shellQuote, type SshRemoteExecutionSpec } from "./ssh-config.js";
 import { runLocalGit, runSshCommand } from "./ssh-command.js";
 import { clearRemoteDirectory, syncDirectoryToSsh, syncDirectoryFromSsh } from "./ssh-sync.js";
 import {
@@ -26,6 +26,15 @@ export function prepareWorkspaceForSshExecution(input: Parameters<typeof prepare
   return scheduleSshWorkspaceOperation(input.onProgress, "prepare", () => prepareWorkspaceForSshExecutionInner(input));
 }
 
+async function hasLocalCacheMarker(directory: string): Promise<boolean> {
+  return fs.stat(path.join(directory, "CACHEDIR.TAG"))
+    .then((entry) => entry.isFile())
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
+}
+
 async function prepareWorkspaceForSshExecutionInner(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -40,13 +49,9 @@ async function prepareWorkspaceForSshExecutionInner(input: {
   );
 
   if (gitSnapshot) {
-    const taggedRoot = await fs.stat(path.join(input.localDir, "CACHEDIR.TAG"))
-      .then((entry) => entry.isFile())
-      .catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return false;
-        throw error;
-      });
-    const repositories = taggedRoot ? [] : await listLocalProjectRepositories(input.localDir);
+    const taggedAncestor = await hasLocalCacheMarker(input.localDir)
+      || await hasLocalCacheMarker(path.join(input.localDir, PROJECT_REPOSITORIES_DIR));
+    const repositories = taggedAncestor ? [] : await listLocalProjectRepositories(input.localDir);
     await transportGitWorkspaceToSsh({
       spec: input.spec,
       localDir: input.localDir,
@@ -128,7 +133,14 @@ async function restoreWorkspaceFromSshExecutionInner(input: {
   }
   const taggedCacheDirectories = await readWorkspaceTaggedDirectories({ ...input, remoteDir });
   if (taggedCacheDirectories.includes(".")) return;
-  for (const repository of repositories) {
+  const taggedRepositoryContainer = repositories.length > 0 && (
+    await hasLocalCacheMarker(path.join(input.localDir, PROJECT_REPOSITORIES_DIR)) ||
+    (await runSshCommand(input.spec,
+      `if [ -f ${shellQuote(path.posix.join(remoteDir, PROJECT_REPOSITORIES_DIR, "CACHEDIR.TAG"))} ]; then printf tagged; fi`,
+      { timeoutMs: 60_000, maxBuffer: 1024 },
+    )).stdout === "tagged"
+  );
+  for (const repository of taggedRepositoryContainer ? [] : repositories) {
     await restoreWorkspaceRootFromSsh({
       spec: input.spec,
       localDir: path.join(input.localDir, repository.path),
