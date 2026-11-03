@@ -1,5 +1,6 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
+import { hasStandingTimerContinuation, resolveDispositionRepairActionAsCovered } from "./disposition-continuation.js";
 import { dispatchBridgeWakes } from "../review-bridge-wakes.js";
 import { isReviewBridgeWait } from "../review-bridge-contract.js";
 import { pendingBridgeWakeCondition } from "../review-bridge-waits.js";
@@ -1078,6 +1079,7 @@ export function recoveryService(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
   ) {
+    if (await hasStandingTimerContinuation(db, issuesSvc, issue)) return true;
     if (issue.monitorNextCheckAt) return true;
     if (issue.status === "in_progress" && latestRun?.status === "succeeded" && latestRun.agentId === issue.assigneeAgentId &&
       await hasCommittedNativePlanWait(db, { companyId: issue.companyId, issueId: issue.id, runId: latestRun.id, agentId: latestRun.agentId })) return true;
@@ -2753,40 +2755,6 @@ export function recoveryService(
     };
   }
 
-  async function resolveDispositionRepairActionAsCovered(
-    issue: typeof issues.$inferSelect,
-    reason: string,
-  ) {
-    const active = await recoveryActionsSvc.getActiveForIssue(
-      issue.companyId,
-      issue.id,
-    );
-    if (!active || active.kind !== "deliberate_wait_without_target") return;
-    await recoveryActionsSvc.resolveActiveForIssue({
-      companyId: issue.companyId,
-      sourceIssueId: issue.id,
-      actionId: active.id,
-      status: "resolved",
-      outcome: "restored",
-      resolutionNote: reason,
-    });
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: "system",
-      actorId: "recovery",
-      agentId: null,
-      runId: null,
-      action: "issue.disposition_repair_resolved",
-      entityType: "issue_recovery_action",
-      entityId: active.id,
-      details: {
-        sourceIssueId: issue.id,
-        sourceIdentifier: issue.identifier,
-        reason,
-      },
-    });
-  }
-
   async function ensureDispositionRepairAction(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
@@ -3599,11 +3567,16 @@ export function recoveryService(
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
 
+    if (await hasStandingTimerContinuation(db, issuesSvc, current)) {
+      await resolveDispositionRepairActionAsCovered(db, current, "standing_driver_timer_continuation");
+      return "covered";
+    }
+
     if (await issueOwnerParkingReason(db, current, "recovery.disposition") ||
         await isRecoveryIssueTokenBudgetBlocked(db, current)) return "skipped";
 
     if (current.status === "blocked" && isReviewBridgeWait(current.unblockDescriptor)) {
-      await resolveDispositionRepairActionAsCovered(current, "recorded_bridge_wait");
+      await resolveDispositionRepairActionAsCovered(db, current, "recorded_bridge_wait");
       return "covered";
     }
     const episode = options.legacyEpisode ?? (
@@ -3614,6 +3587,7 @@ export function recoveryService(
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(
+        db,
         current,
         "dependency_wait_created",
       );
@@ -3632,6 +3606,7 @@ export function recoveryService(
     if (state.hasActiveExecutionPath) return "skipped";
     if (state.hasDurableWaitingPath) {
       await resolveDispositionRepairActionAsCovered(
+        db,
         current,
         `durable_path_restored:${state.durablePathReason ?? "unknown"}`,
       );
@@ -4302,6 +4277,13 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
+        // A recorded native blocker retains the existing repair and safety gates.
+        if (await hasStandingTimerContinuation(db, issuesSvc, issue) &&
+            !await nativeBlockedUnblockAction(issue, await getLatestIssueRun(issue.companyId, issue.id))) {
+          await resolveDispositionRepairActionAsCovered(db, issue, "standing_driver_timer_continuation");
+          result.skipped += 1;
+          continue;
+        }
         if (skipRefusedReconcile(issue) ||
             await issueOwnerParkingReason(db, issue, "recovery.stranded") ||
             await isRecoveryIssueTokenBudgetBlocked(db, issue)) {
