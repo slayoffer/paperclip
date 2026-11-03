@@ -66,6 +66,9 @@ fail the committed issue update.
   symbolic-link aliases used by open issues, and shared paths with live issue runs,
   borrowed environment checkouts, and non-Git providers. It also preserves a
   path used by a non-archived workspace of another open issue.
+- Each workspace row for the same physical checkout must pass automatic-close
+  readiness. Another row's live service, shared mode, or primary-project path
+  prevents removal, including through symbolic links.
 - A reopened issue can rebuild its archived Git worktree through the existing
   reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
 - This transition hook does not scan historical terminal issues. The existing

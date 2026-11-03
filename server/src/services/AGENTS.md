@@ -1,5 +1,13 @@
 # Service rules
 
+## Physical checkout ownership
+
+Automatic close removes a physical checkout, not only an execution-workspace row.
+Resolve path aliases before checking owners, runs, and primary-project paths.
+Apply close readiness to every matching workspace row. Keep denial text generic
+when another company's row prevents cleanup. A terminal source issue does not
+prove that its runtime service or provider run stopped.
+
 ## Deferred dependency wakes
 
 Durable wake payloads describe the blocker set at release time.

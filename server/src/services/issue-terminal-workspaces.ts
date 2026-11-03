@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { executionWorkspaces, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { executionWorkspaces, heartbeatRuns, issues, projectWorkspaces, type Db } from "@paperclipai/db";
 import type { ExecutionWorkspace } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
@@ -94,6 +94,8 @@ async function automaticCloseReasons(
   const candidates = await db.select({
     id: executionWorkspaces.id, sourceIssueId: executionWorkspaces.sourceIssueId,
     cwd: executionWorkspaces.cwd, providerRef: executionWorkspaces.providerRef,
+    metadata: executionWorkspaces.metadata, mode: executionWorkspaces.mode,
+    strategyType: executionWorkspaces.strategyType, providerType: executionWorkspaces.providerType,
   }).from(executionWorkspaces).where(sql`${executionWorkspaces.status} <> 'archived'`);
   const workspaceIds = new Set([workspace.id]);
   const sourceIssueIds = new Set([input.issueId, ...(workspace.sourceIssueId ? [workspace.sourceIssueId] : [])]);
@@ -102,6 +104,11 @@ async function automaticCloseReasons(
       if (value && paths.has(await identity(value))) {
         workspaceIds.add(candidate.id);
         if (candidate.sourceIssueId) sourceIssueIds.add(candidate.sourceIssueId);
+        if (candidate.mode !== "isolated_workspace" || candidate.strategyType !== "git_worktree"
+          || candidate.providerType !== "git_worktree"
+          || typeof candidate.metadata?.taskEnvironmentSourceWorkspaceId === "string") {
+          reasons.push("Another workspace protects this checkout.");
+        }
         break;
       }
     }
@@ -121,12 +128,25 @@ async function automaticCloseReasons(
           or run_issue.execution_run_id = ${heartbeatRuns.id} or run_issue.checkout_run_id = ${heartbeatRuns.id}))`,
   )).limit(1);
   if (activeRun) reasons.push("An issue run still uses this workspace.");
-  const readiness = await executionWorkspaceService(db).getCloseReadiness(workspace.id);
-  if (!readiness) return [...reasons, "The workspace no longer exists."];
-  reasons.push(...readiness.blockingReasons);
-  if (readiness.isProjectPrimaryWorkspace) reasons.push("This is the primary project checkout.");
-  if (readiness.runtimeServices.some((service) => service.status !== "stopped")) reasons.push("Runtime services are still live.");
-  if (readiness.git?.hasDirtyTrackedFiles || readiness.git?.hasUntrackedFiles) reasons.push("The worktree has uncommitted files.");
+  // Cleanup acts on a physical checkout, so every alias must satisfy readiness.
+  const svc = executionWorkspaceService(db);
+  for (const workspaceId of workspaceIds) {
+    const readiness = await svc.getCloseReadiness(workspaceId);
+    if (!readiness || readiness.blockingReasons.length > 0 || readiness.isSharedWorkspace
+      || readiness.isProjectPrimaryWorkspace || readiness.runtimeServices.some((service) => service.status !== "stopped")
+      || readiness.git?.hasDirtyTrackedFiles || readiness.git?.hasUntrackedFiles) {
+      reasons.push("A workspace using this checkout is not ready for automatic close.");
+    }
+  }
+  // Readiness compares saved paths lexically. A primary checkout can have a symlink alias.
+  const primaryPaths = await db.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces)
+    .where(eq(projectWorkspaces.isPrimary, true));
+  for (const primary of primaryPaths) {
+    if (primary.cwd && paths.has(await identity(primary.cwd))) {
+      reasons.push("This checkout is a primary project workspace.");
+      break;
+    }
+  }
   const cwd = workspace.providerRef ?? workspace.cwd;
   try {
     if (!cwd) throw new Error("No workspace path");
