@@ -34,3 +34,5 @@ Optional size collection must not fail a transfer or remove an exclusion.
 Record exclusions first. Give size collection its own bounded command and catch its failures.
 An absent local restore destination has no exclusions. Continue restore so it can create the directory.
 Send scripts with discovered path lists through stdin. Large lists can exceed the SSH argument limit.
+Stdin does not remove child-process argument limits. Batch Git pathspecs and use NUL file lists for large tar inputs.
+Prune retained policy exclusions before every discovery pass, including after clone markers disappear.

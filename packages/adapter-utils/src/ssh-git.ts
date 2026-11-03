@@ -21,6 +21,7 @@ import {
 import { runLocalGit as runLocalGitCommand, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createTransferProgress, streamLocalFileToSsh, streamSshToLocalFile } from "./ssh-transfer-progress.js";
 import { removeDeletedPathsOnSsh, syncDirectoryToSsh } from "./ssh-sync.js";
+import { workspacePathBatches } from "./ssh-workspace-path-lists.js";
 
 // Bind every Git operation to this checkout. Missing metadata must never trigger
 // discovery of a parent repository, including between validation and restore.
@@ -438,7 +439,8 @@ export async function transportGitWorkspaceToSsh(input: {
       `cd ${shellQuote(input.remoteDir)}`,
       'skip_index=$(mktemp)',
       'trap \'rm -f "$skip_index"\' EXIT',
-      `git --literal-pathspecs ls-files -z -- ${input.skippedPaths.map(shellQuote).join(" ")} > "$skip_index"`,
+      ...workspacePathBatches(input.skippedPaths).map((batch) =>
+        `git --literal-pathspecs ls-files -z -- ${batch.map(shellQuote).join(" ")} >> "$skip_index"`),
       'git update-index --skip-worktree -z --stdin < "$skip_index"',
     ].join("\n"), timeoutMs: 30_000, maxBuffer: 256 * 1024 });
     await removeDeletedPathsOnSsh({ spec: input.spec, remoteDir: input.remoteDir, deletedPaths: input.skippedPaths });
