@@ -11,9 +11,12 @@ connection timeout. The default is 30 seconds. Positive integer values are
 capped at 60 seconds. Invalid values use the default. All SSH arguments created
 by `createSshAuthArgs`, including provider launches and transfers, use this setting.
 
-Each command attempt permits at least the connection timeout plus five seconds.
-The retry deadline is 120 seconds, or the explicit command timeout if that is
-longer. Environment transfer and cleanup share the attempt deadline.
+Without an explicit command timeout, each attempt permits the connection timeout
+plus five seconds. The total retry deadline is 120 seconds.
+An explicit command timeout bounds all attempts and their retry delays together.
+It takes precedence over the connection timeout. Fixture readiness probes pass
+their remaining readiness budget to the command runner.
+Environment transfer and cleanup share the attempt deadline.
 The stdin process path permits up to five additional seconds for forced shutdown.
 An expired connection deadline remains a transport error. A timeout after the
 remote shell starts remains a command timeout.

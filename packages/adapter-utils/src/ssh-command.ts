@@ -477,10 +477,12 @@ export async function buildSshSpawnTarget(input: {
 
 export async function ensureSshWorkspaceReady(
   config: SshConnectionConfig,
+  options: { timeoutMs?: number } = {},
 ): Promise<{ remoteCwd: string }> {
   const result = await runSshCommand(
     config,
     `mkdir -p ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
+    options,
   );
   return {
     remoteCwd: result.stdout.trim(),

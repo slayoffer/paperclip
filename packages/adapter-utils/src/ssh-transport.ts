@@ -27,10 +27,10 @@ export function isSshTransportFailure(error: unknown): boolean {
 
 export async function withSshTransportRetry<T>(
   execute: (timeoutMs: number) => Promise<T>,
-  commandTimeoutMs = 15_000,
+  commandTimeoutMs?: number,
 ): Promise<T> {
-  const attemptTimeout = Math.max(commandTimeoutMs, (sshConnectTimeoutSec() + 5) * 1000);
-  const deadline = Date.now() + Math.max(attemptTimeout, 120_000);
+  const attemptTimeout = commandTimeoutMs ?? (sshConnectTimeoutSec() + 5) * 1000;
+  const deadline = Date.now() + (commandTimeoutMs ?? 120_000);
   let lastFailure: unknown;
   for (let attempt = 0; ; attempt += 1) {
     if (attempt > 0 && Date.now() >= deadline) throw new SshTransportError(lastFailure);

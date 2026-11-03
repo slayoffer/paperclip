@@ -18,3 +18,6 @@ Preserve `SshTransportError` through execution-target probes and shell runners.
 A generic probe error spends the run's failure budget and can block its issue.
 The SSH command wrapper distinguishes remote exit 255 from transport exit 255.
 Keep its completion frame when changing remote shell wrappers.
+An explicit SSH timeout bounds all attempts and retry delays. Do not raise it to
+the connection-timeout default. Readiness polling must pass its remaining budget
+to the command runner, or one probe can exceed the readiness deadline.

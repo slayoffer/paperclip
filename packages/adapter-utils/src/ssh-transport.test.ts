@@ -1,7 +1,7 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createSshAuthArgs, runSshCommand } from "./ssh-command.js";
+import { createSshAuthArgs, ensureSshWorkspaceReady, runSshCommand } from "./ssh-command.js";
 import { localSshSpec, useLocalSsh } from "./ssh-command-test-helpers.js";
 import { prepareGitHubExecutionEnvironment } from "./execution-target.js";
 import { isSshTransportFailure, withSshTransportRetry } from "./ssh-transport.js";
@@ -88,6 +88,31 @@ it("does not retry a timeout after the remote shell starts", async () => {
   const command = vi.fn(async () => { throw error; });
   await expect(withSshTransportRetry(command)).rejects.toBe(error);
   expect(command).toHaveBeenCalledOnce();
+});
+
+it("keeps an explicit timeout across transport attempts", async () => {
+  vi.useFakeTimers();
+  const timeouts: number[] = [];
+  const startedAt = Date.now();
+  const retry = withSshTransportRetry(async timeout => {
+    timeouts.push(timeout);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    throw { code: 255 };
+  }, 2_000);
+  const failed = expect(retry).rejects.toMatchObject({ name: "SshTransportError" });
+  await vi.runAllTimersAsync();
+  await failed;
+  expect(timeouts).toEqual([2_000, 500]);
+  expect(Date.now() - startedAt).toBe(2_000);
+});
+
+it("bounds workspace readiness probes without waiting for retry backoff", async () => {
+  const attempts = await fakeSsh(10);
+  const startedAt = Date.now();
+  await expect(ensureSshWorkspaceReady(localSshSpec(root), { timeoutMs: 100 }))
+    .rejects.toMatchObject({ name: "SshTransportError" });
+  expect(await attempts()).toBe(1);
+  expect(Date.now() - startedAt).toBeLessThan(1_000);
 });
 
 it("keeps the transport classification through the Git context setup probe", async () => {
