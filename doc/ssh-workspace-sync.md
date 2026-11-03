@@ -123,7 +123,7 @@ Restore scans also retain caller exclusions from the supplied baseline.
 Saved literal exclusions reach the download archive before data enters the staging directory.
 Restore creates an absent local destination after it checks the remote workspace.
 Discovery, index protection, path removal, and download scripts use standard input for large exclusion lists.
-Git index protection uses bounded path batches. Large archives use NUL-delimited input files instead of exclusion arguments.
+Git index protection and path removal use bounded path batches. Large archives use NUL-delimited input files instead of exclusion arguments.
 The file-list scan prunes exclusions before it reads directories and preserves literal newline names.
 Uploads retain their selected symlink behavior. A followed directory cycle stops the transfer.
 Discovery also prunes exclusions already recorded by the run policy.

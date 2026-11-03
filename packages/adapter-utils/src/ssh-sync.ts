@@ -10,7 +10,7 @@ import { type SshConnectionConfig, type SshRemoteExecutionSpec, shellQuote } fro
 import { createSshAuthArgs, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createSshTransferStopper } from "./ssh-transfer-stop.js";
 import { tarExcludeArgs, tarSpawnEnv, estimateLocalDirSize, probeRemoteDirSize, createTransferProgress } from "./ssh-transfer-progress.js";
-import { localWorkspaceTarList, needsWorkspacePathFile, workspaceTarScript } from "./ssh-workspace-path-lists.js";
+import { localWorkspaceTarList, needsWorkspacePathFile, workspacePathBatches, workspaceTarScript } from "./ssh-workspace-path-lists.js";
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
   await fs.mkdir(targetDir, { recursive: true });
@@ -55,26 +55,29 @@ export async function removeDeletedPathsOnSsh(input: {
       throw new Error(`Invalid workspace removal path: ${JSON.stringify(entry)}`);
     }
   }
-  const quotedPaths = input.deletedPaths.map((entry) => shellQuote(entry)).join(" ");
   // Git import can restore a committed symlink where the local overlay has a
   // directory. Never remove a child through that link before copying the overlay.
   const script = [
     "set -e",
     `cd ${shellQuote(input.remoteDir)}`,
-    `for entry in ${quotedPaths}; do`,
-    '  ancestor=.',
-    '  remaining="$entry"',
-    '  safe=1',
-    '  while [ "${remaining#*/}" != "$remaining" ]; do',
-    '    ancestor="$ancestor/${remaining%%/*}"',
-    '    remaining="${remaining#*/}"',
-    '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
-    '      safe=0',
-    '      break',
-    '    fi',
-    '  done',
-    '  if [ "$safe" = 1 ]; then rm -rf -- "./$entry"; fi',
-    'done',
+    ...workspacePathBatches(input.deletedPaths).flatMap((batch) => [
+      'set --',
+      `for entry in ${batch.map(shellQuote).join(" ")}; do`,
+      '  ancestor=.',
+      '  remaining="$entry"',
+      '  safe=1',
+      '  while [ "${remaining#*/}" != "$remaining" ]; do',
+      '    ancestor="$ancestor/${remaining%%/*}"',
+      '    remaining="${remaining#*/}"',
+      '    if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then',
+      '      safe=0',
+      '      break',
+      '    fi',
+      '  done',
+      '  if [ "$safe" = 1 ]; then set -- "$@" "./$entry"; fi',
+      'done',
+      'if [ "$#" -gt 0 ]; then rm -rf -- "$@"; fi',
+    ]),
   ].join("\n");
   await runSshCommand(input.spec, "sh -s", {
     stdin: script,
