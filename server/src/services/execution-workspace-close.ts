@@ -20,7 +20,7 @@ export async function closeExecutionWorkspace(db: Db, input: {
   workspace: ExecutionWorkspace;
   patch?: Parameters<ReturnType<typeof executionWorkspaceService>["update"]>[1];
   pluginWorkerManager?: PluginWorkerManager;
-  automaticGuard?: (workspace: ExecutionWorkspace) => Promise<string[]>;
+  automaticGuard?: (workspace: ExecutionWorkspace, lockedDb: Db) => Promise<string[]>;
 }): Promise<CloseResult> {
   const svc = executionWorkspaceService(db);
   const existing = input.workspace;
@@ -64,16 +64,16 @@ export async function closeExecutionWorkspace(db: Db, input: {
     const fenced = await svc.fenceClosedWorkspaceDestruction({
       workspaceId: existing.id,
       capturedGeneration,
-      destroy: async () => {
-        await environmentRuntimeService(db, { pluginWorkerManager: input.pluginWorkerManager })
+      destroy: async (lockedDb) => {
+        await environmentRuntimeService(lockedDb, { pluginWorkerManager: input.pluginWorkerManager })
           .destroyReusableSandboxLeases({ companyId: existing.companyId,
             executionWorkspaceId: existing.id, failureReason: "execution_workspace_closed" });
-        await stopRuntimeServicesForExecutionWorkspace({ db, executionWorkspaceId: existing.id, workspaceCwd: existing.cwd });
+        await stopRuntimeServicesForExecutionWorkspace({ db: lockedDb, executionWorkspaceId: existing.id, workspaceCwd: existing.cwd });
         return cleanupExecutionWorkspaceArtifacts({
           workspace: existing, projectWorkspace,
           teardownCommand: config?.teardownCommand ?? projectPolicy?.workspaceStrategy?.teardownCommand ?? null,
           cleanupCommand: config?.cleanupCommand ?? null,
-          recorder: workspaceOperationService(db).createRecorder({
+          recorder: workspaceOperationService(lockedDb).createRecorder({
             companyId: existing.companyId, executionWorkspaceId: existing.id,
           }),
           // The manual route retains its force-close behavior. Automatic close
@@ -81,7 +81,7 @@ export async function closeExecutionWorkspace(db: Db, input: {
           ...(input.automaticGuard ? {
             forceWorktreeRemoval: false,
             assertSafeToCleanup: async () => {
-              const reasons = await input.automaticGuard!(existing);
+              const reasons = await input.automaticGuard!(existing, lockedDb);
               if (reasons.length) throw new Error(reasons.join(" | "));
             },
           } : {}),

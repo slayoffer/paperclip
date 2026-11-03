@@ -17,6 +17,9 @@ Read saved legacy working directories as well as workspace IDs. Inspect persiste
 runtime rows even when configuration no longer displays them. For local native
 providers, use saved process start times and the restart recovery identity check;
 remote PIDs and expired coordinator leases do not prove local ownership.
+Use the lifecycle transaction client for guard queries and destruction callbacks.
+A query through the root client waits forever when the transaction holds the only
+pool connection.
 An issue update inside a transaction must pass its post-commit actions to the caller's
 commit-effects queue. Never run physical cleanup before the outer commit.
 

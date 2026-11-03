@@ -3254,7 +3254,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       id: string;
       patch: Partial<typeof executionWorkspaces.$inferInsert>;
       closedAt: Date;
-      guard?: (workspace: ExecutionWorkspace) => Promise<string[]>;
+      guard?: (workspace: ExecutionWorkspace, lockedDb: Db) => Promise<string[]>;
     }): Promise<
       | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
       | { outcome: "reopen_pending" }
@@ -3281,7 +3281,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           return { outcome: "reopen_pending" };
         }
         if (input.guard) {
-          const reasons = await input.guard(toExecutionWorkspace(fresh, []));
+          const reasons = await input.guard(toExecutionWorkspace(fresh, []), tx as unknown as Db);
           if (reasons.length) return { outcome: "blocked", reasons };
         }
         const baseMetadata =
@@ -3379,7 +3379,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     fenceClosedWorkspaceDestruction: async <T>(input: {
       workspaceId: string;
       capturedGeneration: number;
-      destroy: () => Promise<T>;
+      destroy: (lockedDb: Db) => Promise<T>;
     }): Promise<{ skippedReopened: true } | { skippedReopened: false; result: T }> => {
       return fenceLifecycleGenerationWrite<
         { skippedReopened: true } | { skippedReopened: false; result: T }
@@ -3392,7 +3392,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           message: "execution workspace cleanup skipped because it was reopened",
         },
         onSkip: () => ({ skippedReopened: true as const }),
-        write: async () => ({ skippedReopened: false as const, result: await input.destroy() }),
+        write: async ({ tx }) => ({ skippedReopened: false as const, result: await input.destroy(tx as unknown as Db) }),
       });
     },
 

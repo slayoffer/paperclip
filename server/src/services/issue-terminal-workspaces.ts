@@ -47,7 +47,7 @@ async function closeWorkspaces(db: Db, input: { companyId: string; issueId: stri
       if (!workspace) continue;
       const result = await closeExecutionWorkspace(db, {
         workspace,
-        automaticGuard: (fresh) => automaticCloseReasons(db, fresh, input),
+        automaticGuard: (fresh, lockedDb) => automaticCloseReasons(lockedDb, fresh, input),
       });
       if (result.outcome === "blocked") {
         logger.warn({ ...input, workspaceId: candidate.id, reasons: result.reasons }, "Skipped terminal workspace close");

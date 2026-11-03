@@ -17,3 +17,6 @@ server/src/services/issue-thread-interactions.ts
 
 # Keep the existing workspace fixture while fixing its asynchronous exit cleanup.
 server/src/__tests__/execution-workspaces-service.test.ts
+
+# Keep lifecycle guard and destruction callbacks in the existing service gateway.
+server/src/services/execution-workspaces.ts
