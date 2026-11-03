@@ -173,7 +173,10 @@ const support = externalTestDatabaseUrl ? { supported: true } : await getEmbedde
       if (scenario === "invalid_time") dedicated.confirmedAt = termination.confirmedAt = "not-a-time";
       if (scenario === "before_acquisition") dedicated.confirmedAt = termination.confirmedAt = new Date(stopped.acquiredAt.getTime() - 1).toISOString();
       if (scenario === "after_release") dedicated.confirmedAt = termination.confirmedAt = new Date(stopped.releasedAt!.getTime() + 1).toISOString();
-      if (scenario === "unequal_confirmation") dedicated.confirmedAt = new Date(stopped.releasedAt!.getTime() - 1).toISOString();
+      if (scenario === "unequal_confirmation") {
+        dedicated.confirmedAt = new Date(Date.parse(String(termination.confirmedAt)) - 1).toISOString();
+        expect(dedicated.confirmedAt).not.toBe(termination.confirmedAt);
+      }
       if (scenario === "pending_intent") metadata.sandboxStopAndRetain = {};
       if (scenario === "cleanup_in_flight") metadata.pendingCleanupInFlight = true;
       const [invalid] = await db.update(environmentLeases).set({ metadata,
