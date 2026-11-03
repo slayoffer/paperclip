@@ -76,6 +76,8 @@ Preparation also skips separate nested repository uploads when the workspace roo
 The same protection applies to a tagged `.paperclip-repositories` container.
 Clone and scratch discovery prunes tagged caches before reading their children.
 Cache discovery then prunes the discovered clone and scratch paths.
+Restore discovers local cache markers before remote discovery. Both remote scans
+prune those literal paths, even when the remote directory has no cache marker.
 Both policies retain saved literal exclusions during baseline capture and restore.
 Each scan also prunes paths that an earlier scan recorded in the same policy.
 Policy discovery scripts also travel through stdin, so large saved exclusion lists remain valid.

@@ -195,15 +195,21 @@ async function readWorkspaceTaggedDirectories(input: {
   const scanExclude = input.baselineSnapshot?.exclude ?? [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES];
   await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
     exclude: scanExclude, ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
-  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
-    remote: { spec: input.spec, dir: input.remoteDir }, exclude: scanExclude,
-    ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
-  const scanIgnored = [...new Set([
+  const localIgnored = [...new Set([
     ...workspacePaths(input.baselineSnapshot?.ignoredPaths ?? []),
     ...(input.syncPolicy.excluded.get(input.localDir) ?? []),
   ])];
+  const localTagged = await localTaggedCacheDirectories(input.localDir, scanExclude, localIgnored);
+  if (localTagged.includes(".")) return localTagged;
+  const remoteIgnored = [...new Set([...localIgnored, ...localTagged])];
+  await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
+    remote: { spec: input.spec, dir: input.remoteDir }, exclude: scanExclude,
+    ignoredPaths: remoteIgnored, onProgress: input.onProgress });
+  const scanIgnored = [...new Set([
+    ...remoteIgnored, ...(input.syncPolicy.excluded.get(input.localDir) ?? []),
+  ])];
   return [...new Set([
-    ...await localTaggedCacheDirectories(input.localDir, scanExclude, scanIgnored),
+    ...localTagged,
     ...parseTaggedCacheDirectories((await runSshCommand(input.spec, "sh -s", {
       stdin: taggedCacheScanScript(input.remoteDir, scanExclude, scanIgnored),
       timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024,

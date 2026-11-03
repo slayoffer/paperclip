@@ -146,6 +146,18 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
       expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
     });
 
+    it.each(["work", "work [cache]*"])("prunes newly tagged local %s before remote discovery", async (directory) => {
+      await put(local, "source.txt");
+      await put(local, `${directory}/data`, "local");
+      const prepared = await prepare();
+      await put(local, `${directory}/CACHEDIR.TAG`, "");
+      await block(path.join(prepared.workspaceRemoteDir, directory, "private"));
+      await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+      await prepared.restoreWorkspace();
+      expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+      expect(await readFile(path.join(local, directory, "data"), "utf8")).toBe("local");
+    });
+
     it("does not scan children of a tagged workspace root", async () => {
       await put(local, "CACHEDIR.TAG", "");
       await block(path.join(local, "private"));

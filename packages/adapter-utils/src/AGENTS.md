@@ -47,6 +47,7 @@ Record exclusions first. Give size collection its own bounded command and catch 
 
 Run clone and scratch discovery before cache discovery. Prune tagged caches during clone discovery.
 Both scanners must skip the other policy's excluded trees before reading their children.
+Discover local cache markers before remote scans. Pass those literal paths to both remote scanners.
 Send policy scan scripts through stdin. Serialized exclusions can exceed the limit for one process argument.
 
 Git checkout precedes the file overlay. Remove tagged caches and fixed generated paths after checkout. Protect their index entries.
