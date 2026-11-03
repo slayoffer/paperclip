@@ -11,6 +11,10 @@ export type IssuePostCommitAction = {
   type: "dispatch_dependency_wake";
   companyId: string;
   intentId: string;
+} | {
+  type: "close_terminal_workspaces";
+  companyId: string;
+  issueId: string;
 };
 
 /** Execute side effects that must never run before the issue transaction commits. */
@@ -19,13 +23,23 @@ export async function executeIssuePostCommitActions(
   actions: readonly IssuePostCommitAction[],
 ): Promise<void> {
   if (actions.length === 0) return;
-  const { heartbeatService } = await import("./heartbeat.js");
-  const heartbeat = heartbeatService(db);
+  const heartbeat = actions.some((action) => action.type !== "close_terminal_workspaces")
+    ? (await import("./heartbeat.js")).heartbeatService(db)
+    : null;
   const cancelledRunIds = new Set<string>();
   for (const action of actions) {
+    if (action.type === "close_terminal_workspaces") {
+      try {
+        const { closeTerminalIssueWorkspaces } = await import("./issue-terminal-workspaces.js");
+        await closeTerminalIssueWorkspaces(db, action);
+      } catch (err) {
+        logger.warn({ err, issueId: action.issueId }, "Could not close terminal issue workspaces");
+      }
+      continue;
+    }
     if (action.type === "dispatch_dependency_wake") {
       try {
-        await dispatchPendingDependencyReleaseWakes(db, heartbeat.wakeup, action);
+        await dispatchPendingDependencyReleaseWakes(db, heartbeat!.wakeup, action);
       } catch (err) {
         logger.warn({ err, intentId: action.intentId }, "dependency release wake deferred to recovery");
       }
@@ -34,7 +48,7 @@ export async function executeIssuePostCommitActions(
     if (cancelledRunIds.has(action.runId)) continue;
     cancelledRunIds.add(action.runId);
     try {
-      await heartbeat.cancelRun(
+      await heartbeat!.cancelRun(
         action.runId,
         "Task closed while waiting for operator input",
         {

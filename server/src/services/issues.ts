@@ -10750,7 +10750,7 @@ export function issueService(db: Db) {
           const { issueThreadInteractionService } = await import("./issue-thread-interactions.js");
           await issueThreadInteractionService(tx).expireConnectionIntentsForOwnershipChange(updated);
         }
-        if (existing.status !== updated.status) {
+        if (receiptExisting.status !== updated.status) {
           if (
             (existing.status === "done" || existing.status === "cancelled") &&
             updated.status !== "done" &&
@@ -11041,6 +11041,11 @@ export function issueService(db: Db) {
             },
           });
           activityPublications.push(publication);
+        }
+        if (receiptExisting.status !== updated.status && (updated.status === "done" || updated.status === "cancelled")) {
+          queuedPostCommitActions.push({
+            type: "close_terminal_workspaces", companyId: updated.companyId, issueId: updated.id,
+          });
         }
         return {
           ...enriched,
