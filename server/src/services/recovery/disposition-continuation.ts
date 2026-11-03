@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { agents, issues, type Db } from "@paperclipai/db";
 import { asBoolean, asNumber, parseObject } from "../../adapters/utils.js";
 import { logActivity } from "../activity-log.js";
+import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { resolveTimerDriverIssueId } from "../heartbeat/timer-driver-issue.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import type { issueService } from "../issues.js";
@@ -15,7 +16,7 @@ export async function hasStandingTimerContinuation(
   const [agent] = await db.select().from(agents).where(and(
     eq(agents.companyId, issue.companyId), eq(agents.id, issue.assigneeAgentId),
   )).limit(1);
-  if (!agent) return false;
+  if (!agent || !(await evaluateAgentInvokabilityFromDb(db, agent)).invokable) return false;
   const heartbeat = parseObject(parseObject(agent.runtimeConfig).heartbeat);
   if (!asBoolean(heartbeat.enabled, false) || asNumber(heartbeat.intervalSec, 0) <= 0) return false;
   return await resolveTimerDriverIssueId(db, issuesSvc, agent) === issue.id;

@@ -4162,8 +4162,9 @@ export function recoveryService(
 
     for (const issue of candidates) {
       try {
-        // Resolve old board-owned repairs before their durable-path gate skips this issue.
-        if (await hasStandingTimerContinuation(db, issuesSvc, issue)) {
+        // A recorded native blocker retains the existing repair and safety gates.
+        if (await hasStandingTimerContinuation(db, issuesSvc, issue) &&
+            !await nativeBlockedUnblockAction(issue, await getLatestIssueRun(issue.companyId, issue.id))) {
           await resolveDispositionRepairActionAsCovered(db, issue, "standing_driver_timer_continuation");
           result.skipped += 1;
           continue;

@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agents, agentWakeupRequests, companies, createDb, heartbeatRuns,
-  issueRecoveryActions, issues,
+  agents, agentWakeupRequests, companies, completionContracts, createDb, heartbeatRuns,
+  issueRecoveryActions, issues, nativeRunFinalizations,
 } from "@paperclipai/db";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService, type RecoveryWakeup } from "../services/recovery/service.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { PaperclipControlPlanePort } from "../services/native-runtime/paperclip-control-plane-port.js";
 
 describe("standing timer continuation recovery", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -95,6 +96,59 @@ describe("standing timer continuation recovery", () => {
     expect(await f.actions()).toEqual([]);
     expect(f.enqueueWakeup).not.toHaveBeenCalled();
     expect(await f.readIssue()).toMatchObject({ status: "in_progress", unblockDescriptor: null });
+  });
+
+  it("does not accept a timer whose agent has a terminated manager", async () => {
+    const f = await fixture();
+    const [manager] = await db.insert(agents).values({
+      companyId: f.companyId, name: "Former manager", status: "terminated",
+    }).returning();
+    await db.update(agents).set({ reportsTo: manager.id }).where(eq(agents.id, f.agentId));
+    expect((await f.recovery.reconcileStrandedAssignedIssues()).failed).toBe(0);
+    expect(await f.actions()).toEqual([expect.objectContaining({
+      kind: "deliberate_wait_without_target", status: "active", ownerType: "board",
+    })]);
+    expect(f.enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["current_track", "task_wide"] as const)("repairs a timer driver's accepted %s blocker", async scope => {
+    const f = await fixture({ succeeded: true });
+    const contractId = randomUUID(), runnerInstanceId = randomUUID();
+    const unblockAction = "Restore the required attachment access, then retry.";
+    await db.insert(completionContracts).values({
+      id: contractId, companyId: f.companyId, issueId: f.issueId, revision: 1,
+      schemaVersion: "paperclip.completion-contract.v1", policyVersion: "phase6-v3", risk: "low",
+      completionAuthority: "agent_claim_policy", incompleteCriteriaPolicy: "preserve_non_terminal",
+      contractJson: { revision: "1", objective: "Read attachment", criteria: [{ id: "objective", requirement: "Read attachment" }] },
+      canonicalSha256: f.runId, createdByActorType: "system", createdByActorId: "test",
+    });
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "native", nativeIssueId: f.issueId, completionContractId: contractId,
+      completionContractSha256: f.runId, nativeSessionId: f.runId, runnerInstanceId,
+    }).where(eq(heartbeatRuns.id, f.runId));
+    const port = new PaperclipControlPlanePort(db, {
+      companyId: f.companyId, issueId: f.issueId, runId: f.runId, agentId: f.agentId,
+      sessionId: f.runId, completionContractId: contractId, completionContractSha256: f.runId,
+      sourceInstanceId: runnerInstanceId, controlPlaneSourceInstanceId: `test-${f.runId}`,
+    });
+    await port.completeRun({
+      result: {
+        schema: "paperclip.run_result.v1", reportedWorkDisposition: "blocked", summary: "Attachment access is blocked.",
+        blocker: { scope, owner: { kind: "system", name: "Attachment access" }, reasonCode: "permission_denied", unblockAction },
+        completionClaim: { contractRevision: "1", objectiveSatisfied: false,
+          criteria: [{ criterionId: "objective", status: "not_satisfied", evidenceRefs: [] }],
+          remainingWork: [{ description: "Read attachment", blocksCompletion: true }] },
+        evidence: [], verification: [], attentionRequests: [], artifacts: [],
+      },
+      terminal: { schema: "paperclip.prp.terminal.v1", runTerminalState: "succeeded",
+        turnTerminalState: "completed", reportedWorkDisposition: "blocked" },
+    });
+    // Reproduce the old finalizer after real result validation, without a provider.
+    await db.update(nativeRunFinalizations).set({ phase: "committed" })
+      .where(eq(nativeRunFinalizations.runId, f.runId));
+    expect((await f.recovery.reconcileStrandedAssignedIssues()).failed).toBe(0);
+    expect(await f.readIssue()).toMatchObject({ status: "blocked", unblockDescriptor: { owner: "board", action: unblockAction } });
+    expect(f.enqueueWakeup).not.toHaveBeenCalled();
   });
 
   it.each(["agent", "board"] as const)("resolves an existing %s action on the next pass without reopening", async ownerType => {
