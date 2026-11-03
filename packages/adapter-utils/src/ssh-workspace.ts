@@ -176,9 +176,10 @@ async function restoreWorkspaceRootFromSsh(input: {
     ...(input.hasProjectRepositories ? [PROJECT_REPOSITORIES_DIR] : []),
     ...(input.baselineSnapshot?.exclude ?? [])];
   await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
-    exclude: defaultExclude, onProgress: input.onProgress });
+    exclude: defaultExclude, ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
   const exclude = await sshWorkspaceExcludes({ policy: input.syncPolicy, localDir: input.localDir,
-    remote: { spec: input.spec, dir: remoteDir }, exclude: defaultExclude, onProgress: input.onProgress });
+    remote: { spec: input.spec, dir: remoteDir }, exclude: defaultExclude,
+    ignoredPaths: input.baselineSnapshot?.ignoredPaths, onProgress: input.onProgress });
   // Direct Git restores need the same preflight as managed restores. Fetching
   // objects is safe, but resetting the working tree would remove excluded data.
   const gitSnapshot = input.baselineSnapshot ? null : await readLocalGitWorkspaceSnapshot(input.localDir);

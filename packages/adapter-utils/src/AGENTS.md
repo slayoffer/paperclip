@@ -29,3 +29,5 @@ Preserve literal ignored paths in serialized baselines. A later policy or marker
 change must not expose previously excluded local files to restore.
 Use baseline caller exclusions during restore discovery.
 Pass saved literal exclusions to tar as well as the final merge.
+Prune saved literal exclusions before discovery reads them.
+Optional size collection must not fail a transfer or remove an exclusion.

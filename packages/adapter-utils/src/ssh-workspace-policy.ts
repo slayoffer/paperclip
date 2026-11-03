@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { shellQuote, type SshConnectionConfig } from "./ssh-config.js";
 import { runSshScript } from "./ssh-command.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
+import { workspacePaths, type WorkspacePaths } from "./workspace-manifest.js";
 
 const exec = promisify(execFile);
 
@@ -23,11 +24,15 @@ export function createSshWorkspaceSyncPolicy(): SshWorkspaceSyncPolicy {
 }
 
 // Both ends use the same POSIX tools. NUL records preserve spaces and newlines.
-function scanScript(root: string, exclude: string[], patterns: string[]): string {
-  const ignored = [".git", "._*", ...exclude].map((pattern) => pattern.includes("/")
-    ? `-path ${shellQuote(`./${pattern}`)}` : `-name ${shellQuote(pattern)}`).join(" -o ");
+function scanScript(root: string, exclude: string[], patterns: string[], ignoredPaths?: WorkspacePaths): string {
+  const ignored = [
+    ...[".git", "._*", ...exclude].map((pattern) => pattern.includes("/")
+      ? `-path ${shellQuote(`./${pattern}`)}` : `-name ${shellQuote(pattern)}`),
+    ...[...workspacePaths(ignoredPaths ?? [])].map((relative) =>
+      `-path ${shellQuote(`./${relative.replace(/([\\*?\[\]])/g, "\\$1")}`)}`),
+  ].join(" -o ");
   const scratch = patterns.map((pattern) => `-name ${shellQuote(pattern)} -o `).join("");
-  const report = 'for entry do size=$(du -sk "$entry") || exit; size=${size%%[[:space:]]*}; printf "%s\\0%s\\0" "$entry" "$size"; done';
+  const report = 'for entry do if size=$(du -sk "$entry" 2>/dev/null); then size=${size%%[[:space:]]*}; else size=unknown; fi; printf "%s\\0%s\\0" "$entry" "$size"; done';
   return `cd ${shellQuote(root)} && find . -mindepth 1 \\( ${ignored} \\) -prune -o `
     + `-type d \\( ${scratch}-exec test -e '{}/.git' \\; -o -exec test -L '{}/.git' \\; \\) `
     + `-prune -exec sh -c ${shellQuote(report)} sh {} +`;
@@ -38,9 +43,10 @@ export async function sshWorkspaceExcludes(input: {
   localDir: string;
   remote?: { spec: SshConnectionConfig; dir: string };
   exclude: string[];
+  ignoredPaths?: WorkspacePaths;
   onProgress?: RuntimeProgressSink;
 }): Promise<string[]> {
-  const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns);
+  const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, input.ignoredPaths);
   const options = { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 };
   const result = input.remote
     ? await runSshScript(input.remote.spec, script, { timeoutMs: options.timeout, maxBuffer: options.maxBuffer })
