@@ -36,7 +36,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
     const sourceRunId = randomUUID(), successorRunId = randomUUID();
     const commentId: string = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Explicit turn", defaultResponsibleUserId: "board", issuePrefix: `E${companyId.slice(0, 6)}` });
+    await db.insert(companies).values({ id: companyId, name: "Explicit turn", defaultResponsibleUserId: "board", issuePrefix: `E${companyId}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Native", role: "engineer", adapterType: "paperclip_runner", status: "idle", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } });
     await db.insert(issues).values({ id: issueId, companyId, title: "Deploy", status: "blocked", assigneeAgentId: agentId });
     await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId,
@@ -501,6 +501,37 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.id, receipts.find(row => row.id !== f.receipt.id)!.id));
     await expect(dispatchExplicitRetry(f, scheduled.run)).rejects.toThrow("continuation_user_authorization_missing");
   });
+
+  it.each(["ready", "operator_stop", "provider_started", "edited"])(
+    "revalidates explicit user authority after SSH setup failure (%s)", async gate => {
+      const f = await seedTimedOutExplicitTurn();
+      await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "ssh_transport_wait",
+        resultJson: {
+          executionRecovery: { kind: "ssh_transport_wait", providerWorkStarted: gate === "provider_started" },
+          cancellation: { source: gate === "operator_stop" ? "operator" : "control_plane",
+            expected: true, initiator: { type: gate === "operator_stop" ? "user" : "system" },
+            reason: "SSH setup failed", recordedAt: f.now.toISOString() },
+        },
+      }).where(eq(heartbeatRuns.id, f.parent.id));
+      if (gate === "edited") await db.update(issueComments).set({ body: "Changed instructions" })
+        .where(eq(issueComments.id, f.commentId));
+      const result = await heartbeatService(db).scheduleBoundedRetry(f.parent.id, {
+        now: f.now, retryReason: "ssh_transport_wait", delayMs: 1000,
+      });
+      if (gate !== "ready") {
+        expect(result.outcome).not.toBe("scheduled");
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, f.parent.id)))
+          .toHaveLength(0);
+        return;
+      }
+      expect(result.outcome).toBe("scheduled");
+      if (result.outcome !== "scheduled") return;
+      await expect(dispatchExplicitRetry(f, result.run)).resolves.toMatchObject({ interruptedRunId: f.parent.id });
+      expect(result.run.contextSnapshot?.explicitUserContinuation).toEqual({
+        previousRunId: f.parent.id, commentId: f.commentId,
+      });
+    },
+  );
 
   it("waits for the parent adapter controller even when no environment lease remains", async () => {
     const f = await seedTimedOutExplicitTurn();
