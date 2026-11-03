@@ -31,6 +31,9 @@ Transport waits do not spend that budget or block the issue. Normal dispatch
 gates still apply, including cancellation, ownership, pause, and budget checks.
 An existing workspace-restore or restart-reconciliation hold still applies.
 Setup deferral flushes and finalizes an opened run log before it returns.
+An explicit user message can continue after a verified SSH setup wait. Admission
+rechecks the unchanged message and its receipt, then creates a successor receipt.
+Operator stops and waits after provider work starts remain ineligible.
 
 This change does not alter SSH credentials, host-key checks, or deployment.
 Validation under load on home-pc belongs to homelab after merge.

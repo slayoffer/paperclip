@@ -3,6 +3,7 @@ import type { heartbeatRuns } from "@paperclipai/db";
 import { SshTransportError } from "@paperclipai/adapter-utils/ssh-transport";
 import { deferSshSetupFailure } from "./ssh-setup-deferral.js";
 import { createHeartbeatRunCompletion, type FailHeartbeatRunInput } from "./run-completion.js";
+import { buildEffectiveRunSessionConfigMetadata } from "./workspaces.js";
 
 describe("SSH setup deferral", () => {
   it("ignores remote command failures", async () => {
@@ -22,7 +23,8 @@ describe("SSH setup deferral", () => {
     const calls: string[] = [];
     const run = { id: "run", runtimeMode: "legacy" } as typeof heartbeatRuns.$inferSelect;
     const output = {
-      handle: { store: "local_file", logRef: "test-log" },
+      handle: { store: "local_file" as const, logRef: "test-log" },
+      stdoutExcerpt: "", stderrExcerpt: "",
       flushRunLog: vi.fn(async () => { calls.push("flush"); }),
       outputProgressState: { pending: { bytes: 1 } },
       flushOutputProgress: vi.fn(async () => { calls.push("progress"); }),
@@ -38,9 +40,23 @@ describe("SSH setup deferral", () => {
     const completion = createHeartbeatRunCompletion({} as never, {
       processRunCancellationSettlements: new Map(), runLogStore: { finalize }, setRunStatusIfRunning,
     } as never);
-    await completion.failRun({ run, output, session: {}, legacyAdapterEntered: false,
+    await completion.failRun({
+      run, runId: run.id, agent: {} as FailHeartbeatRunInput["agent"],
+      issueId: null, issueRef: null, signal: new AbortController().signal, output,
+      session: {
+        runtimeForAdapter: { sessionId: null, sessionDisplayId: null },
+        previousSessionParams: null, taskKey: null, configuredModel: null,
+        sessionConfigMetadata: await buildEffectiveRunSessionConfigMetadata({
+          adapterType: "process", effectiveAdapterConfig: {}, agentRuntimeConfig: {},
+          issueOverrides: null, workspaceConfig: null, environment: null,
+          environmentEnv: null, projectEnv: null, routineEnv: null, runtimeSkills: [],
+        }),
+      },
+      legacyAdapterEntered: false, readFailureReportSecrets: () => [],
+      identityRedactor: { redact: value => value }, requiredWorkspaceRestoreEvidence: null,
+      goalCheckpointSession: { current: null }, previousSessionDisplayId: null, taskSession: null,
       err: new SshTransportError(new Error("timeout")),
-    } as FailHeartbeatRunInput);
+    });
     expect(calls).toEqual(["flush", "finalize", "progress", "cancel"]);
     expect(finalize).toHaveBeenCalledWith(output.handle);
     expect(output.outputProgressState.pending.bytes).toBe(123);
