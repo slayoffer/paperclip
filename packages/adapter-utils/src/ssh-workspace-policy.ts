@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { shellQuote, type SshConnectionConfig } from "./ssh-config.js";
@@ -61,6 +62,13 @@ export async function sshWorkspaceExcludes(input: {
   ignoredPaths?: WorkspacePaths;
   onProgress?: RuntimeProgressSink;
 }): Promise<string[]> {
+  if (!input.remote) {
+    const exists = await stat(input.localDir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!exists) return input.exclude;
+  }
   const script = scanScript(input.remote?.dir ?? input.localDir, input.exclude, input.policy.patterns, input.ignoredPaths);
   const result = await runPolicyScript(script, 60_000, input.remote);
   const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));

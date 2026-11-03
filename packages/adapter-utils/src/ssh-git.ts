@@ -18,7 +18,7 @@ import {
   type LocalGitWorkspaceSnapshot,
   shellQuote,
 } from "./ssh-config.js";
-import { runLocalGit as runLocalGitCommand, runSshScript } from "./ssh-command.js";
+import { runLocalGit as runLocalGitCommand, runSshCommand, runSshScript } from "./ssh-command.js";
 import { createTransferProgress, streamLocalFileToSsh, streamSshToLocalFile } from "./ssh-transfer-progress.js";
 import { removeDeletedPathsOnSsh, syncDirectoryToSsh } from "./ssh-sync.js";
 
@@ -433,14 +433,14 @@ export async function transportGitWorkspaceToSsh(input: {
   }));
   if (input.skippedPaths?.length) {
     // Missing excluded files must not become deletions in the agent's next commit.
-    await runSshScript(input.spec, [
+    await runSshCommand(input.spec, "sh -s", { stdin: [
       "set -e",
       `cd ${shellQuote(input.remoteDir)}`,
       'skip_index=$(mktemp)',
       'trap \'rm -f "$skip_index"\' EXIT',
       `git --literal-pathspecs ls-files -z -- ${input.skippedPaths.map(shellQuote).join(" ")} > "$skip_index"`,
       'git update-index --skip-worktree -z --stdin < "$skip_index"',
-    ].join("\n"), { timeoutMs: 30_000, maxBuffer: 256 * 1024 });
+    ].join("\n"), timeoutMs: 30_000, maxBuffer: 256 * 1024 });
     await removeDeletedPathsOnSsh({ spec: input.spec, remoteDir: input.remoteDir, deletedPaths: input.skippedPaths });
   }
   await timeWorkspaceStep(input.onProgress, "Workspace sync", () => syncDirectoryToSsh({
