@@ -70,9 +70,9 @@ describe("terminal workspace removal boundary", () => {
       const expectedStart = kind === "recycled" ? "2000-01-01T00:00:00.000Z" : startedAt!;
       const [run] = await db.insert(heartbeatRuns).values({
         companyId: f.company.id, agentId: agent.id, status: "failed", runtimeMode: "native",
+        contextSnapshot: { paperclipEnvironment: { driver: kind === "remote" ? "sandbox" : "local" } },
         runnerProfileJson: {
-          nativeExecutionInput: { workspace: { cwd: workspace.cwd },
-            paperclipEnvironment: { driver: kind === "remote" ? "sandbox" : "local" } },
+          nativeExecutionInput: { workspace: { cwd: workspace.cwd } },
           sessionCheckpoint: { process: kind === "event" ? {} : {
             [`${prefix}Pid`]: process.pid,
             ...(kind === "ambiguous" ? {} : { [`${prefix}ProcessStartedAt`]: expectedStart }),
@@ -82,7 +82,7 @@ describe("terminal workspace removal boundary", () => {
       if (kind === "event") await db.insert(heartbeatRunEvents).values({
         companyId: f.company.id, agentId: agent.id, runId: run.id, seq: 1,
         eventType: "session.started", payload: { prpEvent: { payload: {
-          processId: process.pid, processStartedAt: expectedStart,
+          processId: process.pid,
         } } },
       });
       await issueService(db).update(f.issue.id, { status: "done" });

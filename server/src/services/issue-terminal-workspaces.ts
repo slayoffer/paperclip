@@ -151,7 +151,8 @@ async function automaticCloseReasons(
   const nativeCwd = sql<string | null>`${heartbeatRuns.runnerProfileJson}#>>'{nativeExecutionInput,workspace,cwd}'`;
   const legacyCwd = sql<string | null>`${heartbeatRuns.contextSnapshot}#>>'{paperclipWorkspace,cwd}'`;
   const relatedRuns = await db.select({
-    run: { id: heartbeatRuns.id, runtimeMode: heartbeatRuns.runtimeMode, runnerProfileJson: heartbeatRuns.runnerProfileJson, status: heartbeatRuns.status, processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
+    run: { id: heartbeatRuns.id, runtimeMode: heartbeatRuns.runtimeMode, runnerProfileJson: heartbeatRuns.runnerProfileJson,
+      contextSnapshot: heartbeatRuns.contextSnapshot, status: heartbeatRuns.status, processPid: heartbeatRuns.processPid, processGroupId: heartbeatRuns.processGroupId,
       controllerBootId: heartbeatRuns.controllerBootId, controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt },
     coordinator: { leaseOwner: nativeRunFinalizations.leaseOwner, leaseExpiresAt: nativeRunFinalizations.leaseExpiresAt },
     bound: sql<boolean>`coalesce(${boundToWorkspace}, false)`, nativeCwd, legacyCwd,

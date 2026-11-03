@@ -15,7 +15,8 @@ workflow must retain control of both the archive and artifact lifecycle.
 Check provider process and controller ownership after terminal run statuses too.
 Read saved legacy working directories as well as workspace IDs. Inspect persisted
 runtime rows even when configuration no longer displays them. For local native
-providers, use saved process start times and the restart recovery identity check;
+providers, read the environment driver from `contextSnapshot.paperclipEnvironment`.
+Use saved process start times and the restart recovery identity check;
 remote PIDs and expired coordinator leases do not prove local ownership.
 Use the lifecycle transaction client for guard queries and destruction callbacks.
 A query through the root client waits forever when the transaction holds the only

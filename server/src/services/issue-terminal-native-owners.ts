@@ -6,13 +6,13 @@ const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 export async function hasRetainedNativeProvider(
-  db: Db, run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "runtimeMode" | "runnerProfileJson">,
+  db: Db, run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "runtimeMode" | "runnerProfileJson" | "contextSnapshot">,
 ): Promise<boolean> {
   if (run.runtimeMode !== "native") return false;
   const profile = record(run.runnerProfileJson);
-  const execution = record(profile.nativeExecutionInput);
+  const environment = record(run.contextSnapshot?.paperclipEnvironment);
   // Remote process IDs do not identify processes on this host.
-  if (profile.nativeWorkspaceSync != null || record(execution.paperclipEnvironment).driver !== "local") return false;
+  if (profile.nativeWorkspaceSync != null || environment.driver !== "local") return false;
   const process = record(record(profile.sessionCheckpoint).process);
   const identities: NativeProviderProcessIdentity[] = [];
   const add = (pid: unknown, startedAt: unknown) => {
