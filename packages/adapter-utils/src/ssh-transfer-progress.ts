@@ -11,9 +11,11 @@ import {
 } from "./runtime-progress.js";
 import { type SshConnectionConfig, shellQuote } from "./ssh-config.js";
 import { createSshAuthArgs, runSshScript } from "./ssh-command.js";
+import { isRelativePathOrDescendant } from "./exclude-patterns.js";
 
-export function tarExcludeArgs(exclude: string[] | undefined): string[] {
-  const combined = ["._*", ...(exclude ?? [])];
+export function tarExcludeArgs(exclude: string[] | undefined, literalExclude: string[] = []): string[] {
+  const combined = ["._*", ...(exclude ?? []),
+    ...literalExclude.map((entry) => `./${entry.replace(/[\\*?[\]]/g, "\\$&")}`)];
   return combined.flatMap((entry) => ["--exclude", entry]);
 }
 
@@ -42,11 +44,13 @@ function tarPatternToRegExp(pattern: string): RegExp {
 export async function estimateLocalDirSize(input: {
   localDir: string;
   exclude?: string[];
+  literalExclude?: string[];
   followSymlinks?: boolean;
 }): Promise<number> {
   const regexes = ["._*", ...(input.exclude ?? [])].map(tarPatternToRegExp);
   const isExcluded = (relPath: string, base: string) =>
-    regexes.some((regex) => regex.test(relPath) || regex.test(base));
+    regexes.some((regex) => regex.test(relPath) || regex.test(base)) ||
+    input.literalExclude?.some((entry) => isRelativePathOrDescendant(relPath, entry));
 
   let total = 0;
   const walk = async (dir: string, relative: string): Promise<void> => {
