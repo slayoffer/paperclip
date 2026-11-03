@@ -240,7 +240,10 @@ describeDatabase("durable dependency release wakes", () => {
   it("recovers a committed intent when the process misses its post-commit actions", async () => {
     const actions: IssuePostCommitAction[] = [];
     await db.transaction(tx => svc.update(blocker.id, { status: "done" }, tx, [], actions));
-    expect(actions).toHaveLength(1);
+    expect(actions).toEqual([
+      { type: "dispatch_dependency_wake", companyId, intentId: (await intents())[0]!.id },
+      { type: "close_terminal_workspaces", companyId, issueId: blocker.id },
+    ]);
     expect(heartbeat.wakeup).not.toHaveBeenCalled();
     heartbeat.wakeup.mockResolvedValueOnce(await delivered());
     expect(await recover()).toMatchObject({ healed: 1 });

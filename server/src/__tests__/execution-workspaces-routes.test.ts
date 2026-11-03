@@ -62,6 +62,19 @@ vi.mock("../services/environment-runtime.js", () => ({
   environmentRuntimeService: () => mockEnvironmentRuntimeService,
 }));
 
+vi.mock("../services/execution-workspaces.js", async (importActual) => ({
+  ...await importActual<typeof import("../services/execution-workspaces.js")>(),
+  executionWorkspaceService: () => mockExecutionWorkspaceService,
+}));
+vi.mock("../services/workspace-operations.js", async (importActual) => ({
+  ...await importActual<typeof import("../services/workspace-operations.js")>(),
+  workspaceOperationService: () => mockWorkspaceOperationService,
+}));
+vi.mock("../services/workspace-runtime-leases.js", async (importActual) => ({
+  ...await importActual<typeof import("../services/workspace-runtime-leases.js")>(),
+  workspaceRuntimeLeaseService: () => mockWorkspaceRuntimeLeaseService,
+}));
+
 const mockWorkspaceRuntimeTeardown = vi.hoisted(() => ({
   stopRuntimeServicesForExecutionWorkspace: vi.fn(async () => undefined),
   cleanupExecutionWorkspaceArtifacts: vi.fn(async () => ({ cleaned: true, warnings: [] as string[] })),
@@ -512,10 +525,7 @@ describe("execution workspace routes", () => {
   });
 
   it("keeps the reusable sandbox leases when a reopen makes the fence skip the archive teardown", async () => {
-    // A reopen raised the lifecycle generation after the archive captured its
-    // own generation. The fence skips the destroy callback and keeps the
-    // reopened row, so the lease teardown must not run. Before the fix the lease
-    // teardown ran before the fence, so an overlapping reopen lost its leases.
+    // A newer reopen generation must preserve its reusable leases.
     const archivedWorkspace = {
       id: "workspace-1",
       companyId: "company-1",
