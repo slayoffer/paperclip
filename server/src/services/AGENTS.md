@@ -29,3 +29,11 @@ Older leases can also lack `sshInPlaceWriter` tracking.
 Recover their lock path from the saved `in_place` realization with matching lease and provider identities.
 A terminal run and released lease still require remote termination proof before lock removal.
 Observed on 2026-10-26 (VLAT): a sweep that used only execution-workspace rows skipped these locks.
+
+## SSH restart recovery
+
+SSH restart recovery retains an active lease and its filesystem lock across shutdown.
+Confirm remote termination before releasing that exact lease and lock for a new acquisition.
+Otherwise in-place realization falls back to copy mode and changes the provider session identity.
+Measured 2026-11-03 (VLAT): the loopback SSH Codex restart test failed with `restart_session_identity_changed`.
+Consume budget admission once per restart claim, and clear the previous finalization deadline when claiming recovery.

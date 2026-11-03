@@ -72,8 +72,10 @@ const support = await getEmbeddedPostgresTestSupport();
     const checkpoint = readLegacyRestartCheckpoint(await read(run.id));
     expect([checkpoint?.providerStopped, checkpoint?.workspaceSettled]).toEqual([true, undefined]);
     await markLegacyRestartBoundary(db, run, "workspaceSettled");
+    await db.update(heartbeatRuns).set({ executionControlDeadlineAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
     expect(await claimLegacyRestartRecovery(db, await expire(run.id), "codex_local")).not.toBeNull();
     expect((await read(run.id)).resultJson).toMatchObject({ restartRecovery: { outcome: "resuming", attempt: 1 } });
+    expect((await read(run.id)).executionControlDeadlineAt).toBeNull();
   });
 
   it.each([

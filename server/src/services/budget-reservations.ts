@@ -108,7 +108,8 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
       const legacyRestartOwner = Boolean(legacyRestartSessionId) && run.runtimeMode === "legacy"
         && run.status === "running" && existing.state === "held" && existing.projectId === projectId
         && run.controllerBootId === legacyControllerBootId
-        && restart?.outcome === "resuming" && restart.sessionId === legacyRestartSessionId;
+        && restart?.outcome === "resuming" && restart.sessionId === legacyRestartSessionId
+        && restart.dispatchStarted !== true;
       if (owner || legacyRestartOwner) {
         if (stopRecovery) return { ...existing, reused: true };
         // Recovery has already made this run queued/running, so its own pending
@@ -120,6 +121,12 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
           .where(and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)));
         if (!agent || agent.lifecycleState !== "ready" || ["paused", "terminated", "pending_approval"].includes(agent.status))
           return { admissionBlockReason: "Agent is paused and cannot start new work" };
+        if (legacyRestartOwner) {
+          // Consume this claim under the run lock. A later restart writes a new claim.
+          await tx.update(heartbeatRuns).set({
+            resultJson: sql`jsonb_set(${heartbeatRuns.resultJson}, '{restartRecovery,dispatchStarted}', 'true'::jsonb)`,
+          }).where(eq(heartbeatRuns.id, runId));
+        }
         return { ...existing, reused: true };
       }
       throw conflict("Provider dispatch has already reserved this run");

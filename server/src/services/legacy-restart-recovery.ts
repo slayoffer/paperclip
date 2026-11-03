@@ -1,3 +1,4 @@
+import { boundRunIssueId } from "./run-task-binding.js";
 import { withStopRequestEvidence } from "./run-execution-evidence.js";
 import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -44,6 +45,7 @@ export function preserveLegacyRestartEvidence(
 export function readLegacyRestartCheckpoint(run: Run): LegacyRestartCheckpoint | null {
   const value = run.resultJson?.restartCheckpoint as LegacyRestartCheckpoint | undefined;
   if (!value || value.version !== 1 || value.companyId !== run.companyId || value.agentId !== run.agentId ||
+      value.issueId !== boundRunIssueId(run) ||
       value.issueId !== run.contextSnapshot?.issueId || value.executionWorkspaceId !== (run.contextSnapshot?.executionWorkspaceId ?? null) ||
       !["codex_local", "claude_local"].includes(value.adapterType) ||
       typeof value.workspaceCwd !== "string" || !value.workspaceCwd.startsWith("/") ||
@@ -64,6 +66,7 @@ export async function saveLegacyRestartCheckpoint(db: Db, run: Run, input: {
 }) {
   if (run.runtimeMode !== "legacy" || !["codex_local", "claude_local"].includes(input.adapterType) ||
       typeof run.contextSnapshot?.issueId !== "string" ||
+      boundRunIssueId(run) !== run.contextSnapshot.issueId ||
       typeof input.sessionParams.sessionId !== "string" || typeof input.sessionParams.cwd !== "string") return;
   const checkpoint = { version: 1, companyId: run.companyId, agentId: run.agentId,
     issueId: run.contextSnapshot.issueId, executionWorkspaceId: run.contextSnapshot?.executionWorkspaceId ?? null, ...input };
@@ -186,7 +189,7 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
         ["done", "cancelled"].includes(issue.status)) return null;
     const [claimed] = await tx.update(heartbeatRuns).set({
       ...legacyControllerClaim("legacy"), processPid: null, processGroupId: null, processStartedAt: null,
-      error: null, errorCode: null,
+      error: null, errorCode: null, executionControlDeadlineAt: null,
       resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
         restartCheckpoint: { ...checkpoint, providerStopped: false, workspaceSettled: false },
         restartRecovery: { outcome: "resuming", attempt: attempts + 1, sessionId: checkpoint.sessionParams.sessionId },
