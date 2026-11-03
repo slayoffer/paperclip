@@ -3,7 +3,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, isNull, isNotNull, lt, sql } from "drizzle-orm";
 import {
   agents, companies, heartbeatRuns, agentWakeupRequests, issues,
-  issueComments, issueThreadInteractions, type Db,
+  issueComments, issueThreadInteractions, withDedicatedDbConnection, type Db,
 } from "@paperclipai/db";
 import type { LiveEvent } from "@paperclipai/shared";
 import type { heartbeatService } from "./heartbeat.js";
@@ -63,9 +63,9 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
         inArray(agents.status, ["idle", "active", "running"])));
     for (const { agent } of owners) {
       if (stopped || (await dependencies.isSuppressed()).suppressed) return;
-      // A transaction lock serializes competing schedulers. It holds no issue
-      // row locks while normal admission uses its independent transaction.
-      await db.transaction(async (tx) => {
+      // Keep the selection lock on a dedicated connection: suppression and
+      // normal admission need the ordinary pool while this transaction is open.
+      await withDedicatedDbConnection(db, (dedicated) => dedicated.transaction(async (tx) => {
         const lock = await tx.execute<{ acquired: boolean }>(sql`select pg_try_advisory_xact_lock(
           hashtextextended(${`pull-queue:${companyId}:${agent.id}`}, 0)) as acquired`);
         if (!lock[0]?.acquired) return;
@@ -119,7 +119,7 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
             or ${ownerHasPendingWake(companyId, agent.id)} as busy`);
           if (busy?.busy) return;
         }
-      }).catch((err) => {
+      })).catch((err) => {
         logger.error({ err, companyId, agentId: agent.id },
           "Pull queue selection failed for this owner. The next reconciliation will retry.");
       });

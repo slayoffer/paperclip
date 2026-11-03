@@ -52,6 +52,13 @@ issue-ownership checks still apply before the adapter starts.
 Operators must verify a deployed release with a controlled restart and record the affected run IDs.
 Tests do not replace this live deployment check.
 
+An explicit wake with `resumeFromRunId` uses the saved run's canonical issue binding
+before admission. Native and first-class issue columns take precedence over the saved
+context. The saved task key still selects the provider session and its workspace.
+Caller issue or task IDs must match the saved issue, and an explicitly supplied task
+key must match the saved key. A conflict returns HTTP 409 with `resume_issue_mismatch`.
+Omitting these fields does not bypass the issue budget or owner-parking checks.
+
 `server/src/__tests__/restart-live-runs.test.ts` stops six live Codex and Claude runs.
 It checks that every saved session resumes once when lock cleanup precedes or overlaps recovery.
 

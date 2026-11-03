@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { issueTokenBudgetRunBlock } from "../issue-token-budget.js";
 import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
@@ -470,7 +471,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
-    const contextSnapshot = parseObject(run.contextSnapshot);
+    const contextSnapshot = { ...parseObject(run.contextSnapshot) };
+    delete contextSnapshot.issueBudgetOverride;
     // A retry inherits the durable authorization scope of its source run. Do
     // not promote an untrusted or legacy contextSnapshot.issueId into a new
     // issue binding: that could either violate the FK or misclassify history.
@@ -549,6 +551,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         };
       }
     }
+
+    const tokenBudgetBlock = await issueTokenBudgetRunBlock(db, run);
+    if (tokenBudgetBlock) return { outcome: "not_scheduled" as const,
+      reason: tokenBudgetBlock.error, errorCode: tokenBudgetBlock.errorCode, issueId: tokenBudgetBlock.issueId };
 
     const schedule =
       transientRetryNotBefore &&

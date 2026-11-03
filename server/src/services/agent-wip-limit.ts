@@ -2,6 +2,7 @@ import { and, eq, inArray, ne } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
 import { issueWipReason, isRunnableWipReason, isWaitingWipReason } from "./agent-wip-policy.js";
 import { logger } from "../middleware/logger.js";
+import { conflict } from "../errors.js";
 
 /**
  * Agent WIP limit (synthiq fork, Guild model v2 rule 2, 2026-10-17). With PAPERCLIP_AGENT_WIP_LIMIT=N, a NEW assignment
@@ -31,7 +32,7 @@ export function wipLimitAppliesToActor(actor: { type?: string; source?: string }
 }
 
 export async function countAgentActiveIssues(
-  db: Db,
+  db: Pick<Db, "select">,
   input: { companyId: string; agentId: string; excludeIssueId?: string | null },
 ): Promise<number> {
   const rows = await db
@@ -52,7 +53,7 @@ export async function countAgentActiveIssues(
 
 /** True when one more active issue for this agent would exceed the limit. */
 export async function agentWipFull(
-  db: Db,
+  db: Pick<Db, "select">,
   actor: { type?: string; source?: string } | undefined | null,
   input: {
     companyId: string; agentId: string | null | undefined; status: unknown; excludeIssueId?: string | null; pending?: number;
@@ -78,4 +79,25 @@ export async function agentWipFull(
 export function wipPullRefusal(limit: number): string {
   return `WIP limit reached: this agent already has ${limit} or more runnable issues. ` +
     "Complete one runnable issue first. The next backlog issue is promoted when a slot becomes available.";
+}
+
+/** Admission is authoritative under the company and issue locks. A route preview must retain any backlog fallback. */
+export async function applyIssueUpdateWipAdmission(
+  db: Pick<Db, "select">,
+  actor: { type?: string; source?: string },
+  existing: { id: string; companyId: string; assigneeAgentId: string | null; status: string; priority: string },
+  patch: { status?: string; priority?: string },
+  requestedAssigneeAgentId: string | null | undefined,
+) {
+  const status = patch.status ?? existing.status;
+  const reassignedTo = requestedAssigneeAgentId && requestedAssigneeAgentId !== existing.assigneeAgentId
+    ? requestedAssigneeAgentId : null;
+  const input = { companyId: existing.companyId, agentId: reassignedTo ?? existing.assigneeAgentId,
+    status, priority: patch.priority ?? existing.priority, excludeIssueId: existing.id };
+  if (reassignedTo) {
+    if (await agentWipFull(db, actor, input)) patch.status = "backlog";
+  } else if (actor.type === "agent" && existing.status === "backlog" && existing.assigneeAgentId
+    && isWipActiveStatus(status) && await agentWipFull(db, actor, input)) {
+    throw conflict(wipPullRefusal(agentWipLimit() ?? 0), { code: "agent_wip_limit" });
+  }
 }

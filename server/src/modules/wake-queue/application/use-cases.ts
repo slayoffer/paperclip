@@ -800,6 +800,11 @@ export function createAdmitWakeBehindIssueExecution(deps: {
   ): Promise<AdmitWakeBehindIssueExecutionResult> {
     const manualUserWakeActorId = input.payload?.manualUserWake === true
       ? readNonEmptyString(input.requestedByActorId) : null;
+    const budgetOverride = input.payload?.issueBudgetOverride;
+    const hasAttributedBudgetOverride = input.requestedByActorType === "user" &&
+      Boolean(input.requestedByActorId) && typeof budgetOverride === "object" && budgetOverride !== null &&
+      "issueId" in budgetOverride && budgetOverride.issueId === input.issueId &&
+      "actorId" in budgetOverride && budgetOverride.actorId === input.requestedByActorId;
     if (input.payload?.manualUserWake === true &&
         (input.requestedByActorType !== "user" || !manualUserWakeActorId)) {
       throw new Error("wake-queue: manual wake requires an authenticated user");
@@ -903,7 +908,7 @@ export function createAdmitWakeBehindIssueExecution(deps: {
             agentId: input.agentId,
             issueId: input.issueId,
             chatConversationId: readWakeChatConversationId(input.contextSnapshot),
-            ...(input.durableReceipt
+            ...(input.durableReceipt || hasAttributedBudgetOverride
               ? {
                   durableActor: {
                     type: input.requestedByActorType,

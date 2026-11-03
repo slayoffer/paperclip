@@ -65,7 +65,7 @@ export function agentIssueCreateRefusal(
 const ANCESTOR_SCAN_LIMIT = 32;
 
 export async function loadAgentIssueCreateCounts(
-  db: Db,
+  db: Pick<Db, "select" | "execute">,
   input: { companyId: string; agentId: string; parentId: string | null; limits: AgentIssueCreateLimits; now?: Date },
 ): Promise<AgentIssueCreateCounts> {
   const { companyId, agentId, parentId, limits } = input;

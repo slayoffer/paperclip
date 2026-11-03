@@ -2,6 +2,7 @@ import { sessionCompactionReason, buildSessionCompactionHandoff } from "../sessi
 import { ownerSessionsEnabled, ownerSessionInputLimit, readOwnerSessionInputTokens, ownerSessionKeyForIssueReset } from "../owner-sessions.js";
 import { resolveCumulativeSessionUsage } from "../session-usage.js";
 import { deriveTaskKey } from "./run-preparation.js";
+import { boundRunIssueId } from "../run-task-binding.js";
 import { retryIdempotentDatabaseOperation } from "../../database-retry.js";
 import { isConversation } from "../agent-conversations.js";
 import fs from "node:fs/promises";
@@ -1125,8 +1126,8 @@ export function createHeartbeatRunState(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getRuntimeState(agentId: string) {
-    return db
+  async function getRuntimeState(agentId: string, client: Pick<Db, "select"> = db) {
+    return client
       .select()
       .from(agentRuntimeState)
       .where(eq(agentRuntimeState.agentId, agentId))
@@ -1374,6 +1375,7 @@ export function createHeartbeatRunState(db: Db) {
   async function resolveSessionBeforeForWakeup(
     agent: typeof agents.$inferSelect,
     taskKey: string | null,
+    client: Pick<Db, "select"> = db,
   ) {
     if (taskKey) {
       const codec = getAdapterSessionCodec(agent.adapterType);
@@ -1382,6 +1384,7 @@ export function createHeartbeatRunState(db: Db) {
         agent.id,
         agent.adapterType,
         taskKey,
+        client,
       );
       const parsedParams = normalizeSessionParams(
         codec.deserialize(existingTaskSession?.sessionParamsJson ?? null),
@@ -1393,7 +1396,7 @@ export function createHeartbeatRunState(db: Db) {
       );
     }
 
-    const runtimeForRun = await getRuntimeState(agent.id);
+    const runtimeForRun = await getRuntimeState(agent.id, client);
     return runtimeForRun?.sessionId ?? null;
   }
 
@@ -1443,7 +1446,7 @@ export function createHeartbeatRunState(db: Db) {
   async function resolveExplicitResumeSessionOverride(
     agent: typeof agents.$inferSelect,
     payload: Record<string, unknown> | null,
-    taskKey: string | null,
+    _taskKey: string | null,
   ) {
     const resumeFromRunId = readNonEmptyString(payload?.resumeFromRunId);
     if (!resumeFromRunId) return null;
@@ -1451,6 +1454,8 @@ export function createHeartbeatRunState(db: Db) {
     const resumeRun = await db
       .select({
         id: heartbeatRuns.id,
+        issueId: heartbeatRuns.issueId,
+        nativeIssueId: heartbeatRuns.nativeIssueId,
         contextSnapshot: heartbeatRuns.contextSnapshot,
         resultJson: heartbeatRuns.resultJson,
         sessionIdBefore: heartbeatRuns.sessionIdBefore,
@@ -1468,7 +1473,8 @@ export function createHeartbeatRunState(db: Db) {
     if (!resumeRun) return null;
 
     const resumeContext = parseObject(resumeRun.contextSnapshot);
-    const resumeTaskKey = deriveTaskKey(resumeContext, null) ?? taskKey;
+    const resumeIssueId = boundRunIssueId(resumeRun);
+    const resumeTaskKey = deriveTaskKey(resumeContext, null) ?? resumeIssueId;
     const resumeTaskSession = resumeTaskKey
       ? await getTaskSession(
           agent.companyId,
@@ -1499,10 +1505,8 @@ export function createHeartbeatRunState(db: Db) {
     return {
       resumeFromRunId,
       taskKey: resumeTaskKey,
-      issueId: readNonEmptyString(resumeContext.issueId),
-      taskId:
-        readNonEmptyString(resumeContext.taskId) ??
-        readNonEmptyString(resumeContext.issueId),
+      issueId: resumeIssueId,
+      taskId: resumeIssueId,
       sessionDisplayId: sessionOverride.sessionDisplayId,
       sessionParams: sessionOverride.sessionParams,
     };

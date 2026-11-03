@@ -5,13 +5,14 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { companies, projects, projectWorkspaces, issues, executionWorkspaces, agents, heartbeatRuns, nativeRunFinalizations, workspaceRuntimeServices, executionWorkspaceRestorePoints, createDb } from "@paperclipai/db";
-import { markGitRestorePointExpired } from "../services/git-restore-point-storage.js";
+import { loadGitRestorePoint, markGitRestorePointExpired } from "../services/git-restore-point-storage.js";
 import { GIT_RESTORE_POINT_EXPIRED_WARNING } from "../services/execution-workspaces.js";
 import { getStorageService } from "../storage/index.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { materializeManagedProjectWorkspace } from "../services/managed-repository-checkout.js";
 import { materializeIsolatedRemoteWorkspaceSource } from "../services/isolated-remote-workspace-source.js";
@@ -24,7 +25,8 @@ import { readGitCacheRestoration } from "../services/git-workspace-restoration.j
 import { gitCacheExpirationLockLocations, readGitCacheExpiration } from "../services/git-workspace-restoration.js";
 
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
-  GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", GIT_TERMINAL_PROMPT: "0" };
+  GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", GIT_TERMINAL_PROMPT: "0",
+  GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: "1" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const exists = (target: string) => fs.lstat(target).then(() => true, () => false);
 
@@ -43,11 +45,23 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
     process.env.PAPERCLIP_HOME = path.join(root, "home");
     process.env.PAPERCLIP_INSTANCE_ID = "default";
   });
-  afterEach(async () => { vi.restoreAllMocks(); await db.execute(sql`TRUNCATE TABLE companies CASCADE`); });
+  beforeEach(() => {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    await db.delete(workspaceRuntimeServices);
+    await db.delete(executionWorkspaceRestorePoints);
+    await db.delete(executionWorkspaces);
+    await clearCompanyFixtures(db);
+  });
   afterAll(async () => {
     if (previousHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousHome;
     if (previousInstance === undefined) delete process.env.PAPERCLIP_INSTANCE_ID; else process.env.PAPERCLIP_INSTANCE_ID = previousInstance;
     await db.$client.end({ timeout: 1 }); await database.cleanup(); await fs.rm(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   async function fixture(managed = false, nested = false, withProject = managed) {
@@ -223,6 +237,15 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       expect(recipe.schema).toBe("paperclip.git-cache-restoration.v2");
       expect(recipe.restorePoint).toBeUndefined();
       expect(recipe.contents.checkouts[0].restorePoint).toMatchObject({ head: unpushed, headOnRemote: false });
+      expect(recipe.contents.checkouts[0].restorePoint.modes.length).toBeGreaterThan(0);
+      const savedRestorePoint = recipe.contents.checkouts[0].restorePoint;
+      const loadInput = { storage: getStorageService(), workspace: { companyId: f.companyId, id: f.workspaceId } };
+      await loadGitRestorePoint({ ...loadInput, ref: savedRestorePoint });
+      await expect(loadGitRestorePoint({ ...loadInput, ref: { ...savedRestorePoint,
+        modes: savedRestorePoint.modes.map((entry: { path: string; mode: number }) => ({ mode: entry.mode ^ 0o100, path: entry.path })),
+      } })).rejects.toMatchObject({ reason: "restore_point_manifest_mismatch" });
+      await expect(loadGitRestorePoint({ ...loadInput, ref: { ...savedRestorePoint, modes: [] } }))
+        .rejects.toMatchObject({ reason: "restore_point_manifest_mismatch" });
       expect(await ledger(f.workspaceId)).toMatchObject([{ status: "active", checkoutName: recipe.contents.checkouts[0].name }]);
       expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
       expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(unpushed);

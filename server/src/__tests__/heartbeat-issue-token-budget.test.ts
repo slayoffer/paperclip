@@ -132,6 +132,56 @@ const BUDGET_ENV = ["PAPERCLIP_ISSUE_TOKEN_BUDGET", "PAPERCLIP_ISSUE_TOKEN_BUDGE
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
   });
 
+  it.each(["snapshot", "first-class", "native", "legacy-key", "legacy-key-issue"])("checks the %s saved issue budget on resume", async (binding) => {
+    const { companyId, agentId, issueId } = await seed();
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";
+    const [savedRun] = await db.update(heartbeatRuns).set({
+      sessionIdAfter: "saved-session",
+      ...(binding === "snapshot" ? {} : { contextSnapshot: {}, scopeKind: "issue",
+        ...(binding === "native" ? { nativeIssueId: issueId } : { issueId }) }),
+      ...(binding.startsWith("legacy-key") ? { contextSnapshot: { taskKey: "saved-legacy-key" } } : {}),
+    })
+      .where(eq(heartbeatRuns.companyId, companyId)).returning();
+
+    const result = await heartbeatService(db).wakeupWithDiagnostics(agentId, {
+      source: "on_demand", payload: { resumeFromRunId: savedRun.id,
+        ...(binding === "legacy-key" ? { taskKey: "saved-legacy-key" } : {}),
+        ...(binding === "legacy-key-issue" ? { issueId } : {}) },
+      requestedByActorType: "agent", requestedByActorId: agentId,
+    });
+
+    expect(result.run).toBeNull();
+    expect(result.skipped).toMatchObject({
+      reason: "issue.token_budget_exceeded", details: { budget: { used: 6_000_000, limit: 5_000_000 } },
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId))).toHaveLength(1);
+  });
+
+  it.each([
+    ["payload", "issueId"], ["contextSnapshot", "issueId"],
+    ["payload", "taskId"], ["contextSnapshot", "taskId"],
+    ["payload", "taskKey"], ["contextSnapshot", "taskKey"],
+  ])("rejects a resume with a conflicting %s.%s", async (location, key) => {
+    const { companyId, agentId } = await seed();
+    process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";
+    const [savedRun] = await db.update(heartbeatRuns).set({ sessionIdAfter: "saved-session" })
+      .where(eq(heartbeatRuns.companyId, companyId)).returning();
+    const [otherIssue] = await db.insert(issues).values({
+      companyId, title: "Other task", status: "todo", assigneeAgentId: agentId,
+      responsibleUserId: "responsible-user", issueNumber: 2,
+    }).returning();
+    const conflicting = { [key]: otherIssue.id };
+    await expect(heartbeatService(db).wakeupWithDiagnostics(agentId, {
+      source: "on_demand",
+      payload: { resumeFromRunId: savedRun.id, ...(location === "payload" ? conflicting : {}) },
+      contextSnapshot: location === "contextSnapshot" ? conflicting : {},
+      requestedByActorType: "agent", requestedByActorId: agentId,
+    })).rejects.toMatchObject({ status: 409, details: { code: "resume_issue_mismatch" } });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+  });
+
   it("shows the weighted usage and cached weight in the stop card and skipped receipt", async () => {
     const { companyId, agentId, issueId } = await seed();
     process.env.PAPERCLIP_ISSUE_TOKEN_BUDGET = "5000000";

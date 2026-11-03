@@ -1,4 +1,7 @@
 import { DELIVERY_QUEUES } from "./delivery-work-notifications.js";
+import { issueTokenBudgetRunBlock } from "./issue-token-budget.js";
+import { settleBudgetStoppedNativeStartup } from "./cancelled-native-startup.js";
+import { isUnusedNativeSessionBootstrap, nativeSessionProviderEvidence } from "./native-runtime/native-session-resume.js";
 import { writeExecutionControl } from "./execution-control-notifications.js";
 import { readFreshWorkspaceReadiness } from "./fresh-workspace-continuation.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
@@ -1171,7 +1174,7 @@ export function heartbeatService(
   }
 
   const wakeQueue = createWakeQueue(db, {
-    resolveResponsibleUserId: async (input) => {
+    resolveResponsibleUserId: async (input, client) => {
       // `input.issue` is the wake-queue module's own transaction-scoped
       // snapshot; using it here, instead of re-reading the issue through
       // `getIssueExecutionContext`, keeps this read off a second connection
@@ -1192,25 +1195,25 @@ export function heartbeatService(
         source: input.source as WakeupOptions["source"],
         triggerDetail: input.triggerDetail as WakeupOptions["triggerDetail"],
         existingRunResponsibleUserId: input.existingRunResponsibleUserId,
-      });
+      }, client);
     },
-    getRoutineEnv: async (input) => {
+    getRoutineEnv: async (input, client) => {
       // Same reason as `resolveResponsibleUserId` above: use the passed-in
       // transaction-scoped issue snapshot instead of reading the issue again.
-      return getRoutineEnvForExecutionIssue(input.companyId, input.issue);
+      return getRoutineEnvForExecutionIssue(input.companyId, input.issue, client);
     },
-    resolveSessionBeforeForWakeup: async (input) => {
+    resolveSessionBeforeForWakeup: async (input, client) => {
       // Scoped to this port only, so a wake-queue agent id can never resolve
       // a session against another company's agent row. The shared `getAgent`
       // helper below has no company predicate, so this reads the agent
       // directly with the company named in its own `WHERE` clause.
-      const agent = await db
+      const agent = await client
         .select()
         .from(agents)
         .where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
         .then((rows) => rows[0] ?? null);
       if (!agent) return null;
-      return resolveSessionBeforeForWakeup(agent, input.taskKey);
+      return resolveSessionBeforeForWakeup(agent, input.taskKey, client);
     },
     // These four helpers stay in this file today; the wake-queue module
     // receives them here so it never imports this file, the service it is
@@ -1792,10 +1795,14 @@ export function heartbeatService(
 
     let settleLegacyRestartLog: (() => Promise<void>) | null = null;
     let legacyAdapterEntered = false;
+    let budgetStoppedBeforeProvider = false;
+    let budgetDispatchRefused = false;
     let legacyLocalAdapterEntered = false;
     let persistUsageCaptureFailure: (() => Promise<void>) | undefined;
     let run = await getRun(runId);
     if (!run) return;
+    // Preparation can copy a predecessor's checkpoint without starting this run.
+    const budgetAttemptStartedWithoutProvider = isUnusedNativeSessionBootstrap(run, false);
     if (run.status !== "queued" && run.status !== "running") return;
 
     if (run.status === "queued") {
@@ -2839,13 +2846,26 @@ export function heartbeatService(
           return { dispatched: false };
         const ownerParkingBlock = issueId ? await issueOwnerParkingReason(db,
           { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
-        const repairBlock = ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
+        const tokenBudgetBlock = isRunnerReattachment(runOptions.nativeRestartRecovery)
+          ? null : await issueTokenBudgetRunBlock(db, run, true);
+        const repairBlock = tokenBudgetBlock?.error ?? ownerParkingBlock ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
+          budgetDispatchRefused = Boolean(tokenBudgetBlock);
+          const stoppedRun = tokenBudgetBlock ? await getRun(run.id) : null;
+          const noProviderWork = stoppedRun && !legacyAdapterEntered && !nativeDispatchStarted &&
+            !runOptions.legacyRestartRecovery &&
+            ((!runOptions.nativeRestartRecovery && !runOptions.nativeLeaseOwner) ||
+              runOptions.nativeRestartRecovery?.kind === "bootstrap_incomplete") &&
+            budgetAttemptStartedWithoutProvider && !(await nativeSessionProviderEvidence(db, [run.id])).has(run.id);
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
-            error: ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: tokenBudgetBlock?.errorCode ?? (ownerParkingBlock ? "issue_owner_parked" : "legacy_disposition_repair_suppressed"),
+            error: tokenBudgetBlock?.error ?? ownerParkingBlock ?? `Disposition repair suppressed: ${repairBlock}`,
+            ...(noProviderWork ? { resultJson: { ...stoppedRun.resultJson,
+                executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+              } } : {}),
           });
           if (cancelled.updated) {
+            budgetStoppedBeforeProvider = Boolean(noProviderWork);
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
             await releaseIssueExecutionAndPromote(cancelled.run!, { suppressImmediateRecovery: true });
             await finalizeAgentStatus(run.agentId, "cancelled");
@@ -2901,7 +2921,7 @@ export function heartbeatService(
             return dispatch(markDispatchStarted);
           }, reservation);
         } finally {
-          if (!entered && !reservation.reused) {
+          if (!entered && (budgetDispatchRefused ? budgetStoppedBeforeProvider : !reservation.reused)) {
             await db.update(heartbeatRuns).set({ costAccountingPending: true,
               usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || '{"accountingProviderWorkStarted":false}'::jsonb`,
             }).where(and(eq(heartbeatRuns.id, run.id), isNull(heartbeatRuns.costAccountedAt)));
@@ -4024,6 +4044,9 @@ export function heartbeatService(
         }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
           eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
           inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
+        if (budgetStoppedBeforeProvider && latestRun?.runtimeMode === "native") {
+          latestRun = await settleBudgetStoppedNativeStartup(db, latestRun, runOptions.nativeRestartRecovery) ?? latestRun;
+        }
 
         latestRun = await getRun(run.id).catch(() => null);
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {

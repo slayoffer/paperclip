@@ -10,3 +10,8 @@ Keep the test timeout and all cancellation settlement assertions.
 SSH writer markers exist before the systemd scope and provider start.
 Await a provider readiness signal before testing restart termination of a live writer.
 Marker presence alone does not prove that the provider started.
+
+Runtime-service child exits persist their final state asynchronously.
+For a fixture that exits through its own marker, await its persisted stopped state
+before deleting runtime-service rows and parent rows. An explicit Stop can return
+before the separate child-exit write finishes and restores a deleted row.

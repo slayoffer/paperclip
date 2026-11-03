@@ -126,6 +126,8 @@ import {
 } from "./issue-review-policy.js";
 import {
   issueService,
+  executeIssuePostCommitActions,
+  type IssuePostCommitAction,
   ensureAssignmentIssueAccessGrant,
   readAcceptedPlanConfirmationTarget,
   runWorkspaceIsFinalized,
@@ -1864,6 +1866,7 @@ export function issueThreadInteractionService(
 
     const now = new Date();
     const postCommitActivityPublications: ActivityPublication[] = [];
+    const postCommitActions: IssuePostCommitAction[] = [];
     const result = await db.transaction(async (tx) => {
       await assertInteractionRunWriteAllowed(tx as unknown as Db, args.issue, args.actor);
       await args.mutationOptions?.beforeResolveInTransaction?.(tx);
@@ -2006,6 +2009,7 @@ export function issueThreadInteractionService(
           },
           tx,
           postCommitActivityPublications,
+          postCommitActions,
         );
         if (completedIssue) {
           continuationIssue = {
@@ -2036,6 +2040,7 @@ export function issueThreadInteractionService(
           },
           tx,
           postCommitActivityPublications,
+          postCommitActions,
         );
 
         if (returnedIssue) {
@@ -2111,6 +2116,7 @@ export function issueThreadInteractionService(
     });
     const publish = async (committedDb: Db) => {
       for (const publication of postCommitActivityPublications) publishActivity(publication);
+      await executeIssuePostCommitActions(committedDb, postCommitActions);
       await emitInteractionResolvedTelemetry(committedDb, result.interaction);
     };
     if (args.mutationOptions?.deferConfirmationCommitEffects) args.mutationOptions.deferConfirmationCommitEffects(publish);

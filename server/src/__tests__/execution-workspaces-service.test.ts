@@ -3932,7 +3932,9 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       "    .createServer((_req, res) => { res.end(\"ok\"); })",
       "    .listen(Number(process.env.PORT), \"127.0.0.1\");",
       "}, 600);",
-      "setInterval(() => {}, 1000);",
+      "setInterval(() => {",
+      `  if (!require("node:fs").existsSync(${JSON.stringify(runtimeStartedMarker)})) process.exit(0);`,
+      "}, 25);",
     ].join(" ");
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(serverScript)}`;
 
@@ -4044,15 +4046,24 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       });
     } finally {
       try {
-        await stopRuntimeServicesForExecutionWorkspace({
-          db,
-          executionWorkspaceId,
-          workspaceCwd: worktreePath,
-        });
         await fs.rm(runtimeStartedMarker, { force: true });
+        if (startedServices.length > 0) {
+          // Wait for the detached exit write before afterEach deletes its parents.
+          await expect.poll(async () => {
+            const [service] = await db.select().from(workspaceRuntimeServices)
+              .where(eq(workspaceRuntimeServices.id, startedServices[0]!.id));
+            return service?.status;
+          }, { timeout: 10_000 }).toBe("stopped");
+        }
       } finally {
-        portOwner.mockRestore();
-        adoption.mockRestore();
+        try {
+          await stopRuntimeServicesForExecutionWorkspace({
+            db, executionWorkspaceId, workspaceCwd: worktreePath,
+          });
+        } finally {
+          portOwner.mockRestore();
+          adoption.mockRestore();
+        }
       }
     }
 

@@ -1,7 +1,7 @@
 import { and, desc, eq, gte, like, ne, or, sql } from "drizzle-orm";
-import { heartbeatRuns, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { boundRunIssueIdSql } from "./run-task-binding.js";
+import { boundRunIssueId, boundRunIssueIdSql } from "./run-task-binding.js";
 
 /**
  * Per-issue input-token budget (synthiq fork, Guild model v2 rule 5, 2026-10-17). With PAPERCLIP_ISSUE_TOKEN_BUDGET=N,
@@ -20,6 +20,34 @@ export interface IssueTokenBudgetConfig {
 
 export const ISSUE_TOKEN_BUDGET_CARD_KEY_PREFIX = "issue-token-budget:";
 export const ISSUE_TOKEN_BUDGET_SKIP_REASON = "issue.token_budget_exceeded";
+
+/** Authority belongs to one server-created wake/run pair, never inherited context. */
+export async function issueTokenBudgetRunBlock(
+  db: Db,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "wakeupRequestId" | "issueId" | "nativeIssueId" | "contextSnapshot">,
+  allowOverride = false,
+) {
+  const config = issueTokenBudgetConfig();
+  const issueId = boundRunIssueId(run);
+  if (!config || !issueId || !UUID_RE.test(issueId)) return null;
+  if (allowOverride) {
+    const [wake] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.runId, run.id),
+      eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+      eq(agentWakeupRequests.requestedByActorType, "user"),
+      sql`${agentWakeupRequests.payload}->'issueBudgetOverride'->>'issueId' = ${issueId}`,
+      sql`${agentWakeupRequests.payload}->'issueBudgetOverride'->>'actorId' = ${agentWakeupRequests.requestedByActorId}`,
+    )).limit(1);
+    if (wake) return null;
+  }
+  const state = await loadIssueTokenBudgetState(db, { companyId: run.companyId, issueId, config });
+  if (!state.exceeded) return null;
+  await ensureIssueTokenBudgetCard(db, { companyId: run.companyId, issueId, config, state }).catch(err => {
+    logger.warn({ err, issueId }, "failed to raise issue token budget card");
+  });
+  return { issueId, errorCode: ISSUE_TOKEN_BUDGET_SKIP_REASON,
+    ...issueTokenBudgetSkipDetails(config, state, {}) };
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_CACHED_WEIGHT = 0.1;
 let warnedInvalidCachedWeight = false;

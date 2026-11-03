@@ -1,4 +1,5 @@
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
+import { nativeSessionProviderEvidence } from "../../../services/native-runtime/native-session-resume.js";
 import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "../../../services/acknowledged-native-stop.js";
 import { readRunCancellation } from "../../../services/run-cancellation.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
@@ -185,16 +186,14 @@ function toDeferredWakeCandidate(row: typeof agentWakeupRequests.$inferSelect): 
 }
 
 export type WakeQueuePostgresAdapterDeps = {
-  resolveResponsibleUserId: WakeQueueHost["resolveResponsibleUserId"];
-  getRoutineEnv: WakeQueueHost["getRoutineEnv"];
-  resolveSessionBeforeForWakeup: WakeQueueHost["resolveSessionBeforeForWakeup"];
+  [K in keyof WakeQueueHost]: (input: Parameters<WakeQueueHost[K]>[0], client: Pick<Db, "select">) => ReturnType<WakeQueueHost[K]>;
 };
 
-function buildHost(_tx: Db, deps: WakeQueuePostgresAdapterDeps): WakeQueueHost {
+function buildHost(tx: Db, deps: WakeQueuePostgresAdapterDeps): WakeQueueHost {
   return {
-    resolveResponsibleUserId: deps.resolveResponsibleUserId,
-    getRoutineEnv: deps.getRoutineEnv,
-    resolveSessionBeforeForWakeup: deps.resolveSessionBeforeForWakeup,
+    resolveResponsibleUserId: input => deps.resolveResponsibleUserId(input, tx),
+    getRoutineEnv: input => deps.getRoutineEnv(input, tx),
+    resolveSessionBeforeForWakeup: input => deps.resolveSessionBeforeForWakeup(input, tx),
   };
 }
 
@@ -749,6 +748,10 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
     issue.assigneeAgentId === run.agentId &&
     !["done", "cancelled"].includes(issue.status);
   if (!applies || isAcknowledgedNativeStop(run) || isAcknowledgedNativeReassignmentStop(run)) return false;
+  const stoppedBeforeProvider = parseObject(run.resultJson?.executionRecovery);
+  if (run.status === "cancelled" && run.errorCode === "issue.token_budget_exceeded" &&
+      stoppedBeforeProvider.kind === "bootstrap" && stoppedBeforeProvider.providerWorkStarted === false &&
+      !(await nativeSessionProviderEvidence(tx, [run.id])).has(run.id)) return false;
 
   const existing = await tx
     .select({ id: issueRecoveryActions.id, evidence: issueRecoveryActions.evidence })

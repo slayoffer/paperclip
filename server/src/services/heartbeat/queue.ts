@@ -2005,12 +2005,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     };
     const reason = opts.reason ?? null;
     let payload = opts.payload ? { ...opts.payload } : null;
+    delete contextSnapshot.issueBudgetOverride;
+    if (opts.issueBudgetOverride && (opts.requestedByActorType !== "user" || !opts.requestedByActorId)) {
+      throw new HttpError(403, "Issue budget override requires an authenticated user");
+    }
     // Only the board queue route can record interruption authority on an
     // existing receipt. Never accept this internal marker from a wake caller.
     if (payload) {
       delete payload.queuedCommentInterrupt;
       delete payload.manualUserWake;
       delete payload.taskRetry;
+      delete payload.issueBudgetOverride;
       if (diagnosticRequestId) {
         delete payload.heartbeatSkip;
         delete payload.executionWait;
@@ -2072,6 +2077,25 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    const explicitResumeSession = await resolveExplicitResumeSessionOverride(agent, payload, taskKey);
+    if (explicitResumeSession) {
+      const requestedIssues = [
+        contextSnapshot.issueId, contextSnapshot.taskId, payload?.issueId, payload?.taskId,
+      ].map(readNonEmptyString);
+      const requestedKeys = [opts.contextSnapshot?.taskKey, payload?.taskKey].map(readNonEmptyString);
+      if (requestedIssues.some(value => value && value !== explicitResumeSession.issueId)
+        || requestedKeys.some(value => value && value !== explicitResumeSession.taskKey)) {
+        throw conflict("Resume context does not match the saved run", { code: "resume_issue_mismatch" });
+      }
+      enrichedContextSnapshot.resumeFromRunId = explicitResumeSession.resumeFromRunId;
+      enrichedContextSnapshot.resumeSessionDisplayId = explicitResumeSession.sessionDisplayId;
+      enrichedContextSnapshot.resumeSessionParams = explicitResumeSession.sessionParams;
+      if (explicitResumeSession.issueId) enrichedContextSnapshot.issueId = explicitResumeSession.issueId;
+      if (explicitResumeSession.taskId) enrichedContextSnapshot.taskId = explicitResumeSession.taskId;
+      if (explicitResumeSession.taskKey) enrichedContextSnapshot.taskKey = explicitResumeSession.taskKey;
+      issueId = explicitResumeSession.issueId;
+      payload = { ...payload, [DEFERRED_WAKE_CONTEXT_KEY]: { ...enrichedContextSnapshot } };
+    }
     const diagnosticCompanyId = agent.companyId;
     const skipWithoutReceipt = async (skipReason: string, message: string) => {
       if (onSkip) { onSkip(skipReason); return null; }
@@ -2406,6 +2430,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       return null;
     }
 
+    // Resume can supply the issue identity; apply issue policies after resolving it.
     if (issueId && isUuidLike(issueId)) {
       const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
       if (parked) { await writeSkippedRequest(parked); return null; }
@@ -2434,37 +2459,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
     }
 
-    const explicitResumeSession = await resolveExplicitResumeSessionOverride(
-      agent,
-      payload,
-      taskKey,
-    );
-    if (explicitResumeSession) {
-      enrichedContextSnapshot.resumeFromRunId =
-        explicitResumeSession.resumeFromRunId;
-      enrichedContextSnapshot.resumeSessionDisplayId =
-        explicitResumeSession.sessionDisplayId;
-      enrichedContextSnapshot.resumeSessionParams =
-        explicitResumeSession.sessionParams;
-      if (
-        !readNonEmptyString(enrichedContextSnapshot.issueId) &&
-        explicitResumeSession.issueId
-      ) {
-        enrichedContextSnapshot.issueId = explicitResumeSession.issueId;
-      }
-      if (
-        !readNonEmptyString(enrichedContextSnapshot.taskId) &&
-        explicitResumeSession.taskId
-      ) {
-        enrichedContextSnapshot.taskId = explicitResumeSession.taskId;
-      }
-      if (
-        !readNonEmptyString(enrichedContextSnapshot.taskKey) &&
-        explicitResumeSession.taskKey
-      ) {
-        enrichedContextSnapshot.taskKey = explicitResumeSession.taskKey;
-      }
-      issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueId;
+    if (opts.issueBudgetOverride && issueId) {
+      // The durable receipt binds this intent to its eventual queued/promoted run.
+      payload = { ...payload, issueBudgetOverride: { issueId, actorId: opts.requestedByActorId } };
     }
     const effectiveTaskKey =
       readNonEmptyString(enrichedContextSnapshot.taskKey) ?? taskKey;

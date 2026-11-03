@@ -1,3 +1,4 @@
+import { applyIssueCreateAdmission, assertIssueCreateQuota, hasIssueCreateQuota, type IssueCreateAdmission } from "./issue-create-admission.js";
 import { insertIssueComment } from "./issue-comment-writes.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { readNativeMonitorSource } from "./native-runtime/native-monitor-delivery.js";
@@ -1953,6 +1954,7 @@ async function assertExecutionTaskParent(db: Db, companyId: string, parentId?: s
 
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" | "titleNeedsGeneration" | "workspaceSelection"> & {
+  createAdmission?: IssueCreateAdmission;
   workspaceSelection?: TaskWorkspaceSelection;
   workspaceSelectionSource?: "explicit" | "channel";
   workspaceSelectionActor?: AuthorizationActor;
@@ -2154,6 +2156,7 @@ function normalizeAcceptedPlanDecompositionFingerprintValue(
 }
 
 const ACCEPTED_PLAN_DECOMPOSITION_FINGERPRINT_CHILD_METADATA_KEYS = new Set([
+  "createAdmission",
   "id",
   "companyId",
   "parentId",
@@ -8986,6 +8989,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!sourceIssue) throw notFound("Source issue not found");
 
+      const persistDecomposition = async (db: Db) => {
       const requestFingerprint =
         createAcceptedPlanDecompositionRequestFingerprint({
           acceptedPlanRevisionId: data.acceptedPlanRevisionId,
@@ -9087,11 +9091,20 @@ export function issueService(db: Db) {
         return existing;
       });
 
+      const remaining = data.children.slice(normalizeIssuePlanDecompositionChildIds(initialClaim.childIssueIds).length);
+      const admission = remaining[0]?.createAdmission;
+      if (remaining.length && hasIssueCreateQuota(admission)) {
+        await assertIssueCreateQuota(db as unknown as DbTransaction, sourceIssue.companyId,
+          sourceIssue.id, admission!, remaining.length);
+      }
+
       let currentClaim = initialClaim;
       const newlyCreatedIssues: Array<typeof issues.$inferSelect> = [];
 
       while (true) {
         const step = await db.transaction(async (tx) => {
+          // Match create() lock order before locking a claim row.
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${sourceIssue.companyId}`}, 0))`);
           await tx.execute(
             sql`select ${issuePlanDecompositions.id}
                 from ${issuePlanDecompositions}
@@ -9242,6 +9255,14 @@ export function issueService(db: Db) {
         childIssues: orderedChildIssues,
         newlyCreatedIssues,
       };
+      };
+      if (!data.children.some(child => hasIssueCreateQuota(child.createAdmission))) {
+        return persistDecomposition(db);
+      }
+      return db.transaction(async tx => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${sourceIssue.companyId}`}, 0))`);
+        return persistDecomposition(tx as unknown as Db);
+      });
     },
 
     listAcceptedPlanDecompositions: async (sourceIssueId: string) => {
@@ -9337,7 +9358,7 @@ export function issueService(db: Db) {
       dbOrTx: Db | DbTransaction = db,
     ) => {
       const {
-        workspaceSelection, workspaceSelectionSource = "explicit", workspaceSelectionActor,
+        createAdmission, workspaceSelection, workspaceSelectionSource = "explicit", workspaceSelectionActor,
         initialPlan,
         labelIds: inputLabelIds,
         blockedByIssueIds,
@@ -9494,6 +9515,8 @@ export function issueService(db: Db) {
           );
           return withRelations;
         }
+
+        if (createAdmission) await applyIssueCreateAdmission(tx, companyId, issueData, createAdmission);
 
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
@@ -10767,7 +10790,7 @@ export function issueService(db: Db) {
           const { issueThreadInteractionService } = await import("./issue-thread-interactions.js");
           await issueThreadInteractionService(tx).expireConnectionIntentsForOwnershipChange(updated);
         }
-        if (existing.status !== updated.status) {
+        if (receiptExisting.status !== updated.status) {
           if (
             (existing.status === "done" || existing.status === "cancelled") &&
             updated.status !== "done" &&
@@ -11058,6 +11081,11 @@ export function issueService(db: Db) {
             },
           });
           activityPublications.push(publication);
+        }
+        if (receiptExisting.status !== updated.status && (updated.status === "done" || updated.status === "cancelled")) {
+          queuedPostCommitActions.push({
+            type: "close_terminal_workspaces", companyId: updated.companyId, issueId: updated.id,
+          });
         }
         return {
           ...enriched,
