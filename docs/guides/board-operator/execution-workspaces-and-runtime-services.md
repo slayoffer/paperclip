@@ -69,6 +69,9 @@ fail the committed issue update.
 - Each workspace row for the same physical checkout must pass automatic-close
   readiness. Another row's live service, shared mode, or primary-project path
   prevents removal, including through symbolic links.
+- Multiple non-archived workspace rows for one physical checkout prevent automatic
+  close, even when all source issues are terminal. Resolve duplicate ownership
+  manually before cleanup. The close workflow controls one row and its artifacts.
 - A reopened issue can rebuild its archived Git worktree through the existing
   reopen flow. A pending reopen prevents cleanup from removing the rebuilt checkout.
 - This transition hook does not scan historical terminal issues. The existing

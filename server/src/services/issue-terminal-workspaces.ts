@@ -113,6 +113,9 @@ async function automaticCloseReasons(
       }
     }
   }
+  if (workspaceIds.size > 1) {
+    reasons.push("Multiple workspace rows own this checkout. Resolve them before automatic close.");
+  }
   const relatedIssues = await db.select({ id: issues.id, status: issues.status }).from(issues).where(or(
     inArray(issues.id, [...sourceIssueIds]), inArray(issues.executionWorkspaceId, [...workspaceIds]),
   ));

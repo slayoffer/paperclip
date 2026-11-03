@@ -7,6 +7,8 @@ Resolve path aliases before checking owners, runs, and primary-project paths.
 Apply close readiness to every matching workspace row. Keep denial text generic
 when another company's row prevents cleanup. A terminal source issue does not
 prove that its runtime service or provider run stopped.
+Hold automatic close when multiple non-archived rows own the checkout. The close
+workflow must retain control of both the archive and artifact lifecycle.
 
 ## Deferred dependency wakes
 

@@ -87,6 +87,23 @@ describe("issue terminal workspace cleanup", () => {
     }
   });
 
+  it.each([false, true])("holds duplicate physical owners with symlink=%s", async (useSymlink) => {
+    const f = await fixture();
+    const first = await f.workspace();
+    const aliasPath = useSymlink ? join(f.root, "alias") : first.cwd!;
+    if (useSymlink) await symlink(first.cwd!, aliasPath);
+    const second = await f.workspace({ cwd: aliasPath, providerRef: aliasPath });
+    const log = vi.spyOn(logger, "warn");
+    await issueService(db).update(f.issue.id, { status: "done" });
+    for (const row of [first, second]) {
+      expect((await readWorkspace(row.id)).status).toBe("active");
+      expect(existsSync(row.cwd!)).toBe(true);
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: row.id,
+        reasons: expect.arrayContaining(["Multiple workspace rows own this checkout. Resolve them before automatic close."]),
+      }), "Skipped terminal workspace close");
+    }
+  });
+
   it.each(["dirty", "untracked", "unpushed", "unpushed merged", "runtime", "open link", "active run"])("keeps %s workspaces active and logs the reason", async (blocker) => {
     const f = await fixture();
     const row = await f.workspace();
@@ -143,6 +160,7 @@ describe("issue terminal workspace cleanup", () => {
 
   it.each([
     { useSymlink: false, consumer: "run" }, { useSymlink: true, consumer: "run" },
+    { useSymlink: false, consumer: "taskId run" },
     { useSymlink: false, consumer: "service" }, { useSymlink: true, consumer: "service" },
     { useSymlink: false, consumer: "primary" }, { useSymlink: true, consumer: "primary" },
     { useSymlink: false, consumer: "shared" }, { useSymlink: true, consumer: "shared" },
@@ -166,9 +184,13 @@ describe("issue terminal workspace cleanup", () => {
     if (consumer === "shared") await db.update(executionWorkspaces).set({ mode: "shared_workspace" })
       .where(eq(executionWorkspaces.id, alias.id));
     await db.update(issues).set({ executionWorkspaceId: alias.id }).where(eq(issues.id, other.id));
-    if (consumer === "run") {
+    if (consumer === "run" || consumer === "taskId run") {
       const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Finishing" }).returning();
-      await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id, issueId: other.id, status: "running" });
+      const [run] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: agent.id, status: "running",
+        ...(consumer === "run" ? { issueId: other.id } : { contextSnapshot: { taskId: other.id } }),
+      }).returning();
+      // The scope trigger binds a taskId-only insert to its existing issue.
+      expect(run.issueId).toBe(other.id);
     } else if (consumer === "service") {
       await db.insert(workspaceRuntimeServices).values({
         id: randomUUID(), companyId: f.company.id, executionWorkspaceId: alias.id, cwd: aliasPath,
