@@ -48,6 +48,7 @@ Serialized in-memory baselines retain these paths when a clone marker or scratch
 A clone at `foo/*` excludes only that directory. Remote edits to `foo/source.txt` still return normally.
 Restore combines discovered paths with existing ignored paths, including disk-backed ignore manifests.
 Restore scans also retain caller exclusions from the supplied baseline.
+Discovery uses the baseline matcher's root-relative scopes. For example, `cache` does not hide a clone at `nested/cache` from discovery; `*/cache` excludes that segment at any depth.
 Saved literal exclusions reach the download archive before data enters the staging directory.
 Restore creates an absent local destination after it checks the remote workspace.
 Discovery, index protection, path removal, and download scripts use standard input for large exclusion lists.

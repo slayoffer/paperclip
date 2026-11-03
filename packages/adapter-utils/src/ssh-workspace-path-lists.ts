@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { shellQuote } from "./ssh-config.js";
+import { parseExcludePattern } from "./exclude-patterns.js";
 
 const exec = promisify(execFile);
 const PATH_ARGUMENT_BUDGET = 32 * 1024;
@@ -42,16 +43,25 @@ export function workspacePathWalkScript(input: {
 }): string {
   const literalCases = input.literal.map((entry) => shellQuote(entry)).join("|");
   const scan = input.scratchPatterns !== undefined;
+  const discoveryCases = input.exclude.map((pattern) => {
+    const { scope, value } = parseExcludePattern(pattern);
+    const literal = shellQuote(value);
+    if (scope === "segment") return `${literal}|${literal}/*|*/${literal}|*/${literal}/*`;
+    if (scope === "descendants") return `${literal}/*`;
+    return `${literal}|${literal}/*`;
+  });
   return `set -e
 workspace_path_excluded() {
   ${literalCases ? `case "\${1#./}" in ${literalCases}) return 0 ;; esac` : ""}
+  ${scan ? (discoveryCases.length
+    ? `case "\${1#./}" in ${discoveryCases.join("|")}) return 0 ;; esac` : "") : `
   for workspace_pattern in ${["._*", ...input.exclude].map(shellQuote).join(" ")}; do
     workspace_candidate="$1"
     while :; do
       case "$workspace_candidate" in $workspace_pattern) return 0 ;; esac
       case "$workspace_candidate" in */*) workspace_candidate="\${workspace_candidate#*/}" ;; *) break ;; esac
     done
-  done
+  done`}
   return 1
 }
 workspace_path_cycle() {
@@ -63,7 +73,7 @@ workspace_path_cycle() {
   return 1
 }
 workspace_path_walk() {
-  if workspace_path_excluded "$1"; then return; fi
+  if ${scan ? '[ "$1" != . ] && ' : ""}workspace_path_excluded "$1"; then return; fi
   ${scan ? `
   [ -d "$1" ] && [ ! -L "$1" ] || return 0
   if [ "$1" != . ]; then

@@ -58,6 +58,21 @@ describe("SSH cache and Git integration review", { timeout: 60_000 }, () => {
     expect(await readdir(local)).toEqual(["source.txt"]);
   });
 
+  it("preserves a nested clone whose name matches a root exclusion", async () => {
+    vi.stubEnv("PAPERCLIP_HOME", path.join(root, "home"));
+    await put(local, "source.txt");
+    await mkdir(path.join(local, "nested/cache/.git"), { recursive: true });
+    await put(local, "nested/cache/data", "local clone");
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: spec(), runId: "matcher-review", adapterKey: "test", workspaceLocalDir: local,
+      workspaceFileMode: "all", workspaceExclude: ["cache"],
+    });
+    await put(prepared.workspaceRemoteDir, "source.txt", "remote");
+    await prepared.restoreWorkspace();
+    expect(await readFile(path.join(local, "nested/cache/data"), "utf8")).toBe("local clone");
+    expect(await readFile(path.join(local, "source.txt"), "utf8")).toBe("remote");
+  });
+
   it("prepares Git workspaces with large literal exclusion lists", async () => {
     await repository();
     const snapshot = await readLocalGitWorkspaceSnapshot(local);
