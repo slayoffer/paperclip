@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -65,13 +65,15 @@ it.skipIf(!support.supported || !containmentSupported)("stops a live SSH writer 
     workspace: { localPath: worktree, metadata: { workspaceRealizationRequest: { adapterType: "codex_local" } } } });
 
   // The 87699d0e shape: a provider that keeps running until something stops it.
-  const target = await buildSshSpawnTarget({ spec: { ...config, remoteCwd: worktree }, command: "sleep", args: ["300"],
+  const ready = path.join(worktree, "provider-ready");
+  const target = await buildSshSpawnTarget({ spec: { ...config, remoteCwd: worktree }, command: "sh",
+    args: ["-c", 'printf ready > "$1"; exec sleep 300', "sh", ready],
     env: { PAPERCLIP_RUN_ID: run.id } });
   const child = spawn(target.command, target.args, { stdio: "ignore" });
   const exited = once(child, "exit");
   try {
-    const writers = path.join(config.remoteWorkspacePath, ".paperclip-runtime", "ssh-writers", run.id);
-    await expect.poll(() => readdir(writers).then(x => x.length, () => 0), { timeout: 15_000 }).toBeGreaterThan(0);
+    // The writer marker exists before systemd starts its scope and the provider.
+    await expect.poll(() => readFile(ready, "utf8").catch(() => ""), { timeout: 15_000 }).toBe("ready");
     expect(await stopSshInPlaceWritersForRestart(db, run, 3)).toBe(true);
     const [code, signal] = await exited;
     expect(signal).toBeNull();

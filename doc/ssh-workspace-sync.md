@@ -52,6 +52,9 @@ The existing fork release test steps completed in 14m47s to 30m02s.
 These release timings are a baseline, not a measurement of this workflow.
 Check the aggregate gate with
 `node --test .github/scripts/tests/ssh-workspace-verification.test.mjs`.
+The restart-stop test waits for the provider to report readiness before stopping it.
+A writer marker exists before its systemd scope starts, so marker presence is not readiness proof.
+The continuation fixture uses the full company UUID in its issue prefix to prevent collisions from truncated IDs.
 The snapshot tests check that hashing stays outside the main thread.
 The public SSH API remains in `ssh.ts`. Implementation modules retain the released module layout.
 The regression transport executes real Git and tar commands through a local SSH substitute.
