@@ -41,15 +41,14 @@ export function legacyExecutionNeedsReconciliation(
       && evidence.providerStopped === true && evidence.sessionPreserved === true
       && evidence.actionOutcomes === "settled"
       && (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "acknowledged") return false;
-  // Waiting for a subscription or workspace precedes provider execution. It is
-  // a resource wait, not a failed provider attempt or permission to replay work.
+  // These resource waits precede provider execution.
   if (run.status === "cancelled" && (run.errorCode === "ai_connection_busy" || run.errorCode === "ai_connection_pool_exhausted") &&
       evidence?.kind === "ai_connection_wait" && evidence.providerWorkStarted === false) return false;
   if (run.status === "cancelled" && run.errorCode === "workspace_busy" &&
       evidence?.kind === "workspace_wait" && evidence.providerWorkStarted === false) return false;
-  // Setup owns the bounded retry budget for temporary workspace scans. Its
-  // exhaustion needs workspace repair, not reconciliation of provider actions
-  // that the bootstrap evidence proves never started. Keep unknown outcomes held.
+  if (run.status === "cancelled" && run.errorCode === "ssh_transport_wait" &&
+      evidence?.kind === "ssh_transport_wait" && evidence.providerWorkStarted === false) return false;
+  // Workspace scan exhaustion needs workspace repair. Unknown outcomes retain their hold.
   if ((run.errorCode === "workspace_git_scan_timeout" || run.errorCode === "workspace_git_scan_saturated") &&
       evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return false;
   if (executionFailureRetryCount(run) >= 2) return true;

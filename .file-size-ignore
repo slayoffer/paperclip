@@ -1,6 +1,9 @@
 # The callback gateway generator retains the merged progress policy and shrinks from the release base.
 packages/adapter-utils/src/sandbox-callback-bridge.ts
 
+# SSH retry authorization tests reuse the existing database admission fixture.
+server/src/services/explicit-native-continuation.test.ts
+
 # Security pins preserve complete existing workflow jobs and triggers.
 .github/workflows/docker.yml
 .github/workflows/pr-trusted.yml

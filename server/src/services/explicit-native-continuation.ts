@@ -1,7 +1,7 @@
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { createHash } from "node:crypto";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
-import { canContinueCancelledRun } from "./run-cancellation.js";
+import { canContinueCancelledRun, isSshSetupWait } from "./run-cancellation.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
 import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { hasNativeLocalProcessStop, hasHistoricalSuspendedNativeSession } from "./native-local-process-stop.js";
@@ -339,10 +339,8 @@ export async function admitExplicitNativeContinuation(input: {
   return { previousRunId: previous.id, commentId, ...(retry ? { failedRunId: input.failedRunId! } : {}) };
 }
 
-/** Re-admit a bounded automatic retry without lending it its parent's receipt.
- * The caller holds the task lock and creates the successor in this transaction.
- * Only unchanged user messages are renewable; Retry/Interrupt intents keep their
- * separate one-run contracts. The scheduler still owns retry and cleanup policy.
+/** Revalidate an unchanged user message and create a receipt for its successor.
+ * The caller holds the task lock. Retry/Interrupt intents remain single-use.
  */
 export async function admitExplicitContinuationRetry(input: {
   db: Db; companyId: string; issueId: string; agentId: string;
@@ -358,7 +356,7 @@ export async function admitExplicitContinuationRetry(input: {
   )).for("update");
   if (!task || task.assigneeAgentId !== agentId || task.executionRunId !== input.parentRunId ||
       ["done", "cancelled"].includes(task.status) || !parent ||
-      !["failed", "timed_out"].includes(parent.status) || !parent.finishedAt ||
+      (!["failed", "timed_out"].includes(parent.status) && !isSshSetupWait(parent)) || !parent.finishedAt ||
       parent.runtimeMode !== "legacy" || parent.contextSnapshot?.issueId !== issueId ||
       (parent.nativeIssueId !== null && parent.nativeIssueId !== issueId) ||
       adapterExecutionControls.has(parent.id) ||
