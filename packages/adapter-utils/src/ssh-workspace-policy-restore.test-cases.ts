@@ -108,4 +108,20 @@ fi
     }
     expect(await readFile(path.join(local, directory, "data"), "utf8")).toBe("keep");
   });
+
+  it("keeps discovered exclusions when optional size collection times out", async () => {
+    const { local, remote, root, spec } = fixture();
+    await mkdir(path.join(local, ".scratch-slow"));
+    await writeFile(path.join(local, ".scratch-slow/data"), "keep");
+    await writeFile(path.join(root, "bin/du"), '#!/bin/sh\nsleep 1\nprintf "123\\t%s\\n" "$2"\n');
+    await chmod(path.join(root, "bin/du"), 0o755);
+    const syncPolicy = createSshWorkspaceSyncPolicy();
+    syncPolicy.sizeTimeoutMs = 30;
+    const logs: string[] = [];
+    await prepareWorkspaceForSshExecution({ spec: spec(), localDir: local, syncPolicy,
+      onProgress: (line) => { logs.push(line); } });
+    expect(syncPolicy.excluded.get(local)).toContain(".scratch-slow");
+    expect(logs.some((line) => line.includes('".scratch-slow" (size=unknown'))).toBe(true);
+    await expect(readFile(path.join(remote, ".scratch-slow/data"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
 }

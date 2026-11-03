@@ -11,6 +11,7 @@ export interface SshWorkspaceSyncPolicy {
   patterns: string[];
   excluded: Map<string, string[]>;
   logged: Set<string>;
+  sizeTimeoutMs: number;
 }
 
 export function createSshWorkspaceSyncPolicy(): SshWorkspaceSyncPolicy {
@@ -20,7 +21,7 @@ export function createSshWorkspaceSyncPolicy(): SshWorkspaceSyncPolicy {
     typeof value !== "string" || !value || value.includes("/") || value.includes("\0"))) {
     throw new Error("PAPERCLIP_SSH_SCRATCH_PATTERNS must be a JSON array of directory name patterns");
   }
-  return { patterns, excluded: new Map(), logged: new Set() };
+  return { patterns, excluded: new Map(), logged: new Set(), sizeTimeoutMs: 5_000 };
 }
 
 // Both ends use the same POSIX tools. NUL records preserve spaces and newlines.
@@ -32,10 +33,9 @@ function scanScript(root: string, exclude: string[], patterns: string[], ignored
       `-path ${shellQuote(`./${relative.replace(/([\\*?\[\]])/g, "\\$1")}`)}`),
   ].join(" -o ");
   const scratch = patterns.map((pattern) => `-name ${shellQuote(pattern)} -o `).join("");
-  const report = 'for entry do if size=$(du -sk "$entry" 2>/dev/null); then size=${size%%[[:space:]]*}; else size=unknown; fi; printf "%s\\0%s\\0" "$entry" "$size"; done';
   return `cd ${shellQuote(root)} && find . -mindepth 1 \\( ${ignored} \\) -prune -o `
     + `-type d \\( ${scratch}-exec test -e '{}/.git' \\; -o -exec test -L '{}/.git' \\; \\) `
-    + `-prune -exec sh -c ${shellQuote(report)} sh {} +`;
+    + `-prune -print0`;
 }
 
 export async function sshWorkspaceExcludes(input: {
@@ -51,18 +51,32 @@ export async function sshWorkspaceExcludes(input: {
   const result = input.remote
     ? await runSshScript(input.remote.spec, script, { timeoutMs: options.timeout, maxBuffer: options.maxBuffer })
     : await exec("sh", ["-c", script], options);
-  const entries = result.stdout.split("\0");
-  const excluded = new Set(input.policy.excluded.get(input.localDir) ?? []);
-  for (let index = 0; index + 1 < entries.length; index += 2) {
-    const relative = entries[index]!.slice(2);
-    excluded.add(relative);
+  const entries = result.stdout.split("\0").filter(Boolean).map((entry) => entry.slice(2));
+  input.policy.excluded.set(input.localDir, [...new Set([
+    ...(input.policy.excluded.get(input.localDir) ?? []), ...entries,
+  ])]);
+  const pending = entries.filter((relative) => !input.policy.logged.has(`${input.localDir}\0${relative}`));
+  const sizes = new Map<string, string>();
+  if (pending.length > 0) {
+    const sizeScript = `cd ${shellQuote(input.remote?.dir ?? input.localDir)} && `
+      + `for entry in ${pending.map((entry) => shellQuote(`./${entry}`)).join(" ")}; do `
+      + 'if size=$(du -sk "$entry" 2>/dev/null); then size=${size%%[[:space:]]*}; else size=unknown; fi; '
+      + 'printf "%s\\0%s\\0" "$entry" "$size"; done';
+    const measured = await (input.remote
+      ? runSshScript(input.remote.spec, sizeScript, { timeoutMs: input.policy.sizeTimeoutMs, maxBuffer: options.maxBuffer })
+      : exec("sh", ["-c", sizeScript], { ...options, timeout: input.policy.sizeTimeoutMs }))
+      .catch(() => null);
+    const records = measured?.stdout.split("\0") ?? [];
+    for (let index = 0; index + 1 < records.length; index += 2) {
+      sizes.set(records[index]!.slice(2), records[index + 1]!);
+    }
+  }
+  for (const relative of pending) {
     const key = `${input.localDir}\0${relative}`;
-    if (input.policy.logged.has(key)) continue;
-    const message = `[paperclip] Skipped SSH workspace path ${JSON.stringify(relative)} (size=${entries[index + 1]} KiB)`;
+    const message = `[paperclip] Skipped SSH workspace path ${JSON.stringify(relative)} (size=${sizes.get(relative) || "unknown"} KiB)`;
     if (input.onProgress) await input.onProgress(message);
     else console.info(message);
     input.policy.logged.add(key);
   }
-  input.policy.excluded.set(input.localDir, [...excluded]);
   return input.exclude;
 }

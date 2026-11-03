@@ -31,3 +31,4 @@ Use baseline caller exclusions during restore discovery.
 Pass saved literal exclusions to tar as well as the final merge.
 Prune saved literal exclusions before discovery reads them.
 Optional size collection must not fail a transfer or remove an exclusion.
+Record exclusions first. Give size collection its own bounded command and catch its failures.

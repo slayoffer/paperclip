@@ -59,6 +59,7 @@ Skipped paths remain excluded through the rest of the managed run, even if their
 
 Each skipped path produces one progress log entry per managed run, with its `du -sk` size in KiB.
 If size collection fails, the log reports `unknown` and the path stays excluded.
+Size collection uses a separate five-second budget after discovery records all exclusions.
 Restore discovery prunes saved literal exclusions before reading their contents.
 Without a progress sink, the entry goes to the server console.
 Paths use JSON quoting so a newline in a filename cannot create a second log line.
