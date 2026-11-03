@@ -7,3 +7,5 @@ packages/adapter-utils/src/sandbox-callback-bridge.ts
 .github/workflows/release.yml
 .github/workflows/runner-full-stack-e2e.yml
 .github/workflows/runner-protocol-live-evals.yml
+# Keep the existing workspace fixture while fixing its asynchronous exit cleanup.
+server/src/__tests__/execution-workspaces-service.test.ts
