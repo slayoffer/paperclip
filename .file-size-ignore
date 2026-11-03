@@ -9,3 +9,6 @@ server/src/services/recovery/service.ts
 
 # The Discord fixture keeps its existing integration setup.
 server/src/__tests__/chat-channels.integration.test.ts
+
+# Reuse the existing recovery fixture for receipt timestamp checks.
+server/src/__tests__/legacy-workspace-restore-recovery.test.ts
