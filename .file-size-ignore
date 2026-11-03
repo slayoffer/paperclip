@@ -6,3 +6,6 @@ server/src/services/explicit-native-continuation.test.ts
 
 # The recovery dispatcher checks native blockers before its timer exemption.
 server/src/services/recovery/service.ts
+
+# The Discord fixture keeps its existing integration setup.
+server/src/__tests__/chat-channels.integration.test.ts

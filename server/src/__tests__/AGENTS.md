@@ -10,3 +10,6 @@ Keep the test timeout and all cancellation settlement assertions.
 SSH writer markers exist before the systemd scope and provider start.
 Await a provider readiness signal before testing restart termination of a live writer.
 Marker presence alone does not prove that the provider started.
+
+For lease-expiry fixtures, freeze only `Date` and advance it after setup.
+Keep timers real for database and runtime I/O. Restore `Date` in `finally`.
