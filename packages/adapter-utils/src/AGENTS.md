@@ -19,3 +19,5 @@ Skip separate nested repository uploads when their workspace root is tagged.
 A marker can appear after baseline capture. Child scans cannot see that marker.
 Send restore archive commands through stdin. Large exclusion lists can exceed
 the operating system limit for one SSH command argument.
+Preserve literal ignored paths when serializing in-memory baselines.
+Otherwise, a removed cache marker permits restore to overwrite excluded local data.

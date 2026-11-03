@@ -65,6 +65,7 @@ local changes or Git history integration.
 For a tagged workspace root, the baseline records the whole-root `.` exclusion.
 Restore skips that workspace before any scan, transfer, or history integration.
 This state survives baseline serialization and removal of the local marker.
+Serialized in-memory baselines also retain literal paths for nested tagged caches.
 Restore also checks current root markers before it restores nested project repositories.
 A marker added after preparation protects the root and its nested repositories.
 Preparation also skips separate nested repository uploads when the workspace root is tagged.

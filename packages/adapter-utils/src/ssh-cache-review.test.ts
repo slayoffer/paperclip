@@ -122,6 +122,21 @@ describe("SSH cache review regressions", { timeout: 30_000 }, () => {
     expect(await readFile(path.join(local, "data"), "utf8")).toBe("keep");
   });
 
+  it.each(["cache", "odd [cache]*"])("retains the literal %s cache across snapshot serialization", async (directory) => {
+    await put(local, `${directory}/CACHEDIR.TAG`, "");
+    await put(local, `${directory}/data`);
+    const snapshot = await captureSshWorkspaceSnapshot(local, { exclude: [] });
+    const baselineSnapshot = parseDirectorySnapshot(serializeDirectorySnapshot(snapshot))!;
+    await rm(path.join(local, directory, "CACHEDIR.TAG"));
+    await put(remote, `${directory}/data`, "remote");
+    await restoreWorkspaceFromSshExecution({ spec: spec(), localDir: local, baselineSnapshot });
+    expect(await readFile(path.join(local, directory, "data"), "utf8")).toBe("keep");
+  });
+
+  it.each(["../outside", "/outside", "", 12])("rejects invalid serialized ignored path %j", (entry) => {
+    expect(parseDirectorySnapshot({ version: 1, exclude: [], entries: [], ignoredPaths: [entry] })).toBeNull();
+  });
+
   it("skips nested repository restores when their workspace root was tagged", async () => {
     const repository = ".paperclip-repositories/child";
     await put(local, "CACHEDIR.TAG", "");
