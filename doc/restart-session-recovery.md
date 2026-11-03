@@ -26,6 +26,10 @@ A local run without saved process identifiers requires an explicit provider-stop
 Missing process metadata alone cannot prove that a detached provider stopped.
 For SSH runs, a local wrapper PID cannot prove remote termination.
 Automatic SSH resume therefore requires a confirmed provider stop and completed workspace restore before shutdown.
+On recovery, the SSH driver checks the retained lease's endpoint and verifies termination again.
+It releases that lease and its exact worktree lock before acquiring the replacement lease.
+This preserves the in-place workspace path. Without this release, lock contention selects copy mode and Codex rejects the changed session identity.
+A failed termination check keeps the lock and requires reconciliation.
 A hard SSH failure without these receipts uses reconciliation.
 Sandbox checkpoints use reconciliation because sandbox preparation replaces the provider store.
 
@@ -33,6 +37,8 @@ A missing session, missing workspace, changed account, changed adapter, or unver
 The run records the reason in `resultJson.restartRecovery`.
 Conversation retry policy cannot remove this reconciliation hold after a failed restart resume.
 Recovery permits at most three controller claims per run.
+Each claim permits one budget admission for resumed provider work. Concurrent or repeated admission is rejected.
+The claim clears the old finalization deadline because the run will execute provider work again.
 Fallback writes require the expected controller and a running row. They preserve the attempt count.
 Normal budget, pause, issue ownership, workspace, and approval checks still apply.
 Verified bootstrap failures retain their existing retry path when no provider execution evidence exists.
@@ -42,3 +48,8 @@ Tests do not replace this live deployment check.
 
 `server/src/__tests__/restart-live-runs.test.ts` stops six live Codex and Claude runs.
 It checks that every saved session resumes once when lock cleanup precedes or overlaps recovery.
+
+`server/src/__tests__/ssh-restart-resume.test.ts` uses the real Codex adapter and a loopback SSH fixture.
+A fixture executable emits Codex protocol events without a provider API call.
+The test checks shutdown receipts, preserved session identity, one resumed invocation, and successful completion of the same run.
+The fixture omits the Paperclip API callback bridge. It requires embedded PostgreSQL, SSH, and user systemd scopes.

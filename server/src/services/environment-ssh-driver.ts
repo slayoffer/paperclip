@@ -1,6 +1,8 @@
 import { confirmSshInPlaceTermination } from "./ssh-in-place-termination.js";
 import { canonicalSshInPlaceLockKey } from "./ssh-in-place-workspace.js";
-import type { Db } from "@paperclipai/db";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { environmentLeases, heartbeatRuns, type Db } from "@paperclipai/db";
+import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
 import { logger } from "../middleware/logger.js";
 import { environmentService } from "./environments.js";
@@ -31,6 +33,33 @@ export function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         throw new Error(`Expected SSH environment config for driver "${input.environment.driver}".`);
       }
 
+      if (input.heartbeatRunId) {
+        const [run] = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, input.heartbeatRunId), eq(heartbeatRuns.companyId, input.companyId),
+          eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+          eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+          gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
+        ));
+        if (run?.resultJson?.restartRecovery &&
+            (run.resultJson.restartRecovery as Record<string, unknown>).outcome === "resuming") {
+          // Shutdown retains this lease and its worktree lock. A new lease would
+          // fall back to copy mode and change the saved provider session's cwd.
+          // Confirm the old endpoint again before releasing its exact lock.
+          const retained = await db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+            eq(environmentLeases.companyId, input.companyId), eq(environmentLeases.heartbeatRunId, run.id),
+            eq(environmentLeases.provider, "ssh"), eq(environmentLeases.status, "active"),
+            isNull(environmentLeases.releasedAt),
+          ));
+          for (const row of retained) {
+            const lease = await environmentsSvc.getLeaseById(row.id);
+            if (!lease || lease.environmentId !== input.environment.id || lease.issueId !== (input.issueId ?? null) ||
+                lease.executionWorkspaceId !== (input.executionWorkspaceId ?? null) ||
+                !await confirmSshInPlaceTermination(db, input.environment, lease, "released")) {
+              throw new Error("restart_ssh_lease_stop_unverified");
+            }
+          }
+        }
+      }
       const { remoteCwd } = await ensureSshWorkspaceReady(parsed.config);
       return await environmentsSvc.acquireLease({
         companyId: input.companyId,
