@@ -14,3 +14,6 @@ server/src/services/native-runtime/native-question-bridge.test.ts
 
 # The existing interaction service passes terminal cleanup through its commit-effects queue.
 server/src/services/issue-thread-interactions.ts
+
+# Keep the existing workspace fixture while fixing its asynchronous exit cleanup.
+server/src/__tests__/execution-workspaces-service.test.ts
