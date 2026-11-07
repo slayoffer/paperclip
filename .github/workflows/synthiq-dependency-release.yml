@@ -1,0 +1,89 @@
+# Fork-only recovery checks. Do not include this workflow in an upstream patch.
+name: Synthiq dependency release tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-dependency-release.yml
+      - server/src/services/**
+      - server/src/routes/issue-dependency-wakeup.ts
+      - server/src/routes/issues.ts
+      - server/src/modules/run-dispatch/**
+      - server/src/__tests__/dependency-release.test.ts
+      - server/src/__tests__/dependency-wake-concurrency.test.ts
+      - server/src/__tests__/dependency-recovery-sweep.test.ts
+      - server/src/__tests__/issue-dependency-wakeup-release.test.ts
+      - server/src/__tests__/heartbeat-dependency-scheduling.test.ts
+      - server/src/__tests__/execution-workspace-policy.test.ts
+      - server/src/__tests__/heartbeat-local-environment.test.ts
+      - server/src/__tests__/heartbeat-task-environment.test.ts
+      - server/src/__tests__/issues-task-environment.test.ts
+      - server/src/__tests__/environment-selection-route-guards.test.ts
+      - server/src/__tests__/environment-routes.test.ts
+      - packages/db/src/**
+      - packages/shared/src/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-dependency-release-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-release:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Locate the package store
+        id: store
+        run: |
+          corepack enable
+          echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: synthiq-dependency-release-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/package.json') }}
+      - name: Install dependencies
+        # Release metadata requires an update to the inherited lockfile.
+        run: corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check adapter types
+        run: corepack pnpm --filter @paperclipai/adapter-utils typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test dependency release and recovery authority
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism
+          server/src/__tests__/dependency-release.test.ts
+          server/src/__tests__/dependency-wake-concurrency.test.ts
+          server/src/__tests__/dependency-recovery-sweep.test.ts
+          server/src/__tests__/issue-dependency-wakeup-release.test.ts
+          server/src/__tests__/workspace-operations-reconciliation.test.ts
+          server/src/__tests__/issues-service.test.ts
+          server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+          server/src/__tests__/heartbeat-dependency-scheduling.test.ts
+          server/src/modules/run-dispatch/domain/policy.test.ts
+          server/src/modules/run-dispatch/adapters/postgres.test.ts
+      - name: Test task environment routing and default behavior
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism
+          server/src/__tests__/execution-workspace-policy.test.ts
+          server/src/__tests__/heartbeat-local-environment.test.ts
+          server/src/__tests__/heartbeat-task-environment.test.ts
+          server/src/__tests__/issues-task-environment.test.ts
+          server/src/__tests__/environment-selection-route-guards.test.ts
+          server/src/__tests__/environment-routes.test.ts

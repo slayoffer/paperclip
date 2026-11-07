@@ -169,7 +169,9 @@ export async function restorePointHistoryUnchanged(ref: GitRestorePointRef, cwd:
 
 export function restorePointSnapshotMatches(ref: GitRestorePointRef, snapshot: { head: string; index: string | null; worktree: string | null; modes: Array<{ path: string; mode: number }> }) {
   return snapshot.head === ref.head && snapshot.index === ref.index && snapshot.worktree === ref.worktree
-    && JSON.stringify(snapshot.modes) === JSON.stringify(ref.modes);
+    && snapshot.modes.length === ref.modes.length
+    // PostgreSQL jsonb can reorder object keys in the persisted reference.
+    && snapshot.modes.every((entry, index) => entry.path === ref.modes[index]?.path && entry.mode === ref.modes[index]?.mode);
 }
 
 export async function abandonGitRestorePointsByKey(db: Db, workspaceId: string, objectKeys: string[]) {
@@ -220,8 +222,7 @@ export async function loadGitRestorePoint(input: {
     identity: { companyId: input.workspace.companyId, workspaceId: input.workspace.id, restorePointId: input.ref.id, generation: input.ref.generation },
   });
   const { manifest } = decodeRestorePointPayload(payload);
-  if (manifest.head !== input.ref.head || manifest.index !== input.ref.index || manifest.worktree !== input.ref.worktree
-    || JSON.stringify(manifest.modes) !== JSON.stringify(input.ref.modes)) {
+  if (!restorePointSnapshotMatches(input.ref, manifest)) {
     throw new RestorePointRestoreFailure("restore_point_manifest_mismatch");
   }
   return { payload, manifest };

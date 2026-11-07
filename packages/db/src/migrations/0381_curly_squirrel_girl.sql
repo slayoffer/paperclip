@@ -1,0 +1,4 @@
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: The migration runner uses one transaction. Each expression index scans the measured 16377-row table once. There is no backfill. Deployment must allow the table write lock.
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_issue_coalesce_idx" ON "heartbeat_runs" USING btree ("company_id",(coalesce("native_issue_id"::text, "context_snapshot"->>'issueId')),"created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_recovery_action_idx" ON "heartbeat_runs" USING btree ("company_id",("context_snapshot"->>'recoveryActionId'),"created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_issue_task_coalesce_idx" ON "heartbeat_runs" USING btree ("company_id",(coalesce("context_snapshot"->>'issueId', "context_snapshot"->>'taskId', "native_issue_id"::text)));

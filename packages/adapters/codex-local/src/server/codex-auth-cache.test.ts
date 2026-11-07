@@ -14,6 +14,7 @@ import {
   resolveCodexAuthCacheEntryPath,
   selectVendCredential,
   toCacheKey,
+  vendPromotedHomeCredential,
   withAccountHomeSecretMutationLock,
   withCodexAccountHomePromotionLock,
 } from "./codex-auth-cache.js";
@@ -318,6 +319,86 @@ describe("codex auth cache store", () => {
       expect(combined).not.toContain("SENTINEL");
       expect(combined).not.toContain("SECRET-ACCT");
       expect(combined).not.toContain("id-token");
+    });
+  });
+
+  describe("promoted managed-home auth.json vend", () => {
+    async function stagePromoted(input: {
+      promotedAuth: string;
+      cacheAuthByAccount: Record<string, string>;
+    }): Promise<{ env: NodeJS.ProcessEnv; homeDir: string; authPath: string }> {
+      const root = await makeInstanceRoot();
+      const env = envFor(root);
+      const homeDir = path.join(root, "company-codex-home");
+      await mkdir(homeDir, { recursive: true });
+      const authPath = path.join(homeDir, "auth.json");
+      await writeFile(authPath, input.promotedAuth, { mode: 0o644 });
+      for (const [accountId, auth] of Object.entries(input.cacheAuthByAccount)) {
+        const entryPath = await ensureCodexAuthCacheEntryDir(env, accountId, "company-a");
+        await writeFile(entryPath, auth, { mode: 0o600 });
+      }
+      return { env, homeDir, authPath };
+    }
+    const resolve = (env: NodeJS.ProcessEnv) => (accountId: string) =>
+      resolveCodexAuthCacheEntryPath(env, accountId, "company-a");
+
+    it("seeds the newer same-identity cache copy into a promoted home with an expired token, at mode 0600", async () => {
+      const { env, homeDir, authPath } = await stagePromoted({
+        promotedAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "promoted" }),
+        cacheAuthByAccount: {
+          "acct-x": subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "cache" }),
+        },
+      });
+      const outcome = await vendPromotedHomeCredential(homeDir, resolve(env), () => undefined, env);
+      expect(outcome).toBe("vended");
+      const final = await readFile(authPath, "utf8");
+      expect(final).toContain("refresh-token-cache");
+      expect(final).not.toContain("refresh-token-promoted");
+      expect((await lstat(authPath)).mode & 0o777).toBe(0o600);
+    });
+
+    it("never vends a cache slot of a different identity", async () => {
+      const { env, homeDir, authPath } = await stagePromoted({
+        promotedAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "promoted" }),
+        cacheAuthByAccount: {
+          "acct-y": subscriptionAuth({ accountId: "acct-y", lastRefresh: NEWER, marker: "other" }),
+        },
+      });
+      const before = await readFile(authPath, "utf8");
+      const outcome = await vendPromotedHomeCredential(homeDir, resolve(env), () => undefined, env);
+      expect(outcome).toBe("kept-host");
+      expect(await readFile(authPath, "utf8")).toBe(before);
+    });
+
+    it("keeps the promoted file when the cache slot is not strictly newer", async () => {
+      for (const cacheRefresh of [OLDER, NEWER]) {
+        const { env, homeDir, authPath } = await stagePromoted({
+          promotedAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "promoted" }),
+          cacheAuthByAccount: {
+            "acct-x": subscriptionAuth({ accountId: "acct-x", lastRefresh: cacheRefresh, marker: "cache" }),
+          },
+        });
+        const before = await readFile(authPath, "utf8");
+        const outcome = await vendPromotedHomeCredential(homeDir, resolve(env), () => undefined, env);
+        expect(outcome).toBe("kept-host");
+        expect(await readFile(authPath, "utf8")).toBe(before);
+      }
+    });
+
+    it("skips a symlinked auth.json and leaves the link in place", async () => {
+      const { env, homeDir, authPath } = await stagePromoted({
+        promotedAuth: subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "shared" }),
+        cacheAuthByAccount: {
+          "acct-x": subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "cache" }),
+        },
+      });
+      const sharedPath = path.join(homeDir, "shared-auth.json");
+      await rm(authPath);
+      await writeFile(sharedPath, subscriptionAuth({ accountId: "acct-x", lastRefresh: OLDER, marker: "shared" }));
+      await symlink(sharedPath, authPath);
+      const outcome = await vendPromotedHomeCredential(homeDir, resolve(env), () => undefined, env);
+      expect(outcome).toBe("not-promoted");
+      expect((await lstat(authPath)).isSymbolicLink()).toBe(true);
     });
   });
 

@@ -1,3 +1,4 @@
+import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { and, eq, sql } from "drizzle-orm";
 import { agents, budgetReservations, heartbeatRuns, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { centsToUnits, unitsToCents } from "@paperclipai/shared";
@@ -70,7 +71,7 @@ export async function recheckRunBudgetReservationInTransaction(
 /** Reserve before dispatch, under the same company lock as charges and policy
  * changes. Estimates constrain admission; they cannot cap a provider's bill.
  * A reservation survives timeouts and restarts until accounting proves closure. */
-export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string) {
+export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string, legacyRestartSessionId?: string | null) {
   const result = await withBudgetSpan("budget.admission.reserve", () => withAccountingTransaction(db, companyId, async (tx, publications) => {
     await lockRunBudgetRecoveryOwnerInTransaction(tx, companyId, runId, recoveryLeaseOwner);
     const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId))).for("update");
@@ -86,7 +87,15 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
           .from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.companyId, companyId),
             eq(nativeRunFinalizations.runId, runId), eq(nativeRunFinalizations.leaseOwner, recoveryLeaseOwner),
             sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`)) : [];
-      if (owner) {
+      // A legacy restart of this run reuses the hold from its first dispatch.
+      // The current controller must own the claim for the same provider session.
+      const restart = run.resultJson?.restartRecovery as Record<string, unknown> | undefined;
+      const legacyRestartOwner = Boolean(legacyRestartSessionId) && run.runtimeMode === "legacy"
+        && run.status === "running" && existing.state === "held" && existing.projectId === projectId
+        && run.controllerBootId === legacyControllerBootId
+        && restart?.outcome === "resuming" && restart.sessionId === legacyRestartSessionId
+        && restart.dispatchStarted !== true;
+      if (owner || legacyRestartOwner) {
         // Recovery has already made this run queued/running, so its own pending
         // accounting is excluded. Current overruns, other unfinished runs and
         // scope pauses still apply before any more paid work starts.
@@ -96,6 +105,12 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
           .where(and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)));
         if (!agent || agent.lifecycleState !== "ready" || ["paused", "terminated", "pending_approval"].includes(agent.status))
           return { admissionBlockReason: "Agent is paused and cannot start new work" };
+        if (legacyRestartOwner) {
+          // Consume this claim under the run lock. A later restart writes a new claim.
+          await tx.update(heartbeatRuns).set({
+            resultJson: sql`jsonb_set(${heartbeatRuns.resultJson}, '{restartRecovery,dispatchStarted}', 'true'::jsonb)`,
+          }).where(eq(heartbeatRuns.id, runId));
+        }
         return { ...existing, reused: true };
       }
       throw conflict("Provider dispatch has already reserved this run");

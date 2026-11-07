@@ -21,7 +21,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { truncateTablesWithDeadlockRetry } from "./helpers/truncate-with-deadlock-retry.js";
+import { clearCompanyFixturesWithDeadlockRetry } from "./helpers/clear-company-fixtures.js";
 import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
 import { createPostgresWatchdogAdapter } from "../modules/active-run-watchdog/adapters/postgres.js";
 import {
@@ -58,7 +58,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
   afterEach(async () => {
     mockedAppendHeartbeatRunEvent.mockClear();
-    await truncateTablesWithDeadlockRetry(db, `TRUNCATE TABLE "companies" CASCADE`, {
+    await clearCompanyFixturesWithDeadlockRetry(db, {
       attempts: 5,
       delayMs: (attempt) => 50 * (attempt + 1),
     });

@@ -1003,7 +1003,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       });
 
       const sweep = await svc.sweepTerminalWorkspaces();
-      expect(sweep).toMatchObject({ archived: 0, skippedUndelivered: 1 });
+      expect(sweep).toMatchObject({ archived: 0, skippedUndelivered: 1, skippedGitInspection: 1, skippedDirty: 0 });
       const [workspace] = await db
         .select({ status: executionWorkspaces.status })
         .from(executionWorkspaces)
@@ -1049,7 +1049,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     const firstSweep = await firstSweepPromise;
 
     // The concurrent sweep inspected no candidate and changed no state.
-    expect(concurrentSweep).toMatchObject({ checked: 0, archived: 0, eligible: 0 });
+    expect(concurrentSweep).toMatchObject({ checked: 0, archived: 0, eligible: 0, skippedConcurrentSweep: 1 });
     // The first sweep archived the eligible workspace.
     expect(firstSweep.archived).toBe(1);
 
@@ -1064,7 +1064,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     expect(laterSweep).toMatchObject({ archived: 0 });
   }, 20_000);
 
-  it("archives an eligible workspace behind a full page of skipped candidates", async () => {
+  it("archives a workspace after skipped candidates with microsecond timestamps", async () => {
     // Seed more skipped candidates than the sweep page holds, each older than
     // the eligible workspace. A skipped candidate keeps its updatedAt, so a
     // sweep that always reads the oldest page never reaches the eligible
@@ -1100,7 +1100,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
         name: `${issuePrefix}-skip-${index}`,
         status: "active",
         providerType: "local_fs",
-        updatedAt: new Date(Date.UTC(2020, 0, index + 1)),
+        updatedAt: sql`'2020-01-01 00:00:00.123456+00'::timestamptz`,
       });
       await db.insert(issues).values({
         id: openIssueId,
@@ -1113,11 +1113,15 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       });
       await db
         .update(executionWorkspaces)
-        .set({ sourceIssueId: openIssueId, updatedAt: new Date(Date.UTC(2020, 0, index + 1)) })
+        .set({ sourceIssueId: openIssueId, updatedAt: sql`'2020-01-01 00:00:00.123456+00'::timestamptz` })
         .where(eq(executionWorkspaces.id, workspaceId));
     }
     // The eligible workspace is newest, so it sorts after the whole skipped page.
     const eligible = await seedAncestryTerminalWorkspace({ updatedAt: new Date(Date.UTC(2020, 0, 9)) });
+
+    await db.update(executionWorkspaces)
+      .set({ updatedAt: sql`'2020-01-01 00:00:00.123457+00'::timestamptz` })
+      .where(eq(executionWorkspaces.id, eligible.executionWorkspaceId));
 
     // A fresh service starts with an empty scan cursor, so each call inspects
     // one row and advances. A single-row page never lands on the eligible
@@ -1148,6 +1152,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       .where(inArray(executionWorkspaces.id, [eligible.executionWorkspaceId, ...skippedWorkspaceIds]));
     const byId = new Map(workspaces.map((row) => [row.id, row.status]));
     expect(byId.get(eligible.executionWorkspaceId)).toBe("archived");
+    await expect(fs.access(eligible.worktreePath)).rejects.toThrow();
     for (const skippedId of skippedWorkspaceIds) {
       expect(byId.get(skippedId)).toBe("active");
     }
@@ -1488,7 +1493,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
 
     expect(readiness?.deliveryState).toBe("merged_via_pr");
     expect(readiness?.warnings).toContain("The workspace has 1 untracked file.");
-    expect(sweep).toMatchObject({ archived: 0, skippedUndelivered: 1 });
+    expect(sweep).toMatchObject({ archived: 0, skippedUndelivered: 1, skippedDirty: 1, skippedGitInspection: 0 });
     expect(workspace?.status).toBe("active");
   });
 
@@ -3927,7 +3932,9 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       "    .createServer((_req, res) => { res.end(\"ok\"); })",
       "    .listen(Number(process.env.PORT), \"127.0.0.1\");",
       "}, 600);",
-      "setInterval(() => {}, 1000);",
+      "setInterval(() => {",
+      `  if (!require("node:fs").existsSync(${JSON.stringify(runtimeStartedMarker)})) process.exit(0);`,
+      "}, 25);",
     ].join(" ");
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(serverScript)}`;
 
@@ -4039,15 +4046,24 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       });
     } finally {
       try {
-        await stopRuntimeServicesForExecutionWorkspace({
-          db,
-          executionWorkspaceId,
-          workspaceCwd: worktreePath,
-        });
         await fs.rm(runtimeStartedMarker, { force: true });
+        if (startedServices.length > 0) {
+          // Wait for the detached exit write before afterEach deletes its parents.
+          await expect.poll(async () => {
+            const [service] = await db.select().from(workspaceRuntimeServices)
+              .where(eq(workspaceRuntimeServices.id, startedServices[0]!.id));
+            return service?.status;
+          }, { timeout: 10_000 }).toBe("stopped");
+        }
       } finally {
-        portOwner.mockRestore();
-        adoption.mockRestore();
+        try {
+          await stopRuntimeServicesForExecutionWorkspace({
+            db, executionWorkspaceId, workspaceCwd: worktreePath,
+          });
+        } finally {
+          portOwner.mockRestore();
+          adoption.mockRestore();
+        }
       }
     }
 

@@ -1,9 +1,10 @@
 import pino from "pino";
 import type { Logger } from "pino";
-import { pinoHttp } from "pino-http";
+import { pinoHttp, startTime } from "pino-http";
 import { HTTP_LOG_REDACT_PATHS } from "./http-log-redaction.js";
 import {
   isPrivateWebhookHttpRequest,
+  isCredentialTransferHttpRequest,
   isSecretSensitiveHttpRequest,
   isPrivateAgentCommentaryHttpRequest,
   isPrivateAgentObservabilityHttpRequest,
@@ -78,6 +79,9 @@ function requestLogUrl(req: {
 }) {
   if(isPrivateMuseHttpRequest(requestClassificationUrl(req)))return "/api/muse/:protocol";
   if (isPrivateAgentObservabilityHttpRequest(requestClassificationUrl(req))) return "/api/companies/:companyId/observability";
+  if (isCredentialTransferHttpRequest(requestClassificationUrl(req))) {
+    return "/api/companies/:companyId/credential-transfers";
+  }
   return isPrivateWebhook(req)
     ? privateWebhookLogUrl(requestClassificationUrl(req))
     : stripSecretBearingUrlParts(typeof req.url === "string" ? req.url : "");
@@ -94,6 +98,9 @@ export function createHttpLogger(baseLogger: Logger) {
         if(isPrivateMuseHttpRequest(typeof req.url === "string" ? req.url : undefined))return {id:req.id,method:req.method,url:"/api/muse/:protocol"};
         if (isPrivateAgentCommentaryHttpRequest(typeof req.url === "string" ? req.url : undefined)) {
           return { id: req.id, method: req.method, url: stripSecretBearingUrlParts(req.url as string) };
+        }
+        if (isCredentialTransferHttpRequest(typeof req.url === "string" ? req.url : undefined)) {
+          return { id: req.id, method: req.method, url: "/api/companies/:companyId/credential-transfers" };
         }
         if (
           isPrivateWebhook({
@@ -131,21 +138,24 @@ export function createHttpLogger(baseLogger: Logger) {
       ) {
         // A provider error may also be reflected in response headers. Keep the
         // same content-free contract on both sides of a webhook request.
-        return res.raw?.req && (isPrivateWebhook(res.raw.req) || isPrivateMuseHttpRequest(requestClassificationUrl(res.raw.req)) || isPrivateAgentCommentaryHttpRequest(requestClassificationUrl(res.raw.req)) || isPrivateAgentObservabilityHttpRequest(requestClassificationUrl(res.raw.req)))
+        return res.raw?.req && (isPrivateWebhook(res.raw.req) || isPrivateMuseHttpRequest(requestClassificationUrl(res.raw.req)) || isPrivateAgentCommentaryHttpRequest(requestClassificationUrl(res.raw.req)) || isPrivateAgentObservabilityHttpRequest(requestClassificationUrl(res.raw.req))
+          || isCredentialTransferHttpRequest(requestClassificationUrl(res.raw.req)))
           ? { statusCode: res.statusCode }
           : res;
       },
     },
     customLogLevel(_req, res, err) {
+      if (err || res.statusCode >= 500) return "error";
+      if (res.statusCode >= 400) return "warn";
+      if (Date.now() - res[startTime] > 2000) return "warn";
       if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
         return "silent";
       }
-      if (err || res.statusCode >= 500) return "error";
-      if (res.statusCode >= 400) return "warn";
       return "info";
     },
-    customSuccessMessage(req, res) {
-      return `${req.method} ${requestLogUrl(req)} ${res.statusCode}`;
+    customSuccessMessage(req, res, responseTime) {
+      const duration = responseTime > 2000 ? ` — slow request (${responseTime} ms)` : "";
+      return `${req.method} ${requestLogUrl(req)} ${res.statusCode}${duration}`;
     },
     customErrorMessage(req, res, err) {
       if (
@@ -169,6 +179,9 @@ export function createHttpLogger(baseLogger: Logger) {
       if (isPrivateAgentCommentaryHttpRequest(requestClassificationUrl(req))) {
         return { ...value, err: { type: "Error", message: "Feedback request failed" } };
       }
+      if (isCredentialTransferHttpRequest(requestClassificationUrl(req))) {
+        return { ...value, err: { type: "Error", message: "Credential transfer request failed" } };
+      }
       // pino-http serializes res.err independently of customProps/errorContext.
       // Do not rely on a particular error handler having sanitized an SDK Error.
       return isPrivateWebhook(req)
@@ -184,7 +197,8 @@ export function createHttpLogger(baseLogger: Logger) {
         if (/^\/mcp\/(?:oauth|paperclip)(?:\/|$)/.test(requestClassificationUrl(req) ?? "")) {
           return { reqBody: "[REDACTED]", ...(ctx ? { errorContext: { name: "Error" } } : {}) };
         }
-        if (isPrivateWebhook(req) || isPrivateMuseHttpRequest(requestClassificationUrl(req)) || isPrivateAgentCommentaryHttpRequest(requestClassificationUrl(req)) || isPrivateAgentObservabilityHttpRequest(requestClassificationUrl(req))) {
+        if (isPrivateWebhook(req) || isPrivateMuseHttpRequest(requestClassificationUrl(req)) || isPrivateAgentCommentaryHttpRequest(requestClassificationUrl(req)) || isPrivateAgentObservabilityHttpRequest(requestClassificationUrl(req))
+          || isCredentialTransferHttpRequest(requestClassificationUrl(req))) {
           // Omit, rather than recursively redact, the entire provider payload.
           // This applies equally before/after parsing and with/without context.
           return {

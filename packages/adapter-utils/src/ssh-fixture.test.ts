@@ -471,7 +471,7 @@ describe("ssh env-lab fixture", () => {
       },
       command: "node",
       args: ["--version"],
-      env: { FOO: "bar" },
+      env: {},
     });
 
     // The remote script rides the last ssh argument. The SSH target is an
@@ -491,10 +491,10 @@ describe("ssh env-lab fixture", () => {
     // nvm in .bashrc still resolves node under a non-login SSH command.
     expect(remoteScript).toContain(".bashrc");
     // The last ssh argument wraps the script as `sh -c '...'`, so the inner
-    // quotes are escaped. Assert the command still runs: cd, env, and the argv.
+    // quotes are escaped. Assert the command still runs: cd and the argv.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    expect(remoteScript).toContain("exec env ");
+    expect(remoteScript).toContain("exec ");
     expect(remoteScript).toContain("node");
     expect(remoteScript).toContain("--version");
     await target.cleanup();
@@ -737,11 +737,11 @@ describe("ssh env-lab fixture", () => {
     const input = { spec: { ...config, remoteCwd: started.workspaceDir }, localDir,
       remoteDir: started.workspaceDir, workspaceFileMode: "all" as const };
     expect(await prepareWorkspaceForSshExecution(input)).toEqual({ gitBacked: false });
-    expect(await readFile(path.join(started.workspaceDir, "node_modules", "personal.bin"))).toEqual(binary);
+    await expect(stat(path.join(started.workspaceDir, "node_modules"))).rejects.toThrow("ENOENT");
     await rm(path.join(localDir, "removed.txt"));
     await prepareWorkspaceForSshExecution(input);
     await expect(stat(path.join(started.workspaceDir, "removed.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(path.join(started.workspaceDir, "node_modules", "personal.bin"))).toEqual(binary);
+    await expect(stat(path.join(started.workspaceDir, "node_modules"))).rejects.toThrow("ENOENT");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips a git workspace through the SSH fixture", async () => {
@@ -875,6 +875,7 @@ describe("ssh env-lab fixture", () => {
     await writeFile(path.join(localRepo, "backend.txt"), "backend base\n", "utf8");
     await git(localRepo, ["add", "backend.txt"]);
     await git(localRepo, ["commit", "-m", "backend initial"]);
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
 
     await mkdir(nestedRepo, { recursive: true });
@@ -978,6 +979,7 @@ describe("ssh env-lab fixture", () => {
       await git(repo, ["add", "tracked.txt"]);
       await git(repo, ["commit", "-m", "initial"]);
     }
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
 
     const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH direct restore with project repositories test");

@@ -2612,6 +2612,62 @@
       "when": 1792713110842,
       "tag": "0374_rare_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1792433293974,
+      "tag": "0375_exotic_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1792488075066,
+      "tag": "0376_simple_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792563986433,
+      "tag": "0377_strange_romulus",
+      "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
+      "when": 1792569002878,
+      "tag": "0378_wide_sersi",
+      "breakpoints": true
+    },
+    {
+      "idx": 379,
+      "version": "7",
+      "when": 1792619441764,
+      "tag": "0379_panoramic_blink",
+      "breakpoints": true
+    },
+    {
+      "idx": 380,
+      "version": "7",
+      "when": 1792858999084,
+      "tag": "0380_shocking_ultron",
+      "breakpoints": true
+    },
+    {
+      "idx": 381,
+      "version": "7",
+      "when": 1792967951765,
+      "tag": "0381_curly_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 382,
+      "version": "7",
+      "when": 1793058290067,
+      "tag": "0382_last_meteorite",
+      "breakpoints": true
     }
   ]
 }

@@ -576,7 +576,7 @@ export async function restoreNativeChatReviewPresentationInTransaction(
   const [updated] = await db
     .update(heartbeatRuns)
     .set({
-      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(projection)}::jsonb`,
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(projection, heartbeatRuns.resultJson)}::jsonb`,
       updatedAt: new Date(),
     })
     .where(

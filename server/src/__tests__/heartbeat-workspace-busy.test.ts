@@ -1,3 +1,4 @@
+import { git } from "./helpers/terminal-workspace-fixture.js";
 import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -154,6 +155,7 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     await waitForPendingRunFailureReports();
     await cleanupFixture();
+    await fs.rm(path.join(workspaceCwd, ".git"), { recursive: true, force: true });
     executedRunIds.length = 0;
     executedInputs.clear();
     failExecutionRunIds.clear();
@@ -375,6 +377,7 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
         strategyType: "project_primary",
         name: "Inherited parent workspace",
         status: "active",
+        metadata: { config: { environmentId: agentEnvironmentId } },
         cwd: workspaceCwd,
         providerType: "local_fs",
         providerRef: workspaceCwd,
@@ -675,12 +678,19 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
   describe("reused shared execution workspace in a sandbox", () => {
     // The holder uses a different project workspace so only the shared execution
     // workspace connects the two runs.
-    const seedInheritedWorkspace = (input?: Parameters<typeof seedWorkspaceFixture>[0]) => seedWorkspaceFixture({
-      sharedExecutionWorkspace: true,
-      holderProjectWorkspaceId: randomUUID(),
-      issueWorkspaceSettings: { mode: "shared_workspace" },
-      ...input,
-    });
+    const seedInheritedWorkspace = async (input?: Parameters<typeof seedWorkspaceFixture>[0]) => {
+      // Cross-issue reuse requires a clean Git workspace before contention is checked.
+      git(workspaceCwd, "init", "--initial-branch=main");
+      git(workspaceCwd, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+        "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "initial");
+      expect(git(workspaceCwd, "status", "--porcelain")).toBe("");
+      return seedWorkspaceFixture({
+        sharedExecutionWorkspace: true,
+        holderProjectWorkspaceId: randomUUID(),
+        issueWorkspaceSettings: { mode: "shared_workspace" },
+        ...input,
+      });
+    };
 
     it("defers instead of failing while a live run holds the workspace", async () => {
       const fixture = await seedInheritedWorkspace();

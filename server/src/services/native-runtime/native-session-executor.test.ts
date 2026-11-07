@@ -4,7 +4,7 @@ import { environmentTaskOperationSchema } from "@paperclipai/plugin-sdk";
 import { trace } from "@opentelemetry/api";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { configuredEnvironment, configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
@@ -106,6 +106,12 @@ const githubAccess = vi.hoisted(() => ({
 vi.mock("./native-github-access.js", () => ({
   createNativeGitHubAccess: githubAccess.create,
 }));
+
+const runSecretRegistration = vi.hoisted(() => ({ register: vi.fn(async () => undefined) }));
+vi.mock("../run-secret-redaction.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../run-secret-redaction.js")>();
+  return { ...actual, createRunSecretRedactionRegistry: (db: Db) => ({ ...actual.createRunSecretRedactionRegistry(db), register: runSecretRegistration.register }) };
+});
 
 type BackendFactoryOptions = {
   runnerInstanceId?: string;
@@ -394,6 +400,7 @@ beforeEach(() => {
     complete: vi.fn(async () => ({ complete: true })), persistFailure: vi.fn(async () => undefined) });
   state.bundledPackManifestPath = null;
   state.bundledRunnerBinary = null;
+  runSecretRegistration.register.mockClear();
   state.createAssignedMcpTools.mockReset();
   state.resolveRunnerBinary.mockReset().mockReturnValue("/tmp/paperclip-runnerd");
   state.resolveRemoteRunnerBinary.mockReset().mockImplementation(async (input: { configuredPath?: string | null }) => input.configuredPath || "/tmp/paperclip-runnerd");
@@ -802,6 +809,7 @@ describe("remote runner process supervision", () => {
     await writeFile(fixture, 'require("node:net").createServer().listen(0,"127.0.0.1",()=>process.stdout.write("ready\\n"));');
     let child: ReturnType<typeof spawn> | undefined;
     let probes = 0;
+    let successfulProbes = 0;
     let settled = false;
     const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { command: string; args?: string[] }) => {
@@ -817,12 +825,14 @@ describe("remote runner process supervision", () => {
         return ok;
       }
       if (label === "paperclip-runner-monitor" && ++probes === 1) return { ...ok, exitCode: null, timedOut: true };
-      return await new Promise<{ exitCode: number | null; signal: null; timedOut: boolean; stdout: string; stderr: string }>(resolve => {
+      const result = await new Promise<{ exitCode: number | null; signal: null; timedOut: boolean; stdout: string; stderr: string }>(resolve => {
         execFile(input.command, input.args ?? [], { timeout: 2_000 }, (error, stdout, stderr) => resolve({
           exitCode: error ? typeof error.code === "number" ? error.code : null : 0,
           signal: null, timedOut: !!error?.killed, stdout, stderr,
         }));
       });
+      if (label === "paperclip-runner-monitor" && result.exitCode === 0) successfulProbes++;
+      return result;
     });
     const handle = createRemoteRunnerProcessLauncher({
       target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: root },
@@ -831,7 +841,8 @@ describe("remote runner process supervision", () => {
     })({ command: fixture, args: [], cwd: root, environment: {} });
     void handle.completion.then(() => { settled = true; }, () => { settled = true; });
     try {
-      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
+      // Let the real identity check finish before stopping the process it inspects.
+      await vi.waitFor(() => expect(successfulProbes).toBeGreaterThanOrEqual(1), { timeout: 5_000 });
       expect(settled).toBe(false);
       expect(handle.isExitConfirmed?.()).toBe(false);
       expect(() => process.kill(child!.pid!, 0)).not.toThrow();
@@ -5713,10 +5724,14 @@ function cancellationDb(options?: {
       ? options.coordinator
       : { runId: execution.binding.runId, assessmentId: null };
   let forUpdateCount = 0;
+  let eventLockCount = 0;
+  let nextEventSeq = 1;
+  const eventUpdates: Array<Record<string, unknown>> = [];
+  const events: Array<Record<string, unknown>> = [];
   let resultJsonUpdateCount = 0;
   const updates: Array<{ table: unknown; values: Record<string, unknown> }> =
     [];
-  const select = vi.fn(() => ({
+  const select = vi.fn((fields?: Record<string, unknown>) => ({
     from: (table: unknown) => {
       const rows =
         table === heartbeatRuns
@@ -5736,7 +5751,9 @@ function cancellationDb(options?: {
       Object.assign(query, {
         where: () => query,
         for: () => {
-          forUpdateCount += 1;
+          // Evidence locks allocate log sequences. Cancellation locks protect authority.
+          if (fields && "resultJson" in fields) forUpdateCount += 1;
+          else eventLockCount += 1;
           return query;
         },
         limit: () => result,
@@ -5747,6 +5764,11 @@ function cancellationDb(options?: {
   const update = vi.fn((table: unknown) => ({
     set: (values: Record<string, unknown>) => ({
       where: () => {
+        if (table === heartbeatRuns && "nextEventSeq" in values) {
+          eventUpdates.push(values);
+          nextEventSeq += 1;
+          return { returning: async () => [{ nextEventSeq }] };
+        }
         updates.push({ table, values });
         if (table === nativeRunFinalizations && coordinator) Object.assign(coordinator, values);
         const updatesResultJson = "resultJson" in values;
@@ -5768,21 +5790,66 @@ function cancellationDb(options?: {
       },
     }),
   }));
-  const tx = { select, update };
+  const insert = (table: unknown) => ({
+    values: (values: Record<string, unknown>) => ({
+      returning: async () => {
+        if (table !== heartbeatRunEvents) throw new Error("unexpected_cancellation_insert");
+        events.push(values);
+        return [{ id: `event-${events.length}`, ...values }];
+      },
+    }),
+  });
+  const tx = { select, update, insert };
   const db = {
     select,
     update,
     transaction: async (operation: (transaction: Db) => Promise<unknown>) =>
       operation(tx as unknown as Db),
   } as unknown as Db;
+  // The real-DB evidence suite tests atomic event allocation. This cancellation
+  // unit fixture records the writer boundary without reproducing its SQL CTE.
+  const append = runEventWriter.appendHeartbeatRunEvent;
+  const writer = vi.spyOn(runEventWriter, "appendHeartbeatRunEvent").mockImplementation(async (target, input) => {
+    if (target !== db) return append(target, input);
+    const row: typeof heartbeatRunEvents.$inferSelect = {
+      ...input, id: events.length + 1, seq: nextEventSeq++, createdAt: new Date(),
+      stream: input.stream ?? null, level: input.level ?? null, color: input.color ?? null,
+      message: input.message ?? null, payload: input.payload ?? null,
+      sourceInstanceId: null, sourceEventId: null, sourceSeq: null,
+      sourcePayloadSha256: null, protocolSchemaVersion: null,
+    };
+    events.push(row);
+    return { row, disposition: "committed", highestContiguousSourceSeq: 0 };
+  });
+  onTestFinished(() => writer.mockRestore());
   return {
     db,
     updates,
+    events,
+    eventUpdates,
     getForUpdateCount: () => forUpdateCount,
+    getEventLockCount: () => eventLockCount,
     getResultJson: () => currentResultJson,
     getResultJsonUpdateCount: () => resultJsonUpdateCount,
     tx,
   };
+}
+
+function expectCancellationEvidence(persistence: ReturnType<typeof cancellationDb>, outcome: "returned" | "failed") {
+  expect(persistence.events).toMatchObject([
+    { seq: 1, payload: { kind: "scope_started", scope: "stop" } },
+    { seq: 2, payload: { kind: "stop_request", requestedAt: expect.any(String) } },
+    { seq: 3, payload: { kind: "stop_result", outcome } },
+    { seq: 4, payload: { kind: "scope_finished", expectedRecords: 4, failedWrites: 0 } },
+  ]);
+  for (const event of persistence.events) {
+    expect(event).toMatchObject({
+      companyId: execution.binding.companyId,
+      agentId: execution.binding.agentId,
+      runId: execution.binding.runId,
+      eventType: "execution.evidence",
+    });
+  }
 }
 
 describe("native startup cancellation fence", () => {
@@ -6642,6 +6709,7 @@ describe("native session cancellation", () => {
       }),
     );
     expect(state.publishActivity).toHaveBeenCalledTimes(2);
+    expectCancellationEvidence(persistence, "returned");
   });
 
   it.each(["terminal_failure", "observed", "committed"])("rejects retry phase %s that changed after caller reservation, before any native effect", async phase => {
@@ -6788,6 +6856,9 @@ describe("native session cancellation", () => {
     ).rejects.toThrow("native_cancellation_coordinator_missing");
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expect(state.cancel).not.toHaveBeenCalled();
+    expectCancellationEvidence(persistence, "failed");
   });
 
   it("does not acknowledge an unverified retained runner as cancelled without an authenticated session", async () => {
@@ -6805,6 +6876,8 @@ describe("native session cancellation", () => {
     expect(persistence.updates).toEqual([]);
     expect(state.persistActivity).not.toHaveBeenCalled();
     expect(state.cancel).not.toHaveBeenCalled();
+    expect(persistence.getForUpdateCount()).toBe(0);
+    expectCancellationEvidence(persistence, "failed");
   });
 });
 
@@ -9095,6 +9168,8 @@ describe("native warm session supervision", () => {
           expect(githubAccess.create).toHaveBeenCalledTimes(replacesProvider ? 2 : 1);
           expect(githubAccess.activate.mock.calls.map(([binding]) => binding.runId))
             .toEqual([first.binding.runId, second.binding.runId]);
+          expect(runSecretRegistration.register).toHaveBeenCalledWith(first.binding.companyId, first.binding.runId, "stable-session-capability");
+          expect(runSecretRegistration.register).toHaveBeenCalledWith(second.binding.companyId, second.binding.runId, "stable-session-capability");
           // Replacement fixture publishes no new provider handle: both the old
           // owner and the unclaimed replacement broker must be cleaned up.
           expect(githubAccess.stop).toHaveBeenCalledTimes(replacesProvider ? 2 : 0);

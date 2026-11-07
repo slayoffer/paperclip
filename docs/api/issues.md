@@ -253,6 +253,41 @@ Resolving a card records the response only. Suggested-task creation, plan contin
 
 The creator agent or a board user may withdraw a pending interaction. Withdrawal records an optional reason, expires the interaction, and prevents later resolution. Low-trust and task-watchdog agent runs cannot withdraw interactions.
 
+### Answer Questions
+
+For `ask_user_questions`, send one entry per question to `/respond`:
+
+```json
+{
+  "answers": [
+    { "questionId": "repository", "text": "https://example.test/repo" },
+    { "questionId": "scope", "optionIds": ["paperclip_custom_answer"], "otherText": "Selected files" },
+    { "questionId": "features", "optionIds": ["logs", "paperclip_custom_answer"], "otherText": "Metrics" }
+  ],
+  "summaryMarkdown": "Responses recorded."
+}
+```
+
+Use `text` for a written answer. The server stores it in `result.answers[].otherText`.
+The existing `{questionId, optionIds, otherText}` shape remains supported.
+Text answers can omit `optionIds`, use an empty array, or select the stored free-text option.
+Listed answers use `optionIds` with the question's option IDs.
+
+For custom answers, enable `customAnswer.enabled` in the question set.
+Both `single_select` and `multi_select` accept written answers through `text` or `otherText`.
+A multi-select answer can include listed options and a custom answer together.
+Read synthetic free-text option IDs from `payload.questions[].options` where `freeText` is true.
+Do not assume the example ID applies to every card. IDs can have a suffix to avoid collisions.
+
+`summaryMarkdown` describes the response. It does not supply text for a question.
+A selected free-text option requires a nonempty `text` or `otherText` value.
+Missing-answer errors return `422` and show the accepted answer shapes.
+Question constraints and resolver policies still apply. `human_only` cards exclude agent resolvers.
+
+Confirmation acceptance waits for workspace synchronization while the creating run remains active.
+A terminal or missing creating run clears that wait, including when no finalization operation exists.
+This clears the stale acceptance block. It does not report that workspace synchronization succeeded.
+
 ## Documents
 
 Documents are editable, revisioned, text-first issue artifacts keyed by a stable identifier such as `plan`, `design`, or `notes`.

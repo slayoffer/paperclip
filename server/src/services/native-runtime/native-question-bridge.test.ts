@@ -5,7 +5,8 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
+import { clearNativeQuestionFixtures } from "./native-question-bridge.test-fixture.js";
 
 import {
   activityLog,
@@ -90,20 +91,10 @@ describeEmbeddedPostgres("native question bridge", () => {
     // heartbeat.ts), so that dispatch can still be writing heartbeat_runs,
     // issues, or activity_log rows when this hook starts. Drain every
     // in-flight run to quiescence first, or its late write races the
-    // TRUNCATE below and can deadlock.
+    // fixture cleanup below and can deadlock.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     nativeQuestionBridgeInternals.resetForTests();
-    await db.execute(sql.raw(`
-      TRUNCATE TABLE
-        "activity_log",
-        "issue_thread_interactions",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "issues",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `));
+    await clearNativeQuestionFixtures(db);
   });
 
   afterAll(async () => {
@@ -608,7 +599,10 @@ describeEmbeddedPostgres("native question bridge", () => {
       expect(runInsideTransaction?.status).toBe("running");
     });
 
-    expect(postCommitActions).toHaveLength(1);
+    expect(postCommitActions).toEqual([
+      { type: "cancel_native_question_run", runId, issueId, issueStatus: "done" },
+      { type: "close_terminal_workspaces", companyId, issueId },
+    ]);
     await executeIssuePostCommitActions(db, postCommitActions);
     const [persistedRun] = await db.select({ status: heartbeatRuns.status })
       .from(heartbeatRuns)

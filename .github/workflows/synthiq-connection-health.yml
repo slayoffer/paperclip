@@ -1,0 +1,82 @@
+# Fork-only connection checks. Do not include this workflow in an upstream patch.
+name: Synthiq connection health tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-connection-health.yml
+      - server/src/services/connection-health-credentials.ts
+      - server/src/services/tool-access.ts
+      - server/src/services/connection-vault-grant.ts
+      - server/src/services/connection-intent-source.ts
+      - server/src/services/connection-intents.ts
+      - server/src/services/secret-rotation-commit.ts
+      - server/src/services/secrets.ts
+      - server/src/services/tool-gateway-errors.ts
+      - server/src/services/tool-gateway.ts
+      - server/src/services/tool-connection-discovery.ts
+      - server/src/services/heartbeat.ts
+      - server/src/__tests__/tool-gateway-shared-connection-failure.test.ts
+      - server/src/services/mcp-http.ts
+      - server/src/services/connection-credentials.ts
+      - server/src/__tests__/connection-health-isolation.test.ts
+      - server/src/__tests__/connection-intents-service.test.ts
+      - server/src/__tests__/tool-gateway-service.test.ts
+      - server/src/__tests__/secrets-service.test.ts
+      - packages/db/src/**
+      - packages/shared/src/**
+      - package.json
+      - pnpm-lock.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-connection-health-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  connection-health:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Locate package store
+        id: store
+        run: |
+          corepack enable
+          echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: synthiq-connection-health-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/package.json') }}
+      - name: Install dependencies
+        # Release metadata requires an update to the inherited lockfile.
+        run: corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check shared types
+        run: corepack pnpm --filter @paperclipai/shared typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test connection health and credential rotation
+        run: >-
+          corepack pnpm exec vitest run --project @paperclipai/server
+          server/src/__tests__/connection-health-isolation.test.ts
+          server/src/__tests__/tool-gateway-shared-connection-failure.test.ts
+          server/src/__tests__/connection-intents-service.test.ts
+          server/src/__tests__/tool-gateway-service.test.ts
+          server/src/__tests__/secrets-service.test.ts
+          --no-file-parallelism
+          --maxWorkers=1

@@ -230,6 +230,23 @@ describePostgres("heartbeat run state database wiring", () => {
     expect((await state.listRuns(companyId)).map((row) => row.id)).toEqual([run.id]);
   });
 
+  it("keeps a saved legacy session key separate from canonical issue admission", async () => {
+    const { companyId, agent, issue, state } = await fixture();
+    const taskKey = `legacy-${issue.id}`;
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: agent.id, invocationSource: "assignment", status: "failed",
+      issueId: issue.id, contextSnapshot: { taskKey }, sessionIdAfter: "saved-session",
+    }).returning();
+    await state.upsertTaskSession({
+      companyId, agentId: agent.id, adapterType: agent.adapterType, taskKey,
+      sessionParamsJson: { sessionId: "saved-session", cwd: "/saved-legacy-workspace" },
+      sessionDisplayId: "saved-session", lastRunId: run.id, lastError: null,
+    });
+    expect(await state.resolveExplicitResumeSessionOverride(agent, { resumeFromRunId: run.id }, null))
+      .toMatchObject({ issueId: issue.id, taskId: issue.id, taskKey,
+        sessionParams: { sessionId: "saved-session", cwd: "/saved-legacy-workspace" } });
+  });
+
   it("subtracts prior cumulative usage while excluding the current run", async () => {
     const { companyId, agent, state } = await fixture();
     await db.insert(heartbeatRuns).values({

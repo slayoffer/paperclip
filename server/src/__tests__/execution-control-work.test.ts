@@ -123,7 +123,11 @@ describe.skipIf(!support.supported)("execution-control durable work", () => {
   }, 90000);
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await temporary?.cleanup(); });
   beforeEach(async () => {
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    });
     companyId = randomUUID(); agentId = randomUUID(); issueId = randomUUID(); calls = 0; errors.length = 0;
     await db.insert(companies).values({ id: companyId, name: "Idle execution", issuePrefix: "EXE" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Worker", adapterType: "codex_local" });

@@ -2006,7 +2006,7 @@ describe("createHttp2BridgeServer + createSandboxHttp2BridgeGateway", () => {
       const forwardedCount = seen.length;
       for (const requestPath of [
         "/api/heartbeat-runs/run-1/cancel",
-        "/api/issues/issue-1/recovery-actions/resolve",
+        "/api/issues/issue-1/recovery-actions/retry-workspace-export",
       ]) {
         const response = await gateway.forwardRequest({
           method: "POST", path: requestPath, query: "", headers: {},

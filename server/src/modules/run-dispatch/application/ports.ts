@@ -41,9 +41,16 @@ export type CancelStaleQueuedRunInput = {
   expectedStatus: "queued" | "running";
 };
 
+export type LegacyRestartDispatchClaim = {
+  controllerBootId: string;
+  attempt: number;
+  sessionId: string;
+};
+
 export type DispatchResolvedInteractionInput<T> = CancelStaleQueuedRunInput & {
   reservationId: string;
   recoveryLeaseOwner?: string;
+  legacyRestartClaim?: LegacyRestartDispatchClaim;
   enforceContinuationOwnership?: boolean;
   dispatch: (markDispatchStarted: () => void) => Promise<T>;
 };

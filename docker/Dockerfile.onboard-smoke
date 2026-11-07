@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 
 ARG NODE_MAJOR=24
 ARG PAPERCLIPAI_VERSION=latest
@@ -17,14 +17,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
   PAPERCLIPAI_VERSION=${PAPERCLIPAI_VERSION}
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg locales \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg locales libbrotli1=1.1.0-2ubuntu0.1 libbrotli1=1.1.0-2ubuntu0.1 \
   && mkdir -p /etc/apt/keyrings \
   && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
   && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
     > /etc/apt/sources.list.d/nodesource.list \
   && apt-get update \
-  && apt-get install -y --no-install-recommends nodejs \
+  && apt-get install -y --no-install-recommends nodejs=24.22.1-1nodesource1=24.22.1-1nodesource1 \
   && locale-gen en_US.UTF-8 \
   && groupadd --gid 10001 paperclip \
   && useradd --create-home --shell /bin/bash --uid "${HOST_UID}" --gid 10001 paperclip \

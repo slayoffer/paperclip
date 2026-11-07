@@ -2259,16 +2259,23 @@ mod tests {
             .unwrap();
         });
         invalid_connected.recv().unwrap();
-        let invalid_failure = match AuthenticatedTransport::connect(
-            &endpoint,
-            &config,
-            &state,
-            Some(&ticket),
-            None,
-            Instant::now() + config.max_runtime,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("invalid listener peer unexpectedly authenticated"),
+        let deadline = Instant::now() + config.max_runtime;
+        let invalid_failure = loop {
+            match AuthenticatedTransport::connect(
+                &endpoint,
+                &config,
+                &state,
+                Some(&ticket),
+                None,
+                deadline,
+            ) {
+                Err(error) => break error,
+                Ok(Some(_)) => panic!("invalid listener peer unexpectedly authenticated"),
+                Ok(None) => {
+                    assert!(Instant::now() < deadline, "invalid peer was not accepted");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
         };
         assert!(!invalid_failure.bootstrap_maybe_consumed);
         invalid_peer.join().unwrap();
@@ -2308,16 +2315,23 @@ mod tests {
             );
         });
         valid_connected.recv().unwrap();
-        let (_, accepted) = AuthenticatedTransport::connect(
-            &endpoint,
-            &config,
-            &state,
-            Some(&ticket),
-            None,
-            Instant::now() + config.max_runtime,
-        )
-        .unwrap()
-        .unwrap();
+        let deadline = Instant::now() + config.max_runtime;
+        let (_, accepted) = loop {
+            if let Some(accepted) = AuthenticatedTransport::connect(
+                &endpoint,
+                &config,
+                &state,
+                Some(&ticket),
+                None,
+                deadline,
+            )
+            .unwrap()
+            {
+                break accepted;
+            }
+            assert!(Instant::now() < deadline, "valid peer was not accepted");
+            thread::sleep(Duration::from_millis(1));
+        };
         assert_eq!(accepted.connection.connection_id, "connection_1");
         assert_eq!(accepted.lease.unwrap().expose().unwrap(), "lease-secret");
         valid_peer.join().unwrap();
@@ -2488,9 +2502,16 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        // The kernel can round socket timeouts to its timer resolution.
+        let reference_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let reference_socket =
+            TcpStream::connect(reference_listener.local_addr().unwrap()).unwrap();
+        reference_socket
+            .set_read_timeout(Some(RUNTIME_READ_TIMEOUT))
+            .unwrap();
         assert_eq!(
             transport.socket.read_timeout().unwrap(),
-            Some(RUNTIME_READ_TIMEOUT)
+            reference_socket.read_timeout().unwrap()
         );
         assert_eq!(welcome.connection.lease_id, "lease_1");
         assert_eq!(welcome.lease.unwrap().expose().unwrap(), "lease-secret");

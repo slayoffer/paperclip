@@ -9,6 +9,7 @@ const {
   ensureAdapterExecutionTargetCommandResolvable,
   maybeRunSandboxInstallCommand,
   runAdapterExecutionTargetProcess,
+  runAdapterExecutionTargetShellCommand,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
   prepareAdapterExecutionTargetRuntime,
@@ -31,6 +32,7 @@ const {
     ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
     ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
     maybeRunSandboxInstallCommand: vi.fn(async () => null),
+    runAdapterExecutionTargetShellCommand: vi.fn(),
     runAdapterExecutionTargetProcess: vi.fn(async () => ({
       exitCode: 0,
       signal: null,
@@ -92,6 +94,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ensureAdapterExecutionTargetCommandResolvable,
     maybeRunSandboxInstallCommand,
     runAdapterExecutionTargetProcess,
+    runAdapterExecutionTargetShellCommand,
     describeAdapterExecutionTarget,
     resolveAdapterExecutionTargetCwd,
     prepareAdapterExecutionTargetRuntime,
@@ -137,6 +140,34 @@ describe("codex remote environment diagnostics", () => {
       const dir = scratchDirs.pop();
       if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it.each(["ssh", "sandbox"])("probes codex when the configured wrapper is absent on %s", async (transport) => {
+    vi.stubEnv("PAPERCLIP_HOST_ONLY_TEST", "host-only");
+    runAdapterExecutionTargetShellCommand
+      .mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, stdout: "paperclip-command-missing\n" })
+      .mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, stdout: "paperclip-command-present\n" });
+    const target = {
+      kind: "remote", transport, remoteCwd: "/remote/workspace",
+      spec: { remoteCwd: "/remote/workspace" },
+    } as AdapterExecutionTarget;
+    const result = await testEnvironment({
+      companyId: "company-1", adapterType: "codex_local", executionTarget: target,
+      config: { engine: "cli", command: "/missing/codex-owner-apps", env: { OPENAI_API_KEY: "test-key" } },
+    });
+
+    expect(result.status).toBe("warn");
+    expect(result.checks.filter((check) => check.code === "codex_command_fallback")).toHaveLength(1);
+    expect(result.checks).not.toContainEqual(expect.objectContaining({ code: "codex_command_unresolvable" }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "codex_hello_probe_passed" }));
+    expect(runAdapterExecutionTargetShellCommand).toHaveBeenCalledWith(
+      expect.any(String), target, expect.any(String),
+      expect.objectContaining({ env: { OPENAI_API_KEY: "test-key" } }),
+    );
+    const calls = runAdapterExecutionTargetProcess.mock.calls as unknown as Array<[
+      string, unknown, string, string[], unknown,
+    ]>;
+    expect(calls[0]?.[3]).toContain("codex");
   });
 
   it("stages managed CODEX_HOME in an isolated runtime dir and keeps the probe cwd on the original remote workspace", async () => {

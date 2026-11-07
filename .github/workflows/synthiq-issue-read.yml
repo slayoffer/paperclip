@@ -1,0 +1,67 @@
+# Fork-only issue read checks. Exclude this workflow from an upstream patch.
+name: Synthiq issue read tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - .github/workflows/synthiq-issue-read.yml
+      - .github/scripts/tests/issue-read-workflow.test.mjs
+      - server/src/**
+      - packages/db/src/**
+      - packages/shared/src/**
+      - ui/src/api/issue-light.ts
+      - package.json
+      - pnpm-lock.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-issue-read-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  issue-read:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # The merge commit includes suites added to the release target.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Check the issue read workflow contract
+        run: node --test .github/scripts/tests/issue-read-workflow.test.mjs
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check shared types
+        run: corepack pnpm --filter @paperclipai/shared typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test issue reads and run projections
+        env:
+          PAPERCLIP_ISSUE_READ_BENCHMARK_OUTPUT: ${{ runner.temp }}/issue-read-benchmark.json
+        run: |
+          corepack pnpm exec vitest run --no-file-parallelism \
+            server/src/__tests__/issue-read-performance.test.ts \
+            server/src/__tests__/issue-light-read-routes.test.ts \
+            server/src/__tests__/issues-goal-context-routes.test.ts \
+            server/src/services/agent-read-batch.test.ts \
+            server/src/__tests__/heartbeat-runtime-state.test.ts \
+            server/src/services/run-cancellation.test.ts \
+            server/src/__tests__/run-identity.test.ts \
+            server/src/__tests__/heartbeat-run-event-sequencing.test.ts \
+            server/src/modules/active-run-watchdog/domain/policy.test.ts \
+            server/src/modules/active-run-watchdog/application/use-cases.test.ts
+          test -s "$PAPERCLIP_ISSUE_READ_BENCHMARK_OUTPUT"

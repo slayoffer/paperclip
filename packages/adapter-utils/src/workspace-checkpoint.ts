@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { WorkspaceManifestWriter, WorkspaceManifestMap, workspacePaths, workspacePathMatcher } from "./workspace-manifest.js";
-import { shouldExcludePath, excludePatternMatches, isRelativePathOrDescendant } from "./exclude-patterns.js";
+import { shouldExcludePath, excludePatternMatches, isRelativePathOrDescendant, parseExcludePattern } from "./exclude-patterns.js";
 import { openDirectorySnapshot, type DirectorySnapshot } from "./workspace-restore-merge.js";
 
 export async function writeCheckpointBaseline(snapshot: DirectorySnapshot, filePath: string): Promise<void> {
@@ -114,7 +114,7 @@ async function checkpointMain(
 }
 
 export function workspaceCheckpointScript(): string {
-  return `import fs from 'node:fs/promises';\nimport path from 'node:path';\nimport { DatabaseSync } from 'node:sqlite';\nimport { createHash } from 'node:crypto';\nimport { createReadStream } from 'node:fs';\nconst __name = (fn) => fn;\n${isRelativePathOrDescendant.toString()}\nfunction pathContainsSegmentOrDescendant(relative, segment) { return relative === segment || relative.startsWith(segment + '/') || relative.endsWith('/' + segment) || relative.includes('/' + segment + '/'); }\n${excludePatternMatches.toString()}\n${shouldExcludePath.toString()}\nawait (${checkpointMain.toString()})(fs, path, DatabaseSync, createHash, createReadStream, shouldExcludePath);\n`;
+  return `import fs from 'node:fs/promises';\nimport path from 'node:path';\nimport { DatabaseSync } from 'node:sqlite';\nimport { createHash } from 'node:crypto';\nimport { createReadStream } from 'node:fs';\nconst __name = (fn) => fn;\n${isRelativePathOrDescendant.toString()}\nfunction pathContainsSegmentOrDescendant(relative, segment) { return relative === segment || relative.startsWith(segment + '/') || relative.endsWith('/' + segment) || relative.includes('/' + segment + '/'); }\n${parseExcludePattern.toString()}\n${excludePatternMatches.toString()}\n${shouldExcludePath.toString()}\nawait (${checkpointMain.toString()})(fs, path, DatabaseSync, createHash, createReadStream, shouldExcludePath);\n`;
 }
 
 export function readCheckpointSnapshot(filePath: string, baseline: DirectorySnapshot): DirectorySnapshot {

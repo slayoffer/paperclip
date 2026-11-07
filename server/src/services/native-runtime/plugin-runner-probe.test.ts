@@ -37,8 +37,9 @@ vi.mock("../../realtime/runner-prp-outbound.js", async importOriginal => {
 
 describe("plugin Runner setup", () => {
   beforeAll(() => {
-    execFileSync("cargo", ["build", "--release", "--locked", "--manifest-path", "packages/paperclip-runner/runner/Cargo.toml",
-      "-p", "paperclip-runner-core", "--bin", "paperclip-runnerd", "--bin", "fake-codex-app-server"], { stdio: "pipe" });
+    execFileSync("cargo", ["build", "--release", "--locked", "--manifest-path", "runner/Cargo.toml",
+      "-p", "paperclip-runner-core", "--bin", "paperclip-runnerd", "--bin", "fake-codex-app-server"],
+    { cwd: resolve("packages/paperclip-runner"), stdio: "pipe" });
   }, 600_000);
   it.each([
     { config: { provider: "acpx", acpxAgent: "pi", model: "fixture-model", piThinkingLevel: "high" }, options: { transportOptions: { acpxAgent: "pi", piThinkingLevel: "high" } } },

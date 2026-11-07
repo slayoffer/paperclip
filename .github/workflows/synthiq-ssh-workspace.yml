@@ -1,0 +1,201 @@
+# Fork-only workspace checks. Do not include this workflow in an upstream patch.
+name: Synthiq SSH workspace tests
+
+on:
+  pull_request:
+    branches: ["synthiq/**"]
+    paths:
+      - ".github/workflows/synthiq-ssh-workspace.yml"
+      - ".github/scripts/tests/ssh-workspace-verification.test.mjs"
+      - "packages/adapter-utils/**"
+      - "packages/adapters/codex-local/**"
+      - "packages/adapters/claude-local/**"
+      - "server/src/services/ssh-in-place-*.ts"
+      - "server/src/services/managed-worktree-git.ts"
+      - "server/src/services/workspace-runtime.ts"
+      - "server/src/__tests__/managed-worktree-git.test.ts"
+      - "server/src/index.ts"
+      - "server/src/services/execution-control-sweeper.ts"
+      - "server/src/__tests__/execution-control-sweeper.test.ts"
+      - "server/src/services/environment-runtime.ts"
+      - "server/src/services/environment-ssh-driver.ts"
+      - "server/src/services/heartbeat.ts"
+      - "server/src/services/run-execution-evidence*"
+      - "server/src/services/reconcile-execution-evidence.ts"
+      - "server/src/services/local-evidence-projection.ts"
+      - "server/src/services/stop-request-evidence.test.ts"
+      - "server/src/services/run-cancellation*"
+      - "server/src/services/legacy-restart-recovery*"
+      - "server/src/services/legacy-restart-ssh-stop.test.ts"
+      - "server/src/services/heartbeat/recovery.ts"
+      - "server/src/shutdown.ts"
+      - "server/src/__tests__/ssh-restart-writer-stop.test.ts"
+      - "server/src/services/native-runtime/native-session-executor.ts"
+      - "server/src/routes/agents.ts"
+      - "server/src/routes/openapi.ts"
+      - "server/src/__tests__/execution-evidence.test.ts"
+      - "server/src/services/heartbeat-github-launchers*"
+      - "server/src/__tests__/heartbeat-ssh-in-place.test.ts"
+      - "server/src/__tests__/ssh-in-place-*.test.ts"
+      - "server/src/__tests__/helpers/ssh-in-place-heartbeat.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthiq-ssh-workspace-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ssh-workspace:
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Install the SSH test server
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server
+      - name: Require writer containment tests
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "PAPERCLIP_REQUIRE_WRITER_CONTAINMENT_TESTS=1" >> "$GITHUB_ENV"
+          systemd-run --user --scope --quiet --expand-environment=no true
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build test dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check adapter types
+        run: corepack pnpm --filter @paperclipai/adapter-utils typecheck
+      - name: Check server types
+        working-directory: server
+        run: corepack pnpm exec tsc --noEmit
+      - name: Test workspace preparation and restore
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000
+          packages/adapter-utils/src/workspace-snapshot-responsiveness.test.ts
+          packages/adapter-utils/src/workspace-operation-schedule.test.ts
+          packages/adapter-utils/src/remote-workspace-schedule.test.ts
+          packages/adapter-utils/src/remote-managed-runtime.test.ts
+          packages/adapter-utils/src/github-launcher-directory.test.ts
+          packages/adapter-utils/src/github-launcher-environment.test.ts
+          packages/adapter-utils/src/workspace-restore-merge.test.ts
+          packages/adapter-utils/src/workspace-restore-contention.test.ts
+          packages/adapter-utils/src/workspace-restore-scan-races.test.ts
+          packages/adapter-utils/src/ssh-sync-regressions.test.ts
+          packages/adapter-utils/src/directory-merge-lock.test.ts
+          packages/adapter-utils/src/ssh-fixture.test.ts
+          packages/adapter-utils/src/ssh-command.test.ts
+          packages/adapter-utils/src/ssh-environment.test.ts
+          packages/adapter-utils/src/ssh-environment.integration.test.ts
+          packages/adapter-utils/src/ssh-git-remotes.test.ts
+          packages/adapter-utils/src/ssh-git-boundary.test.ts
+          server/src/__tests__/managed-worktree-git.test.ts
+          server/src/services/heartbeat-github-launchers.test.ts
+          server/src/__tests__/heartbeat-ssh-in-place.test.ts
+          server/src/__tests__/ssh-in-place-release.test.ts
+          server/src/__tests__/ssh-in-place-termination.test.ts
+          server/src/__tests__/ssh-restart-writer-stop.test.ts
+          server/src/__tests__/ssh-in-place-workspace.test.ts
+          server/src/__tests__/ssh-in-place-lock.test.ts
+          packages/adapter-utils/src/ssh-writer-termination.test.ts
+          server/src/__tests__/ssh-in-place-lock-checks.test.ts
+          server/src/__tests__/ssh-in-place-reconciliation.test.ts
+          server/src/__tests__/execution-control-sweeper.test.ts
+
+      - name: Test complete local execution evidence
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          packages/adapter-utils/src/local-execution-evidence.test.ts
+          server/src/services/run-execution-evidence.test.ts
+          server/src/services/stop-request-evidence.test.ts
+          server/src/services/run-cancellation.test.ts
+          server/src/services/legacy-restart-recovery.test.ts
+          server/src/services/legacy-restart-ssh-stop.test.ts
+          server/src/__tests__/execution-evidence.test.ts
+          server/src/__tests__/heartbeat-native-runner-cancellation.test.ts
+          server/src/__tests__/agent-cross-tenant-authz-routes.test.ts
+          server/src/__tests__/agent-permissions-routes.test.ts
+      - name: Test Stop and shutdown safety
+        run: >-
+          corepack pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --testTimeout=90000 --hookTimeout=90000
+          server/src/__tests__/heartbeat-process-recovery.test.ts
+          --testNamePattern 'cancel|shutdown|Stop'
+
+  repository-verification-shards:
+    name: Repository verification (${{ matrix.shard }}/6)
+    if: github.repository == 'slayoffer/paperclip'
+    runs-on: ubuntu-24.04
+    # Match the passing fork release shards; the unsharded launcher exceeded 150 minutes.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.22.1"
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --no-frozen-lockfile
+      - name: Build verification dependencies
+        run: |
+          corepack pnpm --filter @paperclipai/paperclip-runner build:typescript
+          corepack pnpm --filter @paperclipai/plugin-sdk build
+      - name: Check the verification workflow contract
+        run: node --test .github/scripts/tests/ssh-workspace-verification.test.mjs
+      - name: Check all package types
+        if: matrix.shard == 1
+        run: corepack pnpm -r typecheck
+      - name: Run the repository test suite
+        timeout-minutes: 150
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
+        run: |
+          corepack pnpm run preflight:workspace-links
+          test_root="$(mktemp -d /tmp/pv-XXXXXX)"
+          export NODE_ENV=test
+          export PAPERCLIP_HOME="$test_root/h"
+          export PAPERCLIP_CONFIG="$PAPERCLIP_HOME/config.json"
+          export PAPERCLIP_INSTANCE_ID="vt-$GITHUB_RUN_ID-${TEST_SHARD%/*}"
+          export TMPDIR="$test_root/t"
+          mkdir -p "$PAPERCLIP_HOME" "$TMPDIR"
+          # Same rule as fork-release-tests.yml (#88): skip the real-runnerd Codex
+          # test only on a runner that denies unprivileged user and network namespaces.
+          if ! unshare --user --map-root-user --net true 2>/dev/null; then export PAPERCLIP_TEST_NO_USERNS_SANDBOX=1; fi
+          corepack pnpm exec vitest run --shard="$TEST_SHARD" --exclude '**/dist/**' --no-file-parallelism --maxWorkers=1 --pool=forks --isolate
+      - name: Build the repository
+        if: matrix.shard == 1
+        run: corepack pnpm build
+
+  repository-verification:
+    if: ${{ always() && github.repository == 'slayoffer/paperclip' }}
+    needs: [repository-verification-shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification shard
+        env:
+          SHARDS_RESULT: ${{ needs.repository-verification-shards.result }}
+        run: |
+          test "$SHARDS_RESULT" = success

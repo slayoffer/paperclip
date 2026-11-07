@@ -7,6 +7,8 @@ import type { StorageService } from "../storage/types.js";
 import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
 import { verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 export { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
+import { hasOwnLinkedWorktreeGitDirectory, repairMissingManagedWorktreeGit } from "./managed-worktree-git.js";
+import { assertWorkspaceReuseIsSafe } from "./workspace-reuse-safety.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -44,7 +46,7 @@ import {
 import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
 import { conflict, unprocessable } from "../errors.js";
-import { resolveHomeAwarePath } from "../home-paths.js";
+import { resolveHomeAwarePath, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { hasVerifiedWorktreeSeedManifest, isVerifiedWorktreeSeedManifest } from "../worktree-seed-manifest.js";
 import {
   buildManagedWorkspaceGuestEnv,
@@ -135,6 +137,21 @@ export interface ExecutionWorkspaceAdditionalInput {
   workspaceId: string | null;
   repoUrl: string | null;
   repoRef: string | null;
+}
+
+/**
+ * A directory outside Git that every issue shares by construction, so the cross-issue reuse guard
+ * cannot protect one issue's files from another there: the project-less agent home, and the managed
+ * directory of a project that has no repository (`<projects>/<company>/<project>/_default`). Every
+ * issue of such a project resolves to that same directory and has no separate workspace to fall back
+ * to, so failing closed blocked the whole project while any other issue's record was active (SYNA:
+ * guild-ops, 2026-10-24..28). The guard still requires that Git reports no repository and that no
+ * `.git` marker exists, so a damaged checkout keeps failing closed.
+ */
+function permitsSharedNonGitDirectory(base: ExecutionWorkspaceInput, companyId: string): boolean {
+  if (base.source === "agent_home" && base.projectId === null) return true;
+  if (base.source !== "project_primary" || base.repoUrl !== null || base.workspaceId !== null || !base.projectId) return false;
+  return path.resolve(base.baseCwd) === resolveManagedProjectWorkspaceDir({ companyId, projectId: base.projectId, repoName: null });
 }
 
 export interface ExecutionWorkspaceInput {
@@ -992,10 +1009,18 @@ async function refreshRemoteTrackingBaseRefWithDiagnostic(
     .catch(() => { diagnostic.remoteLookup = "failed"; return null; });
   if (!remoteUrl) return { warnings: [], diagnostic };
 
-  const auth = resolveGitAuth ? await resolveGitAuth(remoteUrl).then((value) => {
-    diagnostic.authLookup = value ? "resolved" : "unavailable";
-    return value;
-  }).catch(() => { diagnostic.authLookup = "failed"; return null; }) : null;
+  let auth: GitRemoteAuthInvocation | null;
+  try {
+    auth = resolveGitAuth ? await resolveGitAuth(remoteUrl) : null;
+    if (resolveGitAuth) diagnostic.authLookup = auth ? "resolved" : "unavailable";
+  } catch {
+    diagnostic.authLookup = "failed";
+    // Provider failures must not fall back to a different ambient identity.
+    return {
+      warnings: [`Could not refresh base ref ${baseRef}: Git credential resolution failed. No fetch was attempted.`],
+      diagnostic,
+    };
+  }
   try {
     await runGit([
       ...(auth?.configArgs ?? []),
@@ -2137,6 +2162,14 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   const expectedBranchName = input.expectedBranchName?.trim();
   if (!expectedBranchName) return { branchName: null, reconciledForward: false, warnings: [] };
 
+  if (!await hasOwnLinkedWorktreeGitDirectory(input.worktreePath, input.repoRoot)) {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Git metadata does not identify the execution worktree at "${input.worktreePath}".`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable", reasonCode: "wrong_git_directory",
+        worktreePath: input.worktreePath, executionWorkspaceId: input.executionWorkspaceId ?? null } },
+    );
+  }
+
   const currentBranch = input.actualBranchName !== undefined
     ? input.actualBranchName
     : await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], input.worktreePath).catch(() => null);
@@ -2909,6 +2942,17 @@ export async function inspectManagedGitWorktreeBranch(input: {
     };
   }
 
+  // A primary checkout inspected as its own owner has no linked-worktree administration directory.
+  if (worktreePath !== repoRoot && !await hasOwnLinkedWorktreeGitDirectory(worktreePath, repoRoot)) {
+    return {
+      ...base,
+      valid: false,
+      reason: "Git does not use this worktree's own administration directory",
+      reasonCode: "wrong_git_directory",
+      repoRoot,
+    };
+  }
+
   const actualBranchName = await runGit(
     ["symbolic-ref", "--quiet", "--short", "HEAD"],
     worktreePath,
@@ -3354,6 +3398,13 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: input.base.baseCwd,
+      allowNonGitDirectory: permitsSharedNonGitDirectory(input.base, input.agent.companyId),
+    });
     return {
       ...input.base,
       strategy: "project_primary",
@@ -3371,21 +3422,47 @@ export async function realizeExecutionWorkspace(input: {
   let branchName: string;
   if (requestedExistingBranch) {
     // Exact-branch mode: attach the requested pre-existing branch verbatim.
-    // The branch must already exist; realization never creates, renames, or
-    // resets it, and any mismatch below fails closed instead of falling back
-    // to a derived branch or the shared checkout.
-    const existingBranchSha = await runGit(
+    // A remote-only branch may acquire a local ref. Never move an existing
+    // local branch or fall back to a derived branch or the shared checkout.
+    const localRef = `refs/heads/${requestedExistingBranch}`;
+    const remoteRef = `refs/remotes/origin/${requestedExistingBranch}`;
+    const readLocalBranch = () => runGit(
       ["rev-parse", "--verify", "--quiet", `refs/heads/${requestedExistingBranch}`],
       repoRoot,
     ).catch(() => null);
+    let existingBranchSha = await readLocalBranch();
+    let fetchWarnings: string[] = [];
+    if (!existingBranchSha) {
+      const validBranch = await runGit(["check-ref-format", localRef], repoRoot)
+        .then(() => true).catch(() => false);
+      const originUrl = validBranch
+        ? await runGit(["remote", "get-url", "origin"], repoRoot).catch(() => null)
+        : null;
+      if (originUrl) {
+        fetchWarnings = await refreshRemoteTrackingBaseRef(repoRoot, remoteRef, input.resolveGitAuth);
+        // A failed fetch must not revive a stale remote-tracking ref.
+        if (fetchWarnings.length === 0 && await resolveBaseRefSha(repoRoot, remoteRef)) {
+          try {
+            await runGit(["branch", "--no-track", "--", requestedExistingBranch, remoteRef], repoRoot);
+          } catch (error) {
+            // Another realization may create the branch during the fetch.
+            if (!await readLocalBranch()) throw error;
+          }
+        }
+      }
+      existingBranchSha = await readLocalBranch();
+    }
     if (!existingBranchSha) {
       throw new WorkspaceRuntimeValidationFailure(
-        `Workspace strategy pins existing branch "${requestedExistingBranch}", but no local branch with that name exists in "${repoRoot}". Create or fetch the branch first, or remove workspaceStrategy.existingBranch; exact-branch realization never creates a branch.`,
+        `Workspace strategy pins existing branch "${requestedExistingBranch}", but local ref "${localRef}" is missing in "${repoRoot}". Remote ref "${remoteRef}" could not be fetched from origin. Check the branch and repository access.`,
         {
           workspaceValidation: {
             reason: "existing_branch_not_found",
             requestedExistingBranch,
             repoRoot,
+            localRef,
+            remoteRef,
+            fetchError: fetchWarnings[0] ?? null,
           },
         },
       );
@@ -3441,6 +3518,12 @@ export async function realizeExecutionWorkspace(input: {
   await fs.mkdir(worktreeParentDir, { recursive: true });
 
   async function reuseExistingWorktree(reusablePath: string, effectiveBranchName = branchName, extraWarnings: string[] = []) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: reusablePath,
+    });
     if (reusablePath !== worktreePath) await input.beforeSourceCopy?.(repoRoot, reusablePath);
     // An exact-branch attach must never move the requested branch, so skip
     // the unstarted-worktree fast-forward that template-derived reuse gets.
@@ -3520,6 +3603,17 @@ export async function realizeExecutionWorkspace(input: {
   }
 
   async function validateReusableWorktree(reusablePath: string) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      issueId: input.issue?.id,
+      cwd: reusablePath,
+    });
+    const repairWarnings = await repairMissingManagedWorktreeGit({
+      repoRoot, worktreePath: reusablePath, branchName,
+      runtimeOwned: !requestedExistingBranch && input.recordedBranchOwnership?.createdByRuntime === true,
+      recorder: input.recorder,
+    });
     const validation = await validateLinkedGitWorktree({
       repoRoot,
       worktreePath: reusablePath,
@@ -3558,10 +3652,10 @@ export async function realizeExecutionWorkspace(input: {
       return {
         validation: nextValidation,
         branchName: effectiveBranchName,
-        warnings: coherence.warnings,
+        warnings: [...repairWarnings, ...coherence.warnings],
       };
     }
-    return { validation, branchName, warnings: [] };
+    return { validation, branchName, warnings: repairWarnings };
   }
 
   const existingWorktree = await directoryExists(worktreePath);
@@ -3585,7 +3679,11 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
-    throw new Error(`Configured worktree path "${worktreePath}" already exists and is not a reusable git worktree${reason}.`);
+    throw new WorkspaceRuntimeValidationFailure(
+      `Configured worktree path "${worktreePath}" already exists and is not a reusable git worktree${reason}.`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable",
+        reasonCode: validation && !validation.valid ? validation.reasonCode : null, worktreePath } },
+    );
   }
 
   const registeredBranchWorktree = await findRegisteredGitWorktreeByBranch(repoRoot, branchName);
@@ -3609,7 +3707,11 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
-    throw new Error(`Registered worktree for branch "${branchName}" at "${registeredBranchWorktree}" is not reusable${reason}.`);
+    throw new WorkspaceRuntimeValidationFailure(
+      `Registered worktree "${registeredBranchWorktree}" is not reusable${reason}.`,
+      { workspaceValidation: { reason: "git_worktree_not_reusable",
+        reasonCode: validation && !validation.valid ? validation.reasonCode : null, worktreePath: registeredBranchWorktree } },
+    );
   }
 
   if (requestedExistingBranch) {
@@ -3788,6 +3890,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   base: ExecutionWorkspaceInput;
   workspace: {
     id?: string | null;
+    sourceIssueId?: string | null;
     mode: string | null | undefined;
     strategyType: string | null | undefined;
     cwd: string | null | undefined;
@@ -3816,6 +3919,18 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
   if (!cwd) return null;
+
+  if (await directoryExists(cwd)) {
+    await assertWorkspaceReuseIsSafe({
+      db: input.db,
+      companyId: input.agent.companyId,
+      sourceIssueId: input.workspace.sourceIssueId,
+      issueId: input.issue?.id,
+      cwd,
+      executionWorkspaceId: input.workspace.id,
+      allowNonGitDirectory: permitsSharedNonGitDirectory(input.base, input.agent.companyId),
+    });
+  }
 
   const strategy = input.workspace.strategyType === "git_worktree" ? "git_worktree" : "project_primary";
   const taskDirectory = isPersistedTaskDirectory(input.workspace);
@@ -3931,8 +4046,12 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
     const reuseWorktreePath = realized.worktreePath ?? cwd;
-    const repairWarnings: string[] = [];
-    if (await isGitCheckout(reuseWorktreePath) && realized.branchCreatedByRuntime) {
+    const repairWarnings = await repairMissingManagedWorktreeGit({
+      repoRoot, worktreePath: reuseWorktreePath,
+      branchName: realized.branchName, runtimeOwned: realized.branchCreatedByRuntime === true,
+      recorder: input.recorder,
+    });
+    if (await hasOwnLinkedWorktreeGitDirectory(reuseWorktreePath, repoRoot) && realized.branchCreatedByRuntime) {
       // Branch-coherence repair may check out another branch, adopt a forward
       // branch, or move the recorded ref from a detached HEAD. Those repairs
       // are valid only for a branch that this runtime created. An attached
@@ -4278,6 +4397,10 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   if (input.workspace.providerType === "plugin") throw new Error("Managed workspace cleanup requires its storage plugin");
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
+  // Environment bindings borrow the source checkout. Only its owner removes it.
+  if (typeof input.workspace.metadata?.taskEnvironmentSourceWorkspaceId === "string") {
+    return { cleanedPath: workspacePath, cleaned: false, warnings };
+  }
   const isolatedSource = await verifiedRecordedIsolatedRemoteSource(input.workspace);
   const repoRoot = input.workspace.providerType === "git_worktree" && workspacePath
     ? await resolveGitRepoRootForWorkspaceCleanup(
@@ -4366,6 +4489,7 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
 
   if (input.workspace.providerType === "git_worktree" && workspacePath) {
     const worktreeExists = await directoryExists(workspacePath);
+    let worktreeRemoved = !worktreeExists;
     if (worktreeExists) {
       if (!repoRoot) {
         warnings.push(`Could not resolve git repo root for "${workspacePath}".`);
@@ -4390,12 +4514,16 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
             successMessage: `Removed git worktree ${workspacePath}\n`,
             failureLabel: `git worktree remove ${workspacePath}`,
           });
+          worktreeRemoved = !await directoryExists(workspacePath);
         } catch (err) {
           warnings.push(err instanceof Error ? err.message : String(err));
         }
       }
     }
-    if (branchCreatedByRuntime && input.workspace.branchName) {
+    if (branchCreatedByRuntime && input.workspace.branchName && !worktreeRemoved) {
+      warnings.push(`Preserved branch "${input.workspace.branchName}" because worktree removal did not complete.`);
+    }
+    if (branchCreatedByRuntime && input.workspace.branchName && worktreeRemoved) {
       if (!repoRoot) {
         warnings.push(`Could not resolve git repo root to delete branch "${input.workspace.branchName}".`);
       } else {

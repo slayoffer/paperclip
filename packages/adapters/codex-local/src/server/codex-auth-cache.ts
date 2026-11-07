@@ -570,6 +570,27 @@ export async function selectVendCredential(
 }
 
 /**
+ * Runs the identity-anchored vend on a promoted managed-home `auth.json`: a
+ * regular file the seed kept in place of the shared symlink. Without this, the
+ * promoted file keeps a spent refresh token after a run rotated it into the
+ * cache slot. Same lock, same predicate, same 0600 mode as
+ * {@link selectVendCredential}, which does the work. A missing file or a symlink
+ * is skipped: a rename over a symlink would replace the link, and the shared
+ * source it points at has its own vend.
+ */
+export async function vendPromotedHomeCredential(
+  homeDir: string,
+  resolveCacheEntryPath: (accountId: string) => string,
+  log: (line: string) => void | Promise<void>,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<VendCodexAuthOutcome | "not-promoted"> {
+  const authPath = path.join(homeDir, "auth.json");
+  const stat = await lstat(authPath).catch(() => null);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink()) return "not-promoted";
+  return selectVendCredential(authPath, resolveCacheEntryPath, log, env);
+}
+
+/**
  * Removes exactly one identity slot from the cache. The `account_id` is
  * sanitized by {@link toCacheKey}, so the removal can never escape the cache
  * root. A missing slot is a benign no-op. Any other removal error is fail-loud.

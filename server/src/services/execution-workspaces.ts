@@ -37,7 +37,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   executionWorkspaces,
@@ -94,6 +94,8 @@ import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
+import { createWorkspaceIssueTreeAssessor } from "./execution-workspace-issue-tree.js";
+import { createTerminalWorkspaceDirtyVerdicts } from "./terminal-workspace-dirty-verdicts.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -105,28 +107,25 @@ export type TaskWorkspaceBindingPatch = Partial<Pick<typeof issues.$inferInsert,
 >>;
 
 type ExecutionWorkspaceRow = typeof executionWorkspaces.$inferSelect;
+
+// A task selection must not replace the environment of an inherited binding.
+export function requiresTaskEnvironmentBinding(
+  workspace: { config: Pick<ExecutionWorkspaceConfig, "environmentId"> | null } | null,
+  selectedEnvironmentId: string | null | undefined,
+  localEnvironmentId?: string | null,
+): boolean {
+  if (!workspace || !selectedEnvironmentId) return false;
+  // A saved workspace without an environment id ran in the local default environment.
+  // Without the local id, keep the conservative answer: a missing id is a change.
+  const workspaceEnvironmentId = workspace.config?.environmentId ?? localEnvironmentId ?? null;
+  return workspaceEnvironmentId !== selectedEnvironmentId;
+}
+
 type WorkspaceRuntimeServiceRow = typeof workspaceRuntimeServices.$inferSelect;
 type RuntimeServiceReadDb = Pick<Db, "select">;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const execFileAsync = promisify(execFile);
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
-
-// Return the timestamp when an issue became terminal. A `done` issue uses
-// `completedAt`. A `cancelled` issue uses `cancelledAt`. The reaper cooldown
-// measures the age of the terminal transition from this timestamp. Fall back to
-// `updatedAt` when the terminal timestamp is null, so an old issue that lacks a
-// recorded transition time still gates the cooldown. Return null for a
-// non-terminal issue.
-function issueTerminalTimestamp(issue: {
-  status: string;
-  completedAt: Date | null;
-  cancelledAt: Date | null;
-  updatedAt: Date;
-}): Date | null {
-  if (issue.status === "done") return issue.completedAt ?? issue.updatedAt;
-  if (issue.status === "cancelled") return issue.cancelledAt ?? issue.updatedAt;
-  return null;
-}
 
 const WORKSPACE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
@@ -319,9 +318,11 @@ export type ExecutionWorkspaceServiceOptions = {
   // Test hook. Runs after compaction moves directories out of the worktree and
   // before it re-checks the guard under the lifecycle lock.
   afterWorkspaceCompactionMove?: (workspace: ExecutionWorkspaceRow) => Promise<void>;
+  // The reaper also uses this seam. An omitted success flag means success.
   inspectGitCloseReadiness?: (workspace: ExecutionWorkspace) => Promise<{
     git: ExecutionWorkspaceCloseGitReadiness | null;
     warnings: string[];
+    statusInspectionSucceeded?: boolean;
   }>;
 };
 
@@ -1739,7 +1740,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // required: without it the query re-selects the oldest ineligible rows every
   // sweep and starves eligible rows behind them. The cursor resets to the start
   // when a sweep reaches the end of the candidate set.
-  let terminalSweepCursor: { updatedAt: Date; id: string } | null = null;
+  let terminalSweepCursor: { updatedAt: string; id: string } | null = null;
   const terminalInspections = new Map<string, { revision: string; issueIds: Set<string>; nextAt: number }>();
   const terminalWorkspaceDeadlines = new Map<string, number>();
   let terminalSweepRescanRequested = false;
@@ -1758,40 +1759,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // removes the upper bound and makes the scan chase newer churn again. This
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
+  const dirtyVerdicts = createTerminalWorkspaceDirtyVerdicts(now);
+  const inspectForSweep = async (workspace: ExecutionWorkspace) => {
+    if (workspace.providerType !== "plugin" && opts.inspectGitCloseReadiness) {
+      const inspected = await opts.inspectGitCloseReadiness(workspace);
+      return { ...inspected, statusInspectionSucceeded: inspected.statusInspectionSucceeded ?? true };
+    }
+    return inspectWorkspace(workspace);
+  };
 
-  async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
-    const sourceIssueId = workspace.sourceIssueId;
-    if (!sourceIssueId) return [];
-    // A read-only lookup: rebuild it after a transient pooled disconnect.
-    return retryIdempotentDatabaseOperation(() => db
-      .select({
-        id: issues.id,
-        status: issues.status,
-        completedAt: issues.completedAt,
-        cancelledAt: issues.cancelledAt,
-        updatedAt: issues.updatedAt,
-      })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, workspace.companyId),
-        sql<boolean>`
-          ${issues.id} IN (
-            WITH RECURSIVE issue_tree(id) AS (
-              SELECT ${issues.id}
-              FROM ${issues}
-              WHERE ${issues.companyId} = ${workspace.companyId}
-                AND ${issues.id} = ${sourceIssueId}
-              UNION ALL
-              SELECT child.id
-              FROM ${issues} child
-              JOIN issue_tree parent ON child.parent_id = parent.id
-              WHERE child.company_id = ${workspace.companyId}
-            )
-            SELECT id FROM issue_tree
-          )
-        `,
-      )));
-  }
+  const assessIssueTree = createWorkspaceIssueTreeAssessor(db);
 
   async function listDeliveryPullRequestProducts(
     workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">,
@@ -1819,26 +1796,15 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .limit(100));
   }
 
+  type WorkspaceIssueTreeAssessment = Awaited<ReturnType<typeof assessIssueTree>>;
+
   async function assessDelivery(
     workspace: ExecutionWorkspaceRow,
     git: ExecutionWorkspaceCloseGitReadiness | null,
-    precomputedIssueTree?: Awaited<ReturnType<typeof listWorkspaceIssueTree>>,
+    issueTreeAssessment?: WorkspaceIssueTreeAssessment,
   ) {
-    const issueTree = precomputedIssueTree ?? await listWorkspaceIssueTree(workspace);
-    const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
-    const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
-    const subtreeTerminal = Boolean(sourceIssue && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
-    // The cooldown anchor is the most recent terminal timestamp across the whole
-    // issue tree. The reaper compares it against the cooldown window. A null
-    // anchor means no issue in the tree is terminal yet, so the cooldown never
-    // applies (the terminal-tree gates above already block the archive).
-    let cooldownAnchor: Date | null = null;
-    for (const issue of issueTree) {
-      const terminalAt = issueTerminalTimestamp(issue);
-      if (terminalAt && (!cooldownAnchor || terminalAt.getTime() > cooldownAnchor.getTime())) {
-        cooldownAnchor = terminalAt;
-      }
-    }
+    const { sourceIssueTerminal, subtreeTerminal, cooldownAnchor } =
+      issueTreeAssessment ?? await assessIssueTree(workspace);
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
     const workspaceHeadSha = workspace.providerType === "plugin" ? git?.headSha ?? null : sourceIssueTerminal && git?.repoRoot && git.workspacePath
@@ -3220,6 +3186,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           eligible: 0,
           archived: 0,
           cleanupFailed: 0,
+          skippedConcurrentSweep: 1,
+          skippedGitInspection: 0,
+          skippedDirty: 0,
           skippedActiveRun: 0,
           skippedNonTerminalTree: 0,
           skippedUndelivered: 0,
@@ -3266,16 +3235,21 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         : undefined;
       const cursorFilter = cursor
         ? or(
-            gt(executionWorkspaces.updatedAt, cursor.updatedAt),
+            sql<boolean>`${executionWorkspaces.updatedAt} > ${cursor.updatedAt}::timestamptz`,
             and(
-              eq(executionWorkspaces.updatedAt, cursor.updatedAt),
+              sql<boolean>`${executionWorkspaces.updatedAt} = ${cursor.updatedAt}::timestamptz`,
               gt(executionWorkspaces.id, cursor.id),
             ),
           )
         : undefined;
       const scanFilter = and(baseCandidateFilter, boundaryFilter, cursorFilter);
+      // Keep the database timestamp as text. JavaScript Date truncates its
+      // microseconds and can make the last row appear again on every page.
       const candidates = await db
-        .select()
+        .select({
+          ...getTableColumns(executionWorkspaces),
+          sweepUpdatedAt: sql<string>`${executionWorkspaces.updatedAt}::text`,
+        })
         .from(executionWorkspaces)
         .where(scanFilter)
         .orderBy(asc(executionWorkspaces.updatedAt), asc(executionWorkspaces.id))
@@ -3288,13 +3262,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         terminalSweepBoundary = null;
       } else {
         const lastCandidate = candidates[candidates.length - 1]!;
-        terminalSweepCursor = { updatedAt: lastCandidate.updatedAt, id: lastCandidate.id };
+        terminalSweepCursor = { updatedAt: lastCandidate.sweepUpdatedAt, id: lastCandidate.id };
       }
       const result = {
         checked: candidates.length,
         eligible: 0,
         archived: 0,
         cleanupFailed: 0,
+        skippedConcurrentSweep: 0,
+        skippedGitInspection: 0,
+        skippedDirty: 0,
         skippedActiveRun: 0,
         skippedNonTerminalTree: 0,
         skippedUndelivered: 0,
@@ -3307,6 +3284,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         compactionFailed: 0,
       };
       const readinessByWorkingTree = new Map<string, ReturnType<typeof inspectGitCloseReadiness>>();
+      dirtyVerdicts.prune();
 
       for (const workspace of candidates) {
         signal?.throwIfAborted();
@@ -3314,13 +3292,14 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // also leaves leftover trash for a later sweep.
         if (options.compact !== false) await purgeCompactionTrashIfDue(workspace);
         else deferCompactionTrashPurge(workspace);
-        const issueTree = await listWorkspaceIssueTree(workspace);
-        const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId);
+        const issueTreeAssessment = await assessIssueTree(workspace);
+        const { issueTree, sourceIssue } = issueTreeAssessment;
         const reopenPending = metadataHasReopenPendingConsumption(
           workspace.metadata as Record<string, unknown> | null,
         );
         if (reopenPending) terminalWorkspaceDeadlines.set(workspace.id, now().getTime());
         if (!sourceIssue || issueTree.some(issue => !TERMINAL_ISSUE_STATUSES.has(issue.status))) {
+          dirtyVerdicts.forget(workspace.id);
           if (reopenPending) {
             await clearReopenPendingConsumptionUnderLock(workspace.id, {
               expectedGeneration: readExecutionWorkspaceLifecycleGeneration(
@@ -3359,7 +3338,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        const latestTerminalAt = Math.max(...issueTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
+        const latestTerminalAt = issueTreeAssessment.cooldownAnchor!.getTime();
         // Compaction runs once per terminal cycle, after its own delay and
         // before the archive cooldown, so a workspace the reaper cannot archive
         // yet (or ever) stops holding regenerable files.
@@ -3420,6 +3399,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           else result.skippedActiveRun += 1;
           continue;
         }
+        // A cached dirty verdict only skips. It never authorizes cleanup.
+        if (dirtyVerdicts.shouldSkip(workspace.id, workspace.sweepUpdatedAt)) {
+          result.skippedDirty += 1;
+          result.skippedUndelivered += 1;
+          continue;
+        }
         if (opts.terminalWorkspaceInspectionBackoffMs) {
           const revision = createHash("sha256").update(JSON.stringify([
             workspace.updatedAt, workspace.metadata,
@@ -3445,15 +3430,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : `workspace:${workspace.id}`;
         let inspection = readinessByWorkingTree.get(readinessKey);
         if (!inspection) {
-          inspection = inspectWorkspace(toExecutionWorkspace(workspace));
+          inspection = inspectForSweep(toExecutionWorkspace(workspace));
           readinessByWorkingTree.set(readinessKey, inspection);
         }
         const { git, statusInspectionSucceeded } = await inspection;
         if (!statusInspectionSucceeded) {
+          result.skippedGitInspection += 1;
           result.skippedUndelivered += 1;
           continue;
         }
-        const assessment = await assessDelivery(workspace, git, issueTree);
+        const assessment = await assessDelivery(workspace, git, issueTreeAssessment);
         if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition
@@ -3471,9 +3457,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         if (assessment.workspaceDirty) {
+          dirtyVerdicts.recordDirty(workspace.id, workspace.sweepUpdatedAt);
+          result.skippedDirty += 1;
           result.skippedUndelivered += 1;
           continue;
         }
+        dirtyVerdicts.forget(workspace.id);
         if (
           assessment.deliveryState !== "merged_via_pr"
           && assessment.deliveryState !== "merged_by_ancestry"
@@ -4107,6 +4096,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             },
             workspace: {
               id: row.id,
+              sourceIssueId: row.sourceIssueId,
               mode: row.mode,
               strategyType: row.strategyType,
               cwd: row.cwd,
@@ -4355,9 +4345,11 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       id: string;
       patch: Partial<typeof executionWorkspaces.$inferInsert>;
       closedAt: Date;
+      guard?: (workspace: ExecutionWorkspace, lockedDb: Db) => Promise<string[]>;
     }): Promise<
       | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
       | { outcome: "reopen_pending" }
+      | { outcome: "blocked"; reasons: string[] }
       | null
     > => {
       const [identity] = await db.select({ companyId: executionWorkspaces.companyId }).from(executionWorkspaces)
@@ -4381,6 +4373,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           // archive and keep the flag, so the destructive path never removes the
           // rebuilt worktree. The route maps this to HTTP 409.
           return { outcome: "reopen_pending" };
+        }
+        if (input.guard) {
+          const reasons = await input.guard(toExecutionWorkspace(fresh, []), tx as unknown as Db);
+          if (reasons.length) return { outcome: "blocked", reasons };
         }
         const nextPatch = preserveWorkspaceMetadataForPatch(fresh, input.patch);
         const baseMetadata =
@@ -4480,7 +4476,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     fenceClosedWorkspaceDestruction: async <T>(input: {
       workspaceId: string;
       capturedGeneration: number;
-      destroy: () => Promise<T>;
+      destroy: (lockedDb: Db) => Promise<T>;
     }): Promise<{ skippedReopened: true } | { skippedReopened: false; result: T }> => {
       return fenceLifecycleGenerationWrite<
         { skippedReopened: true } | { skippedReopened: false; result: T }
@@ -4493,7 +4489,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           message: "execution workspace cleanup skipped because it was reopened",
         },
         onSkip: () => ({ skippedReopened: true as const }),
-        write: async () => ({ skippedReopened: false as const, result: await input.destroy() }),
+        write: async ({ tx }) => ({ skippedReopened: false as const, result: await input.destroy(tx as unknown as Db) }),
       });
     },
 

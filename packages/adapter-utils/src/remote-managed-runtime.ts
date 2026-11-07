@@ -1,4 +1,9 @@
 import path from "node:path";
+import { captureSshWorkspaceSnapshot } from "./ssh-cache-directories.js";
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
+import { createSshWorkspaceSyncPolicy } from "./ssh-workspace-policy.js";
+import { sshRuntimeIsolationScript } from "./ssh-runtime-isolation.js";
+import { linkSshProviderSessionScript, sshProviderSessionDirectories } from "./ssh-provider-sessions.js";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -13,25 +18,18 @@ import {
   type SandboxAdditionalSource,
   type SandboxManagedRuntimeAssetRestoreContext,
 } from "./sandbox-managed-runtime.js";
-import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-restore-merge.js";
+import { type DirectorySnapshot } from "./workspace-restore-merge.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
+import { scheduleSshWorkspaceOperation, timeWorkspaceStep } from "./workspace-operation-schedule.js";
 
 // The fixed heavy-directory excludes every referenced project drops,
 // regardless of its ignore resolution. A `git`-resolved project additionally
 // drops its own resolved ignored paths (see `referencedSourceIgnoreExcludeEntries`
 // and the per-project merge below); an `other` project keeps only this set.
 const REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES = [
-  "node_modules",
-  "vendor",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".cache",
-  ".git",
-].flatMap((entry) => [entry, `${entry}/*`, `*/${entry}`, `*/${entry}/*`]);
+  ...SSH_WORKSPACE_EXCLUDES,
+  ...["vendor", ".git"].flatMap((entry) => [entry, `${entry}/*`, `*/${entry}`, `*/${entry}/*`]),
+];
 
 export interface RemoteManagedRuntimeAsset {
   key: string;
@@ -106,13 +104,26 @@ export function remoteExecutionSessionMatches(saved: unknown, current: SshRemote
   );
 }
 
-export async function prepareRemoteManagedRuntime(input: {
+export function prepareRemoteManagedRuntime(input: Parameters<typeof prepareRemoteManagedRuntimeInner>[0]): Promise<PreparedRemoteManagedRuntime> {
+  return scheduleSshWorkspaceOperation(input.onProgress, "prepare", () => prepareRemoteManagedRuntimeInner(input));
+}
+
+async function prepareRemoteManagedRuntimeInner(input: {
   spec: SshRemoteExecutionSpec;
   runId: string;
   adapterKey: string;
+  companyId?: string;
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /**
+   * Explicit host folder for the runtime assets of this run. Use it only for a
+   * folder that belongs to this run alone (SSH `in_place`): `restoreWorkspace`
+   * removes it after the asset restore hooks ran. Without it, the root stays
+   * `<workspaceRemoteDir>/.paperclip-runtime/<adapterKey>` and nothing removes it.
+   */
+  runtimeRootDir?: string | null;
+  providerSessionRoot?: string;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
   assets?: RemoteManagedRuntimeAsset[];
@@ -124,6 +135,7 @@ export async function prepareRemoteManagedRuntime(input: {
 }): Promise<PreparedRemoteManagedRuntime> {
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const syncWorkspace = input.syncWorkspace !== false;
+  const syncPolicy = syncWorkspace ? createSshWorkspaceSyncPolicy() : undefined;
   const workspaceRemoteDir = syncWorkspace
     ? path.posix.join(
         baseWorkspaceRemoteDir,
@@ -133,7 +145,39 @@ export async function prepareRemoteManagedRuntime(input: {
         "workspace",
       )
     : baseWorkspaceRemoteDir;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const explicitRuntimeRootDir = input.runtimeRootDir?.trim() || null;
+  if (explicitRuntimeRootDir && !path.posix.isAbsolute(explicitRuntimeRootDir)) {
+    throw new Error(`Remote runtime root is not an absolute path: ${explicitRuntimeRootDir}`);
+  }
+  const runtimeRootDir = explicitRuntimeRootDir ??
+    path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const providerSessions = explicitRuntimeRootDir || input.providerSessionRoot ? sshProviderSessionDirectories({
+    runtimeRoot: runtimeRootDir,
+    providerSessionRoot: input.providerSessionRoot,
+    adapterKey: input.adapterKey,
+    companyId: input.companyId,
+    workspace: workspaceRemoteDir,
+    assetKeys: (input.assets ?? []).map((asset) => asset.key),
+  }) : [];
+  if (explicitRuntimeRootDir) {
+    // Check the host view before any credential or configuration upload.
+    await runSshCommand(input.spec, sshRuntimeIsolationScript(workspaceRemoteDir,
+      [explicitRuntimeRootDir,
+        ...(input.assets ?? []).map((asset) => path.posix.join(explicitRuntimeRootDir, asset.key)),
+        ...providerSessions.map((session) => session.directory)]),
+    { timeoutMs: 30_000 });
+  }
+  // Remove the per-run runtime folder. Run it after the asset restore hooks,
+  // because a hook can read a file from the folder (Codex auth copy-back).
+  // The parent `runs/<runId>` folder is removed only when it is empty.
+  const removeExplicitRuntimeRoot = async () => {
+    if (!explicitRuntimeRootDir) return;
+    await runSshCommand(
+      input.spec,
+      `rm -rf -- ${shellQuote(explicitRuntimeRootDir)} && (rmdir -- ${shellQuote(path.posix.dirname(explicitRuntimeRootDir))} 2>/dev/null || true)`,
+      { timeoutMs: 60_000 },
+    );
+  };
 
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
@@ -143,27 +187,31 @@ export async function prepareRemoteManagedRuntime(input: {
         onProgress: input.onProgress,
         workspaceFileMode: input.workspaceFileMode,
         workspaceExclude: input.workspaceExclude,
+        syncPolicy,
       })
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
-    ? await captureDirectorySnapshot(input.workspaceLocalDir, {
+    ? await timeWorkspaceStep(input.onProgress, "Workspace baseline", () => captureSshWorkspaceSnapshot(input.workspaceLocalDir, {
+        ignoredPaths: syncPolicy?.excluded.get(input.workspaceLocalDir),
         exclude: preparedWorkspace.gitBacked
           ? [
               ...GIT_ARCHIVE_EXCLUDES,
+              ...SSH_WORKSPACE_EXCLUDES,
               ".paperclip-runtime",
               ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : []),
             ]
-          : [".paperclip-runtime", ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
-      })
+          : [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+      }))
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
   for (const repository of projectRepositories) {
     repositoryBaselines.push({
       path: repository,
-      baselineSnapshot: await captureDirectorySnapshot(path.join(input.workspaceLocalDir, repository), {
-        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"],
-      }),
+      baselineSnapshot: await timeWorkspaceStep(input.onProgress, "Repository baseline", () => captureSshWorkspaceSnapshot(path.join(input.workspaceLocalDir, repository), {
+        exclude: [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES],
+        ignoredPaths: syncPolicy?.excluded.get(path.join(input.workspaceLocalDir, repository)),
+      })),
     });
   }
 
@@ -171,16 +219,23 @@ export async function prepareRemoteManagedRuntime(input: {
   try {
     for (const asset of input.assets ?? []) {
       const remoteDir = path.posix.join(runtimeRootDir, asset.key);
+      const sessionExcludes = providerSessions.filter((session) => session.assetKey === asset.key)
+        .flatMap((session) => [session.name, `${session.name}/*`]);
       assetDirs[asset.key] = remoteDir;
-      await syncDirectoryToSsh({
+      await timeWorkspaceStep(input.onProgress, `Asset ${asset.key} sync`, () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: asset.localDir,
         remoteDir,
         followSymlinks: asset.followSymlinks,
-        exclude: asset.exclude,
+        exclude: sessionExcludes.length ? [...(asset.exclude ?? []), ...sessionExcludes] : asset.exclude,
         onProgress: input.onProgress,
         progressLabel: asset.key,
-      });
+      }));
+      for (const session of providerSessions.filter((session) => session.assetKey === asset.key)) {
+        await runSshCommand(input.spec,
+          linkSshProviderSessionScript(path.posix.join(remoteDir, session.name), session.directory),
+          { timeoutMs: 30_000 });
+      }
     }
   } catch (error) {
     if (preparedWorkspace && baselineSnapshot) {
@@ -192,8 +247,10 @@ export async function prepareRemoteManagedRuntime(input: {
         restoreGitHistory: preparedWorkspace.gitBacked,
         onProgress: input.onProgress,
         repositories: repositoryBaselines,
+        syncPolicy,
       });
     }
+    await removeExplicitRuntimeRoot().catch(() => undefined);
     throw error;
   }
 
@@ -227,14 +284,19 @@ export async function prepareRemoteManagedRuntime(input: {
         REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
         referencedSourceIgnoreExcludeEntries(ignoreResolution),
       );
-      await syncDirectoryToSsh({
+      await timeWorkspaceStep(input.onProgress, "Referenced project sync", () => syncDirectoryToSsh({
         spec: input.spec,
         localDir: localPath,
         remoteDir,
         exclude,
         onProgress: input.onProgress,
         progressLabel: `project-${projectId}`,
-      });
+        excludeTaggedCaches: true,
+        cacheScan: {
+          exclude: REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
+          ignoredPaths: ignoreResolution.kind === "git" ? ignoreResolution.ignoredPaths : undefined,
+        },
+      }));
       additionalSourceDirs[projectId] = remoteDir;
     } catch (error) {
       console.warn(
@@ -250,7 +312,7 @@ export async function prepareRemoteManagedRuntime(input: {
     runtimeRootDir,
     assetDirs,
     additionalSourceDirs,
-    restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
+    restoreWorkspace: (onProgress?: RuntimeProgressSink) => scheduleSshWorkspaceOperation(onProgress, "restore", async () => {
       if (preparedWorkspace && baselineSnapshot) {
         await restoreWorkspaceFromSshExecution({
           spec: input.spec,
@@ -260,15 +322,23 @@ export async function prepareRemoteManagedRuntime(input: {
           restoreGitHistory: preparedWorkspace.gitBacked,
           onProgress,
           repositories: repositoryBaselines,
+          syncPolicy,
         });
       }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+      try {
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } finally {
+        // Cleanup is best effort: a stale run folder must not fail the run.
+        await removeExplicitRuntimeRoot().catch((error) => {
+          console.warn(`[paperclip] Failed to remove run runtime folder ${explicitRuntimeRootDir}: ${String(error)}`);
         });
       }
-    },
+    }),
   };
 }

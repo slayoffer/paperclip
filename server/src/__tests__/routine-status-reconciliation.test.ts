@@ -10,7 +10,11 @@ if (!support.supported) console.warn(`Skipping routine status database tests: ${
 (support.supported ? describe : describe.skip)("routine status reconciliation", () => {
   let db: ReturnType<typeof createDb>, database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("routine-status-"); db = createDb(database.connectionString); }, 60_000);
-  afterEach(async () => { vi.restoreAllMocks(); await db.execute(sql`SET client_min_messages = warning; TRUNCATE companies CASCADE`); });
+  afterEach(async () => { vi.restoreAllMocks(); await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   async function seed(status = "blocked") {
     const companyId = randomUUID(), runId = randomUUID();

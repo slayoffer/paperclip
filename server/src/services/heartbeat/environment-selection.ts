@@ -3,6 +3,7 @@ import { heartbeatRuns, issues, type Db, type agents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { readGitCacheExpiration } from "../git-workspace-restoration.js";
 import type { ExecutionWorkspace, IssueExecutionWorkspaceSettings, ProjectExecutionWorkspacePolicy } from "@paperclipai/shared";
+import { resolveWorkspaceReuseSelection } from "../workspace-reuse-fallback.js";
 import { parseObject } from "../../adapters/utils.js";
 import { logger } from "../../middleware/logger.js";
 import { parseNativeExecutionInput } from "../../vendor/paperclip-runner/index.js";
@@ -31,7 +32,10 @@ import type { TrustPresetResolution } from "../trust-preset-resolver.js";
 import { WORKSPACE_BUSY_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { WorkspaceBusyDeferral, type createHeartbeatRetries } from "./retries.js";
 import { ConfigurationIncompleteFailure } from "./run-preparation.js";
-import { resolveNativeRecoveryExecutionWorkspaceBinding, resolveExecutionWorkspaceReuseRequestForIssue } from "./workspaces.js";
+import { assertEnvironmentSelectionForCompany } from "../environment-selection.js";
+import { requiresTaskEnvironmentBinding } from "../execution-workspaces.js";
+import type { environmentRunOrchestrator } from "../environment-run-orchestrator.js";
+import { resolveNativeRecoveryExecutionWorkspaceBinding } from "./workspaces.js";
 
 type Issue = typeof issues.$inferSelect;
 
@@ -53,6 +57,8 @@ export interface HeartbeatEnvironmentSelectionInput {
     hasSelectedWorkspaceSource: boolean;
     taskWorkspaceIntent: Issue["workspaceSelection"];
     responsibleUserId: string | null;
+    /** Synthiq legacy restart resume: the workspace the suspended run used. */
+    legacyRestartExecutionWorkspaceId?: string | null;
   };
   policy: {
     trustPreset: TrustPresetResolution;
@@ -60,6 +66,8 @@ export interface HeartbeatEnvironmentSelectionInput {
     isolatedWorkspacesEnabled: boolean;
     projectExecutionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
     issueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
+    /** Task-selected environment settings; kept even when isolated workspaces are off. */
+    environmentExecutionWorkspaceSettings?: IssueExecutionWorkspaceSettings | null;
   };
   config: {
     config: Record<string, unknown>;
@@ -74,6 +82,7 @@ export interface HeartbeatEnvironmentSelectionInput {
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "get" | "getExperimental">;
     findSharedWorkspaceHolder: ReturnType<typeof createHeartbeatRetries>["findSharedWorkspaceHolder"];
     findExecutionWorkspaceHolder: ReturnType<typeof createHeartbeatRetries>["findExecutionWorkspaceHolder"];
+    envOrchestrator?: Pick<ReturnType<typeof environmentRunOrchestrator>, "resolveEnvironment">;
   };
 }
 
@@ -85,11 +94,13 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const { run, agent } = input;
   const { issueRef, issueContext, issueId, context, executionProjectId, workspaceProjectContext, boundSourceWorkspace, hasSelectedWorkspaceSource, taskWorkspaceIntent, responsibleUserId } = input.task;
   const {
-    trustPreset, requestedExecutionWorkspaceMode, isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
-    projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings,
+    trustPreset, isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
+    projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, environmentExecutionWorkspaceSettings,
   } = input.policy;
+  // An unsafe inherited workspace switches this run to an isolated workspace.
+  let requestedExecutionWorkspaceMode = input.policy.requestedExecutionWorkspaceMode;
   const { config, sourceWorkspaceConfig, issueAssigneeOverrides } = input.config;
-  const { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder } = input.services;
+  const { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder, envOrchestrator } = input.services;
   // A native run's execution input is immutable once persisted. Recovery must therefore
   // restore the workspace bound to that input rather than consulting the issue's current
   // workspace pointer: a newer run may already have moved or cleared the issue binding while
@@ -106,9 +117,11 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const isDotRun = heartbeatExternalProvider({ run, agent }) !== null;
   const persistedNativeExecutionWorkspaceId =
     persistedNativeExecutionInput?.binding.executionWorkspaceId ?? null;
+  const persistedRecoveryExecutionWorkspaceId = persistedNativeExecutionWorkspaceId ??
+    input.task.legacyRestartExecutionWorkspaceId ?? null;
   const fresh = input.task.freshWorkspace?.mode === "fresh_isolated_workspace";
   const requestedExecutionWorkspaceId = isDotRun ? null :
-    persistedNativeExecutionWorkspaceId ??
+    persistedRecoveryExecutionWorkspaceId ??
     readNonEmptyString(issueRef?.executionWorkspaceId);
   let existingExecutionWorkspace = requestedExecutionWorkspaceId
     ? await executionWorkspacesSvc.getStoredById(agent.companyId, requestedExecutionWorkspaceId)
@@ -141,24 +154,22 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       bindingId: persistedNativeExecutionWorkspaceId,
       persistedWorkspaceFound: existingExecutionWorkspace !== null,
     });
-  const workspaceReuseRequest =
-    resolveExecutionWorkspaceReuseRequestForIssue({
-      issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
-      issueExecutionWorkspacePreference: isDotRun ? null : nativeRecoveryExecutionWorkspaceId
-        ? "reuse_existing"
-        : (issueRef?.executionWorkspacePreference ?? null),
-      existingExecutionWorkspaceStatus:
-        existingExecutionWorkspace?.status ?? null,
-    });
-  const requestedShouldReuseExisting =
-    workspaceReuseRequest.requestedShouldReuseExisting;
-  const reusableExistingExecutionWorkspace =
-    workspaceReuseRequest.existingExecutionWorkspaceAvailable
-      ? existingExecutionWorkspace
-      : null;
+  // Native and legacy restart recovery both bind the run to its saved workspace.
+  const { recoveryExecutionWorkspaceId, requestedReuseBranch, workspaceReuseRequest,
+    workspaceReuseFallback, requestedShouldReuseExisting, reusableExistingExecutionWorkspace,
+  } = await resolveWorkspaceReuseSelection({
+    db, companyId: agent.companyId, issueId: issueRef?.id,
+    requestedExecutionWorkspaceId, persistedRecoveryExecutionWorkspaceId, existingExecutionWorkspace,
+    preference: isDotRun ? null : issueRef?.executionWorkspacePreference,
+    operatorBranch: requestedExecutionWorkspaceMode === "operator_branch",
+    strategies: [environmentExecutionWorkspaceSettings?.workspaceStrategy,
+      issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
+      config.workspaceStrategy, projectExecutionWorkspacePolicy?.workspaceStrategy],
+  });
+  if (workspaceReuseFallback) requestedExecutionWorkspaceMode = "isolated_workspace";
   const workspaceAuthorizationActor = { type: "agent" as const, agentId: agent.id, companyId: agent.companyId,
     source: "agent_jwt" as const, runId: run.id, onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
-  if (!isDotRun && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+  if (!isDotRun && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !recoveryExecutionWorkspaceId) {
     const workspaceRequiringAccess = reusableExistingExecutionWorkspace ?? boundSourceWorkspace;
     if (workspaceRequiringAccess && issueId) {
       await assertTaskWorkspaceExecutionAccess(db, workspaceAuthorizationActor, agent.companyId, { issueId, workspaceId: workspaceRequiringAccess.id });
@@ -187,6 +198,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const environmentResolution = resolveExecutionWorkspaceEnvironmentId({
     lowTrustIssueEnvironmentId: trustPreset.kind === "low_trust_review"
       ? parseIssueExecutionWorkspaceSettings(issueContext?.executionWorkspaceSettings, {includeEnvironmentId: true})?.environmentId : null,
+    taskEnvironmentId: environmentExecutionWorkspaceSettings?.environmentId,
     agentDefaultEnvironmentId: agent.defaultEnvironmentId,
     instanceDefaultEnvironmentId:
       resolvedInstanceSettings.defaultEnvironmentId ?? null,
@@ -282,6 +294,31 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       : selectedEnvironmentId
         ? await environmentsSvc.getById(selectedEnvironmentId)
         : null;
+  if (environmentExecutionWorkspaceSettings?.environmentId) {
+    await assertEnvironmentSelectionForCompany(
+      environmentsSvc,
+      agent.companyId,
+      environmentExecutionWorkspaceSettings.environmentId,
+      { allowedDrivers: ["local", "ssh", "sandbox"] },
+    );
+    // Validate availability before any workspace or shared binding changes.
+    await envOrchestrator?.resolveEnvironment({
+      companyId: agent.companyId,
+      selectedEnvironmentId,
+      localEnvironmentId: localEnvironment.id,
+    });
+  }
+  const separateTaskEnvironmentBinding = requiresTaskEnvironmentBinding(
+    reusableExistingExecutionWorkspace,
+    selectedEnvironmentId,
+    localEnvironment.id,
+  );
+  if (recoveryExecutionWorkspaceId && separateTaskEnvironmentBinding) {
+    throw new ConfigurationIncompleteFailure(
+      "The task environment changed during a suspended native run. Start a new execution.",
+      { configurationIncomplete: { reason: "task_environment_changed", issueId } },
+    );
+  }
   const nativeChatWorkspaceScope = isDotRun ? null : await findNativeChatWorkspaceScope(db, {
     adapterType: agent.adapterType,
     environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
@@ -469,7 +506,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       preserveImplicitDefaultSettings: ["project", "task_default"].includes(taskWorkspaceIntent.source) });
   }
   const explicitTaskDirectory = !isDotRun && taskWorkspaceIntent?.selection.kind === "task_directory";
-  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && ((fresh && !workspaceProjectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
+  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && (((fresh || Boolean(workspaceReuseFallback)) && !workspaceProjectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
     trustPreset: trustPreset.kind,
     environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
     mode: requestedExecutionWorkspaceMode,
@@ -483,11 +520,15 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     ],
   }));
   return {
+    requestedExecutionWorkspaceMode,
+    workspaceReuseFallback,
+    requestedReuseBranch,
     persistedRunnerProfile,
     persistedNativeExecutionInput,
     isDotRun,
     existingExecutionWorkspace,
     nativeRecoveryExecutionWorkspaceId,
+    recoveryExecutionWorkspaceId,
     workspaceReuseRequest,
     requestedShouldReuseExisting,
     reusableExistingExecutionWorkspace,
@@ -504,5 +545,6 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     materializeNativeChatWorktree,
     explicitTaskDirectory,
     useIsolatedTaskDirectory,
+    separateTaskEnvironmentBinding,
   };
 }

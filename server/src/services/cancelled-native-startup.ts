@@ -6,9 +6,48 @@ import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "./native-loc
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { canContinueCancelledRun } from "./run-cancellation.js";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
+import { nativeSessionProviderEvidence } from "./native-runtime/native-session-resume.js";
+import type { NativeRestartRecoveryClaim } from "./native-runtime/native-restart-recovery.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Coordinator = typeof nativeRunFinalizations.$inferSelect;
+
+/** Close only this controller's unused budget-stopped bootstrap, after cleanup. */
+export async function settleBudgetStoppedNativeStartup(
+  db: Db, identity: { id: string; companyId: string }, recovery?: NativeRestartRecoveryClaim,
+): Promise<Run | null> {
+  return db.transaction(async tx => {
+    const [coordinator] = await tx.select().from(nativeRunFinalizations).where(and(
+      eq(nativeRunFinalizations.companyId, identity.companyId), eq(nativeRunFinalizations.runId, identity.id),
+    )).for("update");
+    if (!coordinator || coordinator.phase !== "observed" || coordinator.resultId || coordinator.failureDetail?.successorRunId) return null;
+    const ownsBootstrap = recovery?.kind === "bootstrap_incomplete" && recovery.runId === identity.id &&
+      coordinator.leaseOwner === recovery.leaseOwner && coordinator.controllerGeneration === recovery.controllerGeneration &&
+      coordinator.attempt === recovery.providerAttempt && coordinator.leaseExpiresAt && coordinator.leaseExpiresAt > new Date();
+    const unclaimed = !recovery && coordinator.attempt === 0 && coordinator.controllerGeneration === 0 &&
+      !coordinator.controllerBootId && !coordinator.controllerPid && !coordinator.leaseOwner && !coordinator.leaseExpiresAt;
+    if (!ownsBootstrap && !unclaimed) return null;
+    const [run] = await tx.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, identity.companyId), eq(heartbeatRuns.id, identity.id),
+    )).for("update");
+    const evidence = run?.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+    if (!run || run.runtimeMode !== "native" || run.status !== "cancelled" || run.errorCode !== "issue.token_budget_exceeded" ||
+        evidence?.kind !== "bootstrap" || evidence.providerWorkStarted !== false ||
+        run.processPid || run.processGroupId || run.processStartedAt ||
+        (await nativeSessionProviderEvidence(tx, [run.id])).has(run.id)) return null;
+    const now = new Date();
+    await tx.update(nativeRunFinalizations).set({ phase: "terminal_failure", leaseOwner: null, leaseExpiresAt: null,
+      controlDeadlineAt: null, nextAttemptAt: null, failureCode: run.errorCode,
+      failureDetail: { ...coordinator.failureDetail, budgetStopBeforeProvider: {
+        runId: run.id, companyId: run.companyId, issueId: run.nativeIssueId,
+        attempt: coordinator.attempt, controllerGeneration: coordinator.controllerGeneration, settledAt: now.toISOString(),
+      } }, updatedAt: now,
+    }).where(eq(nativeRunFinalizations.runId, run.id));
+    const [settled] = await tx.update(heartbeatRuns).set({ nativePhase: "terminal_failure", nativePhaseUpdatedAt: now })
+      .where(eq(heartbeatRuns.id, run.id)).returning();
+    return settled;
+  });
+}
 
 /** Candidate for explicit user Retry only, never automatic replay after Stop. */
 export async function canRetryStoppedRun(db: Db, run: Run): Promise<boolean> {
@@ -48,7 +87,14 @@ export async function isCancelledNativeStartup(db: Db, run: Run, coordinator: Co
     coordinator.controllerGeneration === 0 && !coordinator.controllerBootId &&
     !coordinator.controllerPid && !coordinator.leaseOwner && !coordinator.leaseExpiresAt &&
     !coordinator.resultId && !coordinator.failureDetail?.successorRunId;
-  if (!beforeSelection && !neverClaimed) return false;
+  const budgetReceipt = coordinator?.failureDetail?.budgetStopBeforeProvider as Record<string, unknown> | undefined;
+  const budgetBootstrapSettled = run.runtimeMode === "native" && run.errorCode === "issue.token_budget_exceeded" && coordinator?.phase === "terminal_failure" &&
+    coordinator.failureCode === run.errorCode && !coordinator.leaseOwner && !coordinator.leaseExpiresAt && !coordinator.resultId &&
+    !coordinator.failureDetail?.successorRunId && budgetReceipt?.runId === run.id && budgetReceipt.companyId === run.companyId &&
+    budgetReceipt.issueId === run.nativeIssueId && budgetReceipt.attempt === coordinator.attempt &&
+    budgetReceipt.controllerGeneration === coordinator.controllerGeneration && typeof budgetReceipt.settledAt === "string" &&
+    (run.resultJson?.executionRecovery as Record<string, unknown> | undefined)?.providerWorkStarted === false;
+  if (!beforeSelection && !neverClaimed && !budgetBootstrapSettled) return false;
   const settled = beforeReviewDispatch || typeof run.resultJson?.startupPreparationSettledAt === "string";
   // The old preparer can still be unwinding even though the run is terminal.
   if (!settled && run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return false;

@@ -224,7 +224,8 @@ suite("heartbeat physical workspace source trust", () => {
     await db.update(issues).set({ status: "todo" }).where(eq(issues.id, issueId));
     if (placement === "local" && grants === "both") await db.update(issues).set({ projectId, workspaceSelection: null }).where(eq(issues.id, issueId));
     await executionWorkspaceService(db).update(workspace.id, { metadata: { ...workspace.metadata,
-      _controllerProvisionCopyOnly: false, config: { provisionCommand: `printf host-script-ran > '${marker}'` } } });
+      _controllerProvisionCopyOnly: false, config: { ...(workspace.metadata?.config as Record<string, unknown> | undefined),
+        provisionCommand: `printf host-script-ran > '${marker}'` } } });
     const resumed = await driver.wakeup(agentId, { source: "on_demand", triggerDetail: "manual", contextSnapshot: { issueId } });
     await vi.waitFor(async () => expect((await driver.getRun(resumed!.id))?.status).toMatch(/^(succeeded|failed)$/), { timeout: 15_000 });
     await drainHeartbeatRunsToQuiescence(db, driver);

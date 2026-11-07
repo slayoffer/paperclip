@@ -17,6 +17,7 @@ import {
   readGitWorkspaceSnapshot,
 } from "@paperclipai/adapter-utils/git-workspace-sync";
 import fs from "node:fs/promises";
+import { isCrossIssueWorkspaceNotCleanError } from "../workspace-reuse-safety.js";
 import path from "node:path";
 import { localRepositoryPath } from "../local-repository-path.js";
 import { execFile as execFileCallback } from "node:child_process";
@@ -98,6 +99,8 @@ const execFile = promisify(execFileCallback);
 
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
+
+export { managedCloneTimeoutMs, managedCloneFilterArgs, describeManagedCloneFailure } from "../managed-repository-checkout.js";
 
 export const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 
@@ -2315,6 +2318,11 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
   workspaceConfigFreshness: ExecutionWorkspaceConfigFreshnessDecision;
   restoreExistingWorkspace?: (() => Promise<T | null>) | null;
   realizeWorkspace: () => Promise<T>;
+  /**
+   * Realizes a new isolated workspace. Used once, when the normal realization
+   * lands on another issue's workspace that is not clean (the reuse guard).
+   */
+  realizeIsolatedWorkspace?: (() => Promise<T>) | null;
 }): Promise<{
   executionWorkspace: T;
   reusedExecutionWorkspace: T | null;
@@ -2326,7 +2334,17 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
   });
 
   if (!policy.shouldRestoreExistingWorkspace) {
-    const executionWorkspace = await input.realizeWorkspace();
+    let executionWorkspace: T;
+    try {
+      executionWorkspace = await input.realizeWorkspace();
+    } catch (error) {
+      if (!input.realizeIsolatedWorkspace || !isCrossIssueWorkspaceNotCleanError(error)) throw error;
+      executionWorkspace = await input.realizeIsolatedWorkspace();
+      executionWorkspace.warnings = [
+        ...(executionWorkspace.warnings ?? []),
+        "The workspace chosen for this issue belongs to another issue and is not clean. This run uses a separate issue workspace.",
+      ];
+    }
     return {
       executionWorkspace,
       reusedExecutionWorkspace: null,

@@ -52,6 +52,9 @@ describe("assertReproducibleGitFiles with Paperclip-managed files", () => {
   }
 
   beforeEach(async () => {
+    // The proof compares stock Git metadata, not operator-installed templates.
+    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-reproducible-")));
     const main = await upstream("main", {
       "README.md": "main\n",
@@ -60,6 +63,7 @@ describe("assertReproducibleGitFiles with Paperclip-managed files", () => {
     ({ seed: projectSeed, bare: projectRemote } = await upstream("project", { "README.md": "project\n", ".gitignore": "node_modules/\n" }));
     work = path.join(root, "work");
     await execFile("git", ["clone", "-q", main.bare, work]);
+    await fs.mkdir(path.join(work, ".git", "info"), { recursive: true });
     await fs.appendFile(path.join(work, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n");
     prove = (checkout, _name, signal) => assertReproducibleManagedCheckout(checkout, {
       repoUrl: projectRemote, resolveGitAuth: async () => null, signal,
@@ -67,6 +71,7 @@ describe("assertReproducibleGitFiles with Paperclip-managed files", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(root, { recursive: true, force: true });
   });
 

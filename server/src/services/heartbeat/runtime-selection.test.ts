@@ -39,7 +39,11 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); if (instructionRoot) await rm(instructionRoot, { recursive: true, force: true }); });
   beforeEach(async () => {
-    await db.execute(sql`truncate table companies restart identity cascade`);
+    await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate table companies restart identity cascade`);
+    });
     vi.clearAllMocks();
     vi.mocked(prepareNativeWorkspaceSync).mockResolvedValue(null);
     vi.mocked(buildNativeRuntimeContext).mockImplementation(async () => {

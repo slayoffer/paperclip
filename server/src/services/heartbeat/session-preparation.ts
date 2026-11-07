@@ -1,3 +1,8 @@
+import path from "node:path";
+import { parseObject } from "../../adapters/utils.js";
+import { copyLegacyRestartProviderState } from "../legacy-restart-provider-state.js";
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
+import { describeOwnerSessionResetReason, shouldResetOwnerSessionForWake } from "../owner-sessions.js";
 import { and, desc, eq } from "drizzle-orm";
 import { agentConfigRevisions, type Db, type agents, type agentTaskSessions, type heartbeatRuns, type issues, type projects } from "@paperclipai/db";
 import type { AiConnectionBinding, AiRuntimeConnectionBinding } from "@paperclipai/shared";
@@ -28,6 +33,7 @@ type TaskSession = typeof agentTaskSessions.$inferSelect | null;
 type SessionCodec = ReturnType<typeof getAdapterSessionCodec>;
 
 export interface HeartbeatSessionPreparationInput {
+  ownerSession?: boolean;
   run: Pick<typeof heartbeatRuns.$inferSelect, "createdAt">;
   agent: typeof agents.$inferSelect;
   task: {
@@ -49,6 +55,7 @@ export interface HeartbeatSessionPreparationInput {
   };
   config: {
     runtimeConfig: Record<string, unknown>;
+    mergedConfig?: Record<string, unknown>;
     agentIdentity: { keyId: string } | undefined;
     issueAssigneeOverrides: unknown;
     originalAiIssueOverrides: unknown;
@@ -60,6 +67,7 @@ export interface HeartbeatSessionPreparationInput {
     routineEnvContext: { env: unknown };
   };
   workspace: Pick<WorkspaceInput["policy"], "requestedExecutionWorkspaceMode" | "effectiveExecutionWorkspaceMode" | "projectExecutionWorkspacePolicy" | "issueExecutionWorkspaceSettings" | "executionPolicy"> & {
+    workspaceReuseFallback?: WorkspaceInput["policy"]["workspaceReuseFallback"];
     requestedReusableExecutionWorkspaceConfig: NonNullable<WorkspaceInput["reuse"]["reusableExistingExecutionWorkspace"]>["config"] | null;
     reusableExistingExecutionWorkspace: WorkspaceInput["reuse"]["reusableExistingExecutionWorkspace"];
   };
@@ -102,7 +110,10 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
             ? workspaceProjectContext.updatedAt.toISOString()
             : (workspaceProjectContext?.updatedAt ?? null),
         projectPolicy: projectExecutionWorkspacePolicy,
-        issueSettings: issueExecutionWorkspaceSettings,
+        issueSettings: input.workspace.workspaceReuseFallback
+          ? { ...issueExecutionWorkspaceSettings, mode: "isolated_workspace",
+              workspaceStrategy: parseObject(input.config.mergedConfig?.workspaceStrategy) }
+          : issueExecutionWorkspaceSettings,
         reusableExecutionWorkspaceConfig:
           requestedReusableExecutionWorkspaceConfig,
         existingExecutionWorkspace: reusableExistingExecutionWorkspace
@@ -173,7 +184,7 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
     const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
     if (!canRefresh) context.forceFreshSession = true;
   }
-  const wakeSessionResetReason = describeSessionResetReason(context);
+  const wakeSessionResetReason = input.ownerSession ? describeOwnerSessionResetReason(context) : describeSessionResetReason(context);
   const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
     hasTaskSession: taskSession != null,
     configuredModel,
@@ -186,7 +197,8 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
       acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision && !agentIdentity,
   });
   const resetTaskSession =
-    context.workspaceSelectionChanged === true || shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
+    context.workspaceSelectionChanged === true ||
+    (input.ownerSession ? shouldResetOwnerSessionForWake(context) : shouldResetTaskSessionForWake(context)) || sessionConfigFreshness.reset;
   const sessionResetReason =
     sessionConfigFreshness.reasons.join("; ") || null;
   const taskSessionForRun = resetTaskSession ? null : taskSession;
@@ -220,6 +232,9 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
 }
 
 export interface HeartbeatAdapterSessionInput {
+  legacyRestartRecovery?: LegacyRestartCheckpoint;
+  restartSessionScope?: { sessionStorageKey: string | null; workspaceCwd: string };
+  ownerSession?: boolean;
   agent: typeof agents.$inferSelect;
   task: {
     context: Record<string, unknown>;
@@ -290,6 +305,7 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
 
   const sessionCompaction = await evaluateSessionCompaction({
     agent,
+    ownerSession: input.ownerSession === true,
     sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
     issueId,
     continuationSummaryBody: continuationSummary?.body ?? null,
@@ -328,6 +344,21 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
       delete executionContinuation?.resumeDelta;
     }
   }
+  if (input.legacyRestartRecovery) {
+    const saved = input.legacyRestartRecovery;
+    if (saved.workspaceCwd !== input.restartSessionScope?.workspaceCwd) throw new Error("restart_workspace_changed");
+    if (saved.executionWorkspaceId !== (persistedExecutionWorkspace?.id ?? null)) throw new Error("restart_workspace_binding_changed");
+    if (saved.taskKey !== input.restartSessionScope?.sessionStorageKey) throw new Error("restart_session_scope_changed");
+    if ((saved.aiSessionIdentity ?? null) !== (managedAiRuntime?.sessionIdentity ?? null)) throw new Error("restart_account_changed");
+    if (saved.providerSessionHome) {
+      if (!managedAiRuntime?.home) throw new Error("restart_account_changed");
+      await copyLegacyRestartProviderState(saved.providerSessionHome, path.join(managedAiRuntime.home, "provider"), saved.adapterType);
+    }
+    runtimeSessionIdForAdapter = saved.sessionParams.sessionId;
+    runtimeSessionParamsForAdapter = saved.sessionParams;
+    previousSessionDisplayId = saved.sessionParams.sessionId;
+  }
+  context.paperclipRestartResume = Boolean(input.legacyRestartRecovery);
   const runtimeForAdapter = {
     sessionId: runtimeSessionIdForAdapter,
     sessionParams: runtimeSessionParamsForAdapter,

@@ -1,11 +1,16 @@
+import { isReviewBridgeWait } from "../review-bridge-contract.js";
+import { externalWaitDeadline } from "../external-wait.js";
+import { blockedStateIntegrityEnabled, hasOutsideWait, hasPendingHandoffWait } from "../blocked-state-integrity.js";
 import { createHash } from "node:crypto";
 import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
   approvals,
+  documents,
   heartbeatRuns,
   issueApprovals,
+  issueDocuments,
   issueRelations,
   issueThreadInteractions,
   issueWorkProducts,
@@ -28,6 +33,8 @@ type DispositionRepairIssue = Pick<
   | "executionPolicy"
   | "executionState"
   | "monitorNextCheckAt"
+  | "identifier"
+  | "unblockDescriptor"
 >;
 
 export type DispositionRepairSourceState = {
@@ -84,7 +91,7 @@ export async function collectDispositionRepairSourceState(
   },
 ): Promise<DispositionRepairSourceState> {
   const issue = input.issue;
-  const [blockers, children, interactions, linkedApprovals, workProducts, activeRuns, queuedWakes] =
+  const [blockers, children, interactions, linkedApprovals, workProducts, activeRuns, queuedWakes, issueDocs] =
     await Promise.all([
       db
         .select({ id: issues.id, status: issues.status, assigneeAgentId: issues.assigneeAgentId })
@@ -179,13 +186,20 @@ export async function collectDispositionRepairSourceState(
         .where(
           and(
             eq(agentWakeupRequests.companyId, issue.companyId),
-            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "pending_bridge_dispatch", "dispatching_bridge"]),
             sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
             input.excludeWakeupRequestId
               ? ne(agentWakeupRequests.id, input.excludeWakeupRequestId)
               : sql`true`,
           ),
         ),
+      // Document revisions count as progress (synthiq fork): an owner that revises a plan or receipt document is not
+      // "unchanged", so it does not collect repair wakes. Comments stay excluded on purpose.
+      db
+        .select({ id: documents.id, key: issueDocuments.key, latestRevisionNumber: documents.latestRevisionNumber })
+        .from(issueDocuments)
+        .innerJoin(documents, eq(documents.id, issueDocuments.documentId))
+        .where(and(eq(issueDocuments.companyId, issue.companyId), eq(issueDocuments.issueId, issue.id))),
     ]);
 
   const pendingExecutionState = parseIssueExecutionState(issue.executionState);
@@ -193,7 +207,10 @@ export async function collectDispositionRepairSourceState(
   const pendingApproval = linkedApprovals.some((row) =>
     row.status === "pending" || row.status === "revision_requested",
   );
-  const durablePathReason = issue.assigneeUserId
+  const externalWait = externalWaitDeadline(issue.unblockDescriptor) !== null;
+  const recordedWait = issue.status === "blocked" && (isReviewBridgeWait(issue.unblockDescriptor) || externalWait ||
+    (blockedStateIntegrityEnabled() && (hasOutsideWait(issue.unblockDescriptor) || await hasPendingHandoffWait(db, issue))));
+  const durablePathReason = recordedWait ? "recorded_wait" : issue.assigneeUserId
     ? "user_owner"
     : blockers.length > 0
       ? "blocker"
@@ -210,6 +227,7 @@ export async function collectDispositionRepairSourceState(
   const durableState = {
     source: {
       status: issue.status,
+      ...(blockedStateIntegrityEnabled() || isReviewBridgeWait(issue.unblockDescriptor) || externalWait ? { unblockDescriptor: issue.unblockDescriptor } : {}),
       assigneeAgentId: issue.assigneeAgentId,
       assigneeUserId: issue.assigneeUserId,
       executionPolicy: issue.executionPolicy,
@@ -227,6 +245,7 @@ export async function collectDispositionRepairSourceState(
     workProducts: workProducts
       .map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() }))
       .sort((a, b) => a.id.localeCompare(b.id)),
+    documents: issueDocs.sort((a, b) => a.id.localeCompare(b.id)),
   };
   const digest = createHash("sha256").update(stableJson(durableState)).digest("hex");
 

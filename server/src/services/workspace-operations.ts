@@ -1,3 +1,5 @@
+import { withWorkspaceFinalizationActivity } from "./workspace-finalization-activity.js";
+export { isNativeWorkspaceFinalizationOperationActive } from "./workspace-finalization-activity.js";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { workspaceOperations } from "@paperclipai/db";
@@ -5,6 +7,7 @@ import type { WorkspaceOperation, WorkspaceOperationPhase, WorkspaceOperationSta
 import { asc, desc, eq, gte, inArray, isNull, lt, or, and } from "drizzle-orm";
 import { conflict, notFound } from "../errors.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { redactRunLogText } from "./run-result-redaction.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getWorkspaceOperationLogStore } from "./workspace-operation-log-store.js";
 
@@ -95,22 +98,6 @@ function readRuntimeControlOwner(metadata: unknown): RuntimeControlOwnerStamp | 
  * so it is safe to terminalize immediately instead of waiting out the staleness window.
  */
 const liveRuntimeControlOperationIds = new Set<string>();
-
-type NativeFinalizationActivityScope = {
-  operationId: string;
-  companyId: string;
-  runId: string;
-  issueId: string;
-};
-// Presentation-only positive proof. Persisted running rows can outlive a crash;
-// this registry only exists while this process awaits the actual export callback.
-const liveNativeFinalizationOperations = new Map<string, NativeFinalizationActivityScope>();
-
-export function isNativeWorkspaceFinalizationOperationActive(scope: NativeFinalizationActivityScope): boolean {
-  const active = liveNativeFinalizationOperations.get(scope.operationId);
-  return Boolean(active && active.companyId === scope.companyId
-    && active.runId === scope.runId && active.issueId === scope.issueId);
-}
 
 /**
  * Whether the process that stamped an operation is still alive on this host. A dead owner can
@@ -490,7 +477,9 @@ export function workspaceOperationService(db: Db) {
           let stderrExcerpt = "";
           const append = async (stream: "stdout" | "stderr" | "system", chunk: string | null | undefined) => {
             if (!chunk) return;
-            const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
+            // SYNA-1586: workspace commands (git clone, provisioning) print credential-bearing URLs and env. Use the run-log
+            // policy for the log file and both excerpts. A value split across two chunks is not seen.
+            const sanitizedChunk = redactRunLogText(redactCurrentUserText(chunk, currentUserRedactionOptions));
             if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
             if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
             await logStore.append(handle, {
@@ -595,22 +584,10 @@ export function workspaceOperationService(db: Db) {
           };
 
           const timeoutMs = recordInput.timeoutMs ?? defaultRuntimeControlTimeoutMs(runtimeControlAction);
-          const runWithActivity = async () => {
-            const nativeFinalization = recordInput.phase === "workspace_finalize"
-              && recordInput.metadata?.owningService === "native_workspace_finalizer"
-              && input.heartbeatRunId && input.issueId;
-            if (nativeFinalization) liveNativeFinalizationOperations.set(id, {
-              operationId: id, companyId: input.companyId,
-              runId: input.heartbeatRunId!, issueId: input.issueId!,
-            });
-            try {
-              return await recordInput.run(reportProgress);
-            } finally {
-              // Join the underlying callback, even if the recorder's timeout
-              // already fired. A deadline cannot prove physical export stopped.
-              liveNativeFinalizationOperations.delete(id);
-            }
-          };
+          const runWithActivity = () => withWorkspaceFinalizationActivity({
+            operationId: id, companyId: input.companyId, runId: input.heartbeatRunId,
+            issueId: input.issueId, phase: recordInput.phase, metadata: recordInput.metadata,
+          }, () => recordInput.run(reportProgress));
           const settle = async () => {
             if (!timeoutMs || timeoutMs <= 0) return await runWithActivity();
             const timeout = new Promise<never>((_resolve, reject) => {

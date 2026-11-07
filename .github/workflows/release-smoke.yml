@@ -68,7 +68,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
 
       - name: Start a user systemd session
         # The hosted runner has no login session for the runner user, so
@@ -134,7 +134,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
 
       - name: Install dependencies
@@ -236,7 +236,7 @@ jobs:
           version: 9.15.4
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: ${{ needs.qualification_daemons.outputs.runner_artifact_prefix }}-*
@@ -313,7 +313,7 @@ jobs:
           version: 9.15.4
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: ${{ inputs.artifact_name }}-public-packages

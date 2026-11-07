@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   classifyCodexAuthRefreshFailure,
+  describeCodexAuthRefreshFailure,
   extractCodexRetryNotBefore,
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
@@ -23,6 +25,18 @@ describe("parseCodexJsonl", () => {
       usageReported: true, usageComplete: true, usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
     });
   });
+
+  it("declares resumed thread totals as cumulative for task-keyed and owner sessions", () => {
+    const fixture = JSON.parse(readFileSync(new URL("./__fixtures__/resume-usage.json", import.meta.url), "utf8"));
+    const turns = fixture.turns.map((event: Record<string, unknown>) => parseCodexJsonl([
+      JSON.stringify({ type: "thread.started", thread_id: "resume-fixture" }), JSON.stringify(event),
+    ].join("\n")));
+    expect(turns.map((turn: ReturnType<typeof parseCodexJsonl>) => turn.usageBasis))
+      .toEqual(Array(4).fill("session_cumulative"));
+    expect(turns.map((turn: ReturnType<typeof parseCodexJsonl>) => turn.usage.inputTokens))
+      .toEqual([550_000, 1_100_000, 2_190_000, 3_360_000]);
+  });
+
   it("captures session id, assistant summary, usage, and error message", () => {
     const stdout = [
       JSON.stringify({ type: "thread.started", thread_id: "thread_123" }),
@@ -41,11 +55,11 @@ describe("parseCodexJsonl", () => {
       sessionId: "thread_123",
       summary: "Recovered response",
       usage: {
-        inputTokens: 8,
+        inputTokens: 10,
         cachedInputTokens: 2,
         outputTokens: 4,
       },
-      usageBasis: "per_run",
+      usageBasis: "session_cumulative",
       errorMessage: "resume failed",
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
@@ -79,11 +93,11 @@ describe("parseCodexJsonl", () => {
       sessionId: "thread_123",
       summary: "Fixed the issue and verified the targeted tests pass.",
       usage: {
-        inputTokens: 8,
+        inputTokens: 10,
         cachedInputTokens: 2,
         outputTokens: 4,
       },
-      usageBasis: "per_run",
+      usageBasis: "session_cumulative",
       errorMessage: null,
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
@@ -262,5 +276,18 @@ describe("isCodexTransientUpstreamError", () => {
         ].join("\n"),
       }),
     ).toBe(false);
+  });
+});
+
+describe("describeCodexAuthRefreshFailure", () => {
+  it("names the login refresh as the cause and keeps the original line", () => {
+    const message = describeCodexAuthRefreshFailure(
+      "refresh_token_reused",
+      "workspace routing discovery unauthorized (401)",
+    );
+    expect(message).toContain("Codex login refresh failed");
+    expect(message).toContain("refresh_token_reused");
+    expect(message).toContain("not a workspace routing problem");
+    expect(message).toContain("workspace routing discovery unauthorized (401)");
   });
 });

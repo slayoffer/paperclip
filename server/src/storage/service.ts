@@ -49,7 +49,7 @@ function ensureCompanyPrefix(companyId: string, objectKey: string): void {
   if (!objectKey.startsWith(expectedPrefix)) {
     throw forbidden("Object does not belong to company");
   }
-  if (objectKey.includes("..")) {
+  if (objectKey.split(/[\\/]/).some((part) => part === "." || part === "..")) {
     throw badRequest("Invalid object key");
   }
 }
@@ -101,7 +101,13 @@ export function createStorageService(provider: StorageProvider): StorageService 
       ensureCompanyPrefix(input.companyId, objectKey);
       const byteSize = "byteSize" in input ? input.byteSize : input.body.length;
       const contentType = input.contentType.trim().toLowerCase();
+      const planned: PutFileResult = {
+        provider: provider.id, objectKey, contentType, byteSize,
+        sha256: "sha256" in input ? input.sha256 : hashBuffer(input.body),
+        originalFilename: input.originalFilename,
+      };
       try {
+        await input.beforePut?.(planned);
         await provider.putObject({
           objectKey,
           body: input.body,
@@ -109,25 +115,18 @@ export function createStorageService(provider: StorageProvider): StorageService 
           contentLength: byteSize,
         });
       } catch (error) {
-        await provider.deleteObject({ objectKey }).catch(() => {});
+        if (!input.preserveOnError) await provider.deleteObject({ objectKey }).catch(() => {});
         throw error;
       } finally {
         if (input.body instanceof Readable) input.body.destroy();
       }
 
-      return {
-        provider: provider.id,
-        objectKey,
-        contentType,
-        byteSize,
-        sha256: "sha256" in input ? input.sha256 : hashBuffer(input.body),
-        originalFilename: input.originalFilename,
-      };
+      return planned;
     },
 
     async getObject(companyId: string, objectKey: string, options) {
       ensureCompanyPrefix(companyId, objectKey);
-      return provider.getObject({ objectKey, range: options?.range });
+      return provider.getObject({ objectKey, range: options?.range, signal: options?.signal });
     },
 
     async headObject(companyId: string, objectKey: string) {

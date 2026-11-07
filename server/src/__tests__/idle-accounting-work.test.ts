@@ -19,7 +19,11 @@ const support = await getEmbeddedPostgresTestSupport();
     db = createDb(database.connectionString);
   }, 60_000);
   afterEach(async () => {
-    await db.execute(sql`TRUNCATE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      // Synthiq fork: publication request history rejects TRUNCATE. Reset with triggers off.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies CASCADE`);
+    });
     for (const directory of directories.splice(0)) await fs.rm(directory, { force: true, recursive: true });
   });
   afterAll(async () => { await database?.cleanup(); });

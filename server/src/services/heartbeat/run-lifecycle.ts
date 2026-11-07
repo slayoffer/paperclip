@@ -1,5 +1,6 @@
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import os from "node:os";
+import { preserveLegacyRestartEvidence } from "../legacy-restart-recovery.js";
 import {
   DEFERRED_WAKE_CONTEXT_KEY,
   EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
@@ -83,6 +84,9 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
+import { publishHeartbeatRunRuntimeProgress, recordCurrentRunRuntimeProgress } from "../heartbeat-runtime-progress.js";
+import { redactRunPersistencePatch } from "../run-result-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
 import {
   appendHeartbeatRunEvent,
@@ -236,6 +240,7 @@ const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
 ];
 
 const LIVENESS_BOOKKEEPING_EVENT_TYPES = [
+  "execution.evidence",
   "lifecycle",
   "adapter.invoke",
   "error",
@@ -356,61 +361,7 @@ export function decorateHeartbeatRunRuntimeStatus<
   };
 }
 
-export function publishHeartbeatRunRuntimeProgress(status: {
-  companyId: string;
-  runId: string;
-  agentId: string;
-  issueId: string | null;
-  phase: HeartbeatRunStatusPhase;
-  message: string;
-  updatedAt: Date;
-  currentToolName?: string | null;
-  lastAssistantSnippet?: string | null;
-  lastEventAt?: Date | null;
-}) {
-  publishLiveEvent({
-    companyId: status.companyId,
-    type: "heartbeat.run.progress",
-    payload: {
-      runId: status.runId,
-      agentId: status.agentId,
-      issueId: status.issueId,
-      phase: status.phase,
-      message: status.message,
-      currentToolName: status.currentToolName ?? null,
-      lastAssistantSnippet: status.lastAssistantSnippet ?? null,
-      lastEventAt: (status.lastEventAt ?? status.updatedAt).toISOString(),
-      updatedAt: status.updatedAt.toISOString(),
-    },
-  });
-}
-
-function recordHeartbeatRunRuntimeProgress(
-  run: Pick<
-    typeof heartbeatRuns.$inferSelect,
-    "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-  >,
-  update: RuntimeStatusUpdate,
-  issueId: string | null,
-) {
-  if (!isHeartbeatRunRuntimeStatusActive(run.status)) return null;
-  const status = setHeartbeatRunRuntimeStatus({
-    companyId: run.companyId,
-    issueId,
-    agentId: run.agentId,
-    runId: run.id,
-    phase: update.phase as HeartbeatRunStatusPhase,
-    message: update.message,
-    currentToolName: readNonEmptyString(update.currentToolName) ?? null,
-    lastAssistantSnippet:
-      readNonEmptyString(update.lastAssistantSnippet) ?? null,
-    lastEventAt: update.lastEventAt ? new Date(update.lastEventAt) : new Date(),
-  });
-  if (!status) return null;
-
-  publishHeartbeatRunRuntimeProgress(status);
-  return status;
-}
+export { publishHeartbeatRunRuntimeProgress } from "../heartbeat-runtime-progress.js";
 
 function sanitizeLiveRunProgressText(
   value: string,
@@ -990,25 +941,11 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
   }
 
   async function recordCurrentHeartbeatRunRuntimeProgress(
-    run: Pick<
-      typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
-    >,
+    run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "status">,
     update: RuntimeStatusUpdate,
     issueId: string | null,
   ) {
-    if (!isHeartbeatRunRuntimeStatusActive(run.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    const currentRun = await getRun(run.id);
-    if (!currentRun || !isHeartbeatRunRuntimeStatusActive(currentRun.status)) {
-      clearHeartbeatRunRuntimeStatus(run.id);
-      return null;
-    }
-
-    return recordHeartbeatRunRuntimeProgress(currentRun, update, issueId);
+    return recordCurrentRunRuntimeProgress(db, run, update, issueId);
   }
 
   async function writeRunStatus<T>(status: string, companyId: string | undefined, write: (tx: Db) => Promise<T>) {
@@ -1020,6 +957,56 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       await notifyExecutionRunWork(tx);
       return write(tx);
     });
+  }
+
+  // SYNA-1817: secret values a run's adapter received (declared secret env keys), by run id. Read at every run-row
+  // write that carries error, excerpts or resultJson, so late and failure writers mask them too. Entries expire.
+  // An entry lives while its run is live: a terminal status write schedules its removal 15 min later (late writers still
+  // see it). The count cap is only a memory backstop, far above the number of live runs.
+  const runPersistSecretReaders = new Map<string, { read: () => string[]; at: number }>();
+  const RUN_PERSIST_SECRET_READERS_MAX = 50_000;
+  const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out", "interrupted"]);
+  function forgetRunPersistSecretsLater(runId: string, status: string) {
+    if (!TERMINAL_RUN_STATUSES.has(status) || !runPersistSecretReaders.has(runId)) return;
+    setTimeout(() => runPersistSecretReaders.delete(runId), 15 * 60_000).unref?.();
+  }
+  function rememberRunPersistSecrets(runId: string, read: () => string[]) {
+    runPersistSecretReaders.delete(runId);
+    runPersistSecretReaders.set(runId, { read, at: Date.now() });
+    while (runPersistSecretReaders.size > RUN_PERSIST_SECRET_READERS_MAX) {
+      const oldest = runPersistSecretReaders.keys().next().value;
+      if (oldest === undefined) break;
+      runPersistSecretReaders.delete(oldest);
+    }
+  }
+  function readRunPersistSecrets(runId: string): string[] {
+    const entry = runPersistSecretReaders.get(runId);
+    if (!entry) return [];
+    runPersistSecretReaders.delete(runId);
+    runPersistSecretReaders.set(runId, { ...entry, at: Date.now() });
+    return entry.read();
+  }
+  async function redactRunPatchForPersistence(
+    run: { id: string; companyId: string } | null,
+    patch: Partial<typeof heartbeatRuns.$inferInsert> | undefined,
+  ) {
+    if (!patch || !run) return patch;
+    if (patch.error == null && patch.stdoutExcerpt == null && patch.stderrExcerpt == null && patch.resultJson == null) return patch;
+    let registered: string[] = [];
+    try {
+      registered = await createRunSecretRedactionRegistry(db).valuesForRun(run.companyId, run.id);
+    } catch (err) {
+      logger.warn({ runId: run.id }, "run secret registry unavailable; suppressing persisted output");
+      return {
+        ...patch,
+        ...(patch.error != null ? { error: "***REDACTED***" } : {}),
+        ...(patch.stdoutExcerpt != null ? { stdoutExcerpt: "***REDACTED***" } : {}),
+        ...(patch.stderrExcerpt != null ? { stderrExcerpt: "***REDACTED***" } : {}),
+        ...(patch.resultJson != null ? { resultJson: { redactionUnavailable: true } } : {}),
+      };
+    }
+    const declared = readRunPersistSecrets(run.id);
+    return redactRunPersistencePatch(patch, [...declared, ...registered]);
   }
 
   async function setRunStatus(
@@ -1043,6 +1030,10 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
+
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
     }
@@ -1062,6 +1053,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated = await writeRunStatus(status, previousStatus?.companyId, writer =>
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? terminalizeLegacyExecution({
@@ -1091,6 +1083,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
     }
 
     return updated;
@@ -1128,6 +1121,10 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       .then((rows) => rows[0] ?? null);
     const previousStatus = previous?.run ?? null;
 
+    if (patch?.resultJson) {
+      patch = { ...patch, resultJson: preserveLegacyRestartEvidence(previousStatus?.resultJson, patch.resultJson) };
+    }
+
     if (previousStatus && (status === "cancelled" || status === "interrupted")) {
       patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
     }
@@ -1158,6 +1155,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         },
       };
     }
+    patch = await redactRunPatchForPersistence(previousStatus, patch);
     const updated = await writeRunStatus(status, previousStatus?.companyId, writer =>
       previousStatus && previousStatus.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status)
         ? terminalizeLegacyExecution({
@@ -1215,6 +1213,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       });
       publishRunLifecyclePluginEvent(updated);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null, failureReport);
+      forgetRunPersistSecretsLater(updated.id, updated.status);
       return { run: updated, updated: true as const };
     }
 
@@ -1895,7 +1894,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         .set({
           livenessReason: UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-            ${JSON.stringify({ stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON })}::jsonb`,
+            ${sql.param({ stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON }, heartbeatRuns.resultJson)}::jsonb`,
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -3003,6 +3002,9 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
 
   return {
     appendRunEvent,
+    rememberRunPersistSecrets,
+    readRunPersistSecrets,
+    redactRunPatchForPersistence,
     escalatePlanApprovalResumeFailureNeedsAttention,
     recordPlanApprovalResumeFailureRetry,
     setRunStatusIfRunning,

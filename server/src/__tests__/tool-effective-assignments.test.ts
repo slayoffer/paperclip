@@ -18,7 +18,11 @@ describeDatabase("effective tool assignments", () => {
     database = await startEmbeddedPostgresTestDatabase("effective-tool-assignments-");
     db = createDb(database.connectionString, { maxConnections: 1 });
   });
-  afterEach(async () => { await db.execute(sql`TRUNCATE TABLE companies CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await database?.cleanup(); });
 
   async function fixture() {

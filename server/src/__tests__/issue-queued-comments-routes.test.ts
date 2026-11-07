@@ -1,3 +1,4 @@
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { runningProcesses } from "../adapters/index.js";
 import { randomUUID } from "node:crypto";
@@ -70,9 +71,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       child.kill();
     }
     testProcesses.clear();
-    // Each case owns the entire disposable database. Clear the full company
-    // graph, including attribution rows and constraints added by migrations.
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    // Remove this case from its disposable database.
+    await clearCompanyFixtures(db);
   });
 
   afterAll(async () => {

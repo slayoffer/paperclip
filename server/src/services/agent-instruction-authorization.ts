@@ -61,7 +61,8 @@ export async function resolveInstructionActor(
   }
   if (actor.runId) {
     const [run] = await db
-      .select()
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId,
+        responsibleUserId: heartbeatRuns.responsibleUserId, activeIdentityContextId: heartbeatRuns.activeIdentityContextId })
       .from(heartbeatRuns)
       .where(
         and(

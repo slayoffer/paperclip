@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { issueTokenBudgetRunBlock } from "../issue-token-budget.js";
 import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
@@ -6,6 +7,7 @@ import {
   readWorkspaceValidationPayloadFromRun,
 } from "./workspaces.js";
 import { admitExplicitContinuationRetry } from "../explicit-native-continuation.js";
+import { isSshSetupWait } from "../run-cancellation.js";
 import {
   CONVERSATION_CONTINUATION_POLICY,
   hasConversationContinuationPolicy,
@@ -15,6 +17,7 @@ import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
   accountingForScheduledRetry,
+  SSH_TRANSPORT_WAIT,
 } from "../execution-recovery-attempt.js";
 import { WORKSPACE_GIT_SCAN_ERROR_CODES } from "../workspace-git-operation-scheduler.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE } from "../legacy-controller-lease.js";
@@ -468,7 +471,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
-    const contextSnapshot = parseObject(run.contextSnapshot);
+    const contextSnapshot = { ...parseObject(run.contextSnapshot) };
+    delete contextSnapshot.issueBudgetOverride;
     // A retry inherits the durable authorization scope of its source run. Do
     // not promote an untrusted or legacy contextSnapshot.issueId into a new
     // issue binding: that could either violate the FK or misclassify history.
@@ -547,6 +551,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         };
       }
     }
+
+    const tokenBudgetBlock = await issueTokenBudgetRunBlock(db, run);
+    if (tokenBudgetBlock) return { outcome: "not_scheduled" as const,
+      reason: tokenBudgetBlock.error, errorCode: tokenBudgetBlock.errorCode, issueId: tokenBudgetBlock.issueId };
 
     const schedule =
       transientRetryNotBefore &&
@@ -964,8 +972,6 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
           (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) && issueId &&
           !isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)
         ) {
-          // The issue row is locked above. Recheck after the preflight gate so
-          // cancellation or recovery cannot leave a successor without its lock.
           const [lockedIssue] = await tx.select({ executionRunId: issues.executionRunId })
             .from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
           if (lockedIssue?.executionRunId !== run.id) {
@@ -979,7 +985,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {
-          const continuation = issueId && retryReason === "transient_failure" ? await admitExplicitContinuationRetry({
+          const continuation = issueId && (retryReason === "transient_failure" ||
+            (retryReason === SSH_TRANSPORT_WAIT && isSshSetupWait(run))) ? await admitExplicitContinuationRetry({
             db: tx as unknown as Db, companyId: run.companyId, issueId, agentId: run.agentId,
             parentRunId: run.id, successorRunId: scheduledRunId, now,
           }) : null;

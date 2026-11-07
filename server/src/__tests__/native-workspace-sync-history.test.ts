@@ -49,6 +49,16 @@ describe("native warm workspace Git history", () => {
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
   });
 
+  it.each([0, 7])("preserves exit code %s when the child does not read stdin", async (exitCode) => {
+    const result = await runner.execute({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write('probe'); process.exit(${exitCode})`],
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 5_000,
+    });
+    expect(result).toMatchObject({ exitCode, stdout: "probe", stderr: "", timedOut: false });
+  });
+
   it.each(["unchanged", "host_commit", "host_branch", "host_origin", "remote_commit", "remote_commit_corrupt_seed", "remote_commit_missing_seed", "remote_commit_cache_refused", "host_bytes_cache_refused", "remote_commit_missing_run_seed", "remote_commit_corrupt_run_seed", "nested_commit", "plain_nested_commit"] as const)(
     "checks Git identity before reusing a warm sandbox: %s", async (change) => {
       const invalidRunSeed = change === "remote_commit_missing_run_seed" || change === "remote_commit_corrupt_run_seed";

@@ -41,6 +41,8 @@ describe("reconstruction after confirmed native workspace loss", () => {
     providerExecute.mockClear();
     await db.transaction(async tx => {
     await tx.execute(sql`set local client_min_messages = warning`);
+    // Publication history is immutable; disable triggers only for fixture reset.
+    await tx.execute(sql`set local session_replication_role = replica`);
     await tx.execute(sql`truncate companies cascade`);
   }); });
 

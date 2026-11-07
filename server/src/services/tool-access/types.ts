@@ -1,6 +1,8 @@
 import type { Db } from "@paperclipai/db";
 
 export type ActorInfo = {
+  /** Server-selected grant. The caller must check its audience before health testing. */
+  credentialGrantId?: string;
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   sessionId?: string | null;

@@ -177,6 +177,7 @@ const support = externalTestDatabaseUrl ? { supported: true } : await getEmbedde
         const unequalConfirmation = new Date(Date.parse(String(termination.confirmedAt)) + 1);
         dedicated.confirmedAt = unequalConfirmation.toISOString();
         await db.update(environmentLeases).set({ releasedAt: unequalConfirmation }).where(eq(environmentLeases.id, stopped.id));
+        expect(dedicated.confirmedAt).not.toBe(termination.confirmedAt);
       }
       if (scenario === "pending_intent") metadata.sandboxStopAndRetain = {};
       if (scenario === "cleanup_in_flight") metadata.pendingCleanupInFlight = true;

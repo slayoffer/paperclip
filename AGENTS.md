@@ -16,6 +16,7 @@ Before making changes, read in this order:
 3. `doc/SPEC-implementation.md`
 4. `doc/DEVELOPING.md`
 5. `doc/DATABASE.md`
+6. [Production contract](doc/PRODUCTION-CONTRACT.md) — five Golden Path questions.
 
 `doc/SPEC.md` is long-horizon product context.
 `doc/SPEC-implementation.md` is the concrete V1 build contract.

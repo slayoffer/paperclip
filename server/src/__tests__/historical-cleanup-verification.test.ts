@@ -16,7 +16,11 @@ if (!support.supported) console.warn(`Skipping historical cleanup database tests
 (support.supported ? describe : describe.skip)("historical cleanup verification", () => {
   let db: ReturnType<typeof createDb>, database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("historical-cleanup-"); db = createDb(database.connectionString); }, 60_000);
-  afterEach(async () => { await db.execute(sql`SET client_min_messages = warning; TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   const read = () => readIdleSleepSafety(db, owned, () => now, ownerId, async () => "none", undefined, undefined, true, true);
   const state = async () => (await read()).backgroundWork;

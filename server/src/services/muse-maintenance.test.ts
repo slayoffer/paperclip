@@ -47,7 +47,11 @@ describeDatabase("Muse commit and deadline maintenance", () => {
     await coordinator?.stop();
     await stop?.();
     vi.useRealTimers();
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.transaction(async (tx) => {
+      // Publication history is immutable; disable triggers only for fixture reset.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    });
   });
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await database?.cleanup(); });
 

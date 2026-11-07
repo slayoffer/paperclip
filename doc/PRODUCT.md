@@ -56,6 +56,10 @@ while keeping the harness, selected model, account bindings, instructions, and
 history. Unsupported settings produce an actionable error without changing the
 saved agent. Future runs start fresh sessions.
 
+The Synthiq fork offers optional [owner sessions](owner-sessions.md).
+A selected owner resumes one provider thread across issues in the same project.
+Each issue retains its execution worktree. The default remains task-keyed sessions.
+
 Paperclip supports several ways to run an agent's heartbeat:
 
 1. **Local CLI/session adapters** — Paperclip starts or resumes local coding-tool sessions such as Claude Code, Codex, Gemini, OpenCode, Pi, and Cursor, then tracks the run.

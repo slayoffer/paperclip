@@ -40,4 +40,20 @@ describe("compactRunLogChunk", () => {
     expect(compacted).not.toContain("paperclip-json-secret");
     expect(compacted).not.toContain("paperclip-flag-secret");
   });
+
+  it("masks token shapes inside a long run and registered values (SYNA-1817)", () => {
+    const board = `pcp_board_${"0a1b2c3d4e5f".repeat(4)}`;
+    const chunk = `start ${"A".repeat(5000)}${board} opaque-registered-value-77 end`;
+    const compacted = compactRunLogChunk(chunk, 1_000_000, ["opaque-registered-value-77"]);
+    expect(compacted).not.toContain(board);
+    expect(compacted).not.toContain("opaque-registered-value-77");
+    expect(compacted.startsWith("start ")).toBe(true);
+  });
+
+  it("stays fast on a long base64-like run", () => {
+    const chunk = `data ${"QUJD".repeat(60_000)} tail`;
+    const started = performance.now();
+    compactRunLogChunk(chunk, 1_000_000);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
 });

@@ -26,6 +26,13 @@ awareness is supplied by the harness; compatible session continuations carry
 fresh routing information and changed facts, with full context retained for
 new sessions and resume failure.
 
+The Synthiq fork has an optional [guarded pull queue](pull-queue.md).
+Tasks support validated [environment selection](workspace-operations.md#task-environment-selection) without changing inherited workspace bindings or agent defaults.
+The [V1 implementation contract](SPEC-implementation.md) defines its default-off activation and admission boundaries.
+The fork permits [saved review waits](review-waits.md) with a board owner and an exact saved head.
+The fork also permits [external waits](external-waits.md) from the unchanged assignee with a deadline within seven days.
+Fork recovery: [CLI restart](restart-session-recovery.md) and [normal owner work](owner-recovery-resume.md).
+
 ---
 
 Reusable workflows stay inside the Cases experiment. A workflow is a company-shared
@@ -38,7 +45,8 @@ workflow information and history.
 
 ## 1. Company Model [DRAFT]
 
-A Company is a first-order object. One Paperclip instance runs multiple Companies. A Company does not have a standalone "goal" field — its direction is defined by its set of Initiatives (see Task Hierarchy Mapping).
+An instance has multiple companies. Initiatives define direction, without a company goal field (see Task Hierarchy Mapping).
+The board [flow report](company-flow.md) shows queues and dependencies.
 
 ### Fields (Draft)
 

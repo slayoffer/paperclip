@@ -19,8 +19,8 @@ describe("personal Muse client durability", () => {
     execFileSync("python3", [
       fileURLToPath(new URL("./fixtures/muse-client-contract.py", import.meta.url)),
       fileURLToPath(new URL("../services/scripts/v9/client.py", import.meta.url)),
-    ], { encoding: "utf8", timeout: 30_000 });
-  });
+    ], { encoding: "utf8", timeout: 60_000 });
+  }, 65_000); // The subprocess runs 64 filesystem and transport contract cases.
 });
 
 

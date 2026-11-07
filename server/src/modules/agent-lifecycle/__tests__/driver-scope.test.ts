@@ -7,12 +7,12 @@ vi.mock("../../../services/agent-harness-verification.js", () => ({ agentHarness
 import { createLifecycleDriver } from "../../../services/agent-lifecycle-driver.js";
 
 describe("lifecycle host stop scope", () => {
-  it("pauses only the requested agent without loading its company peers", async () => {
+  it.each([null, new Date("2026-10-19T01:00:00Z")])("pauses only the requested agent without loading its company peers (pause time: %s)", async (pausedAt) => {
     const db = { select: vi.fn(() => { throw new Error("No peer lookup expected"); }) } as unknown as Db;
     const driver = createLifecycleDriver(db, {} as never);
     expect(await driver.runHost({ id: "target", companyId: "company", lifecycleState: "pausing",
-      lifecycleVersion: 2, lifecycleRequiredPluginIds: [], lifecycleError: null, lifecycleOperation: null })).toBe("complete");
-    expect(stop).toHaveBeenCalledWith(["target"], "Agent lifecycle stop requested");
+      pausedAt, lifecycleVersion: 2, lifecycleRequiredPluginIds: [], lifecycleError: null, lifecycleOperation: null })).toBe("complete");
+    expect(stop).toHaveBeenLastCalledWith(["target"], "Agent lifecycle stop requested", { historyBefore: pausedAt });
     expect(db.select).not.toHaveBeenCalled();
   });
 });

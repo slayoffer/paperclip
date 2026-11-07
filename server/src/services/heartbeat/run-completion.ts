@@ -1,5 +1,8 @@
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
+import type { LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
+import { deferSshSetupFailure } from "./ssh-setup-deferral.js";
+import { saveOwnerSessionState } from "../owner-sessions.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
 import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspaceGitScanCode } from "./retries.js";
@@ -32,6 +35,8 @@ import { readAcceptedTaskContinuationSummary } from "../heartbeat-run-summary.js
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
+import { redactRunResultSecrets } from "../run-result-redaction.js";
+import { wakeDependentsAfterFinalization } from "../dependency-finalize-wake.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
@@ -63,7 +68,7 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
     "classifyAndPersistRunLiveness" | "completeSkillTestRunForHeartbeatOutcome" | "refreshContinuationSummaryForRun" |
     "findRunIssueComment" | "findLatestCompletedFinalAgentMessage" | "parseMaxTurnContinuationPolicy" |
     "finalizeIssueCommentPolicy" | "handleIssueReviewPathDisposition" | "handleRunLivenessContinuation" |
-    "handleSuccessfulRunHandoff" | "updateRuntimeState">,
+    "handleSuccessfulRunHandoff" | "updateRuntimeState" | "redactRunPatchForPersistence">,
   Pick<ReturnType<typeof createHeartbeatRetries>,
     "scheduleBoundedRetryForRun" | "scheduleInteractionContinuationInfrastructureRetryIfEligible" | "timerClaimWasFirstHeartbeat">,
   Pick<ReturnType<typeof createHeartbeatRunControl>, "releaseIssueExecutionAndPromote">,
@@ -81,6 +86,7 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
 
 interface RunCompletionOutput {
   handle: RunLogHandle | null;
+  flushRunLog?: () => Promise<void>;
   outputProgressState: { pending: { bytes: number } | null };
   flushOutputProgress: (options?: { force?: boolean }) => Promise<void>;
   // Getters in the executor retain output that arrives while finalization awaits I/O.
@@ -94,6 +100,11 @@ interface RunCompletionSession {
   taskKey: string | null;
   configuredModel: string | null;
   sessionConfigMetadata: EffectiveRunSessionConfigMetadata;
+  /** Synthiq owner sessions: the row key that stores this run's thread. */
+  sessionStorageKey?: string | null;
+  ownerSession?: { key: string } | null;
+  /** The owner row's lastRunId when this run started; guards the shared row. */
+  ownerSessionExpectedLastRunId?: string | null;
 }
 
 interface RunCompletionInput {
@@ -120,6 +131,8 @@ export interface CompleteHeartbeatRunInput extends RunCompletionInput {
   onProviderTraceFinalized: () => void;
   issueContext: IssueContext;
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  /** Synthiq legacy restart resume: the checkpoint this run resumed from. */
+  legacyRestartRecovery?: LegacyRestartCheckpoint;
 }
 
 export interface FailHeartbeatRunInput extends RunCompletionInput {
@@ -365,6 +378,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     handleRunLivenessContinuation,
     handleSuccessfulRunHandoff,
     updateRuntimeState,
+    redactRunPatchForPersistence,
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
@@ -384,9 +398,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   async function completeRun(input: CompleteHeartbeatRunInput) {
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
-      providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
+      providerTraceCapture, onProviderTraceFinalized, issueContext, onLog, legacyRestartRecovery } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
-    const { handle, outputProgressState, flushOutputProgress } = output;
+    const ownerSession = session.ownerSession ?? null;
+    const sessionStorageKey = session.sessionStorageKey ?? taskKey;
+    const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
     const processCancellation =
       processRunCancellationSettlements.get(run.id) ??
       failedProcessRunCancellations.get(run.id);
@@ -471,13 +487,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         { legacySessionId: nextSessionState.legacySessionId },
         normalizedUsage,
       );
-      if (!taskKey) return;
+      if (!taskKey || ownerSession) return;
       if (
         adapterResult.clearSession ||
         (!nextSessionState.params && !nextSessionState.displayId)
       ) {
         await clearTaskSessions(agent.companyId, agent.id, {
-          taskKey,
+          taskKey: sessionStorageKey!,
           adapterType: agent.adapterType,
           expectedRunId: finalizedRun.id,
         });
@@ -486,7 +502,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           companyId: agent.companyId,
           agentId: agent.id,
           adapterType: agent.adapterType,
-          taskKey,
+          taskKey: sessionStorageKey!,
           sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
             nextSessionState.params,
             configuredModel,
@@ -505,6 +521,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       compressed: boolean;
     } | null = null;
     if (handle) {
+      await flushRunLog?.();
       logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
     }
     const finalLogBytes = logSummary?.bytes;
@@ -596,7 +613,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       ),
     };
 
-    const persistedResultJson = cancellationResultJson(latestRun ?? run, outcome, mergeHeartbeatRunResultJson(
+    // Host-side credentials that Paperclip did not inject can reach captured output or the summary;
+    // mask token-shaped text in the final merged result before it is stored.
+    const persistedResultJson = redactRunResultSecrets(cancellationResultJson(latestRun ?? run, outcome, mergeHeartbeatRunResultJson(
       mergeRunStopMetadataForAgent(agent, outcome, {
         resultJson: mergeAdapterRecoveryMetadata({
           resultJson: {
@@ -604,6 +623,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               ? parseObject(latestRun?.resultJson)
               : {}),
             ...parseObject(adapterResult.resultJson),
+            ...(latestRun?.resultJson?.restartRecovery ? { restartRecovery: latestRun.resultJson.restartRecovery } : {}),
+            ...(legacyRestartRecovery ? { restartRecovery: {
+              outcome: outcome === "succeeded" ? "resumed" : "reconciliation",
+              sessionId: legacyRestartRecovery.sessionParams.sessionId,
+              ...(outcome === "succeeded" ? {} : { reason: runErrorCode ?? "restart_resume_failed" }),
+            } } : {}),
             ...(adapterResult.executionRecovery
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),
@@ -617,7 +642,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         errorMessage: runErrorMessage,
       }),
       adapterResult.summary ?? null,
-    ), runErrorCode, runErrorMessage);
+    ), runErrorCode, runErrorMessage));
 
     const ledgerScope = runLedgerScope;
     const finalRunPatch: Partial<typeof heartbeatRuns.$inferInsert> = {
@@ -639,6 +664,18 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       logSha256: logSummary?.sha256,
       logCompressed: logSummary?.compressed ?? false,
     };
+    if (ownerSession) {
+      // The owner row is shared across issues: save it while this run still holds admission (SYNA-2912 r2 P2).
+      const clear = adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId);
+      await saveOwnerSessionState(db, {
+        companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType, key: ownerSession.key,
+        runId: run.id, expectedLastRunId: session.ownerSessionExpectedLastRunId ?? null, lastError: runErrorMessage,
+        session: clear ? null : {
+          params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
+          displayId: nextSessionState.displayId,
+        },
+      });
+    }
     const persistedRunWrite = await measureRunPhase("completion.terminal_write", () => setRunStatusIfRunning(
       run.id,
       status,
@@ -662,12 +699,16 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           (processCancellation && !processCancellation.failed && status === "cancelled")) &&
         persistedRunWrite.run?.status === status
       ) {
+        const redactedFinalRunPatch = (await redactRunPatchForPersistence(persistedRunWrite.run, {
+          ...finalRunPatch,
+          resultJson: cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage),
+        }))!;
         persistedRun = await db
           .update(heartbeatRuns)
           .set({
-            ...finalRunPatch,
+            ...redactedFinalRunPatch,
             resultJson: preserveWorkspaceRestoreRecoveryMetadataSql(
-              cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage) ?? null,
+              redactedFinalRunPatch.resultJson ?? null,
             ),
 
             usageJson: { ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) },
@@ -889,10 +930,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           };
         }
 
+        const redactedPresentationResult = (await redactRunPatchForPersistence(livenessRun, {
+          resultJson: { presentationDecision },
+        }))!.resultJson;
         await db
           .update(heartbeatRuns)
           .set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ presentationDecision })}::jsonb`,
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param(redactedPresentationResult, heartbeatRuns.resultJson)}::jsonb`,
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, livenessRun.id));
@@ -1008,32 +1052,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         }
       }
 
-      // Dependency wake re-check: if this run's issue was marked done mid-run,
-      // the route-time `issue_blockers_resolved` wake may have been gated by
-      // workspace finalization or merged into this run. Reuse the level-triggered
-      // dependency backstop so finalize and periodic recovery share idempotency,
-      // readiness, active-path, and observability rules.
       if (issueId && finalizedRun) {
-        try {
-          const blockerIssueStatus = await db
-            .select({ status: issues.status })
-            .from(issues)
-            .where(eq(issues.id, issueId))
-            .then((rows) => rows[0]?.status ?? null);
-          if (blockerIssueStatus === "done") {
-            await recovery.reconcileResolvedDependencyWakeBackstop({
-              runId: finalizedRun.id,
-              companyId: finalizedRun.companyId,
-              blockerIssueId: issueId,
-              source: "workspace.finalize",
-            });
-          }
-        } catch (finalizeWakeErr) {
-          logger.warn(
-            { err: finalizeWakeErr, runId: run.id, issueId },
-            "failed to evaluate dependent wakes after workspace_finalize",
-          );
-        }
+        await wakeDependentsAfterFinalization(db, recovery, finalizedRun, issueId);
       }
     }
 
@@ -1047,10 +1067,38 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
       legacyAdapterEntered, goalCheckpointSession, previousSessionDisplayId, taskSession } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
-    const { handle, outputProgressState, flushOutputProgress } = output;
-    // A process adapter may throw while its owned Stop is joining the
-    // child. Let the cancellation write settle before attempting failure.
+    const ownerSession = session.ownerSession ?? null;
+    const sessionStorageKey = session.sessionStorageKey ?? taskKey;
+    const { handle, flushRunLog, outputProgressState, flushOutputProgress } = output;
     await processRunCancellationSettlements.get(run.id)?.settled;
+    let logSummary: {
+      bytes: number | null;
+      sha256?: string | null;
+      compressed: boolean;
+    } | null = null;
+    if (handle) {
+      try {
+        await flushRunLog?.();
+        logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
+      } catch (finalizeErr) {
+        logger.warn(
+          { err: finalizeErr, runId },
+          "failed to finalize run log after error",
+        );
+      }
+    }
+    const finalLogBytes = logSummary?.bytes;
+    if (outputProgressState.pending && typeof finalLogBytes === "number") {
+      outputProgressState.pending.bytes = finalLogBytes;
+    }
+    await flushOutputProgress({ force: true }).catch((flushErr) => {
+      logger.warn(
+        { err: flushErr, runId },
+        "failed to flush run output progress after error",
+      );
+    });
+    if (!legacyAdapterEntered && !signal.aborted && run.runtimeMode !== "native" &&
+        await deferSshSetupFailure(run, err, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
       await getCurrentUserRedactionOptions(),
@@ -1095,33 +1143,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       recordedResponsibleUserDenialCode ??
       nativeTerminalFailureCode ??
       "adapter_failed";
-    logger.error({ err: identityRedactor.redact({ message: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }), runId }, "heartbeat execution failed");
-
-    let logSummary: {
-      bytes: number | null;
-      sha256?: string | null;
-      compressed: boolean;
-    } | null = null;
-    if (handle) {
-      try {
-        logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
-      } catch (finalizeErr) {
-        logger.warn(
-          { err: finalizeErr, runId },
-          "failed to finalize run log after error",
-        );
-      }
-    }
-    const finalLogBytes = logSummary?.bytes;
-    if (outputProgressState.pending && typeof finalLogBytes === "number") {
-      outputProgressState.pending.bytes = finalLogBytes;
-    }
-    await flushOutputProgress({ force: true }).catch((flushErr) => {
-      logger.warn(
-        { err: flushErr, runId },
-        "failed to flush run output progress after error",
-      );
+    const safeError = await redactRunPatchForPersistence(run, {
+      resultJson: identityRedactor.redact(err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : { message: String(err) }),
     });
+    logger.error({ err: safeError?.resultJson, runId }, "heartbeat execution failed");
 
     const stoppedDuringFailure = signal.aborted;
     const stopSnapshot = stoppedDuringFailure ? await getRun(run.id) : null;
@@ -1248,7 +1275,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       );
 
       if (
-        taskKey &&
+        taskKey && !ownerSession &&
         (goalCheckpointSession.current ||
           previousSessionParams ||
           previousSessionDisplayId ||
@@ -1258,7 +1285,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           companyId: agent.companyId,
           agentId: agent.id,
           adapterType: agent.adapterType,
-          taskKey,
+          taskKey: sessionStorageKey!,
           sessionParamsJson:
             goalCheckpointSession.current?.params ??
             attachPaperclipSessionMetadataToSessionParams(
@@ -1288,15 +1315,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       signal.reason instanceof LegacyControllerLeaseLostError;
     // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
     // The inner catch did not fire, so we must record the failure here.
+    if (!providerDispatchStarted && !signal.aborted && run.runtimeMode !== "native" &&
+        await deferSshSetupFailure(run, outerErr, dependencies)) return;
     const message = redactCurrentUserText(
       identityRedactor.redact(outerErr instanceof Error
         ? outerErr.message
         : "Unknown setup failure"),
       await getCurrentUserRedactionOptions(),
     );
-    // A missing secret/env binding is a known pre-dispatch configuration gap,
-    // not an opaque setup crash. Surface it with its own errorCode so the
-    // recovery path routes it to a human owner instead of looping retries.
     const workspaceValidationSetupFailure = isWorkspaceValidationFailure(
       outerErr,
     )

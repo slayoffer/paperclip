@@ -264,3 +264,6 @@ export { companyObservability } from "./company_observability.js";
 
 export * from "./prompt_injection_prevention.js";
 export { workflows } from "./workflows.js";
+export { credentialTransfers } from "./credential_transfers.js";
+export { interactionResolutionOutbox } from "./interaction_resolution_outbox.js";
+export { publicationAuthorityClocks, publicationBrokers, publicationRequests } from "./publication_requests.js";

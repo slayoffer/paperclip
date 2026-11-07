@@ -280,7 +280,13 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(await server.db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, f.companyId))).toEqual(before);
 
       await server.db.update(issues).set({ executionWorkspaceId: executionWorkspace.id }).where(eq(issues.id, f.issueId));
-      await expect(call(f, "create_task", { title: "Inherited source cannot escape", idempotencyKey: "inherited-source-denied", status: "backlog" })).rejects.toThrow(/outside.*boundary/i);
+      const isolated = await call(f, "create_task", { title: "Child does not inherit an outside source", idempotencyKey: "isolated-source", status: "backlog" }) as any;
+      const [child] = await server.db.select({ projectId: issues.projectId, projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId, executionWorkspacePreference: issues.executionWorkspacePreference,
+      }).from(issues).where(eq(issues.id, isolated.task.id));
+      expect(child).toEqual({ projectId: null, projectWorkspaceId: null, executionWorkspaceId: null, executionWorkspacePreference: null });
+      const explicit = await create(paths[0]!, { inheritExecutionWorkspaceFromIssueId: f.issueId });
+      expect(explicit.status, JSON.stringify(explicit.body)).toBe(403);
       await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: {
         trustBoundary: { ...boundary, projectIds: [f.projectId] },
       } } }).where(eq(agents.id, f.agentId));

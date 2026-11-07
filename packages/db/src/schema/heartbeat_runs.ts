@@ -18,6 +18,7 @@ import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
 import { issues } from "./issues.js";
+import { redactedRunJson, redactedRunText } from "../run-output-redaction.js";
 
 export const heartbeatRuns = pgTable(
   "heartbeat_runs",
@@ -42,7 +43,7 @@ export const heartbeatRuns = pgTable(
     executionControlDeadlineAt: timestamp("execution_control_deadline_at", { withTimezone: true }),
     // Transactional delivery marker. Null on historical rows; publication never replays provider work.
     executionStatusDeliveryId: uuid("execution_status_delivery_id"),
-    error: text("error"),
+    error: redactedRunText("error"),
     wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id),
     exitCode: integer("exit_code"),
     signal: text("signal"),
@@ -53,7 +54,8 @@ export const heartbeatRuns = pgTable(
     accountingLastError: text("accounting_last_error"),
     accountingAttemptCount: integer("accounting_attempt_count").notNull().default(0),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
-    resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
+    // Run output columns redact credentials on every write (SYNA-1586, ../run-output-redaction.ts).
+    resultJson: redactedRunJson("result_json"),
     runtimeMode: text("runtime_mode").notNull().default("legacy"),
     runtimeModeResolverVersion: text("runtime_mode_resolver_version"),
     runtimeModeReason: text("runtime_mode_reason"),
@@ -76,8 +78,8 @@ export const heartbeatRuns = pgTable(
     logBytes: bigint("log_bytes", { mode: "number" }),
     logSha256: text("log_sha256"),
     logCompressed: boolean("log_compressed").notNull().default(false),
-    stdoutExcerpt: text("stdout_excerpt"),
-    stderrExcerpt: text("stderr_excerpt"),
+    stdoutExcerpt: redactedRunText("stdout_excerpt"),
+    stderrExcerpt: redactedRunText("stderr_excerpt"),
     errorCode: text("error_code"),
     externalRunId: text("external_run_id"),
     // Legacy controller lease. A PID alone is not an identity across containers.
@@ -106,6 +108,11 @@ export const heartbeatRuns = pgTable(
     continuationAttempt: integer("continuation_attempt").notNull().default(0),
     lastUsefulActionAt: timestamp("last_useful_action_at", { withTimezone: true }),
     nextAction: text("next_action"),
+    contextTaskIdentity: jsonb("context_task_identity").generatedAlwaysAs(sql`coalesce(nullif(context_snapshot -> 'issueId', 'null'::jsonb), nullif(context_snapshot -> 'taskId', 'null'::jsonb) )`),
+    writesRevoked: boolean("writes_revoked").generatedAlwaysAs(sql`status = 'cancelled' or coalesce(jsonb_typeof(result_json -> 'executionCancellation') = 'object' and result_json -> 'executionCancellation' -> 'state' = '"requested"'::jsonb, false)`),
+    conversationMode: boolean("conversation_mode").generatedAlwaysAs(sql`coalesce(context_snapshot -> 'conversationMode' = 'true'::jsonb, false)`),
+    contextIssueId: text("context_issue_id").generatedAlwaysAs(sql`context_snapshot ->> 'issueId'`),
+    contextTaskId: text("context_task_id").generatedAlwaysAs(sql`context_snapshot ->> 'taskId'`),
     contextSnapshot: jsonb("context_snapshot").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -144,6 +151,9 @@ export const heartbeatRuns = pgTable(
       table.id,
       table.completionContractId,
     ),
+    companyAgentActivityIdx: index("heartbeat_runs_company_agent_activity_idx").on(
+      table.companyId, table.agentId, table.createdAt, table.contextIssueId, table.contextTaskId,
+    ),
     companyAgentStartedIdx: index("heartbeat_runs_company_agent_started_idx").on(
       table.companyId,
       table.agentId,
@@ -177,6 +187,20 @@ export const heartbeatRuns = pgTable(
     companyCreatedAtDescIdx: index("heartbeat_runs_company_created_at_desc_idx").on(
       table.companyId,
       table.createdAt.desc(),
+    ),
+    companyIssueCoalesceIdx: index("heartbeat_runs_company_issue_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.nativeIssueId}::text, ${table.contextSnapshot}->>'issueId'))`,
+      table.createdAt.desc(),
+    ),
+    companyRecoveryActionIdx: index("heartbeat_runs_company_recovery_action_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot}->>'recoveryActionId')`,
+      table.createdAt.desc(),
+    ),
+    companyIssueTaskCoalesceIdx: index("heartbeat_runs_company_issue_task_coalesce_idx").on(
+      table.companyId,
+      sql`(coalesce(${table.contextSnapshot}->>'issueId', ${table.contextSnapshot}->>'taskId', ${table.nativeIssueId}::text))`,
     ),
     companyCtxIssueCreatedIdx: index("heartbeat_runs_company_ctx_issue_created_idx").on(
       table.companyId,

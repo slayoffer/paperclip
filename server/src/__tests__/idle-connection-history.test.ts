@@ -19,7 +19,11 @@ if (!support.supported) console.warn(`Skipping connection-history database tests
 (support.supported ? describe : describe.skip)("idle connection and local lease history", () => {
   let db: ReturnType<typeof createDb>; let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("idle-connection-history-"); db = createDb(database.connectionString); }, 60_000);
-  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
+  afterEach(async () => { await db.transaction(async (tx) => {
+      // Publication history forbids TRUNCATE; disable triggers only for fixture cleanup.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`TRUNCATE companies, plugins, environments CASCADE`);
+    }); });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
   const read = () => readIdleSleepSafety(db, owned, () => now, ownerId, async () => "none", undefined, undefined, true, true);
   async function seed(status = "done") {

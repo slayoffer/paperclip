@@ -134,7 +134,7 @@ const support = await getEmbeddedPostgresTestSupport();
     }
   });
 
-  it.each(["create", "createChild"] as const)("inherits a parent task folder through %s with isolated workspaces disabled", async (entryPoint) => {
+  it.each(["create", "createChild"] as const)("keeps a child task folder separate through %s with isolated workspaces disabled", async (entryPoint) => {
     const f = await fixture(), settings = instanceSettingsService(db), previous = await settings.getExperimental();
     await settings.updateExperimental({ enableIsolatedWorkspaces: false });
     try {
@@ -145,10 +145,12 @@ const support = await getEmbeddedPostgresTestSupport();
       const child = entryPoint === "create"
         ? await tasks.create(f.companyId, { ...input, parentId: f.issueId })
         : (await tasks.createChild(f.issueId, input)).issue;
-      expect(child).toMatchObject({ parentId: f.issueId, projectId: null, executionWorkspaceId: f.workspaceId,
-        executionWorkspacePreference: "reuse_existing" });
+      expect(child).toMatchObject({ parentId: f.issueId, projectId: null, executionWorkspaceId: null,
+        executionWorkspacePreference: null });
       const view = await executionWorkspaceService(db).inspectTaskWorkspace(f.companyId, child.id, f.actor);
-      expect(view.workspace).toMatchObject({ id: f.workspaceId, cwd: `/tmp/task-${f.issueId}` });
+      expect(view.workspace).toBeNull();
+      const parentView = await executionWorkspaceService(db).inspectTaskWorkspace(f.companyId, f.issueId, f.actor);
+      expect(parentView.workspace).toMatchObject({ id: f.workspaceId, cwd: `/tmp/task-${f.issueId}` });
       const explicit = await tasks.create(f.companyId, { ...input, title: "Explicit separate folder", parentId: f.issueId,
         workspaceSelectionSource: "explicit" });
       expect(explicit.executionWorkspaceId).toBeNull();
@@ -210,7 +212,7 @@ const support = await getEmbeddedPostgresTestSupport();
       .toMatchObject({ id: f.workspaceId, projectWorkspaceId: parentSource.id });
   });
 
-  it.each(["explicit", "channel", "inherited", "legacy"] as const)("keeps a reused task folder's null source authoritative for %s creation", async (source) => {
+  it.each(["explicit", "channel", "explicitly inherited", "legacy"] as const)("keeps a reused task folder's null source authoritative for %s creation", async (source) => {
     const f = await fixture(), svc = executionWorkspaceService(db), tasks = issueService(db);
     const settings = instanceSettingsService(db), previous = await settings.getExperimental();
     await settings.updateExperimental({ enableIsolatedWorkspaces: true });
@@ -220,7 +222,7 @@ const support = await getEmbeddedPostgresTestSupport();
       const [projectWorkspace] = await db.insert(projectWorkspaces).values({ companyId: f.companyId, projectId: project.id,
         name: "Unrelated repository", cwd: "/tmp/unrelated-source", isPrimary: true }).returning();
       let parentId: string | undefined;
-      if (source === "inherited") {
+      if (source === "explicitly inherited") {
         const [parent] = await db.insert(issues).values({ companyId: f.companyId, projectId: project.id,
           title: "Parent sharing task files", executionWorkspaceId: f.workspaceId }).returning();
         parentId = parent.id;
@@ -230,7 +232,7 @@ const support = await getEmbeddedPostgresTestSupport();
         workspaceSelectionActor: f.actor,
         ...(source === "legacy"
           ? { executionWorkspaceId: f.workspaceId, projectWorkspaceId: projectWorkspace.id, executionWorkspacePreference: "reuse_existing" }
-          : source === "inherited" ? {}
+          : source === "explicitly inherited" ? { inheritExecutionWorkspaceFromIssueId: parentId }
             : { workspaceSelection: { kind: "existing" as const, workspaceId: f.workspaceId }, workspaceSelectionSource: source }),
       });
       expect(created).toMatchObject({ projectId: project.id, executionWorkspaceId: f.workspaceId, projectWorkspaceId: null });

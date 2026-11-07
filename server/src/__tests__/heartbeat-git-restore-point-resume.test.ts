@@ -4,8 +4,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentWakeupRequests,
   agents,
@@ -21,6 +21,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
@@ -39,7 +40,7 @@ vi.mock("../adapters/index.js", () => ({
   runningProcesses: new Map(),
 }));
 
-const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
   GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -54,11 +55,15 @@ describe.skipIf(!support.supported)("heartbeat resume of an idle-expired workspa
     db = createDb(database.connectionString);
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-heartbeat-restore-point-")));
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+  beforeEach(() => {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  });
   afterEach(async () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     adapterExecute.mockClear();
     await db.delete(executionWorkspaceRestorePoints);
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.delete(executionWorkspaces); await clearCompanyFixtures(db);
     await db.delete(authUsers).where(eq(authUsers.id, "responsible-user"));
     vi.unstubAllEnvs();
   });

@@ -11,7 +11,7 @@ const {
 } = vi.hoisted(() => ({
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
-  runSshCommand: vi.fn(async () => ({
+  runSshCommand: vi.fn(async (_spec: unknown, _command: string, _options?: unknown) => ({
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),
@@ -25,6 +25,7 @@ vi.mock("./ssh.js", () => ({
   syncDirectoryToSsh,
 }));
 
+import { SSH_WORKSPACE_EXCLUDES } from "./ssh-workspace-excludes.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
 import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
@@ -32,7 +33,7 @@ import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
 describe("remote managed runtime", () => {
   const cleanupDirs: string[] = [];
 
-  it("stages all files over SSH without Git or cache exclusions and restores the same baseline", async () => {
+  it("excludes generated files from the SSH workspace baseline", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-plain-"));
     cleanupDirs.push(root);
     await mkdir(path.join(root, "node_modules"));
@@ -50,12 +51,12 @@ describe("remote managed runtime", () => {
     await prepared.restoreWorkspace();
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledWith(expect.objectContaining({
       restoreGitHistory: false, baselineSnapshot: expect.objectContaining({
-        exclude: [".paperclip-runtime", "explicitly-excluded"],
+        exclude: [".paperclip-runtime", ...SSH_WORKSPACE_EXCLUDES, "explicitly-excluded"],
         entries: expect.any(Map),
       }),
     }));
     const args = vi.mocked(restoreWorkspaceFromSshExecution).mock.calls[0] as unknown as [{ baselineSnapshot: { entries: Map<string, unknown> } }];
-    expect(args[0].baselineSnapshot.entries.has("node_modules/personal.bin")).toBe(true);
+    expect(args[0].baselineSnapshot.entries.has("node_modules/personal.bin")).toBe(false);
   });
 
 
@@ -90,6 +91,7 @@ describe("remote managed runtime", () => {
         strictHostKeyChecking: true,
       },
       runId: "run-in-place",
+      companyId: "company-1",
       adapterKey: "codex",
       workspaceLocalDir: workspaceDir,
       workspaceRemoteDir: "/app",
@@ -120,6 +122,104 @@ describe("remote managed runtime", () => {
       { maxBuffer: 1024 * 1024 },
     );
     expect(restoredAuth).toBe('{"token":"remote"}\n');
+  });
+
+  it("keeps same-host in_place runtime assets in a per-run folder and removes it after the restore hooks", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-per-run-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const homeDir = path.join(rootDir, "home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    await writeFile(path.join(homeDir, "auth.json"), '{"token":"host"}\n', "utf8");
+
+    const order: string[] = [];
+    vi.mocked(runSshCommand).mockImplementation(async (_spec: unknown, command: string) => {
+      if (!command.startsWith("set -eu")) order.push(command.startsWith("rm -rf") ? "remove" : "read");
+      return { stdout: Buffer.from('{"token":"remote"}\n').toString("base64"), stderr: "" };
+    });
+    const runtimeRootDir = "/home/u/work/.paperclip-runtime/runs/run-in-place/codex";
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/home/u/work",
+        remoteCwd: "/srv/worktrees/SYNA-1",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-in-place",
+      companyId: "company-1",
+      adapterKey: "codex",
+      workspaceLocalDir: "/srv/worktrees/SYNA-1",
+      workspaceRemoteDir: "/srv/worktrees/SYNA-1",
+      syncWorkspace: false,
+      runtimeRootDir,
+      assets: [
+        {
+          key: "home",
+          localDir: homeDir,
+          restore: async ({ assetDir, readFile }) => {
+            await readFile(path.posix.join(assetDir, "auth.json"));
+          },
+        },
+      ],
+    });
+
+    // No bundle, no tar of the workspace, no baseline.
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(prepared.workspaceRemoteDir).toBe("/srv/worktrees/SYNA-1");
+    expect(prepared.runtimeRootDir).toBe(runtimeRootDir);
+    expect(prepared.assetDirs.home).toBe(`${runtimeRootDir}/home`);
+    expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+      localDir: homeDir,
+      remoteDir: `${runtimeRootDir}/home`,
+    }));
+
+    await prepared.restoreWorkspace();
+
+    expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+    expect(order).toEqual(["read", "remove"]);
+    expect(runSshCommand).toHaveBeenLastCalledWith(
+      expect.anything(),
+      `rm -rf -- '${runtimeRootDir}' && (rmdir -- '/home/u/work/.paperclip-runtime/runs/run-in-place' 2>/dev/null || true)`,
+      { timeoutMs: 60_000 },
+    );
+    vi.mocked(runSshCommand).mockReset();
+  });
+
+  it("does not fail the restore when the per-run folder cannot be removed", async () => {
+    vi.mocked(runSshCommand).mockImplementation(async (_spec: unknown, command: string) => {
+      if (command.startsWith("rm -rf")) throw new Error("ssh dropped");
+      return { stdout: "", stderr: "" };
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1", port: 2222, username: "fixture", remoteWorkspacePath: "/home/u/work",
+        remoteCwd: "/srv/worktrees/SYNA-1", privateKey: null, knownHosts: null, strictHostKeyChecking: true,
+      },
+      runId: "run-in-place", adapterKey: "claude", workspaceLocalDir: "/srv/worktrees/SYNA-1",
+      workspaceRemoteDir: "/srv/worktrees/SYNA-1", syncWorkspace: false,
+      runtimeRootDir: "/home/u/work/.paperclip-runtime/runs/run-in-place/claude",
+    });
+    await expect(prepared.restoreWorkspace()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Failed to remove run runtime folder"));
+    warn.mockRestore();
+    vi.mocked(runSshCommand).mockReset();
+  });
+
+  it("rejects a relative per-run runtime root", async () => {
+    await expect(prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1", port: 2222, username: "fixture", remoteWorkspacePath: "/w",
+        remoteCwd: "/w", privateKey: null, knownHosts: null, strictHostKeyChecking: true,
+      },
+      runId: "r", adapterKey: "codex", workspaceLocalDir: "/w", workspaceRemoteDir: "/w",
+      syncWorkspace: false, runtimeRootDir: "relative/root",
+    })).rejects.toThrow("Remote runtime root is not an absolute path");
   });
 
   it("stages each additional project into its own isolated SSH dir, isolating one failure", async () => {

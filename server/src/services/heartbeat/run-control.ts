@@ -19,6 +19,7 @@ import {
   claimCancellationRequest,
   rethrowNativeCancellationLockConflict,
 } from "../native-runtime/native-cancellation-request.js";
+import { withStopRequestEvidence } from "../run-execution-evidence.js";
 import {
   canContinueCancelledRun,
   readRunCancellation,
@@ -268,6 +269,7 @@ function readNonEmptyString(value: unknown): string | null {
 export type CancelRunOptions = {
     /** Return null if a parked retry was promoted or settled before this cancellation. */
     expectedStatus?: "scheduled_retry";
+    requestedAt?: string;
     budgetEnforcement?: BudgetEnforcementScope;
     /** Optional board request identity, atomically reserved for native Stop. */
     cancellationRequestId?: string;
@@ -291,10 +293,11 @@ function runCancellationFenceSql(input: {
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
 }) {
-  const cancellation = JSON.stringify(input.cancellation);
-  const startupCancellation = sql`jsonb_build_object(
-    'requestedAt', ${new Date().toISOString()}::text,
-    'errorCode', ${input.errorCode}::text,
+  const cancellation = sql.param(input.cancellation, heartbeatRuns.resultJson);
+  const startupCancellation = sql`${sql.param({
+    requestedAt: input.cancellation.requestedAt ?? new Date().toISOString(),
+    errorCode: input.errorCode,
+  }, heartbeatRuns.resultJson)}::jsonb || jsonb_build_object(
     'beforeNativeSelection', ${heartbeatRuns.runtimeMode} = 'legacy'
       and ${heartbeatRuns.runtimeModeResolvedAt} is null
       and ${heartbeatRuns.executionStage} = 'preparing'
@@ -304,20 +307,21 @@ function runCancellationFenceSql(input: {
     ? sql`coalesce(${heartbeatRuns.resultJson}->'startupCancellation', ${startupCancellation})`
     : startupCancellation;
   if (input.budgetEnforcement) {
-    const intent = JSON.stringify({ companyId: input.budgetEnforcement.companyId,
+    const intent = sql.param({ companyId: input.budgetEnforcement.companyId,
       scopeType: input.budgetEnforcement.scopeType, scopeId: input.budgetEnforcement.scopeId,
       policyId: input.budgetEnforcement.enforcement?.policyId, version: input.budgetEnforcement.enforcement?.version,
-      createdBefore: input.budgetEnforcement.createdBefore?.toISOString() });
+      createdBefore: input.budgetEnforcement.createdBefore?.toISOString() }, heartbeatRuns.resultJson);
     startupFence = sql`${startupFence} || jsonb_build_object('budgetEnforcement',
       coalesce(nullif(${heartbeatRuns.resultJson}->'startupCancellation'->'budgetEnforcement', 'null'::jsonb), ${intent}::jsonb))`;
   }
   return sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-    ${JSON.stringify(input.reassignmentStopRequested ? { reassignmentStopRequested: true } : {})}::jsonb ||
+    ${sql.param(input.reassignmentStopRequested ? { reassignmentStopRequested: true } : {}, heartbeatRuns.resultJson)}::jsonb ||
     jsonb_build_object('cancellation', ${input.preserveCancellation
       ? sql`coalesce(${heartbeatRuns.resultJson}->'cancellation', ${cancellation}::jsonb)`
       : sql`${cancellation}::jsonb`}) ||
     jsonb_build_object('startupCancellation', ${startupFence})`;
 }
+export type StopRequestContext = Pick<CancelRunOptions, "requestedAt" | "resultJson">;
 
 /** Run control binds cancellation, resource release, and saved-input resumption. */
 export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunControlDependencies) {
@@ -489,12 +493,12 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         await runUsedConversationAdapter(db, stopped) &&
         await remoteExecutionHasStopped(db, companyId, runId)) {
       await db.update(heartbeatRuns).set({
-        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
           executionCancellation: { ...parseObject(stopped.resultJson?.executionCancellation),
             state: "acknowledged", acknowledgedAt: new Date().toISOString(),
             proof: "provider_termination_receipt" },
           conversationContinuation: CONVERSATION_CONTINUATION_POLICY,
-                 })}::jsonb`,
+                 }, heartbeatRuns.resultJson)}::jsonb`,
         updatedAt: new Date(),
       }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId),
         eq(heartbeatRuns.status, "cancelled")));
@@ -1003,7 +1007,13 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     return Math.max(100, Math.min(30_000, Math.trunc(requestedGraceMs)));
   }
 
-  async function cancelRunInternal(
+  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
+    const request = { ...options, requestedAt: options.requestedAt ?? new Date().toISOString() };
+    return withStopRequestEvidence({ db, run: { id: runId }, requestedAt: request.requestedAt,
+      reason, metadata: request.resultJson }, () => cancelRunInternalImpl(runId, reason, request));
+  }
+
+  async function cancelRunInternalImpl(
     runId: string,
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
@@ -1015,7 +1025,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     if (!parseObject(parseObject(run.resultJson?.startupCancellation).budgetEnforcement).scopeType) return;
     const acknowledged = await db.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(${heartbeatRuns.resultJson},
       '{startupCancellation,budgetEnforcement}', ${heartbeatRuns.resultJson}->'startupCancellation'->'budgetEnforcement'
-        || ${JSON.stringify({ deliveredAt: new Date().toISOString(), ...(terminationProof ? { terminationProof } : {}) })}::jsonb)` })
+        || ${sql.param({ deliveredAt: new Date().toISOString(), ...(terminationProof ? { terminationProof } : {}) }, heartbeatRuns.resultJson)}::jsonb)` })
       .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
         pendingBudgetRunCancellationPredicate(),
         terminationProof ? and(eq(heartbeatRuns.status, run.status), eq(heartbeatRuns.nextEventSeq, run.nextEventSeq),
@@ -1122,19 +1132,19 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
             issueId: currentRun.nativeIssueId, resultJson: currentRun.resultJson, requestId: options.cancellationRequestId }, coordinator);
           if (caseHandoffRetryClaimed) cancellableStatuses.push("failed");
         }
-        const requestedAt = new Date().toISOString();
+        const requestedAt = options.requestedAt ?? new Date().toISOString();
         const guardedCancellation = options.expectedStatus ? {
           cancellation: (currentRun.resultJson?.startupCancellation ? readRunCancellation(currentRun.resultJson) : null)
-            ?? requestedRunCancellation(options.resultJson ?? {}, reason),
+            ?? requestedRunCancellation(options.resultJson ?? {}, reason, options.requestedAt),
           // Promotion must remain fenced after this transaction releases the
           // run lock, before the ordinary Stop path performs its settlement.
           startupCancellation: { requestedAt, beforeNativeSelection: currentRun.runtimeMode === "legacy" && !currentRun.runtimeModeResolvedAt
             && currentRun.executionStage === "preparing" && parseObject(currentRun.runnerProfileJson?.adapterDispatch).adapterType === "paperclip_runner" },
         } : {};
         const [fenced] = await tx.update(heartbeatRuns).set({
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${sql.param({
             executionCancellation: { state: "requested", requestedAt }, ...guardedCancellation,
-          })}::jsonb`,
+          }, heartbeatRuns.resultJson)}::jsonb`,
         }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, run!.companyId),
           inArray(heartbeatRuns.status, cancellableStatuses))).returning();
         if (options.expectedStatus && !fenced) return false;
@@ -1190,7 +1200,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
     const cancellation = ((options.expectedStatus || committedBudgetCancellation) && run.resultJson?.startupCancellation
-      ? readRunCancellation(run.resultJson) : null) ?? requestedRunCancellation(options.resultJson ?? {}, reason);
+      ? readRunCancellation(run.resultJson) : null) ?? requestedRunCancellation(options.resultJson ?? {}, reason, options.requestedAt);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -1489,7 +1499,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    context: StopRequestContext = {},
   ) {
+    const requestedAt = context.requestedAt ?? new Date().toISOString();
     const runs = await db
       .select()
       .from(heartbeatRuns)
@@ -1500,7 +1512,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         ),
       );
 
-    for (const run of runs) await cancelRunInternal(run.id, reason, { errorCode });
+    for (const run of runs) {
+      await withStopRequestEvidence({ db, run, requestedAt, reason, metadata: context.resultJson },
+        () => cancelRunInternal(run.id, reason, { ...context, requestedAt, errorCode }));
+    }
 
     return runs.length;
   }
@@ -1548,13 +1563,15 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   async function cancelInvocationsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    context: StopRequestContext = {},
   ) {
+    const request = { ...context, requestedAt: context.requestedAt ?? new Date().toISOString() };
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
     );
     let runsCancelled = 0;
     for (const agentId of uniqueAgentIds) {
-      runsCancelled += await cancelActiveForAgentInternal(agentId, reason);
+      runsCancelled += await cancelActiveForAgentInternal(agentId, reason, "cancelled", request);
     }
     const wakeupsCancelled = await cancelPendingWakeupsForAgentsInternal(
       uniqueAgentIds,
@@ -1595,6 +1612,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   }
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
+    const request = { requestedAt: new Date().toISOString() };
     const reason = "Cancelled due to budget pause";
     const newlyFenced = await withCurrentBudgetEnforcement(db, scope, async (tx) => {
       // Queue admission and every selected run lose authority in this commit,
@@ -1611,7 +1629,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         )).then((rows) => rows.map((row) => row.id));
       if (!candidates.length) return [];
       return tx.update(heartbeatRuns).set({ resultJson: runCancellationFenceSql({
-        cancellation: requestedRunCancellation({}, reason), errorCode: "cancelled", preserveCancellation: true, budgetEnforcement: scope,
+        cancellation: requestedRunCancellation({}, reason, request.requestedAt), errorCode: "cancelled", preserveCancellation: true, budgetEnforcement: scope,
       }) }).where(and(eq(heartbeatRuns.companyId, scope.companyId), inArray(heartbeatRuns.id, candidates),
         inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
         scope.createdBefore ? lt(heartbeatRuns.createdAt, scope.createdBefore) : undefined,
@@ -1634,10 +1652,14 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           // edit admits new work. Do not revoke or repeat that earlier fence.
           await withBudgetStopDelivery(db, async () => {
             const [attempted] = await db.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(${heartbeatRuns.resultJson},
-              '{startupCancellation,budgetEnforcement,lastAttemptAt}', ${JSON.stringify(new Date().toISOString())}::jsonb)` })
+              '{startupCancellation,budgetEnforcement,lastAttemptAt}', ${sql.param({ at: new Date().toISOString() }, heartbeatRuns.resultJson)}::jsonb->'at')` })
               .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, runId),
-                pendingBudgetRunCancellationPredicate())).returning({ id: heartbeatRuns.id });
-            if (attempted) await cancelRun(runId, reason, {}, true);
+                pendingBudgetRunCancellationPredicate())).returning({ id: heartbeatRuns.id, resultJson: heartbeatRuns.resultJson });
+            if (attempted) {
+              const requestedAt = readRunCancellation(attempted.resultJson)?.requestedAt ?? request.requestedAt;
+              await withStopRequestEvidence({ db, run: { id: runId }, requestedAt, reason },
+                () => cancelRun(runId, reason, { requestedAt }, true));
+            }
           });
         } catch (error) {
           failures.push(error);

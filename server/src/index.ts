@@ -24,8 +24,14 @@ import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./se
 import { isIdleTaskDrainActive, beginIdleTrackedWork, trackIdleWork } from "./services/task-admission.js";
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { clearIdleBackupWakeRequired, idleBackupWakeMarker, markIdleBackupWakeRequired, verifyIdleDatabaseBackup } from "./services/idle-database-backup.js";
+import { createSshInPlaceOwnershipReconciler } from "./services/ssh-in-place-reconciliation.js";
+import { runStartupHeartbeatRecoverySteps } from "./startup-heartbeat-recovery.js";
+import type { BetterAuthSessionResult, EmbeddedPostgresInstance, EmbeddedPostgresCtor, StartedServer, StartupDatabaseTeardown } from "./server-startup-types.js";
+export type { StartedServer } from "./server-startup-types.js";
+import { createTerminalWorkspaceSweepReporter } from "./services/terminal-workspace-sweep-report.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
+import { createHeartbeatPullQueue, isPullQueueSignal } from "./services/pull-queue.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -37,6 +43,7 @@ import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
 import { setSentryRunLinkResolver } from "./sentry-links.js";
 import { createSentryRunLinkResolver } from "./services/sentry-run-links.js";
 import { waitForPendingRunFailureReports } from "./services/run-failure-report.js";
+import { installRunOutputRedaction } from "./services/run-result-redaction.js";
 import { verifyStoppedNativeSessionForReplacement } from "./services/native-runtime/native-session-executor.js";
 import { embeddedPostgresOwnerPort } from "./embedded-postgres-owner.js";
 import { deliverExecutionStatuses } from "./services/execution-status-delivery.js";
@@ -46,7 +53,7 @@ import { reconcileAbandonedExecutionControl } from "./services/execution-control
 import { executionControlSchedule, registerExecutionControlWork } from "./services/execution-control-work.js";
 import { connectionIntentDeliveryService } from "./services/connection-intent-delivery.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import type { Server, RequestListener } from "node:http";
+import type { RequestListener } from "node:http";
 import { createPaperclipHttpServer } from "./http/server.js";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -116,7 +123,7 @@ import {
   toolAccessService,
   workspaceOperationService,
 } from "./services/index.js";
-import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
+import { interactionDeliveryService } from "./services/interaction-deliveries.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
@@ -153,6 +160,7 @@ import {
   drainRunExecutionFinalizersForShutdown,
   finalizeServerShutdown,
   loadWithoutCoordinatedShutdownSignalHooks,
+  restartSettleTimeoutMs,
 } from "./shutdown.js";
 import { initializeCloudRuntimeIdentity } from "./services/cloud-runtime-identity.js";
 import { systemdNotify } from "./services/systemd-notify.js";
@@ -160,56 +168,11 @@ import { flushInFlightRunLogMirrors } from "./services/run-log-store.js";
 import {
   createEmbeddedPostgresSupervisor,
   type EmbeddedPostgresSupervisor,
-  type SupervisedEmbeddedPostgres,
 } from "./embedded-postgres-supervisor.js";
 import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
 } from "./routes/instance-database-backups.js";
-
-type BetterAuthSessionUser = {
-  id: string;
-  email?: string | null;
-  name?: string | null;
-};
-
-type BetterAuthSessionResult = {
-  session: { id: string; userId: string } | null;
-  user: BetterAuthSessionUser | null;
-};
-
-type EmbeddedPostgresInstance = SupervisedEmbeddedPostgres & {
-  initialise(): Promise<void>;
-};
-
-type EmbeddedPostgresCtor = new (opts: {
-  databaseDir: string;
-  user: string;
-  password: string;
-  port: number;
-  persistent: boolean;
-  initdbFlags?: string[];
-  onLog?: (message: unknown) => void;
-  onError?: (message: unknown) => void;
-}) => EmbeddedPostgresInstance;
-
-
-export interface StartedServer {
-  server: Server;
-  host: string;
-  listenPort: number;
-  apiUrl: string;
-  databaseUrl: string;
-  shutdown: (signal?: "SIGINT" | "SIGTERM") => Promise<void>;
-}
-
-// Set by the boot sequence once the primary pool exists. A boot that fails
-// after that point (a bootstrap query that throws, for example) must end the
-// pool before the caller exits: the driver keeps idle connections open until
-// the process dies, and in a restart loop the leftover backends of every
-// failed generation can exhaust `max_connections` before the next boot even
-// gets a connection.
-type StartupDatabaseTeardown = { close: (() => Promise<void>) | null };
 
 // Ends the pool behind a drizzle client. Tolerates a client without `$client`
 // (test doubles) and never throws, so it is safe on every exit path.
@@ -452,6 +415,8 @@ async function startServerWithDatabaseTeardown(
   let startupDbInfo:
     | { mode: "external-postgres"; connectionString: string }
     | { mode: "embedded-postgres"; dataDir: string; port: number };
+  // SYNA-1586: heartbeat_runs output columns redact credentials on every write. Install before the first db write.
+  installRunOutputRedaction();
   assertCloudDatabaseContract();
   if (config.databaseUrl) {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
@@ -922,6 +887,10 @@ async function startServerWithDatabaseTeardown(
     ? heartbeatService(db as any, { pluginWorkerManager })
     : null;
   const accountingHeartbeat = heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
+  const pullQueue = heartbeat ? createHeartbeatPullQueue(db as any, {
+    wakeup: heartbeat.wakeup,
+    isSuppressed: () => heartbeat.resolveSchedulingSuppression(),
+  }) : null;
   const decisionServiceOptions = {
     wakeOriginAgent: createDecisionWakeOriginAgent(heartbeat?.wakeup ?? null),
   };
@@ -1184,7 +1153,7 @@ async function startServerWithDatabaseTeardown(
   let drainHeartbeatRunsForShutdown: ((
     signal: "SIGINT" | "SIGTERM",
     runIds?: readonly string[] | null,
-  ) => Promise<unknown>) | null = null;
+  ) => Promise<{ restartSuspendedRunIds: readonly string[] }>) | null = null;
   let drainHeartbeatExecutionFinalizers: (() => Promise<void>) | null = null;
   let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{
     skipDrain: boolean;
@@ -1321,13 +1290,16 @@ async function startServerWithDatabaseTeardown(
   const environmentLeaseCleanupHeartbeat = accountingHeartbeat;
   const chatCompletionDeliveries = chatCompletionDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
   const connectionDeliveries = connectionIntentDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
-  const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
+  const questionResponseDeliveries = interactionDeliveryService(db as any, {
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
   const deliveryWork = app.locals.deliveryWork as ReturnType<typeof createDeliveryWorkCoordinator>;
   const executionSchedule = executionControlSchedule(db);
+  const reconcileSshOwnership = createSshInPlaceOwnershipReconciler(db);
   registerExecutionControlWork(deliveryWork, [
+    { queue: DELIVERY_QUEUES.executionSshOwnership, run: reconcileSshOwnership,
+      onSettled: reconcileSshOwnership.requestScan, next: reconcileSshOwnership.nextRunAt },
     { queue: DELIVERY_QUEUES.executionFinalization, run: () => reconcileAbandonedExecutionControl(db), next: executionSchedule.finalization },
     { queue: DELIVERY_QUEUES.executionStatus, run: () => deliverExecutionStatuses(db), next: executionSchedule.status },
     { queue: DELIVERY_QUEUES.executionDisposition, run: () => settleUnrecoverableExecutions(db), next: executionSchedule.disposition },
@@ -1391,6 +1363,11 @@ async function startServerWithDatabaseTeardown(
       if (result.verified > 0) logger.info(result, "verified historical provider cleanup");
     }).catch(() => logger.warn("historical provider cleanup verification deferred")));
   };
+  const unsubscribePullQueue = subscribeAllCompanyLiveEvents(event => {
+    if (isIdleTaskDrainActive() || isWarmStandby() || heartbeatSchedulerStopped || !isPullQueueSignal(event)) return;
+    if (pullQueue) trackHeartbeatSchedulerWork(pullQueue.notify(event.companyId));
+  });
+  server.on("close", unsubscribePullQueue);
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepPendingCleanupLeases({ backoffMs })
@@ -1514,7 +1491,7 @@ async function startServerWithDatabaseTeardown(
         logger.info(result, "git restore point retention");
       }
     });
-    let lastTerminalWorkspaceSkipLogAt = 0;
+    const reportTerminalWorkspaceSweep = createTerminalWorkspaceSweepReporter(logger);
     const terminalWorkspaceWorker = registerTerminalWorkspaceWork(deliveryWork, {
       ...terminalWorkspaces,
       terminalWorkspaceWorkSettled: (hints) => {
@@ -1523,12 +1500,7 @@ async function startServerWithDatabaseTeardown(
       },
       sweepTerminalWorkspaces: async (limit, signal, options) => {
         const result = await terminalWorkspaces.sweepTerminalWorkspaces(limit, signal, options);
-        if (result.archived > 0 || result.cleanupFailed > 0 || result.compacted > 0 || result.compactionFailed > 0) {
-          logger.info(result, "terminal issue workspace reaper changed workspace state");
-        } else if (result.checked > 0 && Date.now() - lastTerminalWorkspaceSkipLogAt >= 10 * 60 * 1000) {
-          lastTerminalWorkspaceSkipLogAt = Date.now();
-          logger.info(result, "terminal issue workspace reaper skipped all candidates");
-        }
+        reportTerminalWorkspaceSweep(result);
         return result;
       },
     }, () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
@@ -1652,66 +1624,7 @@ async function startServerWithDatabaseTeardown(
           }
         }
 
-        const promotion = await timeStartupRecovery("scheduled_retries", () => heartbeat.promoteDueScheduledRetries());
-        await timeStartupRecovery("queued_runs", () => heartbeat.resumeQueuedRuns());
-        const recoveredGoalActions = await timeStartupRecovery("goal_actions", () => heartbeat.recoverPendingSessionGoalActions());
-        if (
-          recoveredGoalActions.enqueued > 0 ||
-          recoveredGoalActions.invalid > 0
-        ) {
-          logger.warn(
-            recoveredGoalActions,
-            "startup session-goal action outbox recovery reconciled pending controls",
-          );
-        }
-        const recoveredGoals = await timeStartupRecovery("active_goals", () => heartbeat.recoverActiveSessionGoals());
-        if (recoveredGoals.enqueued > 0) {
-          logger.warn(
-            recoveredGoals,
-            "startup session-goal recovery resumed durable agent goals",
-          );
-        }
-        const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-        if (
-          promotion.promoted > 0 ||
-          reconciled.assignmentDispatched > 0 ||
-          reconciled.dispatchRequeued > 0 ||
-          reconciled.continuationRequeued > 0 ||
-          reconciled.successfulRunHandoffEscalated > 0 ||
-          reconciled.successfulRunHandoffRetried > 0 ||
-          reconciled.escalated > 0
-        ) {
-          logger.warn(
-            { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-            "startup heartbeat recovery changed assigned issue state",
-          );
-        }
-
-        const dependencyWakesReconciled = await heartbeat.reconcileResolvedDependencyWakes();
-        if (dependencyWakesReconciled.healed > 0) {
-          logger.warn(
-            { ...dependencyWakesReconciled },
-            "startup dependency-wake reconciliation restored task execution paths",
-          );
-        }
-
-        const taskWatchdogsReconciled = await heartbeat.reconcileTaskWatchdogs();
-        if (taskWatchdogsReconciled.triggered > 0) {
-          logger.warn(
-            { ...taskWatchdogsReconciled },
-            "startup task-watchdog reconciliation triggered watchdog work",
-          );
-        }
-
-        const scanned = await heartbeat.scanSilentActiveRuns();
-        if (scanned.created > 0 || scanned.escalated > 0) {
-          logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
-        }
-
-        const swept = await heartbeat.sweepStaleIssueLocks();
-        if (swept.cleared > 0) {
-          logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
-        }
+        await runStartupHeartbeatRecoverySteps(heartbeat);
       })().catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
         throw err;
@@ -1793,6 +1706,11 @@ async function startServerWithDatabaseTeardown(
           );
         }
 
+        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
+          if (pullQueue) trackHeartbeatSchedulerWork(pullQueue.reconcile().catch(err => {
+            logger.error({ err }, "Pull queue reconciliation failed");
+          }));
+        }
         scheduled.timers.wake();
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
@@ -1879,7 +1797,7 @@ async function startServerWithDatabaseTeardown(
             .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
             .then(() => heartbeat.promoteDueScheduledRetries())
             .then(async (promotion) => {
-              await heartbeat.resumeQueuedRuns();
+              await timeStartupRecovery("queued_runs", () => heartbeat.resumeQueuedRuns());
               const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
               if (
                 promotion.promoted > 0 ||
@@ -1888,7 +1806,8 @@ async function startServerWithDatabaseTeardown(
                 reconciled.continuationRequeued > 0 ||
                 reconciled.successfulRunHandoffEscalated > 0 ||
                 reconciled.successfulRunHandoffRetried > 0 ||
-                reconciled.escalated > 0
+                reconciled.escalated > 0 ||
+                reconciled.failed > 0
               ) {
                 logger.warn(
                   { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
@@ -2070,6 +1989,8 @@ async function startServerWithDatabaseTeardown(
     await skillVersionRetention.dispose();
     await skillSourceSync.stop();
     unsubscribeChatCompletions();
+    unsubscribePullQueue();
+    await pullQueue?.stop();
     await deliveryWork.stop();
     unregisterTerminalWorkspaceProbe?.();
     if (heartbeatSchedulerInterval) {
@@ -2102,9 +2023,11 @@ async function startServerWithDatabaseTeardown(
       await telemetryClient.flush();
     }
 
+    let restartSuspendedRuns = 0;
     if (!skipHeartbeatDrain && drainHeartbeatRunsForShutdown) {
       try {
         const drain = await drainHeartbeatRunsForShutdown(signal, selectiveDrainRunIds);
+        restartSuspendedRuns = drain.restartSuspendedRunIds.length;
         logger.info({ signal, drain }, "graceful heartbeat run drain complete");
       } catch (err) {
         logger.error({ err, signal }, "graceful heartbeat run drain failed");
@@ -2117,6 +2040,9 @@ async function startServerWithDatabaseTeardown(
         drain: drainHeartbeatExecutionFinalizers,
         timeoutMs: 30_000,
         log: logger,
+        // SYNA-2959: a run suspended for restart must finish its workspace restore and record its restart
+        // boundaries before the database closes, or the next boot cannot resume it.
+        ...(restartSuspendedRuns > 0 ? { timeoutMs: restartSettleTimeoutMs() } : {}),
       });
     }
 

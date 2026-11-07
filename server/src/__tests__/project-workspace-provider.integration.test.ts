@@ -25,7 +25,13 @@ describe.skipIf(!support.supported)("installed project workspace defaults", () =
     db = createDb(database.connectionString);
   }, 120_000);
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
-  beforeEach(async () => { await db.execute(sql`truncate companies, plugins cascade`); });
+  beforeEach(async () => {
+    await db.transaction(async (tx) => {
+      // Publication history is immutable; disable triggers only for fixture reset.
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.execute(sql`truncate companies, plugins cascade`);
+    });
+  });
 
   async function fixture() {
     const f = await createPluginWorkspaceFixture(db);

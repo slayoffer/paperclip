@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, projects, type Db } from "@paperclipai/db";
+import { agents, budgetIncidents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, projects, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { clearCompanyFixtures } from "./helpers/clear-company-fixtures.js";
 import { budgetService, computeObservedSpend } from "../services/budgets.js";
 import { reserveRunBudget } from "../services/budget-reservations.js";
 import { accountRunCost } from "../services/run-cost-accounting.js";
@@ -17,10 +18,11 @@ const support = await getEmbeddedPostgresTestSupport();
     database = await startEmbeddedPostgresTestDatabase("budget-live-scoping-");
     db = createDb(database.connectionString);
   }, 60_000);
-  afterEach(async () => { await db.transaction(async tx => {
-    await tx.execute(sql`SET LOCAL client_min_messages = warning`);
-    await tx.execute(sql`TRUNCATE companies CASCADE`);
-  }); });
+  afterEach(async () => {
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
+    await clearCompanyFixtures(db);
+  });
   afterAll(async () => { await database?.cleanup(); });
 
   async function fixture(options: { scope?: "company" | "agent" | "project"; amount?: number; reservationCents?: string } = {}) {
@@ -223,22 +225,22 @@ const support = await getEmbeddedPostgresTestSupport();
     await expect(reserveRunBudget(db, f.companyId, await f.queuedRun(), otherProject.id)).resolves.toMatchObject({ reused: false });
   });
 
-  it("keeps missing-price terminal work held until accounting evidence arrives", async () => {
+  it("keeps missing-price terminal accounting pending without holding new work", async () => {
     const f = await fixture();
     await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));
-    expect(await budgetService(db).getInvocationBlock(f.companyId, f.agentId, { projectId: f.projectId })).not.toBeNull();
+    expect(await budgetService(db).getInvocationBlock(f.companyId, f.agentId, { projectId: f.projectId })).toBeNull();
     expect(await f.exposure()).toMatchObject({ pendingTerminalRunCount: 1, ledgerCents: "0.0000000", liveObservedCents: "0.0000000" });
     expect(await accountRunCost(db, f.runId)).toBe(false);
     expect((await f.readRun()).costAccountingPending).toBe(true);
     expect(await db.select().from(costEvents).where(and(eq(costEvents.companyId, f.companyId), eq(costEvents.heartbeatRunId, f.runId)))).toHaveLength(0);
   });
 
-  it.each(["pre-provider release", "stale pending marker"])("releases accounting-induced holds after %s", async kind => {
+  it.each(["pre-provider release", "stale pending marker"])("clears pending accounting without a budget hold after %s", async kind => {
     const f = await fixture();
     await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));
-    expect(await budgetService(db).getInvocationBlock(f.companyId, f.agentId, { projectId: f.projectId })).not.toBeNull();
-    const [held] = await db.select().from(agents).where(eq(agents.id, f.agentId));
-    expect(held.lifecycleHolds).toContain("budget");
+    expect(await budgetService(db).getInvocationBlock(f.companyId, f.agentId, { projectId: f.projectId })).toBeNull();
+    const [before] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+    expect(before.lifecycleHolds).not.toContain("budget");
     await db.update(heartbeatRuns).set(kind === "pre-provider release"
       ? { resultJson: { executionRecovery: { providerWorkStarted: false } } }
       : { costAccountedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));

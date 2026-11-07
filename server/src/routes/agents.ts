@@ -1,5 +1,7 @@
 import { prepareRuntimeSettingsPatch } from "../services/agent-runtime-settings.js";
 import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
+import { readRunExecutionEvidence } from "../services/run-execution-evidence.js";
+import { reconcileExecutionEvidence } from "../services/reconcile-execution-evidence.js";
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
 import { agentHarnessType, type AgentRunnerChoice } from "@paperclipai/shared";
 import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-selection.js";
@@ -63,6 +65,7 @@ import {
   deriveAgentUrlKey,
   isUuidLike,
   normalizeIssueIdentifier,
+  pauseAgentSchema,
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentDesiredSkillEntry,
@@ -5652,18 +5655,22 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
       return;
     }
-    const agent = await svcLifecycle.pauseAgent(id);
+    const { reason = "manual" } = pauseAgentSchema.parse(req.body);
+    const agent = await svcLifecycle.pauseAgent(id, reason);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
 
-    await heartbeat.cancelActiveForAgent(id);
+    await heartbeat.cancelActiveForAgent(id, undefined, stopRequest);
 
     await logActivity(db, {
       companyId: agent.companyId,
@@ -5672,6 +5679,7 @@ export function agentRoutes(
       action: "agent.paused",
       entityType: "agent",
       entityId: agent.id,
+      details: { reason },
     });
 
     res.json(redactAgentRowForResponse(agent));
@@ -5781,6 +5789,9 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/terminate", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -5810,6 +5821,7 @@ export function agentRoutes(
     const cancellation = await heartbeat.cancelInvocationsForAgents(
       [id, ...invalidOrgChainDescendantIds],
       "Cancelled because the agent was terminated or became invalid-org-chain under a terminated manager",
+      stopRequest,
     );
 
     await logActivity(db, {
@@ -6139,9 +6151,11 @@ export function agentRoutes(
         ),
       );
     }
-    const run = await heartbeat.wakeup(id, {
+    const { run, skipped } = await heartbeat.wakeupWithDiagnostics(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: opts.source,
       triggerDetail: req.body.triggerDetail ?? "manual",
       reason: req.body.reason ?? null,
@@ -6175,7 +6189,19 @@ export function agentRoutes(
     });
 
     if (!run) {
-      res.status(202).json(await opts.skippedResponse(agent, wakePayload));
+      res.status(202).json(skipped
+        ? {
+            status: "skipped",
+            issueId: typeof wakePayload?.issueId === "string" && wakePayload.issueId.trim()
+              ? wakePayload.issueId : null,
+            executionRunId: typeof skipped.details?.heartbeatSkip?.executionRunId === "string"
+              ? skipped.details.heartbeatSkip.executionRunId : null,
+            executionAgentId: typeof skipped.details?.heartbeatSkip?.executionAgentId === "string"
+              ? skipped.details.heartbeatSkip.executionAgentId : null,
+            executionAgentName: null,
+            ...skipped,
+          }
+        : await opts.skippedResponse(agent, wakePayload));
       return;
     }
 
@@ -6280,6 +6306,8 @@ export function agentRoutes(
     }
     const wakeOpts: Parameters<typeof heartbeat.wakeup>[1] = {
       ...(req.actor.type === "board" ? { manualUserWake: true } : {}),
+      ...(req.actor.type === "board" && (req.actor.source === "session" || req.actor.source === "local_implicit")
+        ? { issueBudgetOverride: true } : {}),
       source: "on_demand",
       triggerDetail: typeof body.triggerDetail === "string" ? body.triggerDetail as "manual" | "system" | "ping" | "callback" : "manual",
       requestedByActorType: req.actor.type === "agent" ? "agent" : "user",
@@ -7046,6 +7074,9 @@ export function agentRoutes(
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
+    const stopRequest = { requestedAt: new Date().toISOString(), resultJson: {
+      cancelledByActorType: "user", cancelledByUserId: req.actor.userId ?? "board",
+    } };
     assertBoard(req);
     const runId = readHeartbeatRunId(req);
     const existing = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
@@ -7056,11 +7087,8 @@ export function agentRoutes(
     // Recovery reads this to stand down instead of classifying the cancelled
     // run as agent stranding and re-waking the agent the operator just stopped.
     const run = await heartbeat.cancelRun(runId, "Cancelled by a board operator", {
+      ...stopRequest,
       ...(requestId ? { cancellationRequestId: requestId, cancellationRequestedByUserId: req.actor.userId ?? null } : {}),
-      resultJson: {
-        cancelledByActorType: "user",
-        cancelledByUserId: req.actor.userId ?? null,
-      },
     });
 
     if (run) {
@@ -7505,6 +7533,17 @@ export function agentRoutes(
       details: { traceId: removed.id, recoverable: false },
     });
     res.json({ ok: true });
+  });
+
+  router.get("/heartbeat-runs/:runId/execution-evidence", async (req, res) => {
+    const runId = readHeartbeatRunId(req);
+    const run = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
+    if (!run) return;
+    if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
+    if (!(await assertRunReadAllowed(req, res, run))) return;
+    const evidence = await readRunExecutionEvidence(db, run);
+    const report = reconcileExecutionEvidence(evidence);
+    res.json(await runRedactions.redactForRun(run.companyId, run.id, { ...report, collectedAt: evidence.collectedAt }));
   });
 
   router.get("/heartbeat-runs/:runId/events", async (req, res) => {
