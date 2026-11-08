@@ -30,6 +30,8 @@ test("distribution lock closes exact wrapper, SDK and upstream Pi graph with int
   const pkg = JSON.parse(await readFile(new URL("./pi-distribution/package.json", import.meta.url), "utf8"));
   const lock = JSON.parse(await readFile(new URL("./pi-distribution/package-lock.json", import.meta.url), "utf8"));
   assert.deepEqual(lock.packages[""].dependencies, pkg.dependencies);
+  assert.deepEqual(pkg.engines, lock.packages[""].engines,
+    "The isolated manifest is part of the pinned Pi closure, not the host Node policy");
   assert.equal(pkg.overrides, undefined);
   assert.equal(lock.packages["node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion"].version, "5.0.12");
   const patch = await readFile(new URL("../../../patches/brace-expansion@5.0.9.patch", import.meta.url));

@@ -17,6 +17,12 @@ node --test .github/scripts/tests/fork-release-tests.test.mjs
 ```
 
 It installs Node.js `24.22.1` and `pnpm@9.15.4`.
+The isolated Pi distribution retains its upstream manifest engine metadata.
+That file is part of the trusted closure hash. Its executable has a separate
+pin in `packages/paperclip-runner/src/drivers/acpx/pi-node-pins.ts`.
+The Node policy checks this exact manifest separately from host packages.
+Run `node --test packages/paperclip-runner/scripts/materialize-pi-distribution.test.mjs`
+to check the manifest against its committed npm lock.
 It uses `pnpm install --no-frozen-lockfile`, as the release branch's PR policy requires.
 The runner resolves dependencies without committing a lockfile change.
 Before test collection, each shard prepares the linked workspace packages,
