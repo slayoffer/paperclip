@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const piDistributionManifest = path.join(
+  repoRoot, "packages/paperclip-runner/scripts/pi-distribution/package.json",
+);
 const expectedEngine = ">=24.22.1";
 const expectedTypes = "^24.0.0";
 const failures = [];
@@ -33,7 +36,7 @@ walk(repoRoot, (filePath) => {
   }
   // This isolated manifest is hashed into Pi's trusted closure. Its runtime
   // uses pi-node-pins.ts, independently of the application's Node requirement.
-  const manifestEngine = relative(filePath) === "packages/paperclip-runner/scripts/pi-distribution/package.json"
+  const manifestEngine = filePath === piDistributionManifest
     ? ">=24.11.0"
     : expectedEngine;
   if (manifest.engines?.node !== manifestEngine) {
