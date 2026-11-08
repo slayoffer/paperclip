@@ -26,10 +26,26 @@ test("plain Node loads the source materializer without a TypeScript import resol
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("host Node policy preserves the Pi manifest with backslash diagnostic paths", () => {
+  const policy = new URL("../../../scripts/check-node-version-policy.mjs", import.meta.url).href;
+  // Exercise the real policy on Linux with Windows-style relative paths.
+  // Absolute filesystem paths stay native so the test can read the repository.
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import path from "node:path";
+    const relative = path.relative;
+    path.relative = (...args) => relative(...args).split(path.sep).join(String.fromCharCode(92));
+    await import(${JSON.stringify(policy)});
+  `], { encoding: "utf8", timeout: 60_000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("distribution lock closes exact wrapper, SDK and upstream Pi graph with integrity", async () => {
   const pkg = JSON.parse(await readFile(new URL("./pi-distribution/package.json", import.meta.url), "utf8"));
   const lock = JSON.parse(await readFile(new URL("./pi-distribution/package-lock.json", import.meta.url), "utf8"));
   assert.deepEqual(lock.packages[""].dependencies, pkg.dependencies);
+  assert.deepEqual(pkg.engines, lock.packages[""].engines,
+    "The isolated manifest is part of the pinned Pi closure, not the host Node policy");
   assert.equal(pkg.overrides, undefined);
   assert.equal(lock.packages["node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion"].version, "5.0.12");
   const patch = await readFile(new URL("../../../patches/brace-expansion@5.0.9.patch", import.meta.url));
