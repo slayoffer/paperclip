@@ -31,8 +31,13 @@ walk(repoRoot, (filePath) => {
       failures.push(`${relative(filePath)}: ${section}.@types/node must be ${expectedTypes}, found ${specifier}`);
     }
   }
-  if (manifest.engines?.node !== expectedEngine) {
-    failures.push(`${relative(filePath)}: engines.node must be ${expectedEngine}, found ${manifest.engines?.node ?? "missing"}`);
+  // This isolated manifest is hashed into Pi's trusted closure. Its runtime
+  // uses pi-node-pins.ts, independently of the application's Node requirement.
+  const manifestEngine = relative(filePath) === "packages/paperclip-runner/scripts/pi-distribution/package.json"
+    ? ">=24.11.0"
+    : expectedEngine;
+  if (manifest.engines?.node !== manifestEngine) {
+    failures.push(`${relative(filePath)}: engines.node must be ${manifestEngine}, found ${manifest.engines?.node ?? "missing"}`);
   }
 });
 
@@ -84,4 +89,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log("Node version policy check passed (Node >=24.22.1, @types/node 24.x).");
+console.log("Node version policy check passed (host Node >=24.22.1, pinned Pi manifest preserved, @types/node 24.x).");
