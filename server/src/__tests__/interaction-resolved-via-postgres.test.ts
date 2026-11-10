@@ -188,6 +188,8 @@ describe("authenticated interaction resolution channel", () => {
       const card = await f.card();
       const result = await request(f.server).patch(`/api/issues/${f.issue.id}`).send({ status: "done" });
       expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(result.body).not.toHaveProperty("actorResolvedVia");
+      expect(result.body.changes).not.toHaveProperty("actorResolvedVia");
       const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
       expect(stored).toMatchObject({ status: "expired", resolvedVia: {
         session: "user_session", board_key: "board_api_key", agent_key: "agent_key",
