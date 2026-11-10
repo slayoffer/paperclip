@@ -364,21 +364,31 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
         if (!updatedConnection)
           throw new Error("OAuth connection was not found");
         connection = updatedConnection;
-        await tx.update(toolApplications)
-          .set({ status: "active", updatedAt: new Date() })
+        await tx
+          .update(toolApplications)
+          .set({
+            status: "active",
+            updatedAt: new Date(),
+          })
           .where(eq(toolApplications.id, connection.applicationId));
         const linkedInteractionKind = stateRow.interactionId
-          ? await tx.select({ kind: issueThreadInteractions.kind }).from(issueThreadInteractions)
-              .where(eq(issueThreadInteractions.id, stateRow.interactionId)).limit(1)
+          ? await tx
+              .select({ kind: issueThreadInteractions.kind })
+              .from(issueThreadInteractions)
+              .where(eq(issueThreadInteractions.id, stateRow.interactionId))
+              .limit(1)
               .then((rows) => rows[0]?.kind ?? null)
           : null;
-        if (stateRow.interactionId && linkedInteractionKind === "request_confirmation") {
-          await tx.update(issueThreadInteractions)
+        if (
+          stateRow.interactionId &&
+          linkedInteractionKind === "request_confirmation"
+        ) {
+          await tx
+            .update(issueThreadInteractions)
             .set({
               status: "accepted",
               result: { version: 1, outcome: "accepted" },
               resolvedByUserId: stateRow.subjectUserId!,
-              // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
               resolvedAt: new Date(),
               updatedAt: new Date(),
             })

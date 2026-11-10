@@ -7,7 +7,9 @@ import type {
   RespondIssueThreadInteraction,
 } from "@paperclipai/shared";
 
-import { questionSetToAskUserQuestionsPayload } from "@paperclipai/shared";
+import {
+  questionSetToAskUserQuestionsPayload,
+} from "@paperclipai/shared";
 
 import type { PrpEvent } from "../../vendor/paperclip-runner/index.js";
 import {

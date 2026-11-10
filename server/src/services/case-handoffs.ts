@@ -180,7 +180,9 @@ async function assertCaseContentsFitTask(tx: Db, caseRow: CaseRow, issue: IssueR
     if (project?.visibility === "private" && issue.projectId !== sourceIssue.projectId) throw unprocessable("Primary task must preserve the case's private project boundary");
     if (sourceIssue.visibility === "private") {
       if (issue.visibility !== "private") throw unprocessable("Primary task must preserve the case's private task boundary");
-      // Grants flow down parent edges, never to siblings. UNION removes cycles.
+      // Match the canonical privacy ancestry: private task/project grants flow
+      // down parent edges, never sideways to a sibling sharing root metadata.
+      // UNION limits traversal to distinct task identities, including cycles.
       const [ancestry] = await tx.execute<{ inherited: boolean }>(sql`
         WITH RECURSIVE privacy_ancestors AS (
           SELECT p.id, p.company_id, p.privacy_parent_issue_id FROM issues p
@@ -246,11 +248,13 @@ export function caseHandoffService(db: Db) {
     await eligible(tx, issue);
     const sourceAuthorizer = await assertCaseHandoffDispatchAuthority(tx, row, issue, caseRow);
     const assigningActor = originalActor ?? await restoreCaseHandoffActor(tx, row, issue, sourceAuthorizer, cloudAuthority);
-    // Recheck the original principal at transfer; acceptance reserves no permission.
+    // Acceptance does not reserve permission. Recheck the original principal at
+    // the actual transfer, while it still owns/reads the outgoing task.
     try {
       await authorizeTask(tx, assigningActor, row.companyId, issue, issue.projectId, row.toAgentId);
     } catch (error) {
-      // Locked records exist. Hidden tasks suspend access without cancelling intent.
+      // The records were just locked and exist. A hidden task is a revocable
+      // actor-access hold, not a deleted task that should cancel durable intent.
       if (!originalActor && error instanceof HttpError && error.status === 404) throw forbidden("Handoff original actor can no longer access the task");
       throw error;
     }

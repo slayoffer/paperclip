@@ -89,7 +89,9 @@ import {
   type IssuePrivacyRow,
 } from "./authorization.js";
 import { redactEventPayload, sanitizeRecord } from "../redaction.js";
-import type { WorkerHostCallContext } from "@paperclipai/plugin-sdk";
+import type {
+  WorkerHostCallContext,
+} from "@paperclipai/plugin-sdk";
 import {
   normalizeProviderFamily,
   SANDBOX_STARTUP_SPAN_ATTRS,
@@ -2730,7 +2732,8 @@ export function buildHostServices(
         if (!current || current.issueId !== issue.id || current.companyId !== companyId) {
           throw new Error(`Interaction "${params.interactionId}" not found for this issue`);
         }
-        // Resolved interactions return without repeating side effects.
+        // Idempotent replay: an already-resolved interaction converges without
+        // re-applying, so a duplicate button tap from chat is a safe no-op.
         if (current.status !== "pending") {
           return { interaction: current as any, applied: false };
         }

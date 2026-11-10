@@ -78,8 +78,11 @@ export function voiceSessionStore(db: Db, options: { allowLocalBoard: boolean; n
   async function authorizeConnection(tx: VoiceTransaction, context: Awaited<ReturnType<typeof endpointContext>>, caller: VoiceCaller) {
     const { endpoint, connection } = context;
     if (!endpoint.allowDirectMessages) throw forbidden("Voice conversations are disabled for this connection");
-    // Legacy channel credentials use the endpoint agent and have no grant/install.
-    // Managed credentials require a current install; retained revoked grants enforce this.
+    // Dedicated channel credentials predate connection grants; their agent is
+    // the endpoint assignment. Once grants/installs exist, honor those current
+    // restrictions, including revoked grants. Managed grants require a current
+    // install even after the final install is removed. Grant revocation keeps
+    // its durable row; only the dedicated legacy channel has neither.
     const grants = await tx.select().from(connectionGrants).where(and(eq(connectionGrants.companyId, endpoint.companyId), eq(connectionGrants.connectionId, connection.id)));
     const members = grants.length ? await tx.select().from(connectionGrantMembers).where(and(eq(connectionGrantMembers.companyId, endpoint.companyId), inArray(connectionGrantMembers.grantId, grants.map(g => g.id)))) : [];
     if (grants.length && !grants.some(grant => {

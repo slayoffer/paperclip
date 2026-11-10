@@ -6602,8 +6602,10 @@ export function issueService(db: Db) {
   }
 
 
-  // Cache attribution to avoid rescanning run logs. Failures must not block reads.
-  // IS NULL guards preserve values saved by concurrent readers.
+  // Persist a resolved attribution so subsequent reads stop re-scanning run
+  // logs (and old "Board" threads stay fixed durably). Best-effort: a write
+  // failure must never break the read path. The `IS NULL` guard keeps this
+  // idempotent and avoids clobbering a value another reader just stored.
   async function persistDerivedIssueCommentAttribution(
     derivedByCommentId: ReadonlyMap<string, DerivedIssueCommentAttribution>,
   ) {
@@ -10314,8 +10316,11 @@ export function issueService(db: Db) {
       const ownedPostCommitActions: IssuePostCommitAction[] = [];
       const queuedPostCommitActions =
         postCommitActions ?? ownedPostCommitActions;
-      // Carry companyGuard into every read and write: company_id can change
-      // between a caller's access check and this update.
+      // A caller that supplies `companyGuard` gets the company added to
+      // every read, lock, and write predicate below. A check before this
+      // call is not a boundary: `issues.company_id` can change between
+      // that check and this write, so the predicate must carry the
+      // company itself.
       const idPredicate =
         data.companyGuard !== undefined
           ? and(eq(issues.id, id), eq(issues.companyId, data.companyGuard))
@@ -10834,9 +10839,12 @@ export function issueService(db: Db) {
               type: "dispatch_dependency_wake", companyId: updated.companyId, intentId,
             });
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
-            // Expire governed cards for HTTP and internal terminal transitions.
-            // Keep ordinary historical questions answerable. Dynamic import avoids
-            // the cycle with issue-thread-interactions.js.
+            // Every terminal transition funnels through here, including direct
+            // service callers (tree control, recovery, status cards)
+            // that never touch the HTTP routes. Governed cards expire; ordinary
+            // historical questions remain answerable after completion.
+            // Dynamic import breaks the module
+            // cycle (issue-thread-interactions.js imports issueService).
             const { issueThreadInteractionService } =
               await import("./issue-thread-interactions.js");
             // Stop live question requests independently of card expiry. A
@@ -11993,7 +12001,10 @@ export function issueService(db: Db) {
       if (dbOrTx === db && (actor.runId || actor.userId)) {
         const append = () =>
           measureRunTransaction(db, "response", async (tx) => {
-            // Lock the issue through lookup and insert so retries cannot duplicate comments.
+            // Serialize run-authored comments on the issue so a provider retry
+            // cannot publish the same visible result twice. This needs no schema
+            // change: the issue row is the transaction fence, and the recursive
+            // call below performs the lookup and insert while holding it.
             await measureRunPhase("response.row_lock", () => tx
               .select({ id: issues.id })
               .from(issues)
@@ -12023,17 +12034,19 @@ export function issueService(db: Db) {
         throw unprocessable("Agent Chat is disabled in Experimental settings");
       }
       const currentUserRedactionOptions = {
-        // Use the caller's transaction: re-entering a full pool can deadlock.
+        // Keep every read on the caller's transaction connection. Re-entering
+        // the outer pool here can deadlock when concurrent transactions fill
+        // the pool while waiting on the same issue or delivery row.
         enabled: (await instanceSettings.getGeneral({ db: dbOrTx }))
           .censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
       if (actor.userId && options?.clientRequestId) {
-        const [existing]: Array<typeof issueComments.$inferSelect> = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
+        const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
           eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
         if (existing) {
           if (existing.body !== redactedBody) throw conflict("Message request ID was already used for different content");
-          return redactIssueComment(existing, currentUserRedactionOptions.enabled);
+          return existing;
         }
       }
       if (issue.conversationAgentId && actor.runId) {
@@ -12198,9 +12211,13 @@ export function issueService(db: Db) {
             (rows: Array<typeof issueComments.$inferSelect>) => rows[0] ?? null,
           );
         if (existing) {
-          // Upgrade the saved internal comment when the presentation resolver
-          // selects its prose for an authorized external-chat reply. Returning
-          // early would let a generic completion message take the reply slot.
+          // Heartbeat's presentation resolver can intentionally select the
+          // exact same prose that the agent already wrote while handling an
+          // external-chat continuation. The first write is kept internal so
+          // lifecycle/tool chatter cannot escape; the later, narrowly
+          // authorized presentation must upgrade that one durable comment
+          // instead of returning early and letting the generic completion
+          // milestone win the provider reply slot.
           const shouldUpgradeExternalAuthorization =
             authorType === "agent" &&
             metadata?.authorizationReason ===

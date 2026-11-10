@@ -2,7 +2,6 @@ import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, interactionResolutionOutbox, issueThreadInteractions } from "@paperclipai/db";
-import { saveConnectionAuthorizationInteraction } from "../services/connection-authorization-interaction.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { resolutionFixture } from "./helpers/resolution-v2.js";
 import * as heartbeats from "../services/heartbeat.js";
@@ -35,10 +34,9 @@ describe("authorization card resolution after reopen", () => {
       const delivered = await db.update(interactionResolutionOutbox).set({ deliveredAt: new Date() })
         .where(eq(interactionResolutionOutbox.interactionId, card.id)).returning();
       expect(delivered).toHaveLength(1);
-      const reopened = await saveConnectionAuthorizationInteraction(db, {
-        companyId: f.issue.companyId, issueId: f.issue.id, kind: card.kind,
-        payload: card.payload, idempotencyKey: "authorization-retry",
-      }, { status: "pending", result: null, resolvedAt: null });
+      const [reopened] = await db.update(issueThreadInteractions).set({
+        status: "pending", result: null, resolvedAt: null,
+      }).where(eq(issueThreadInteractions.id, card.id)).returning();
       expect(reopened.id).toBe(card.id);
       expect(reopened).toMatchObject({
         status: "pending", resolvedAt: null, resolvedVia: null, resolvedViaKeyId: null,

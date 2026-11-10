@@ -15,12 +15,25 @@ export function interactionResolutionAttribution(actor: InteractionActor) {
 }
 
 /** Authentication provenance must come from middleware, never from the body or resolver ID. */
-export function resolutionViaFromActor<T extends { source?: string; keyId?: string | null }>(actor: T): ResolutionVia | null {
+export function resolutionViaFromActor(actor: {
+  source?: Express.Request["actor"]["source"];
+  keyId?: Express.Request["actor"]["keyId"] | null;
+}): ResolutionVia | null {
   switch (actor.source) {
     case "session": return { resolvedVia: "user_session", resolvedViaKeyId: null };
     case "board_key": return actor.keyId ? { resolvedVia: "board_api_key", resolvedViaKeyId: actor.keyId } : null;
     case "agent_key":
     case "agent_jwt": return { resolvedVia: "agent_key", resolvedViaKeyId: null };
-    default: return null;
+    case "local_implicit":
+    case "mcp_oauth":
+    case "cloud_tenant":
+    case "cloud_control":
+    case "none":
+    case undefined: return null;
+    default: {
+      const unhandled: never = actor.source;
+      void unhandled;
+      return null;
+    }
   }
 }

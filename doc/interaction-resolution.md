@@ -38,13 +38,14 @@ A database trigger prevents either value from changing while a row stays resolve
 including relabeling a legacy null. Reopening a row by clearing `resolvedAt`
 clears both provenance fields; the next resolution records its own channel.
 The migration has no default or backfill. List, single-interaction, and company
-reads expose both fields. Resolver permissions and existing identity fields keep
-their current behavior, including existing resolver IDs on reopened rows.
+reads expose both fields. Resolver permissions are unchanged. Status-card actions
+pass the authenticated resolver IDs with the channel. Reopened rows retain their
+existing resolver IDs.
 
-An authenticated comment, document change, or issue closure can expire a card.
-These implicit resolutions record the initiating authentication channel too.
-Historical comment sweeps and deferred Agent Chat `/new` commands have no live
-authenticated channel and record null. OAuth provider callbacks also record null
+Comments, document changes, and issue closures can expire cards. Comment-triggered
+expiries record null: a comment is not an answer to the card. Document changes and
+issue closures record the initiating channel. Historical comment sweeps and
+deferred Agent Chat `/new` commands also record null. OAuth provider callbacks record null
 on first resolution and preserve existing attribution on late result updates.
 An authorization retry reopens the existing card and clears its provenance through
 the database trigger. Repeated requests retain the same card ID.

@@ -2335,7 +2335,9 @@ rl.on("line", (line) => {
         toolName: "whoami",
         riskLevel: "read",
       });
-      // Keep cached tools visible when only a personal grant can authenticate.
+      // Personal credentials live on grants, so a company-level health probe
+      // may be unable to authenticate even though this user's grant is valid.
+      // The cached catalog must remain visible so grant resolution can happen.
       await db.update(toolConnections).set({
         credentialPolicy: "per_user",
         healthStatus: "error",
@@ -2355,7 +2357,7 @@ rl.on("line", (line) => {
       expect(snapshot.bindingId).toBe(`native-mcp:${run.id}`);
       const runtime = await buildPaperclipRuntimeMcpServers({ db, agent, runId: run.id, expectedAssignmentDigest: snapshot.digest });
       expect(runtime).toHaveLength(1);
-      // Discovery makes no provider call.
+      // Startup and tool discovery never contact the provider or ask Carol to sign in.
       expect(fake.requests).toHaveLength(0);
       expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issue.id))).toEqual([]);
       const gateway = createTestToolGatewayService(db);

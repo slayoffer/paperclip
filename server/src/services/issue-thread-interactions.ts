@@ -903,8 +903,11 @@ function buildSupersededByNewerRequestResult(replacementInteractionId: string) {
   } as const;
 }
 
-// New agent questions replace pending siblings (PAP-437). Match comment expiry:
-// question results use expirationReason, not outcome, so the UI can hide them.
+// An agent that posts a fresh ask_user_questions while its own earlier ones on
+// the same issue are still pending has replaced them — the newer card carries
+// the real ask, so the stale siblings auto-expire (PAP-437). Mirrors the
+// `superseded_by_comment` shape (ask_user_questions results key expiry off
+// `expirationReason`, not `outcome`) so the UI can hide them cleanly.
 function buildSupersededByNewerInteractionResult(
   replacementInteractionId: string,
 ) {
@@ -1001,14 +1004,19 @@ function buildSkippedOutcomeResult(
   return { version: 1, outcome: "skipped", reason } as const;
 }
 
-// A lost resolution race must roll back the enclosing tool-action revocation.
+// Rollback sentinel: the interaction was resolved by another actor between the
+// pending-rows read and the conditional update, so the enclosing transaction's
+// tool-action revocation must be undone.
 class InteractionResolvedConcurrentlyError extends Error {
   constructor() {
     super("Interaction was resolved concurrently");
   }
 }
 
-// Administrative card resolution must also settle its linked parked tool call.
+// A request_confirmation card can govern a parked tool call via a linked
+// tool_action_requests row. Administrative resolutions (withdraw, terminal-issue
+// expiry) must settle that row too, or the parked call stays approvable under
+// its own one-hour lifecycle after its card is gone.
 async function resolveLinkedToolActionRequests(
   db: Pick<Db, "update">,
   interaction: Pick<IssueThreadInteractionRow, "id" | "companyId" | "kind">,
@@ -3420,8 +3428,11 @@ export function issueThreadInteractionService(
             }, null, { agentId: actor.agentId, userId: actor.userId });
           }
 
-          // Replace pending cards for the same agent, issue, and kind.
-          // Agent Chat questions remain answerable in history.
+          // An agent replacing its own still-pending card supersedes the older
+          // one so the thread never accumulates stale sibling cards. This covers
+          // request_confirmation drafts and ordinary task questions. Agent Chat
+          // questions remain answerable in history even when another is asked.
+          // Scoped to the same agent + issue + kind; other actors are untouched.
           const canSupersedeSiblingCards =
             options.supersedePendingSiblingInteractions !== false &&
             ((data.kind === "request_confirmation" &&
@@ -4106,7 +4117,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: buildSupersededByCommentResult(row, comment.id),
-              ...interactionResolutionAttribution(actor),
+              ...interactionResolutionAttribution({ ...actor, via: null }),
               resolvedAt: now,
               updatedAt: now,
             })

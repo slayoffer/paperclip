@@ -1064,7 +1064,9 @@ describe("issue comment reopen routes", () => {
     );
   });
 
-  // Assignee self-comments cannot reopen done issues. Explicit resume uses `resume: true`.
+  // The guard must block explicit reopen=true + comment by the assignee agent
+  // on their own done issue (assignee self-comments are log lines, not reopen
+  // signals; explicit resume intent is delivered via `resume: true` instead).
   it("does not reopen via PATCH comment+reopen when the assignee agent is the actor on a done issue", async () => {
     const assigneeAgentId = "22222222-2222-4222-8222-222222222222";
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));

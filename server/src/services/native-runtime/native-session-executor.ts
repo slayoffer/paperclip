@@ -952,8 +952,11 @@ export function runtimeQuestionFallbackFromEvent(
 }
 
 /**
- * Materialize a non-replayable question's replacement. Its stable idempotency key
- * permits recovery when the original post-commit callback did not finish.
+ * Materialize the durable replacement for a non-replayable runtime question.
+ *
+ * The interaction service enforces the fallback's stable idempotency key, so
+ * this is safe both immediately after the event commit and while recovering an
+ * exact duplicate whose original post-commit callback did not finish.
  */
 export async function materializeRuntimeQuestionFallback(input: {
   db: Db;

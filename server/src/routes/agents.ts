@@ -5340,14 +5340,16 @@ export function agentRoutes(
     if (loaded.interaction.status !== "pending") throw conflict("Connection intent is already resolved");
     const setup = await intents.setupOptions(interactionId);
     if (!setup.aiConnectionRequiresAdoption || !setup.aiConnection) throw conflict("The agent’s AI configuration changed. Reload the task and try again.");
-    // Probe without installing; binding, install, audit, and resolution commit together.
+    // Probe in the agent's execution environment without installing access.
+    // The binding, install, audit, and card resolution commit together below.
     const validatedConnection = await validateManagedAgentBinding(req, agent.companyId, agent.id, agent.adapterType, agent.adapterConfig, setup.aiConnection, agent.defaultEnvironmentId, true, true);
     if (validatedConnection?.connectionId !== connectionId) throw conflict("This is no longer the selected account. Reload the task and try again.");
     const completed = await intents.complete(interactionId, connectionId, userId, {
       via: resolutionViaFromActor(req.actor),
       validatedAdoption: { agentUpdatedAt: agent.updatedAt, binding: setup.aiConnection },
     });
-    // The sweeper retries this durable continuation if immediate delivery fails.
+    // Dispatch the committed continuation now. The persisted delivery remains
+    // available to the sweeper if this process exits or dispatch is deferred.
     await connectionIntentDeliveryService(db, heartbeat).tryDeliver(interactionId);
     res.json(completed);
   });

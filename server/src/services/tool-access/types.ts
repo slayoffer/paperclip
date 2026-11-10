@@ -1,8 +1,6 @@
 import type { Db } from "@paperclipai/db";
-import type { InteractionActor } from "../interaction-resolution-input.js";
 
 export type ActorInfo = {
-  via?: InteractionActor["via"];
   /** Server-selected grant. The caller must check its audience before health testing. */
   credentialGrantId?: string;
   actorType?: "agent" | "user" | "system" | "plugin";

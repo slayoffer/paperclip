@@ -141,7 +141,7 @@ describe("native completed failure diagnostics", () => {
       expect(adapter.errorCode).toBe(classified ? "native_provider_model_rejected" : undefined);
       expect(adapter.errorMessage).toBe(classified ? NATIVE_MODEL_REJECTION_MESSAGE : scenario === "succeeded" ? null : `Native session ${terminal.runTerminalState}`);
       expect(adapter.resultJson?.nativeProviderFailure).toEqual(classified ? NATIVE_MODEL_REJECTION_DIAGNOSTIC : undefined);
-      // A committed, unclassified terminal-turn failure explains the generic message.
+      // Only a committed, unclassified failure of the terminal turn explains the generic message.
       const turnFailure = scenario === "unknown-error" ? { provider: "codex", category: "turn_failed", codexErrorInfo: "other" }
         : opencode ? { provider: "opencode", category: "turn_failed", runnerFailureCode: "opencode_server_exited", streamFailure: "server_exited", signal: "SIGKILL", connectionError: "ECONNREFUSED" }
           : undefined;

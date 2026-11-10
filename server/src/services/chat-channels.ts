@@ -1,4 +1,5 @@
 import { createChatSdkMessageReceiver } from "./chat-channels/runtime/sdk-messages.js";
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { admitDiscordSdkMessage } from "./chat-channels/discord/messages.js";
 import { resolveInboundConversationBinding } from "./chat-channels/inbound/conversation-binding.js";
 import { createGitHubMaintenance } from "./chat-channels/github/maintenance.js";
@@ -2185,6 +2186,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             issue.id,
             {
               status: "todo",
+              actorResolvedVia: SYSTEM_RESOLUTION_VIA,
               actorUserId: taskUserId ?? taskEndpoint.sponsorUserId,
             },
             taskTx,

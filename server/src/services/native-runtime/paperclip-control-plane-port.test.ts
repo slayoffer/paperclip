@@ -4,19 +4,41 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { readCompletedAssistantMessageCandidate, resolveHeartbeatRunResponse, selectHeartbeatRunFinalAgentMessage } from "../heartbeat-run-summary.js";
 import {
-  activityLog, agentWakeupRequests, agents, authUsers, companies, companyMemberships,
-  completionContracts, createDb, heartbeatRunEvents, heartbeatRuns, issueComments,
-  issueRecoveryActions, issueRelations, issueThreadInteractions, issueWorkProducts, issues,
-  nativeRunFinalizations, nativeRunResults, statusDecisionEffects, statusDecisions,
+  activityLog,
+  agentWakeupRequests,
+  agents,
+  authUsers,
+  companies,
+  companyMemberships,
+  completionContracts,
+  createDb,
+  heartbeatRunEvents,
+  heartbeatRuns,
+  issueComments,
+  issueRecoveryActions,
+  issueRelations,
+  issueThreadInteractions,
+  issueWorkProducts,
+  issues,
+  nativeRunFinalizations,
+  nativeRunResults,
+  statusDecisionEffects,
+  statusDecisions,
   workAssessments,
 } from "@paperclipai/db";
 import {
-  executeNativeSession, parseNativeExecutionInput, type NativeSessionBackend, type PrpEvent,
-  type PrpStructuredRunResult, type PrpTerminalState,
+  executeNativeSession,
+  parseNativeExecutionInput,
+  type NativeSessionBackend,
+  type PrpEvent,
+  type PrpStructuredRunResult,
+  type PrpTerminalState,
 } from "../../vendor/paperclip-runner/index.js";
 import {
-  CONTROL_PLANE_CONFORMANCE_RESULT, CONTROL_PLANE_CONFORMANCE_TERMINAL,
-  CONTROL_PLANE_CONFORMANCE_OPEN, runControlPlanePortConformance,
+  CONTROL_PLANE_CONFORMANCE_RESULT,
+  CONTROL_PLANE_CONFORMANCE_TERMINAL,
+  CONTROL_PLANE_CONFORMANCE_OPEN,
+  runControlPlanePortConformance,
 } from "../../vendor/paperclip-runner/testing.js";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
@@ -35,7 +57,8 @@ import { childReviewOutcomes } from "./child-review-outcomes.js";
 import { createPostgresRunDispatchAdapter } from "../../modules/run-dispatch/adapters/postgres.js";
 import { materializeRuntimeQuestionFallback } from "./native-session-executor.js";
 import {
-  subscribeAllCompanyLiveEvents, subscribeCompanyLiveEvents,
+  subscribeAllCompanyLiveEvents,
+  subscribeCompanyLiveEvents,
 } from "../live-events.js";
 
 describe("PaperclipControlPlanePort conformance", () => {
@@ -1522,7 +1545,8 @@ describe("PaperclipControlPlanePort conformance", () => {
     ]);
     await expect(nativeCompletionFeedback(db, reviewRunId, CONTROL_PLANE_CONFORMANCE_RESULT))
       .resolves.toContain("recorded review decision controls task completion");
-    // The executor checks after reviewer completion. Acceptance releases the lock, not the assignee.
+    // The real executor checks this fence after the reviewer has accepted and
+    // finished. Acceptance releases the lock but keeps the worker assignee.
     await expect(db.select({ executionRunId: issues.executionRunId }).from(issues)
       .where(eq(issues.id, issueId))).resolves.toEqual([{ executionRunId: null }]);
     await expect(assertCurrentWakeCommentsRead(db, reviewBinding, null)).resolves.toBeUndefined();

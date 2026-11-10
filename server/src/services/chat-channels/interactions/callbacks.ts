@@ -1329,8 +1329,12 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
       if (isExternalActionAuthorizationChange(error)) {
         return deny(safelyKnown);
       }
-      // Interaction and token commit together before the issue timestamp touch.
-      // A failed touch must not mark a committed token failed or request redelivery.
+      // `answerQuestions` commits the interaction and this action in one
+      // transaction, then performs a best-effort issue timestamp touch. If
+      // that post-commit touch fails, the provider callback is nevertheless
+      // durably complete. Do not corrupt the processed token to `failed` or
+      // return a retryable webhook response that turns Telegram's redelivery
+      // into a misleading stale-action notice.
       try {
         const raceResult = await db.transaction(async (tx) => {
           const currentAction = await tx

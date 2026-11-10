@@ -941,7 +941,9 @@ export function connectionIntentService(db: Db) {
   }
 
   async function complete(
-    interactionId: string, connectionId: string, userId: string,
+    interactionId: string,
+    connectionId: string,
+    userId: string,
     options: {
       canManageOrganizationGrant?: boolean;
       via?: import("@paperclipai/shared").ResolutionVia | null;
@@ -961,9 +963,16 @@ export function connectionIntentService(db: Db) {
     return db.transaction(async (tx) => {
       const [task] = await tx.select().from(issues).where(and(eq(issues.id, loaded.issue.id), eq(issues.companyId, loaded.issue.companyId))).for("update");
       if (!task || task.assigneeAgentId !== payload.requestingAgentId || ["done", "cancelled"].includes(task.status)) throw conflict("Connection request no longer belongs to an active task");
-      // Serialize membership changes through OAuth, installs, delegation, and resolution.
-      // A removal that commits first fails this recheck.
-      await lockCurrentUserWriteAccess(tx, loaded.issue.companyId, userId, options.bypassCurrentMembershipCheck);
+      // Membership downgrade/removal takes the same row lock. Whichever side
+      // commits first is authoritative: a completed revocation makes this
+      // revalidation fail, while completion holds authority through OAuth
+      // finalization, every install/delegation, and intent resolution.
+      await lockCurrentUserWriteAccess(
+        tx,
+        loaded.issue.companyId,
+        userId,
+        options.bypassCurrentMembershipCheck,
+      );
       const txDb = tx as unknown as Db;
       const txAccess = toolAccessService(txDb);
       const txInteractions = issueThreadInteractionService(txDb);

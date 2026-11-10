@@ -172,7 +172,6 @@ async function rejectPendingOAuthInteraction(
             "Authorization was declined or cancelled in the provider's window",
         },
         resolvedByUserId: actor?.actorType === "user" ? actor.actorId : null,
-        // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
         resolvedAt: now,
         updatedAt: now,
       })

@@ -1,4 +1,3 @@
-import type { Request } from "express";
 import type { connectionIntentService } from "../services/connection-intents.js";
 import { forbidden } from "../errors.js";
 
@@ -10,7 +9,6 @@ export function connectionIntentOAuthFinisher(
     interactionId: string;
     connectionId?: string;
     userId: string;
-    actor: Request["actor"];
     outcome: "connected" | "declined" | "failed";
     canManageOrganizationGrant: boolean;
     bypassCurrentMembershipCheck: boolean;

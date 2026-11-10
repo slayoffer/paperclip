@@ -3162,7 +3162,7 @@ export function issueRoutes(
       issueId: string;
       interactionId: string;
       proposalId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
   } = {},
 ) {
@@ -12239,7 +12239,12 @@ export function issueRoutes(
           );
         }
 
-        // Seed the opening question as the assignee. An answer or comment wakes it.
+        // Seed the opening question card right after the greeting so the first
+        // task is not open-ended: "Interview me and propose a plan and an agent
+        // team" or "I have a task in mind" (free text). Posted as the assignee,
+        // deterministic (no LLM), and best-effort like the greeting. Answering
+        // the card wakes the assignee through the normal question-response path;
+        // typing a message instead supersedes the card and wakes on the comment.
         try {
           await issueThreadInteractionService(db).create(
             issue,
@@ -16557,10 +16562,7 @@ export function issueRoutes(
               issueId: issue.id,
               interactionId: interaction.id,
               proposalId: secretProposal.proposalId,
-              actor: {
-                agentId: actor.agentId,
-                userId: actor.actorType === "user" ? actor.actorId : null,
-              },
+              actor: interactionResolutionActor(req),
             });
           } else {
             const proposal = await secretProposals.getById(
@@ -16577,6 +16579,7 @@ export function issueRoutes(
             }
             await secretProposals.approve(issue.companyId, proposal.id, {
               resolvedByUserId,
+              via: resolutionViaFromActor(req.actor),
               assertCanResolve: (lockedProposal, txDb) =>
                 assertCanResolveProposal({
                   db: txDb,

@@ -1,4 +1,3 @@
-import { saveConnectionAuthorizationInteraction } from "./connection-authorization-interaction.js";
 import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import type { InteractionActor as Actor } from "./interaction-resolution-input.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
@@ -47,33 +46,85 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
-  and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql,
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  agents, approvals, companies, companyMemberships, companySecrets, connectionGrantMembers,
-  connectionGrantDelegations, connectionGrants, documents, heartbeatRuns, issueApprovals,
-  issueDocuments, issueThreadInteractions, issues, projects, toolActionRequests,
-  toolActionDeliveries, toolAccessAuditEvents, toolApplications, toolCallEvents,
-  toolCatalogEntries, toolConnections, toolGatewayRateLimitCounters, toolGatewaySessions,
-  toolInvocations, toolMcpGateways, toolMcpGatewayTokens, toolPolicies, toolProfileBindings,
-  toolProfileEntries, toolProfiles, toolStdioCommandTemplates,
+  agents,
+  approvals,
+  companies,
+  companyMemberships,
+  companySecrets,
+  connectionGrantMembers,
+  connectionGrantDelegations,
+  connectionGrants,
+  documents,
+  heartbeatRuns,
+  issueApprovals,
+  issueDocuments,
+  issueThreadInteractions,
+  issues,
+  projects,
+  toolActionRequests,
+  toolActionDeliveries,
+  toolAccessAuditEvents,
+  toolApplications,
+  toolCallEvents,
+  toolCatalogEntries,
+  toolConnections,
+  toolGatewayRateLimitCounters,
+  toolGatewaySessions,
+  toolInvocations,
+  toolMcpGateways,
+  toolMcpGatewayTokens,
+  toolPolicies,
+  toolProfileBindings,
+  toolProfileEntries,
+  toolProfiles,
+  toolStdioCommandTemplates,
 } from "@paperclipai/db";
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import type {
-  CreateToolMcpGateway, CreateToolMcpGatewayToken, DeploymentExposure, DeploymentMode,
-  McpConnectionCredentialRef, SecretVersionSelector, ToolAccessDecision,
-  ToolAccessDecisionInput, ToolConnectionTestCallStatus, ToolUpstreamPending,
-  ToolConnectionTestCallStatusPhase, ToolCredentialSecretRef, ToolMcpGateway,
-  ToolMcpGatewayClientSnippet, ToolMcpGatewayToken, ToolMcpGatewayTokenAction,
-  ToolMcpGatewayTokenCreated, ToolMcpGatewayWithTokens, UpdateToolMcpGateway,
+  CreateToolMcpGateway,
+  CreateToolMcpGatewayToken,
+  DeploymentExposure,
+  DeploymentMode,
+  McpConnectionCredentialRef,
+  SecretVersionSelector,
+  ToolAccessDecision,
+  ToolAccessDecisionInput,
+  ToolConnectionTestCallStatus,
+  ToolUpstreamPending,
+  ToolConnectionTestCallStatusPhase,
+  ToolCredentialSecretRef,
+  ToolMcpGateway,
+  ToolMcpGatewayClientSnippet,
+  ToolMcpGatewayToken,
+  ToolMcpGatewayTokenAction,
+  ToolMcpGatewayTokenCreated,
+  ToolMcpGatewayWithTokens,
+  UpdateToolMcpGateway,
 } from "@paperclipai/shared";
 import {
-  getConnectableAppDefinition, isGitHubConnectorProfileId, isGoogleWorkspaceConnectorProfileId,
-  type GitHubConnectorProfileId, type GoogleWorkspaceConnectorProfileId,
+  getConnectableAppDefinition,
+  isGitHubConnectorProfileId,
+  isGoogleWorkspaceConnectorProfileId,
+  type GitHubConnectorProfileId,
+  type GoogleWorkspaceConnectorProfileId,
 } from "@paperclipai/shared";
 import type {
-  AgentToolDescriptor, PluginToolDispatcher,
+  AgentToolDescriptor,
+  PluginToolDispatcher,
 } from "./plugin-tool-dispatcher.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
@@ -81,50 +132,73 @@ import { connectionGrantCredentialRef as grantRefForCredential, resolveConnectio
 import { railwayCommandBudgetMs, createRailwayClient, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_API_URL, RAILWAY_TOOL_PREFIX, RailwayError } from "./railway.js";
 import { RAILWAY_SSH_SECRET_PATH, runRailwaySshCommand } from "./railway-ssh.js";
 import {
-  initializeMcpHttpSession, getMcpHttpSession, forgetMcpHttpSession, readMcpHttpResponse,
-  McpHttpResponseError, McpHttpInitializationError, mcpHttpRequestHeaders,
+  initializeMcpHttpSession,
+  getMcpHttpSession,
+  forgetMcpHttpSession,
+  readMcpHttpResponse,
+  McpHttpResponseError,
+  McpHttpInitializationError,
+  mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
 } from "./mcp-http.js";
 import {
-  projectedConnectionHeaders, projectedConnectionToolArguments,
+  projectedConnectionHeaders,
+  projectedConnectionToolArguments,
   projectedConnectionToolInputSchema,
 } from "./tool-access.js";
 import { assertGoogleChatToolArgumentsSupported, googleChatToolDescription } from "./google-chat-tool-policy.js";
 import { assertGmailArchiveToolArgumentsSupported, gmailArchiveToolDescription } from "./gmail-archive-tool-policy.js";
 import { parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
 import {
-  guardedRemoteHttpFetch, type GuardedRemoteHttpFetchOptions,
+  guardedRemoteHttpFetch,
+  type GuardedRemoteHttpFetchOptions,
 } from "./remote-http-fetch.js";
 import {
-  REMOTE_URL_SECRET_CONFIG_PATH, remoteUrlCredentialMatchesPublicUrl,
+  REMOTE_URL_SECRET_CONFIG_PATH,
+  remoteUrlCredentialMatchesPublicUrl,
 } from "./remote-url-credentials.js";
 import {
-  createToolAccessDecisionCache, runContextSnapshotString, toolAccessPolicyService,
+  createToolAccessDecisionCache,
+  runContextSnapshotString,
+  toolAccessPolicyService,
   type ToolAccessDecisionCache,
 } from "./tool-access-policy.js";
 import { toolDiscoveryScheduler, ToolDiscoveryBusyError } from "./tool-discovery-scheduler.js";
 import { commitToolActionReview } from "./tool-action-review.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
-  createToolRuntimeSupervisor, ToolRuntimeSupervisorError, type ToolRuntimeSupervisorOptions,
+  createToolRuntimeSupervisor,
+  ToolRuntimeSupervisorError,
+  type ToolRuntimeSupervisorOptions,
   type ToolRuntimeSlotView,
 } from "./tool-runtime-supervisor.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
 import { unresolvedRecoveryToolInvocation } from "./recovery-effect-receipts.js";
 import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE } from "@paperclipai/shared";
 import {
-  createPaperclipCloudConnector, isPaperclipCloudConnectorStrategy,
-  paperclipCloudConnectorConfigFromEnv, PaperclipCloudConnectorError,
+  createPaperclipCloudConnector,
+  isPaperclipCloudConnectorStrategy,
+  paperclipCloudConnectorConfigFromEnv,
+  PaperclipCloudConnectorError,
   type PaperclipCloudConnector,
 } from "./paperclip-cloud-connector.js";
 import {
-  createVercelConnectClient, vercelGrantReference, vercelTokenRequest, VercelConnectClientError,
+  createVercelConnectClient,
+  vercelGrantReference,
+  vercelTokenRequest,
+  VercelConnectClientError,
   type VercelConnectClient,
 } from "./vercel-connect.js";
 import {
-  canonicalToolArguments, readSignedToolArgumentsPayload, signToolArguments, summarizeToolValue,
-  TOOL_ACTION_REQUEST_SIGNING_GRACE_MS, ToolActionSigningSecretMissingError,
-  ToolContentValidationError, validateToolContent, verifyToolArgumentsSignature,
+  canonicalToolArguments,
+  readSignedToolArgumentsPayload,
+  signToolArguments,
+  summarizeToolValue,
+  TOOL_ACTION_REQUEST_SIGNING_GRACE_MS,
+  ToolActionSigningSecretMissingError,
+  ToolContentValidationError,
+  validateToolContent,
+  verifyToolArgumentsSignature,
 } from "./tool-content-guards.js";
 import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.js";
 
@@ -4255,7 +4329,37 @@ export function createToolGatewayService(
         href,
       },
     };
-    await saveConnectionAuthorizationInteraction(db, {
+    const [existing] = await db
+      .select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, session.companyId),
+          eq(issueThreadInteractions.issueId, session.issueId),
+          eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      await db
+        .update(issueThreadInteractions)
+        .set({
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+          effectiveResolverPolicySource: "requested",
+          addresseeUserId: userId,
+          payload,
+          result: null,
+          resolvedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(issueThreadInteractions.id, existing.id));
+      return;
+    }
+    await db.insert(issueThreadInteractions).values({
       companyId: session.companyId,
       issueId: session.issueId,
       kind: "request_confirmation",
@@ -4278,18 +4382,6 @@ export function createToolGatewayService(
       createdByAgentId: session.agentId,
       addresseeUserId: userId,
       payload,
-    }, {
-      status: "pending",
-      continuationPolicy: "wake_assignee",
-      requestedResolverPolicy: "human_only",
-      effectiveResolverPolicy: "human_only",
-      resolverPolicyProvenance: "explicit",
-      effectiveResolverPolicySource: "requested",
-      addresseeUserId: userId,
-      payload,
-      result: null,
-      resolvedAt: null,
-      updatedAt: new Date(),
     });
   }
 

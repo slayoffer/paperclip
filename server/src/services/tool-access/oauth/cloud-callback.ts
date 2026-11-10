@@ -42,7 +42,9 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
     error?: string | null;
     actor?: ActorInfo;
   }): Promise<ConnectToolAppResult> {
-    // Retain state until the claim is stored. The broker binds retries to this state.
+    // Keep the local state live until the sealed claim is in the durable vault.
+    // The broker binds repeat claim requests to this stable state value, so a
+    // transient broker, database, or secret-store failure can retry safely.
     const stateRow = await validateOAuthState(input.state, input.actor);
     let connection = await getConnectionRow(
       stateRow.connectionId,
@@ -421,7 +423,6 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
             status: "accepted",
             result: { version: 1, outcome: "accepted" },
             resolvedByUserId: authorizingUserId,
-            // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
             resolvedAt: now(),
             updatedAt: now(),
           })

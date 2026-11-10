@@ -10,7 +10,6 @@ import {
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { commitToolActionReview } from "../services/tool-action-review.js";
-import { saveConnectionAuthorizationInteraction } from "../services/connection-authorization-interaction.js";
 import { issueTreeControlService } from "../services/issue-tree-control.js";
 import { statusCardService } from "../services/status-cards.js";
 import { defaultStatusCardRefreshPolicy } from "@paperclipai/shared";
@@ -105,7 +104,7 @@ describe("authenticated interaction resolution channel", () => {
         await db.update(issues).set({ conversationAgentId: f.run.agentId,
           conversationUserId: "same-user", conversationState: "waiting" }).where(eq(issues.id, f.issue.id));
         const card = await f.card(true);
-        const body = { body: "/new", clientRequestId: randomUUID(), authorAuthSource: "user_session" };
+        const body = { body: "/new", clientRequestId: randomUUID() };
         const response = await request(f.server).post(`/api/issues/${f.issue.id}/comments`).send(body);
         expect(response.status, JSON.stringify(response.body)).toBe(201);
         f.actor.source = source === "session" ? "board_key" : "session";
@@ -118,12 +117,6 @@ describe("authenticated interaction resolution channel", () => {
         expect(saved.status).toBe("expired");
         expect(saved.resolvedVia).toBeNull();
         expect(saved.resolvedByUserId).toBe("same-user");
-        expect(response.body).not.toHaveProperty("authorAuthSource");
-        expect(retry.body).not.toHaveProperty("authorAuthSource");
-        const listed = await request(f.server).get(`/api/issues/${f.issue.id}/comments`);
-        expect(listed.status).toBe(200);
-        expect(listed.body.find((entry: { id: string }) => entry.id === response.body.id))
-          .not.toHaveProperty("authorAuthSource");
       } finally { await f.close(); }
     },
   );
@@ -245,7 +238,7 @@ describe("authenticated interaction resolution channel", () => {
     } finally { await f.close(); }
   });
 
-  it("records the board-key channel when a comment supersedes a card", async () => {
+  it("keeps comment-triggered expiry provenance unknown", async () => {
     const f = await fixture("board_key");
     try {
       const card = await f.card();
@@ -256,7 +249,7 @@ describe("authenticated interaction resolution channel", () => {
         .send({ body: "The earlier request is no longer needed.", resolvedVia: "user_session" });
       expect(result.status, JSON.stringify(result.body)).toBe(201);
       const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
-      expect(stored).toMatchObject({ status: "expired", resolvedVia: "board_api_key" });
+      expect(stored).toMatchObject({ status: "expired", resolvedVia: null, resolvedViaKeyId: null });
     } finally { await f.close(); }
   });
 
@@ -266,7 +259,7 @@ describe("authenticated interaction resolution channel", () => {
       companyId: f.issue.companyId, issueId: f.issue.id, kind: "request_confirmation" as const,
       idempotencyKey: "authorization-retry", payload: { version: 1 as const, prompt: "Connect?" },
     };
-    const card = await saveConnectionAuthorizationInteraction(db, values, {});
+    const [card] = await db.insert(issueThreadInteractions).values(values).returning();
     let release!: () => void;
     let ready!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -279,9 +272,9 @@ describe("authenticated interaction resolution channel", () => {
       await gate;
     });
     await started;
-    const retry = saveConnectionAuthorizationInteraction(db, values, {
+    const retry = db.update(issueThreadInteractions).set({
       status: "pending", result: null, resolvedAt: null,
-    });
+    }).where(eq(issueThreadInteractions.id, card.id)).returning().then((rows) => rows[0]);
     try {
       const deadline = Date.now() + 10_000;
       let waiting = false;

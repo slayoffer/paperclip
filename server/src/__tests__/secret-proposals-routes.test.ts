@@ -932,7 +932,7 @@ describeEmbeddedPostgres("secret proposal routes", () => {
         injectedCollision = true;
         throw conflict("Proposal is no longer pending");
       }
-      return proposals.transition(companyId, proposalId, "expired", { reason: "Pending proposal expired" });
+      return proposals.transition(companyId, proposalId, "expired", { reason: "Pending proposal expired", via: null });
     })).resolves.toBe(1);
     expect((await db.select().from(companySecretProposals)).filter((proposal) => proposal.status === "pending"))
       .toHaveLength(2);

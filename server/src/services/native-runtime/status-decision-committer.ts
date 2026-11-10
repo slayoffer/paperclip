@@ -628,7 +628,8 @@ async function materializeDecisionEffect(input: {
       reviewInput,
       { systemId: "native-status-committer", runId: input.runId, via: SYSTEM_RESOLUTION_VIA },
     );
-    // Commit card and reviewer together; revalidate the review before dispatch.
+    // The card and its next actor commit together. The post-commit dispatcher
+    // revalidates this exact review before granting a scoped reviewer run.
     const reviewContext = {
       nativeReviewInteractionId: interaction.id,
       nativeReviewDecisionId: input.decisionId,
@@ -1044,20 +1045,13 @@ async function materializeDecisionEffect(input: {
         ),
       );
     if (interactionRows.length > 0) {
-      await input.tx
-        .update(issueThreadInteractions)
-        .set({
-          status: "cancelled",
-          ...SYSTEM_RESOLUTION_VIA,
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          inArray(
-            issueThreadInteractions.id,
-            interactionRows.map((row) => row.id),
-          ),
-        );
+      await input.tx.update(issueThreadInteractions).set({
+        status: "cancelled", ...SYSTEM_RESOLUTION_VIA,
+        resolvedAt: new Date(), updatedAt: new Date(),
+      }).where(and(
+        eq(issueThreadInteractions.status, "pending"),
+        inArray(issueThreadInteractions.id, interactionRows.map((row) => row.id)),
+      ));
     }
     await notifyDeliveryWork(input.tx, DELIVERY_QUEUES.accounting, input.companyId);
     const [run] = await input.tx
@@ -1164,7 +1158,10 @@ async function materializeDecisionEffect(input: {
     if (!assessment?.supersedesAssessmentId) {
       throw new Error("native_superseding_assessment_not_linked");
     }
-    // Decisions span runs; assessment lineage is run-local. Retain its saved parent.
+    // Status decisions form one issue-wide sequence and may supersede a
+    // decision from another run. Work-assessment lineage is deliberately
+    // run-local, so retain the parent recorded when this reassessment was
+    // created instead of replacing it with the prior decision's assessment.
     const [decision] = await input.tx
       .update(statusDecisions)
       .set({
@@ -1612,7 +1609,8 @@ export async function commitNativeStatusDecision(input: {
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!issue) throw new NativeStatusRaceError();
-    // Preserve persistent conversations; their response finalizer records waiting.
+    // A completed model turn cannot close a persistent conversation. Preserve
+    // the task here; the response finalizer records its durable waiting state.
     if (issue.conversationAgentId && input.decision.statusAction === "done") {
       input = { ...input, decision: { ...input.decision, statusAction: "preserve", toStatus: issue.status as NativeStatusDecision["toStatus"], effects: [] } };
     }
@@ -1779,7 +1777,8 @@ export async function commitNativeStatusDecision(input: {
     let boardResponseWait: Awaited<
       ReturnType<typeof readNativeBoardResponseWaitSource>
     > = null;
-    // Revalidate continuation preconditions under the locks before restarting work.
+    // Corrective continuations also carry this precondition. Revalidate it
+    // under the same locks before any decision effects can restart old work.
     if (reasonCode === "board_response_waiting" || input.requireBoardResponseWaitSource) {
       const expected = input.requireBoardResponseWaitSource;
       if (

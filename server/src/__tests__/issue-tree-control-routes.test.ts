@@ -422,15 +422,23 @@ describe("issue tree control routes", () => {
 
   it("records session channel on cancellation", async () => {
     const app = await createApp({
-      type: "board", userId: "user-1", companyIds: ["company-2"], source: "session", isInstanceAdmin: false,
+      type: "board",
+      userId: "user-1",
+      companyIds: ["company-2"],
+      source: "session",
+      isInstanceAdmin: false,
     });
     mockTreeControlService.createHold.mockResolvedValue({
       hold: {
         id: "33333333-3333-4333-8333-333333333333",
-        mode: "cancel", reason: "cancel subtree",
+        mode: "cancel",
+        reason: "cancel subtree",
       },
       preview: {
-        mode: "cancel", totals: { affectedIssues: 2 }, warnings: [], activeRuns: [],
+        mode: "cancel",
+        totals: { affectedIssues: 2 },
+        warnings: [],
+        activeRuns: [],
       },
     });
     mockTreeControlService.cancelIssueStatusesForHold.mockResolvedValue({

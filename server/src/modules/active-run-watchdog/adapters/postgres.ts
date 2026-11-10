@@ -12,6 +12,7 @@ import {
 } from "@paperclipai/db";
 import { parseObject } from "../../../adapters/utils.js";
 import { visibleIssueCondition } from "../../../services/issue-visibility.js";
+import { SYSTEM_RESOLUTION_VIA } from "../../../services/interaction-resolution-attribution.js";
 import { logActivity } from "../../../services/activity-log.js";
 import { appendHeartbeatRunEvent } from "../../../services/heartbeat-run-events.js";
 import { emitAgentTaskRun } from "../../../services/agent-task-run-telemetry.js";
@@ -397,7 +398,7 @@ export function createPostgresWatchdogAdapter(db: Db): WatchdogRunReader & Watch
       if (input.existingEvaluation && !isTerminalIssueStatus(input.existingEvaluation.status)) {
         const updatedEvaluation = await issuesSvc.update(
           input.existingEvaluation.id,
-          { status: "done" },
+          { status: "done", actorResolvedVia: SYSTEM_RESOLUTION_VIA },
           tx,
           undefined,
           postCommitIssueActions,

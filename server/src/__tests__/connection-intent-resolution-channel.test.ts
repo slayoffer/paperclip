@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { connectionIntentOAuthFinisher } from "../routes/connection-intent-oauth-resolution.js";
 
 describe("OAuth connection-intent resolution attribution", () => {
-  it.each([["session", "user_session"], ["board_key", "board_api_key"]] as const)(
-    "leaves provider callback provenance unknown for %s", async (source) => {
+  it("leaves provider callback provenance unknown", async () => {
       const complete = vi.fn().mockResolvedValue({ status: "accepted", resolvedVia: null });
       const updatePhase = vi.fn();
       const deliver = vi.fn();
@@ -13,7 +12,7 @@ describe("OAuth connection-intent resolution attribution", () => {
       }, deliver);
       const result = await finish({
         interactionId: "card", connectionId: "connection", userId: "user",
-        actor: { type: "board", source, userId: "user" }, outcome: "connected",
+        outcome: "connected",
         canManageOrganizationGrant: false, bypassCurrentMembershipCheck: false,
       });
       expect(complete).toHaveBeenCalledWith("card", "connection", "user", {
@@ -22,6 +21,5 @@ describe("OAuth connection-intent resolution attribution", () => {
       expect(result.resolvedVia).toBeNull();
       expect(updatePhase).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledWith("card");
-    },
-  );
+  });
 });

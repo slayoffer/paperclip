@@ -9,25 +9,43 @@ import { eq } from "drizzle-orm";
 import { clearNativeQuestionFixtures } from "./native-question-bridge.test-fixture.js";
 
 import {
-  activityLog, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns,
-  heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueThreadInteractions,
-  issues, nativeRunFinalizations,
+  activityLog,
+  agents,
+  authUsers,
+  companies,
+  companyMemberships,
+  createDb,
+  heartbeatRuns,
+  heartbeatRunEvents,
+  issueComments,
+  issueQuestionResponseDeliveries,
+  issueThreadInteractions,
+  issues,
+  nativeRunFinalizations,
 } from "@paperclipai/db";
 import type { PrpEvent } from "@paperclipai/paperclip-runner";
 import { respondIssueThreadInteractionSchema } from "@paperclipai/shared";
 
 import {
-  getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase,
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
 } from "../../__tests__/helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "../../__tests__/helpers/drain-heartbeat-runs.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import {
-  deliverNativeQuestionResponse, flushNativeQuestionResponses, nativeQuestionBridgeInternals,
-  nativeQuestionRunToCancel, projectNativeRuntimeRequest, registerNativeQuestionCommandTarget,
-  requestNativeQuestionRunCancellation, validateNativeQuestionResponseInput,
+  deliverNativeQuestionResponse,
+  flushNativeQuestionResponses,
+  nativeQuestionBridgeInternals,
+  nativeQuestionRunToCancel,
+  projectNativeRuntimeRequest,
+  registerNativeQuestionCommandTarget,
+  requestNativeQuestionRunCancellation,
+  validateNativeQuestionResponseInput,
 } from "./native-question-bridge.js";
 import {
-  executeIssuePostCommitActions, issueService, type IssuePostCommitAction,
+  executeIssuePostCommitActions,
+  issueService,
+  type IssuePostCommitAction,
 } from "../issues.js";
 import { questionResponseDeliveryService } from "../question-response-delivery.js";
 import * as questionPatternValidation from "../question-pattern-validation.js";
@@ -36,7 +54,8 @@ import { DurablePrpControlPlane } from "../../vendor/paperclip-runner/index.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { readPendingNativeRuntimeRequest } from "./runtime-request-resolution-authority.js";
 import {
-  queueRunnerPrpRuntimeRequestResolution, registerRunnerPrpAuthority,
+  queueRunnerPrpRuntimeRequestResolution,
+  registerRunnerPrpAuthority,
   setupRunnerPrpWebSocketServer,
 } from "../../realtime/runner-prp-ws.js";
 

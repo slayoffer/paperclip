@@ -11,9 +11,9 @@ describe("interaction authentication channel", () => {
       resolvedVia, resolvedViaKeyId: source === "board_key" ? keyId : null,
     });
   });
-  it.each(["local_implicit", "cloud_tenant", "cloud_control", "mcp_oauth", "none", undefined])(
+  it.each(["local_implicit", "cloud_tenant", "cloud_control", "mcp_oauth", "none", undefined] as const)(
     "keeps unmapped source %s unknown", (source) => {
-      expect(resolutionViaFromActor({ source, keyId, userId: "same-user" })).toBeNull();
+      expect(resolutionViaFromActor({ source, keyId })).toBeNull();
     },
   );
   it("keeps a board source without authenticated key identity unknown", () => {

@@ -1,4 +1,4 @@
-import { resolutionViaFromActor } from "./interaction-resolution-actor.js";
+import { interactionIssueUpdateActor, resolutionViaFromActor } from "./interaction-resolution-actor.js";
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -103,7 +103,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
           rethrowOnError: true,
         });
       } catch (error) {
-        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", actorResolvedVia: resolutionViaFromActor(req.actor) });
+        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", ...interactionIssueUpdateActor(req) });
         throw error;
       }
     }
@@ -135,7 +135,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
           rethrowOnError: true,
         });
       } catch (error) {
-        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", actorResolvedVia: resolutionViaFromActor(req.actor) });
+        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", ...interactionIssueUpdateActor(req) });
         throw error;
       }
     }

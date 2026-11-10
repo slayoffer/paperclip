@@ -1,4 +1,4 @@
-import type { InteractionActor } from "./interaction-resolution-input.js";
+import { statusCardCancellationActor, type StatusCardActor } from "./status-card-resolution-actor.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import {
@@ -19,7 +19,10 @@ import type {
   WriteStatusCardQuery,
   WriteStatusCardSummary,
 } from "@paperclipai/shared";
-import { companySearchQuerySchema, STATUS_CARD_AGENT_MAX_CARDS } from "@paperclipai/shared";
+import {
+  companySearchQuerySchema,
+  STATUS_CARD_AGENT_MAX_CARDS,
+} from "@paperclipai/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
@@ -42,7 +45,6 @@ import {
   type StatusCardFingerprint,
 } from "./status-card-update-engine.js";
 
-type StatusCardActor = { agentId: string | null; userId: string | null; via?: InteractionActor["via"] };
 type StatusCardWriter = { agentId: string | null; runId: string | null };
 type StatusCardRow = typeof statusCards.$inferSelect;
 type StatusCardReadOptions = { issueReadCondition?: SQL<boolean> };
@@ -317,7 +319,7 @@ export function statusCardService(
     if (archiveChanged && input.archived && card.generatingIssueId) {
       const generationIssue = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       if (generationIssue && !TERMINAL_ISSUE_STATUSES.has(generationIssue.status)) {
-        await issuesSvc.update(generationIssue.id, { status: "cancelled", actorResolvedVia: actor.via });
+        await issuesSvc.update(generationIssue.id, { status: "cancelled", ...statusCardCancellationActor(actor) });
       }
     }
     return next;
@@ -381,8 +383,10 @@ export function statusCardService(
     if (card.generatingIssueId) {
       const active = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       const payload = parseGenerationPayload(active?.description ?? null);
-      // A blocked setup task needs a human. A manual retry reopens it as todo.
-      // Only an active, unblocked task counts as already generating.
+      // Only treat an existing setup task as "already generating" while it is
+      // genuinely in flight. A `blocked` task is stuck awaiting a human and will
+      // never finish on its own, so a manual re-kick must supersede it (reopened
+      // to `todo` below) rather than silently no-op.
       if (active && !TERMINAL_ISSUE_STATUSES.has(active.status) && active.status !== "blocked" && payload?.promptHash === hash) {
         return { card, generatingIssue: active, alreadyGenerating: true };
       }
@@ -633,7 +637,8 @@ export function statusCardService(
     if (card.queries.length === 0) throw conflict("Compile the status-card query before refreshing it");
     if (card.generatingIssueId) {
       const active = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
-      // Manual refresh can replace blocked tasks.
+      // As in requestCompile: a `blocked` update task is stuck, not in flight, so
+      // a manual refresh must be allowed to supersede it instead of no-opping.
       if (active && !TERMINAL_ISSUE_STATUSES.has(active.status) && active.status !== "blocked") {
         return { card, generatingIssue: active, alreadyGenerating: true, enqueued: false };
       }
@@ -739,12 +744,12 @@ export function statusCardService(
       const winner = await getById(card.id);
       if (!winner?.generatingIssueId) {
         if (!TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-          await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.via });
+          await issuesSvc.update(generationIssue!.id, { status: "cancelled", ...statusCardCancellationActor(input.actor) });
         }
         throw conflict("Status-card refresh claim was lost");
       }
       if (generationIssue!.id !== winner.generatingIssueId && !TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-        await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.via });
+        await issuesSvc.update(generationIssue!.id, { status: "cancelled", ...statusCardCancellationActor(input.actor) });
       }
       const winnerIssue = await db.select().from(issues).where(eq(issues.id, winner.generatingIssueId)).then((rows) => rows[0] ?? null);
       return { card: winner, generatingIssue: winnerIssue, alreadyGenerating: true, enqueued: false, kind, changes };
