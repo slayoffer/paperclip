@@ -1,4 +1,5 @@
 import { statusCardCancellationActor, type StatusCardActor } from "./status-card-resolution-actor.js";
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import {
@@ -412,10 +413,11 @@ export function statusCardService(
     // covers idempotency-key hits that resolve to a terminal task (done/cancelled)
     // as well as a `blocked` one that a manual re-kick is reviving.
     const reopened = deduplicated && (TERMINAL_ISSUE_STATUSES.has(created.status) || created.status === "blocked")
-      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId })
+      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId, actorResolvedVia: SYSTEM_RESOLUTION_VIA })
       : created;
     const generationIssue = await issuesSvc.update(reopened!.id, {
       description: compileDescription(card, reopened!.id, hash),
+      actorResolvedVia: SYSTEM_RESOLUTION_VIA,
     });
     const [nextCard] = await db
       .update(statusCards)
@@ -723,10 +725,11 @@ export function statusCardService(
       onDeduplicated: (reason) => { deduplicated = reason === "idempotency_key"; },
     });
     const reopened = deduplicated && TERMINAL_ISSUE_STATUSES.has(created.status)
-      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId })
+      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId, actorResolvedVia: SYSTEM_RESOLUTION_VIA })
       : created;
     const generationIssue = await issuesSvc.update(reopened!.id, {
       description: updateDescription({ card, generationIssueId: reopened!.id, fingerprint, changes, kind, trigger, previousSummary, snapshot }),
+      actorResolvedVia: SYSTEM_RESOLUTION_VIA,
     });
     const priorGenerationPredicate = card.generatingIssueId
       ? eq(statusCards.generatingIssueId, card.generatingIssueId)
