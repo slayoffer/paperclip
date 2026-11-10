@@ -10,6 +10,7 @@ import {
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { commitToolActionReview } from "../services/tool-action-review.js";
+import { saveConnectionAuthorizationInteraction } from "../services/connection-authorization-interaction.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 describe("authenticated interaction resolution channel", () => {
@@ -136,6 +137,23 @@ describe("authenticated interaction resolution channel", () => {
         .rejects.toThrow();
       const read = await request(f.server).get(`/api/issues/${f.issue.id}/interactions/${card.id}`);
       expect(read.body.resolvedVia).toBe("board_api_key");
+      await db.update(issueThreadInteractions).set({ status: "pending", resolvedAt: null })
+        .where(eq(issueThreadInteractions.id, card.id));
+      await expect(db.execute(sql`UPDATE issue_thread_interactions SET resolved_via = 'user_session' WHERE id = ${card.id}`))
+        .rejects.toThrow();
+    } finally { await f.close(); }
+  });
+
+  it.each(["session", "board_key", "agent_key"] as const)("records %s when issue closure resolves a card", async (source) => {
+    const f = await fixture(source);
+    try {
+      const card = await f.card();
+      const result = await request(f.server).patch(`/api/issues/${f.issue.id}`).send({ status: "done" });
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(stored).toMatchObject({ status: "expired", resolvedVia: {
+        session: "user_session", board_key: "board_api_key", agent_key: "agent_key",
+      }[source] });
     } finally { await f.close(); }
   });
 
@@ -154,6 +172,64 @@ describe("authenticated interaction resolution channel", () => {
       const complete = await request(f.server).post(endpoint).send({ verdicts: [{ id: "two", verdict: "approve" }] });
       expect(complete.status, JSON.stringify(complete.body)).toBe(200);
       expect(complete.body).toMatchObject({ status: "answered", resolvedVia: "user_session" });
+    } finally { await f.close(); }
+  });
+
+  it("records the board-key channel when a comment supersedes a card", async () => {
+    const f = await fixture("board_key");
+    try {
+      const card = await f.card();
+      await db.update(issueThreadInteractions).set({
+        payload: { version: 1, prompt: "Continue?", supersedeOnUserComment: true },
+      }).where(eq(issueThreadInteractions.id, card.id));
+      const result = await request(f.server).post(`/api/issues/${f.issue.id}/comments`)
+        .send({ body: "The earlier request is no longer needed.", resolvedVia: "user_session" });
+      expect(result.status, JSON.stringify(result.body)).toBe(201);
+      const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(stored).toMatchObject({ status: "expired", resolvedVia: "board_api_key" });
+    } finally { await f.close(); }
+  });
+
+  it("preserves a callback resolution concurrent with an authorization retry", async () => {
+    const f = await fixture("board_key");
+    const values = {
+      companyId: f.issue.companyId, issueId: f.issue.id, kind: "request_confirmation" as const,
+      idempotencyKey: "authorization-retry", payload: { version: 1 as const, prompt: "Connect?" },
+    };
+    const card = await saveConnectionAuthorizationInteraction(db, values, {});
+    let release!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { ready = resolve; });
+    const callback = db.transaction(async (tx) => {
+      await tx.update(issueThreadInteractions).set({
+        status: "accepted", resolvedAt: new Date(), resolvedVia: "user_session",
+      }).where(eq(issueThreadInteractions.id, card.id));
+      ready();
+      await gate;
+    });
+    await started;
+    const retry = saveConnectionAuthorizationInteraction(db, values, {
+      status: "pending", result: null, resolvedAt: null,
+    });
+    try {
+      const deadline = Date.now() + 10_000;
+      let waiting = false;
+      while (!waiting && Date.now() < deadline) {
+        const rows = await db.execute(sql`SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`);
+        waiting = rows.length > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally { release(); }
+    try {
+      await callback;
+      const next = await retry;
+      expect(next.id).not.toBe(card.id);
+      expect(next).toMatchObject({ status: "pending", resolvedVia: null });
+      const [original] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(original).toMatchObject({ status: "accepted", resolvedVia: "user_session" });
     } finally { await f.close(); }
   });
 

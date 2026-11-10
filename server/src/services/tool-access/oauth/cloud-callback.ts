@@ -1,3 +1,4 @@
+import { oauthResolutionAttribution } from "./resolution-attribution.js";
 import { managedConnectorProfile } from "./client-settings.js";
 import type { ActorInfo } from "../types.js";
 import { oauthConfig, normalizeOauthScopes } from "./metadata.js";
@@ -42,9 +43,7 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
     error?: string | null;
     actor?: ActorInfo;
   }): Promise<ConnectToolAppResult> {
-    // Keep the local state live until the sealed claim is in the durable vault.
-    // The broker binds repeat claim requests to this stable state value, so a
-    // transient broker, database, or secret-store failure can retry safely.
+    // Retain state until the claim is stored. The broker binds retries to this state.
     const stateRow = await validateOAuthState(input.state, input.actor);
     let connection = await getConnectionRow(
       stateRow.connectionId,
@@ -423,6 +422,7 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
             status: "accepted",
             result: { version: 1, outcome: "accepted" },
             resolvedByUserId: authorizingUserId,
+            ...oauthResolutionAttribution(input.actor),
             resolvedAt: now(),
             updatedAt: now(),
           })

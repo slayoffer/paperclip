@@ -1,3 +1,4 @@
+import { saveConnectionAuthorizationInteraction } from "./connection-authorization-interaction.js";
 import type { InteractionActor as Actor } from "./interaction-resolution-input.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
@@ -4328,37 +4329,7 @@ export function createToolGatewayService(
         href,
       },
     };
-    const [existing] = await db
-      .select({ id: issueThreadInteractions.id })
-      .from(issueThreadInteractions)
-      .where(
-        and(
-          eq(issueThreadInteractions.companyId, session.companyId),
-          eq(issueThreadInteractions.issueId, session.issueId),
-          eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
-        ),
-      )
-      .limit(1);
-    if (existing) {
-      await db
-        .update(issueThreadInteractions)
-        .set({
-          status: "pending",
-          continuationPolicy: "wake_assignee",
-          requestedResolverPolicy: "human_only",
-          effectiveResolverPolicy: "human_only",
-          resolverPolicyProvenance: "explicit",
-          effectiveResolverPolicySource: "requested",
-          addresseeUserId: userId,
-          payload,
-          result: null,
-          resolvedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(issueThreadInteractions.id, existing.id));
-      return;
-    }
-    await db.insert(issueThreadInteractions).values({
+    await saveConnectionAuthorizationInteraction(db, {
       companyId: session.companyId,
       issueId: session.issueId,
       kind: "request_confirmation",
@@ -4381,6 +4352,18 @@ export function createToolGatewayService(
       createdByAgentId: session.agentId,
       addresseeUserId: userId,
       payload,
+    }, {
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      requestedResolverPolicy: "human_only",
+      effectiveResolverPolicy: "human_only",
+      resolverPolicyProvenance: "explicit",
+      effectiveResolverPolicySource: "requested",
+      addresseeUserId: userId,
+      payload,
+      result: null,
+      resolvedAt: null,
+      updatedAt: new Date(),
     });
   }
 

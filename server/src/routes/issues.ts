@@ -1,4 +1,4 @@
-import { interactionResolutionActor } from "./interaction-resolution-actor.js";
+import { interactionResolutionActor, interactionResolvedVia } from "./interaction-resolution-actor.js";
 import type { InteractionActor } from "../services/interaction-resolution-input.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
@@ -10440,10 +10440,7 @@ export function issueRoutes(
             latestRevisionId: doc.latestRevisionId,
             latestRevisionNumber: doc.latestRevisionNumber,
           },
-          {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          interactionResolutionActor(req),
         );
         await logExpiredRequestConfirmations({
           issue,
@@ -10734,10 +10731,7 @@ export function issueRoutes(
           latestRevisionId: result.document.latestRevisionId,
           latestRevisionNumber: result.document.latestRevisionNumber,
         },
-        {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        },
+        interactionResolutionActor(req),
       );
       await logExpiredRequestConfirmations({
         issue,
@@ -10844,10 +10838,7 @@ export function issueRoutes(
         latestRevisionId: null,
         latestRevisionNumber: null,
       },
-      {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      },
+      interactionResolutionActor(req),
     );
     await logExpiredRequestConfirmations({
       issue,
@@ -13970,6 +13961,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
+        actorResolvedVia: interactionResolvedVia(req.actor),
         workspaceSelectionActor: req.actor,
         expectedExecutionPolicy,
         expectedStatusVersion,
@@ -14174,6 +14166,7 @@ export function issueRoutes(
                     actor.actorType === "user" ? actor.actorId : undefined,
                   runId: actor.runId,
                   onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+                  resolvedVia: interactionResolvedVia(req.actor),
                 },
                 {
                   attachmentIds: commentAttachmentIds,
@@ -14787,6 +14780,7 @@ export function issueRoutes(
             userId: actor.actorType === "user" ? actor.actorId : undefined,
             runId: actor.runId,
             onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+            resolvedVia: interactionResolvedVia(req.actor),
           },
           {
             authorizationReason: issueMutationAuthorizationReason,
@@ -14928,10 +14922,7 @@ export function issueRoutes(
 
         const expiredInteractions = await issueThreadInteractionService(
           db,
-        ).expireRequestConfirmationsSupersededByComment(issue, comment, {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        });
+        ).expireRequestConfirmationsSupersededByComment(issue, comment, interactionResolutionActor(req));
         await logExpiredRequestConfirmations({
           issue,
           interactions: expiredInteractions,
@@ -15283,10 +15274,7 @@ export function issueRoutes(
         if (becameTerminal) {
           const expiredInteractions = await issueThreadInteractionService(
             db,
-          ).expirePendingInteractionsForTerminalIssue(issue, {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          });
+          ).expirePendingInteractionsForTerminalIssue(issue, interactionResolutionActor(req));
           await logExpiredRequestConfirmations({
             issue,
             interactions: expiredInteractions,
@@ -17633,7 +17621,7 @@ export function issueRoutes(
             eq(issueComments.issueId, issue.id), eq(issueComments.authorUserId, userId),
             eq(issueComments.clientRequestId, req.body.clientRequestId),
           ));
-          const saved = await svc.addComment(issue.id, req.body.body, { userId }, {
+          const saved = await svc.addComment(issue.id, req.body.body, { userId, resolvedVia: interactionResolvedVia(req.actor) }, {
             clientRequestId: req.body.clientRequestId, authorType: "user", attachmentIds: req.body.attachmentIds,
           }, tx);
           if (!existing) await logActivity(tx as unknown as Db, {
@@ -18010,6 +17998,7 @@ export function issueRoutes(
         issueBeforeCommentDecision = currentIssue;
         const updatePatch = {
           ...transition.patch,
+          actorResolvedVia: interactionResolvedVia(req.actor),
           status:
             typeof transition.patch.status === "string"
               ? transition.patch.status
@@ -18046,6 +18035,7 @@ export function issueRoutes(
                 userId: actor.actorType === "user" ? actor.actorId : undefined,
                 runId: actor.runId,
                 onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+                resolvedVia: interactionResolvedVia(req.actor),
               },
               {
                 ...commentOptions,
@@ -18153,6 +18143,7 @@ export function issueRoutes(
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
               onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+              resolvedVia: interactionResolvedVia(req.actor),
             },
             commentOptions,
             dbOrTx,
@@ -18300,10 +18291,7 @@ export function issueRoutes(
 
       const expiredInteractions = await issueThreadInteractionService(
         db,
-      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, interactionResolutionActor(req));
       await logExpiredRequestConfirmations({
         issue: currentIssue,
         interactions: expiredInteractions,
@@ -18525,10 +18513,7 @@ export function issueRoutes(
         if (becameTerminal) {
           const expiredInteractions = await issueThreadInteractionService(
             db,
-          ).expirePendingInteractionsForTerminalIssue(currentIssue, {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          });
+          ).expirePendingInteractionsForTerminalIssue(currentIssue, interactionResolutionActor(req));
           await logExpiredRequestConfirmations({
             issue: currentIssue,
             interactions: expiredInteractions,

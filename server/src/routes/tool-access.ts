@@ -1,3 +1,4 @@
+import { interactionResolvedVia } from "./interaction-resolution-actor.js";
 import { connectionIntentOAuthFinisher } from "./connection-intent-oauth-resolution.js";
 import { isCrossSiteOAuthCallbackNavigation, oauthCallbackInterstitialHtml } from "../lib/oauth-browser-return.js";
 import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
@@ -1122,7 +1123,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         state,
         claimId,
         error,
-        actor: getActorInfo(req),
+        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
       });
       const pendingConfig = pendingConnection.config ?? {};
       const oauthConfig = pendingConfig.oauth && typeof pendingConfig.oauth === "object"
@@ -1237,7 +1238,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       const result = await svc.completeVercelConnectCallback({
         state,
         error,
-        actor: getActorInfo(req),
+        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
       });
       await logActivity(db, {
         companyId: result.connection.companyId,
@@ -1318,9 +1319,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const state = typeof req.query.state === "string" ? req.query.state : "";
     const code = typeof req.query.code === "string" ? req.query.code : null;
     const error = typeof req.query.error === "string" ? req.query.error : null;
-    // `error_description` / `error_uri` are read from neither the query nor the
-    // provider's body: they are provider-authored prose, and Paperclip maps the
-    // `error` code to its own copy instead of reflecting them (PAP-17108).
+    // Ignore provider-authored error prose; render only server-defined copy (PAP-17108).
     const iss = typeof req.query.iss === "string" ? req.query.iss : null;
     const pendingState = state ? await svc.peekOAuthState(state) : null;
     if (!pendingState || !hasCompanyAccess(req, pendingState.companyId)) {
@@ -1352,11 +1351,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
         code,
         error,
         iss,
-        // A provider denial is bound and consumed by state alone. Avoid
-        // requiring this deployment's callback origin just to record that the
-        // user declined; successful code exchange still validates the origin.
+        // Denials consume state without an origin check. Code exchange still checks it.
         redirectUri: error ? "" : oauthRedirectUri(req),
-        actor: getActorInfo(req),
+        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
       });
     } catch (callbackError) {
       if (!acceptsHtml) throw callbackError;

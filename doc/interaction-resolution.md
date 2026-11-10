@@ -30,6 +30,15 @@ does not backfill historical rows. List, single-interaction, and company reads
 return the saved value. These fields record evidence; resolver permissions and
 existing identity fields retain their current behavior.
 
+An authenticated comment, document change, or issue closure can expire a card.
+These implicit resolutions record the initiating authentication channel too.
+OAuth confirmation callbacks record their authenticated channel and preserve
+the original channel if a late callback reaches an already resolved card.
+An authorization retry creates a new card after a completed resolution. It
+retains the old card and its attribution. The old lookup key gains that card's
+ID as a suffix; the new pending card receives the stable lookup key. Repeated
+requests refresh the pending card without creating another one.
+
 | Method | Path | Answer fields |
 | --- | --- | --- |
 | POST | `/api/issues/:issueId/interactions/:interactionId/accept` | Existing confirmation or suggestion fields |

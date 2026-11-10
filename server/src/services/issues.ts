@@ -1,3 +1,4 @@
+import type { InteractionActor } from "./interaction-resolution-input.js";
 import { applyIssueCreateAdmission, assertIssueCreateQuota, hasIssueCreateQuota, type IssueCreateAdmission } from "./issue-create-admission.js";
 import { insertIssueComment } from "./issue-comment-writes.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
@@ -10298,6 +10299,7 @@ export function issueService(db: Db) {
         actorRunStopId?: string | null;
         blockedWaitCommentBody?: string | null;
         actorUserId?: string | null;
+        actorResolvedVia?: InteractionActor["resolvedVia"];
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
         expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
@@ -10314,11 +10316,8 @@ export function issueService(db: Db) {
       const ownedPostCommitActions: IssuePostCommitAction[] = [];
       const queuedPostCommitActions =
         postCommitActions ?? ownedPostCommitActions;
-      // A caller that supplies `companyGuard` gets the company added to
-      // every read, lock, and write predicate below. A check before this
-      // call is not a boundary: `issues.company_id` can change between
-      // that check and this write, so the predicate must carry the
-      // company itself.
+      // Carry companyGuard into every read and write: company_id can change
+      // between a caller's access check and this update.
       const idPredicate =
         data.companyGuard !== undefined
           ? and(eq(issues.id, id), eq(issues.companyId, data.companyGuard))
@@ -10350,6 +10349,7 @@ export function issueService(db: Db) {
         actorRunStopId,
         blockedWaitCommentBody,
         actorUserId,
+        actorResolvedVia,
         companyGuard,
         workspaceSelectionActor,
         expectedExecutionPolicy,
@@ -10836,12 +10836,9 @@ export function issueService(db: Db) {
               type: "dispatch_dependency_wake", companyId: updated.companyId, intentId,
             });
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
-            // Every terminal transition funnels through here, including direct
-            // service callers (tree control, recovery, status cards)
-            // that never touch the HTTP routes. Governed cards expire; ordinary
-            // historical questions remain answerable after completion.
-            // Dynamic import breaks the module
-            // cycle (issue-thread-interactions.js imports issueService).
+            // Expire governed cards for HTTP and internal terminal transitions.
+            // Keep ordinary historical questions answerable. Dynamic import avoids
+            // the cycle with issue-thread-interactions.js.
             const { issueThreadInteractionService } =
               await import("./issue-thread-interactions.js");
             // Stop live question requests independently of card expiry. A
@@ -10861,6 +10858,7 @@ export function issueService(db: Db) {
             ).expirePendingInteractionsForTerminalIssue(updated, {
               agentId: actorAgentId ?? null,
               userId: actorUserId ?? null,
+              resolvedVia: actorResolvedVia,
             });
             const {
               nativeQuestionCancellationIdentity,
@@ -11972,6 +11970,7 @@ export function issueService(db: Db) {
       issueId: string,
       body: string,
       actor: {
+        resolvedVia?: InteractionActor["resolvedVia"];
         agentId?: string;
         userId?: string;
         runId?: string | null;
@@ -12602,7 +12601,7 @@ export function issueService(db: Db) {
         ).expireRequestConfirmationsSupersededByComment(
           { id: issueId, companyId: issue.companyId },
           comment,
-          { agentId: actor.agentId, userId: actor.userId },
+          { agentId: actor.agentId, userId: actor.userId, resolvedVia: actor.resolvedVia },
         );
         for (const interaction of expiredInteractions) {
           await logActivity(dbOrTx, {

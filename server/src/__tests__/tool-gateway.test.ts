@@ -59,6 +59,7 @@ import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool
 import { resolveConnectionGrantSecret } from "../services/connection-credentials.js";
 import { secretService } from "../services/secrets.js";
 import { createRemoteMcpTool } from "./helpers/tool-gateway-remote-fixture.js";
+import { assertAuthorizationResolutionHistory } from "./helpers/authorization-resolution-history.js";
 import * as cogneeBridge from "../services/cognee-connection.js";
 import { createKvDemoHttpServer, type KvDemoHttpServer } from "../../../packages/kv-demo-mcp-server/src/http.js";
 import {
@@ -2334,9 +2335,7 @@ rl.on("line", (line) => {
         toolName: "whoami",
         riskLevel: "read",
       });
-      // Personal credentials live on grants, so a company-level health probe
-      // may be unable to authenticate even though this user's grant is valid.
-      // The cached catalog must remain visible so grant resolution can happen.
+      // Keep cached tools visible when only a personal grant can authenticate.
       await db.update(toolConnections).set({
         credentialPolicy: "per_user",
         healthStatus: "error",
@@ -2356,7 +2355,7 @@ rl.on("line", (line) => {
       expect(snapshot.bindingId).toBe(`native-mcp:${run.id}`);
       const runtime = await buildPaperclipRuntimeMcpServers({ db, agent, runId: run.id, expectedAssignmentDigest: snapshot.digest });
       expect(runtime).toHaveLength(1);
-      // Startup and tool discovery never contact the provider or ask Carol to sign in.
+      // Discovery makes no provider call.
       expect(fake.requests).toHaveLength(0);
       expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issue.id))).toEqual([]);
       const gateway = createTestToolGatewayService(db);
@@ -2406,6 +2405,7 @@ rl.on("line", (line) => {
         prompt: `Connect your ${connection.name} account to continue`,
         target: { key: `connection:${connection.uid}:user:carol` },
       });
+      await assertAuthorizationResolutionHistory(db, interaction!, () => call().expect(409));
 
       await db.insert(connectionGrants).values({
         companyId: company.id,
