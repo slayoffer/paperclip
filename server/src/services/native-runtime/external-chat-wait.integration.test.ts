@@ -759,7 +759,7 @@ describe("native external-chat response wait", () => {
             ],
           },
         },
-        { agentId: fixture.agentId, runId: sourceRunId },
+        { via: null, agentId: fixture.agentId, runId: sourceRunId },
       );
     } finally {
       if (previousPublicUrl === undefined)
@@ -781,7 +781,7 @@ describe("native external-chat response wait", () => {
       { id: fixture.issueId, companyId: fixture.companyId },
       interaction.id,
       { answers: [{ questionId: "color", optionIds: ["cobalt"] }] },
-      { userId: fixture.userId },
+      { via: null, userId: fixture.userId },
     );
     const [delivery] = await db
       .update(issueQuestionResponseDeliveries)

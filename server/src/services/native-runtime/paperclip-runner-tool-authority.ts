@@ -2600,7 +2600,7 @@ export class PaperclipRunnerToolAuthority {
               supersedeOnUserComment: normalizedPayload.supersedeOnUserComment ?? false,
             } : {}),
           },
-        } as never, { agentId: this.binding.agentId, userId: null, identityContextId });
+        } as never, { agentId: this.binding.agentId, userId: null, identityContextId, via: null });
         const activity = await persistActivity(tx, {
           companyId: this.binding.companyId,
           actorType: "agent",

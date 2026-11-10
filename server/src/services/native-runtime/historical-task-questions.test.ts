@@ -16,6 +16,8 @@ import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.
 import { PaperclipRunnerSemanticAuthority } from "./runner-semantic-authority.js";
 import type { PrpStructuredRunResult } from "../../vendor/paperclip-runner/index.js";
 
+const userActor = { via: null, userId: "board-user" };
+
 const questionTime = new Date("2026-01-01T12:00:00Z");
 const messageTime = new Date("2026-01-01T12:01:00Z");
 const done: PrpStructuredRunResult = {
@@ -98,11 +100,11 @@ describe("historical task questions", () => {
     const service = issueThreadInteractionService(db);
     const task = { id: f.issueId, companyId: f.companyId };
     expect(await gate(f)).not.toBeNull();
-    await expect(service.dismissInteraction(task, f.question.id, { agentId: f.agentId })).rejects.toMatchObject({ status: 403 });
-    await expect(service.dismissInteraction({ ...task, companyId: randomUUID() }, f.question.id, { userId: "board-user" })).rejects.toMatchObject({ status: 404 });
-    const dismissed = await service.dismissInteraction(task, f.question.id, { userId: "board-user" });
+    await expect(service.dismissInteraction(task, f.question.id, { via: null, agentId: f.agentId })).rejects.toMatchObject({ status: 403 });
+    await expect(service.dismissInteraction({ ...task, companyId: randomUUID() }, f.question.id, userActor)).rejects.toMatchObject({ status: 404 });
+    const dismissed = await service.dismissInteraction(task, f.question.id, userActor);
     expect(dismissed).toMatchObject({ status: "pending", dismissedByUserId: "board-user", resolvedAt: null, result: null });
-    expect((await service.dismissInteraction(task, f.question.id, { userId: "board-user" })).dismissedAt).toEqual(dismissed.dismissedAt);
+    expect((await service.dismissInteraction(task, f.question.id, userActor)).dismissedAt).toEqual(dismissed.dismissedAt);
     expect(await gate(f)).toBeNull();
     expect(await nativeCompletionFeedback(db, f.runId, done)).not.toContain("Tell the user");
     expect((await readTaskQuestionContext(db, f)).questions).toEqual([expect.objectContaining({ id: f.question.id, historical: true, dismissedAt: dismissed.dismissedAt })]);
@@ -113,7 +115,7 @@ describe("historical task questions", () => {
     const f = await fixture();
     await db.update(issueThreadInteractions).set({ kind: "request_confirmation", effectiveResolverPolicySource: "company_cap",
       payload: { version: 1, prompt: "Approve deployment?" } }).where(eq(issueThreadInteractions.id, f.question.id));
-    await issueThreadInteractionService(db).dismissInteraction({ id: f.issueId, companyId: f.companyId }, f.question.id, { userId: "board-user" });
+    await issueThreadInteractionService(db).dismissInteraction({ id: f.issueId, companyId: f.companyId }, f.question.id, userActor);
     expect(await gate(f)).toEqual({ kind: "interaction", id: f.question.id });
     const feedback = await nativeCompletionFeedback(db, f.runId, done);
     expect(feedback).toContain("Dismissal does not authorize");
@@ -135,12 +137,12 @@ describe("historical task questions", () => {
     });
     const service = issueThreadInteractionService(db);
     const staleTask = { id: f.issueId, companyId: f.companyId, status: "in_progress", reviewPolicy: "anyone" };
-    await expect(service.dismissInteraction(staleTask, f.question.id, { userId: "review-requester" }))
+    await expect(service.dismissInteraction(staleTask, f.question.id, { via: null, userId: "review-requester" }))
       .rejects.toMatchObject({ status: 403, details: { code: "review_policy_denied" } });
     expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, f.question.id)))[0])
       .toMatchObject({ dismissedAt: null, status: "pending", resolvedAt: null, result: null });
     expect(await gate(f)).toEqual({ kind: "interaction", id: f.question.id });
-    expect(await service.dismissInteraction(staleTask, f.question.id, { userId: "original-author" }))
+    expect(await service.dismissInteraction(staleTask, f.question.id, { via: null, userId: "original-author" }))
       .toMatchObject({ dismissedByUserId: "original-author", status: "pending", resolvedAt: null, result: null });
     expect(await gate(f)).toBeNull();
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toEqual([]);
@@ -165,7 +167,7 @@ describe("historical task questions", () => {
         .where(eq(issueThreadInteractions.id, f.question.id));
     }
     if (mode.startsWith("dismissed-")) {
-      await issueThreadInteractionService(db).dismissInteraction({ id: f.issueId, companyId: f.companyId }, f.question.id, { userId: "board-user" });
+      await issueThreadInteractionService(db).dismissInteraction({ id: f.issueId, companyId: f.companyId }, f.question.id, userActor);
     }
     const contractId = randomUUID(), sessionId = randomUUID(), runnerId = randomUUID();
     const contractSha256 = "historical-question-contract";
@@ -201,7 +203,7 @@ describe("historical task questions", () => {
         .toEqual([expect.objectContaining({ status: "pending", result: null, resolvedAt: null })]);
       const answered = await issueThreadInteractionService(db).answerQuestions(
         { id: f.issueId, companyId: f.companyId, status: "done" }, f.question.id,
-        { answers: [{ questionId: "configuration", optionIds: ["configured"] }] }, { userId: "board-user" });
+        { answers: [{ questionId: "configuration", optionIds: ["configured"] }] }, userActor);
       expect(answered).toMatchObject({ status: "answered", resolvedByUserId: "board-user",
         result: { answers: [{ questionId: "configuration", optionIds: ["configured"] }] } });
       expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].status).toBe("done");
@@ -308,8 +310,8 @@ describe("historical task questions", () => {
     const service = issueThreadInteractionService(db);
     await expect(service.answerQuestions({ id: f.issueId, companyId: f.companyId, status: "in_progress" },
       f.question.id, { answers: [{ questionId: "configuration", optionIds: ["configured"] }] },
-      { userId: "board-user" })).rejects.toMatchObject({ status: 409, details: { code: "interaction_issue_closed" } });
-    expect(await service.expirePendingInteractionsForTerminalIssue({ id: f.issueId, companyId: f.companyId, status: "cancelled" }))
+      userActor)).rejects.toMatchObject({ status: 409, details: { code: "interaction_issue_closed" } });
+    expect(await service.expirePendingInteractionsForTerminalIssue({ id: f.issueId, companyId: f.companyId, status: "cancelled" }, { via: null }))
       .toEqual([expect.objectContaining({ id: f.question.id, status: "expired" })]);
   });
 
@@ -322,8 +324,8 @@ describe("historical task questions", () => {
     const service = issueThreadInteractionService(db);
     await expect(service.answerQuestions({ id: f.issueId, companyId: f.companyId, status: "in_progress" },
       f.question.id, { answers: [{ questionId: "configuration", optionIds: ["configured"] }] },
-      { userId: "board-user" })).rejects.toMatchObject({ status: 409, details: { code: "interaction_issue_closed" } });
-    expect(await service.expirePendingInteractionsForTerminalIssue({ id: f.issueId, companyId: f.companyId, status: "done" }))
+      userActor)).rejects.toMatchObject({ status: 409, details: { code: "interaction_issue_closed" } });
+    expect(await service.expirePendingInteractionsForTerminalIssue({ id: f.issueId, companyId: f.companyId, status: "done" }, { via: null }))
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ id: f.question.id, status: "expired" }),
         expect.objectContaining({ id: confirmation.id, status: "expired" }),

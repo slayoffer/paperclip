@@ -7,7 +7,9 @@ import type {
   RespondIssueThreadInteraction,
 } from "@paperclipai/shared";
 
-import { questionSetToAskUserQuestionsPayload } from "@paperclipai/shared";
+import {
+  questionSetToAskUserQuestionsPayload,
+} from "@paperclipai/shared";
 
 import type { PrpEvent } from "../../vendor/paperclip-runner/index.js";
 import {
@@ -196,7 +198,7 @@ export async function projectNativeRuntimeRequest(input: {
       ...(typeof request.prompt === "string" ? { summary: request.prompt.slice(0, 1000) } : {}),
       payload: toInteractionPayload(questionSet, request.requestId),
     },
-    { agentId: input.binding.agentId, runId: input.binding.runId },
+    { agentId: input.binding.agentId, runId: input.binding.runId, via: null },
     { supersedePendingSiblingInteractions: false },
   ) as AskUserQuestionsInteraction;
   if (!existing) {

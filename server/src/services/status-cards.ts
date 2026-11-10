@@ -1,3 +1,5 @@
+import { statusCardCancellationActor, type StatusCardActor } from "./status-card-resolution-actor.js";
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import {
@@ -18,7 +20,10 @@ import type {
   WriteStatusCardQuery,
   WriteStatusCardSummary,
 } from "@paperclipai/shared";
-import { companySearchQuerySchema, STATUS_CARD_AGENT_MAX_CARDS } from "@paperclipai/shared";
+import {
+  companySearchQuerySchema,
+  STATUS_CARD_AGENT_MAX_CARDS,
+} from "@paperclipai/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
@@ -41,7 +46,6 @@ import {
   type StatusCardFingerprint,
 } from "./status-card-update-engine.js";
 
-type StatusCardActor = { agentId: string | null; userId: string | null };
 type StatusCardWriter = { agentId: string | null; runId: string | null };
 type StatusCardRow = typeof statusCards.$inferSelect;
 type StatusCardReadOptions = { issueReadCondition?: SQL<boolean> };
@@ -316,7 +320,7 @@ export function statusCardService(
     if (archiveChanged && input.archived && card.generatingIssueId) {
       const generationIssue = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       if (generationIssue && !TERMINAL_ISSUE_STATUSES.has(generationIssue.status)) {
-        await issuesSvc.update(generationIssue.id, { status: "cancelled" });
+        await issuesSvc.update(generationIssue.id, { status: "cancelled", ...statusCardCancellationActor(actor) });
       }
     }
     return next;
@@ -409,10 +413,11 @@ export function statusCardService(
     // covers idempotency-key hits that resolve to a terminal task (done/cancelled)
     // as well as a `blocked` one that a manual re-kick is reviving.
     const reopened = deduplicated && (TERMINAL_ISSUE_STATUSES.has(created.status) || created.status === "blocked")
-      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId })
+      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId, actorResolvedVia: SYSTEM_RESOLUTION_VIA })
       : created;
     const generationIssue = await issuesSvc.update(reopened!.id, {
       description: compileDescription(card, reopened!.id, hash),
+      actorResolvedVia: SYSTEM_RESOLUTION_VIA,
     });
     const [nextCard] = await db
       .update(statusCards)
@@ -720,10 +725,11 @@ export function statusCardService(
       onDeduplicated: (reason) => { deduplicated = reason === "idempotency_key"; },
     });
     const reopened = deduplicated && TERMINAL_ISSUE_STATUSES.has(created.status)
-      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId })
+      ? await issuesSvc.update(created.id, { status: "todo", assigneeAgentId: summarizerAgentId, actorResolvedVia: SYSTEM_RESOLUTION_VIA })
       : created;
     const generationIssue = await issuesSvc.update(reopened!.id, {
       description: updateDescription({ card, generationIssueId: reopened!.id, fingerprint, changes, kind, trigger, previousSummary, snapshot }),
+      actorResolvedVia: SYSTEM_RESOLUTION_VIA,
     });
     const priorGenerationPredicate = card.generatingIssueId
       ? eq(statusCards.generatingIssueId, card.generatingIssueId)
@@ -741,12 +747,12 @@ export function statusCardService(
       const winner = await getById(card.id);
       if (!winner?.generatingIssueId) {
         if (!TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-          await issuesSvc.update(generationIssue!.id, { status: "cancelled" });
+          await issuesSvc.update(generationIssue!.id, { status: "cancelled", ...statusCardCancellationActor(input.actor) });
         }
         throw conflict("Status-card refresh claim was lost");
       }
       if (generationIssue!.id !== winner.generatingIssueId && !TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-        await issuesSvc.update(generationIssue!.id, { status: "cancelled" });
+        await issuesSvc.update(generationIssue!.id, { status: "cancelled", ...statusCardCancellationActor(input.actor) });
       }
       const winnerIssue = await db.select().from(issues).where(eq(issues.id, winner.generatingIssueId)).then((rows) => rows[0] ?? null);
       return { card: winner, generatingIssue: winnerIssue, alreadyGenerating: true, enqueued: false, kind, changes };

@@ -13,7 +13,9 @@ import {
   userSecretDeclarations,
   userSecretDefinitions,
 } from "@paperclipai/db";
-import type { SecretProvider } from "@paperclipai/shared";
+import type { ResolutionVia, SecretProvider } from "@paperclipai/shared";
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
+import { reflectProposalLifecycleOnInteraction } from "./secret-proposal-interaction.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { agentService } from "./agents.js";
@@ -251,66 +253,6 @@ export function createSecretProposalsService(db: Db) {
       },
     });
     return linked;
-  }
-
-  async function reflectProposalLifecycleOnInteraction(
-    txDb: Db,
-    proposal: Proposal,
-    outcome: "approved" | "rejected" | "withdrawn" | "expired",
-    input: { resolvedByUserId?: string | null; reason?: string | null } = {},
-  ) {
-    if (!proposal.interactionId) return;
-    const current = await txDb
-      .select()
-      .from(issueThreadInteractions)
-      .where(and(
-        eq(issueThreadInteractions.id, proposal.interactionId),
-        eq(issueThreadInteractions.companyId, proposal.companyId),
-      ))
-      .for("update")
-      .then((rows) => rows[0] ?? null);
-    if (!current || (current.status !== "pending" && !(outcome === "approved" && current.status === "accepted"))) return;
-    const payload = asRecord(current.payload);
-    const linked = asRecord(payload.secretProposal);
-    if (linked.proposalId !== proposal.id) return;
-
-    const now = new Date();
-    const currentResult = asRecord(current.result);
-    const status = outcome === "approved"
-      ? "accepted"
-      : outcome === "rejected"
-        ? "rejected"
-        : outcome === "withdrawn"
-          ? "cancelled"
-          : "expired";
-    const resultOutcome = outcome === "approved"
-      ? "accepted"
-      : outcome === "rejected"
-        ? "rejected"
-        : "withdrawn";
-    await txDb
-      .update(issueThreadInteractions)
-      .set({
-        status,
-        result: {
-          ...currentResult,
-          version: 1,
-          outcome: resultOutcome,
-          ...(input.reason ? { reason: input.reason } : {}),
-          secretProposal: {
-            version: 1,
-            status: outcome === "approved" ? "executed" : outcome,
-            updatedAt: now.toISOString(),
-          },
-        },
-        resolvedByUserId: input.resolvedByUserId ?? current.resolvedByUserId ?? null,
-        resolvedAt: current.resolvedAt ?? now,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(issueThreadInteractions.id, current.id),
-        inArray(issueThreadInteractions.status, outcome === "approved" ? ["pending", "accepted"] : ["pending"]),
-      ));
   }
 
   async function createSecret(context: ProposalRunContext, input: {
@@ -614,6 +556,7 @@ export function createSecretProposalsService(db: Db) {
   }
 
   async function markApproved(txDb: Db, proposal: Proposal, input: {
+    via: ResolutionVia | null;
     resolvedByUserId: string;
     createdSecretId?: string | null;
     appliedBindingConfigPath?: string | null;
@@ -650,6 +593,7 @@ export function createSecretProposalsService(db: Db) {
       },
     });
     await reflectProposalLifecycleOnInteraction(txDb, proposal, "approved", {
+      via: input.via,
       resolvedByUserId: input.resolvedByUserId,
     });
     return updated;
@@ -716,6 +660,7 @@ export function createSecretProposalsService(db: Db) {
   }
 
   async function approve(companyId: string, proposalId: string, input: {
+    via: ResolutionVia | null;
     resolvedByUserId: string;
     cascade?: boolean;
     overrides?: { name?: string; description?: string | null; providerConfigId?: string | null };
@@ -734,6 +679,7 @@ export function createSecretProposalsService(db: Db) {
       if (proposal.kind === "secret") {
         const created = await applySecretApproval(txDb, proposal, input);
         return { kind: "secret" as const, proposal: await markApproved(txDb, proposal, {
+          via: input.via,
           resolvedByUserId: input.resolvedByUserId,
           createdSecretId: created.id,
         }) };
@@ -755,6 +701,7 @@ export function createSecretProposalsService(db: Db) {
           assertNotExpired(dependency);
           const created = await applySecretApproval(txDb, dependency, input);
           await markApproved(txDb, dependency, {
+            via: input.via,
             resolvedByUserId: input.resolvedByUserId,
             createdSecretId: created.id,
           });
@@ -776,6 +723,7 @@ export function createSecretProposalsService(db: Db) {
       }
       await applyBindingApproval(txDb, proposal, liveSecret, input.resolvedByUserId);
       return markApproved(txDb, proposal, {
+        via: input.via,
         resolvedByUserId: input.resolvedByUserId,
         appliedBindingConfigPath: proposal.configPath,
       });
@@ -783,10 +731,11 @@ export function createSecretProposalsService(db: Db) {
   }
 
   async function transition(companyId: string, proposalId: string, status: Exclude<SecretProposalTerminalStatus, "approved">, input: {
+    via: ResolutionVia | null;
     resolvedByUserId?: string | null;
     reason?: string | null;
     proposerAgentId?: string | null;
-  } = {}) {
+  }) {
     const proposal = await requirePending(companyId, proposalId);
     if (status === "withdrawn" && proposal.proposedByAgentId !== input.proposerAgentId) {
       throw forbidden("Only the proposer can withdraw this proposal");
@@ -851,11 +800,13 @@ export function createSecretProposalsService(db: Db) {
           },
         });
         await reflectProposalLifecycleOnInteraction(txDb, dependent, "rejected", {
+          via: input.via,
           resolvedByUserId: input.resolvedByUserId,
           reason: dependent.resolutionReason,
         });
       }
       await reflectProposalLifecycleOnInteraction(txDb, proposal, status, {
+        via: input.via,
         resolvedByUserId: input.resolvedByUserId,
         reason: input.reason ?? (status === "expired" ? "Pending proposal expired" : null),
       });
@@ -867,7 +818,7 @@ export function createSecretProposalsService(db: Db) {
     now = new Date(),
     limit = DEFAULT_EXPIRY_SWEEP_LIMIT,
     expireProposal: (companyId: string, proposalId: string) => Promise<unknown> =
-      (companyId, proposalId) => transition(companyId, proposalId, "expired", { reason: "Pending proposal expired" }),
+      (companyId, proposalId) => transition(companyId, proposalId, "expired", { via: SYSTEM_RESOLUTION_VIA, reason: "Pending proposal expired" }),
   ) {
     const expired = await db.select({ id: companySecretProposals.id, companyId: companySecretProposals.companyId })
       .from(companySecretProposals)

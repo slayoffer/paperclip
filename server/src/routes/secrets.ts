@@ -29,6 +29,7 @@ import type { IssueAssignmentWakeupDeps } from "../services/issue-assignment-wak
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
 import { assertCanResolveProposal } from "../services/secret-proposal-authorization.js";
+import { resolutionViaFromActor } from "../services/interaction-resolution-attribution.js";
 
 type SecretRoutesDeps = {
   heartbeat?: IssueAssignmentWakeupDeps;
@@ -233,7 +234,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
 
   router.delete("/agents/me/secret-proposals/:id", async (req, res) => {
     const context = await proposalAgentContext(req);
-    const proposal = await proposals.transition(context.companyId, req.params.id as string, "withdrawn", { proposerAgentId: context.agentId });
+    const proposal = await proposals.transition(context.companyId, req.params.id as string, "withdrawn", { proposerAgentId: context.agentId, via: resolutionViaFromActor(req.actor) });
     res.json(agentProposalView(await proposals.view(proposal)));
   });
 
@@ -257,25 +258,17 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     assertCompanySecretWrite(req, companyId);
     const proposal = await proposals.getById(companyId, req.params.id as string);
     if (!proposal) throw notFound("Secret proposal not found");
-    await assertCanResolveProposal({
-      db,
-      actor: req.actor,
-      companyId,
-      proposal,
+    const authorize = (item: typeof proposal, db: Db) => assertCanResolveProposal({
+      db, actor: req.actor, companyId, proposal: item,
       assertSecretDefinitionAdmin: () => assertSecretDefinitionAdmin(req, companyId),
     });
+    await authorize(proposal, db);
     const resolvedByUserId = req.actor.userId ?? "board";
     const approved = await proposals.approve(companyId, proposal.id, {
-      resolvedByUserId,
+      resolvedByUserId, via: resolutionViaFromActor(req.actor),
       cascade: req.body?.cascade === true,
       overrides: req.body?.overrides,
-      assertCanResolve: (lockedProposal, txDb) => assertCanResolveProposal({
-        db: txDb,
-        actor: req.actor,
-        companyId,
-        proposal: lockedProposal,
-        assertSecretDefinitionAdmin: () => assertSecretDefinitionAdmin(req, companyId),
-      }),
+      assertCanResolve: authorize,
     });
     await notifySecretProposalResolution({ proposal, status: "approved", userId: resolvedByUserId, issues, heartbeat });
     res.json(await boardProposalView(req, await proposals.view(approved)));
@@ -298,7 +291,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     });
     const resolvedByUserId = req.actor.userId ?? "board";
     const proposal = await proposals.transition(companyId, req.params.id as string, "rejected", {
-      resolvedByUserId, reason,
+      resolvedByUserId, reason, via: resolutionViaFromActor(req.actor),
     });
     await notifySecretProposalResolution({
       proposal: existing,

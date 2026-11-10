@@ -598,7 +598,7 @@ describe("issue thread interaction routes", () => {
     const result = await request(await createApp()).post(path).send({});
     expect(result.status).toBe(200);
     expect(result.body).toMatchObject({ status: "pending", dismissedAt: "2026-10-22T12:00:00Z" });
-    expect(mockInteractionService.dismissInteraction).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-1" }), "request-1", { userId: "local-board" });
+    expect(mockInteractionService.dismissInteraction).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-1" }), "request-1", { userId: "local-board", via: null });
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "issue.thread_interaction_dismissed" }));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     mockInteractionService.dismissInteraction.mockClear();
@@ -1288,7 +1288,7 @@ describe("issue thread interaction routes", () => {
       issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       interactionId: "interaction-tool-action",
       actionRequestId: "action-request-1",
-      actor: { agentId: null, userId: "local-board" },
+      actor: { agentId: null, userId: "local-board", via: null },
     });
     const expectedToolAction = {
       toolName: "google_sheets_add_row",
@@ -1500,11 +1500,9 @@ describe("issue thread interaction routes", () => {
 
     expect(res.status).toBe(200);
     expect(approveSecretProposal).toHaveBeenCalledWith({
-      companyId: "company-1",
-      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      interactionId: "interaction-secret-proposal",
-      proposalId,
-      actor: { agentId: null, userId: "local-board" },
+      companyId: "company-1", issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      interactionId: "interaction-secret-proposal", proposalId,
+      actor: { agentId: null, userId: "local-board", via: null },
     });
     expect(mockInteractionService.recordSecretProposalExecutionResult).toHaveBeenCalledWith(
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
@@ -2384,10 +2382,7 @@ describe("issue thread interaction routes", () => {
         idempotencyKey: "interaction:task-1",
         sourceRunId: RUN_1,
       }),
-      {
-        agentId: CREATED_AGENT_ID,
-        userId: null,
-      },
+      { agentId: CREATED_AGENT_ID, userId: null, via: null },
     );
   });
 
@@ -2471,15 +2466,9 @@ describe("issue thread interaction routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockInteractionService.acceptInteraction).toHaveBeenCalledWith(
-      expect.anything(),
-      "interaction-agent-review",
-      {},
-      {
-        agentId: ASSIGNEE_AGENT_ID,
-        runId: RUN_2,
-        userId: null,
-        resolverPolicyRestriction: "anyone",
-        suggestedTaskEffectsAuthorized: true,
+      expect.anything(), "interaction-agent-review", {}, {
+        agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null, via: null,
+        resolverPolicyRestriction: "anyone", suggestedTaskEffectsAuthorized: true,
       }, {},
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

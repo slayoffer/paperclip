@@ -1,3 +1,5 @@
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
+import type { InteractionActor as Actor } from "./interaction-resolution-input.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
@@ -2174,7 +2176,7 @@ export function createToolGatewayService(
         .set({
           ...(["expired", "cancelled"].includes(input.status) &&
           interaction.status === "pending"
-            ? { status: input.status, resolvedAt: now }
+            ? { status: input.status, resolvedAt: now, ...SYSTEM_RESOLUTION_VIA }
             : {}),
           result: {
             ...(currentResult ?? { version: 1, outcome }),
@@ -2502,7 +2504,7 @@ export function createToolGatewayService(
           },
         },
       },
-      { agentId: input.session.agentId },
+      { agentId: input.session.agentId, via: null },
     );
 
     // Sign the row only while it is still pending. A concurrent matching call can
@@ -5756,7 +5758,7 @@ export function createToolGatewayService(
           questions: elicitationQuestions(input.request),
         },
       },
-      { agentId: input.session.agentId },
+      { agentId: input.session.agentId, via: null },
     );
     const now = new Date();
     await db
@@ -9594,7 +9596,7 @@ export function createToolGatewayService(
             await this.approveActionRequest({
               companyId: row.companyId,
               actionRequestId: row.id,
-              actor: { userId: row.decidedByUserId ?? row.resolvedByUserId },
+              actor: { userId: row.decidedByUserId ?? row.resolvedByUserId, via: null },
             }).catch((error) =>
               logger.warn(
                 { err: error, actionRequestId: row.id },
@@ -9657,7 +9659,7 @@ export function createToolGatewayService(
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: Actor;
     }) {
       if (input.actor.agentId)
         throw new ToolGatewayHttpError(
@@ -9938,7 +9940,7 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: Actor;
     }) {
       const updated = await commitToolActionReview(db, {
         ...input,

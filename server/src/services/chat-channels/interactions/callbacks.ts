@@ -1,4 +1,5 @@
 import { createDiscordQuestionForms } from "../discord/question-forms.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { createProviderEffects, type ProviderEffectPayload } from "../provider-effects.js";
 import { createTelegramCallbackNoticeAuthority } from "../telegram/callback-notices.js";
@@ -1203,7 +1204,7 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
         {
           answers: [{ questionId: question.id, optionIds: [option.id] }],
         },
-        { userId: principal.userId },
+        { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
         {
           beforeResolveInTransaction: async (tx) => {
             await requireCurrentExternalActionAuthorization(tx, {
@@ -1837,7 +1838,7 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
         issue,
         interaction.id,
         { answers: validation.answers },
-        { userId: principal.userId },
+        { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
         {
           beforeResolveInTransaction: async (tx) => {
             await requireCurrentExternalActionAuthorization(tx, {

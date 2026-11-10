@@ -192,6 +192,7 @@ function issueUpdateWithReceipt(issue: ReturnType<typeof makeIssue>, patch: Reco
     actorRunId: _actorRunId,
     actorRunStopId: _actorRunStopId,
     actorUserId: _actorUserId,
+    actorResolvedVia: _actorResolvedVia,
     workspaceSelectionActor: _workspaceSelectionActor,
     blockedByIssueIds: _blockedByIssueIds,
     blockedWaitCommentBody: _blockedWaitCommentBody,

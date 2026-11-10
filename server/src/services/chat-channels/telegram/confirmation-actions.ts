@@ -1,4 +1,5 @@
 import type { DbTransaction, RuntimeContext, LifecycleRuntimeFence } from "../runtime-types.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { notifyChatPublicationWork } from "../../chat-work-notifications.js";
 
@@ -140,7 +141,7 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           issue,
           interaction.id,
           {},
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {
@@ -190,7 +191,7 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           issue,
           interaction.id,
           {},
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {

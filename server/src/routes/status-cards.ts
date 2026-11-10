@@ -1,3 +1,4 @@
+import { interactionIssueUpdateActor, resolutionViaFromActor } from "./interaction-resolution-actor.js";
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -86,6 +87,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
     const result = await service.requestCompile(cardId, {
       agentId: actor.actorType === "agent" ? actor.actorId : null,
       userId: actor.actorType === "user" ? actor.actorId : null,
+      via: resolutionViaFromActor(req.actor),
     });
     if (!result.alreadyGenerating) {
       try {
@@ -101,7 +103,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
           rethrowOnError: true,
         });
       } catch (error) {
-        await issueSvc.update(result.generatingIssue.id, { status: "cancelled" });
+        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", ...interactionIssueUpdateActor(req) });
         throw error;
       }
     }
@@ -116,6 +118,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
       actor: {
         agentId: actor.actorType === "agent" ? actor.actorId : null,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        via: resolutionViaFromActor(req.actor),
       },
     });
     if (result.enqueued && result.generatingIssue && !result.alreadyGenerating) {
@@ -132,7 +135,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
           rethrowOnError: true,
         });
       } catch (error) {
-        await issueSvc.update(result.generatingIssue.id, { status: "cancelled" });
+        await issueSvc.update(result.generatingIssue.id, { status: "cancelled", ...interactionIssueUpdateActor(req) });
         throw error;
       }
     }
@@ -158,6 +161,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
     const card = await service.create(companyId, req.body, {
       agentId: actor.actorType === "agent" ? actor.actorId : null,
       userId: actor.actorType === "user" ? actor.actorId : null,
+      via: resolutionViaFromActor(req.actor),
     });
     try {
       const compile = await enqueueCompile(req, card.id);
@@ -188,6 +192,7 @@ export function statusCardRoutes(db: Db, opts: { heartbeat?: IssueAssignmentWake
     const updated = await service.update(card, req.body, {
       agentId: actor.actorType === "agent" ? actor.actorId : null,
       userId: actor.actorType === "user" ? actor.actorId : null,
+      via: resolutionViaFromActor(req.actor),
     });
     const compile = req.body.interestPrompt !== undefined ? await enqueueCompile(req, card.id) : null;
     const restore = req.body.archived === false && card.archivedAt && updated.queries.length > 0 && !updated.generatingIssueId

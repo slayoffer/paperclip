@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { SYSTEM_RESOLUTION_VIA } from "../interaction-resolution-attribution.js";
 import {
   approvals, issueApprovals, issueThreadInteractions, issues,
   nativeRunFinalizations, statusDecisionEffects, statusDecisions, workAssessments,
@@ -72,6 +73,7 @@ export async function dismissObsoleteNativePolicyReviews(db: Db, runIds?: string
         const [cancelled] = await tx.update(issueThreadInteractions).set({
           status: "cancelled",
           result: { version: 1, outcome: "withdrawn", reason: "A Paperclip upgrade does not require completion review." },
+          ...SYSTEM_RESOLUTION_VIA,
           resolvedAt: now,
           updatedAt: now,
         }).where(and(

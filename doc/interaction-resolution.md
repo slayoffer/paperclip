@@ -6,6 +6,53 @@ The Attention feed also includes the token in the interaction subject metadata.
 
 Use the existing routes. Company access and resolver restrictions still apply.
 
+Resolution reads include `resolvedVia` and `resolvedViaKeyId`. The server records
+the authenticated channel and board-key ID when it saves the resolution:
+
+| Value | Authentication channel |
+| --- | --- |
+| `user_session` | Signed-in user session, including a TMA request authenticated with that session |
+| `board_api_key` | Board API key, even when its owner is the addressed user |
+| `agent_key` | Agent API key or authenticated agent run JWT |
+| `chat_channel` | Paperclip's native chat or voice callback |
+| `system` | Automatic cleanup or sweep |
+| `null` | Unknown channel, including old rows and internal calls without authentication provenance |
+
+Request bodies cannot set either field. `resolvedViaKeyId` is non-null only for
+`board_api_key`, and stores the authenticated key's ID, never its value. It has no
+foreign key, so key deletion does not remove the evidence. A user ID alone does
+not prove a session. Local implicit access, cloud tenant claims, public assistant
+OAuth, provider callbacks, and plugin calls without channel evidence remain unknown.
+
+A TMA relay that uses a board key records `board_api_key`. A Telegram tap alone
+does not change that channel. Count a board-key resolution as Anton's own tap
+only after the operator verifies that the recorded key ID belongs to a key used
+exclusively by the TMA. Different automation and TMA key IDs do not prove this
+exclusivity: another process can still use the TMA key. Until exclusive use is
+verified, only `user_session` is human proof. `chat_channel`, `system`, and null
+are never human proof. This PR does not change a verifier or `human_only` policy.
+
+Both fields are saved with `resolvedAt` and the existing resolver IDs. Partial
+item verdicts keep them null until completion. Retries return the first values.
+A database trigger prevents either value from changing while a row stays resolved,
+including relabeling a legacy null. Reopening a row by clearing `resolvedAt`
+clears both provenance fields; the next resolution records its own channel.
+The migration has no default or backfill. List, single-interaction, and company
+reads expose both fields. Resolver permissions are unchanged. Status-card actions
+pass the authenticated resolver IDs with the channel. Reopened rows retain their
+existing resolver IDs.
+
+Comments, document changes, and issue closures can expire cards. Comment-triggered
+expiries record null: a comment is not an answer to the card. Document changes and
+issue closures record the initiating channel. Historical comment sweeps and
+deferred Agent Chat `/new` commands also record null. OAuth provider callbacks record null
+on first resolution and preserve existing attribution on late result updates.
+An authorization retry reopens the existing card and clears its provenance through
+the database trigger. Repeated requests retain the same card ID.
+An existing limitation remains: reopening retains the previous resolution receipt
+and outbox entry. A second revision-protected confirmation answer can fail with an
+outbox primary key conflict. Provenance reset does not repair that answer lifecycle.
+
 | Method | Path | Answer fields |
 | --- | --- | --- |
 | POST | `/api/issues/:issueId/interactions/:interactionId/accept` | Existing confirmation or suggestion fields |

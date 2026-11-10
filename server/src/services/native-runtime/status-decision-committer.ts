@@ -1,4 +1,5 @@
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
+import { SYSTEM_RESOLUTION_VIA } from "../interaction-resolution-attribution.js";
 import { readNativeMonitorDelivery, type NativeMonitorDelivery } from "./native-monitor-delivery.js";
 import { readNativePlanWait, type NativePlanWaitSource } from "./native-plan-wait.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
@@ -577,7 +578,7 @@ async function materializeDecisionEffect(input: {
           ],
         },
       },
-      { systemId: "native-status-committer", runId: input.runId },
+      { systemId: "native-status-committer", runId: input.runId, via: SYSTEM_RESOLUTION_VIA },
     );
     return {
       effectKind: effect.kind,
@@ -625,7 +626,7 @@ async function materializeDecisionEffect(input: {
     const interaction = await issueThreadInteractionService(input.tx).create(
       input.issue,
       reviewInput,
-      { systemId: "native-status-committer", runId: input.runId },
+      { systemId: "native-status-committer", runId: input.runId, via: SYSTEM_RESOLUTION_VIA },
     );
     // The card and its next actor commit together. The post-commit dispatcher
     // revalidates this exact review before granting a scoped reviewer run.
@@ -888,7 +889,7 @@ async function materializeDecisionEffect(input: {
     if (!input.issue.assigneeAgentId)
       throw new Error("native_recovery_owner_missing");
     const interaction = await input.tx
-      .select({ id: issueThreadInteractions.id })
+      .select({ id: issueThreadInteractions.id, resolvedAt: issueThreadInteractions.resolvedAt })
       .from(issueThreadInteractions)
       .where(
         and(
@@ -905,6 +906,7 @@ async function materializeDecisionEffect(input: {
       .update(issueThreadInteractions)
       .set({
         status: "expired",
+        ...(interaction.resolvedAt === null ? SYSTEM_RESOLUTION_VIA : {}),
         resolvedAt: new Date(),
         updatedAt: new Date(),
       })
@@ -1043,19 +1045,13 @@ async function materializeDecisionEffect(input: {
         ),
       );
     if (interactionRows.length > 0) {
-      await input.tx
-        .update(issueThreadInteractions)
-        .set({
-          status: "cancelled",
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          inArray(
-            issueThreadInteractions.id,
-            interactionRows.map((row) => row.id),
-          ),
-        );
+      await input.tx.update(issueThreadInteractions).set({
+        status: "cancelled", ...SYSTEM_RESOLUTION_VIA,
+        resolvedAt: new Date(), updatedAt: new Date(),
+      }).where(and(
+        eq(issueThreadInteractions.status, "pending"),
+        inArray(issueThreadInteractions.id, interactionRows.map((row) => row.id)),
+      ));
     }
     await notifyDeliveryWork(input.tx, DELIVERY_QUEUES.accounting, input.companyId);
     const [run] = await input.tx

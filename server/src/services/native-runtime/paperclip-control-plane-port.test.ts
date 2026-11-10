@@ -1485,13 +1485,13 @@ describe("PaperclipControlPlanePort conformance", () => {
       .rejects.toThrow("no longer available");
     await expect(issueThreadInteractionService(db).acceptInteraction(
       { id: issueId, companyId: identity.companyId, projectId: null, goalId: null }, agentReview.id, {},
-      { agentId: reviewerAgentId, runId: reviewRunId },
+      { via: null, agentId: reviewerAgentId, runId: reviewRunId },
     )).rejects.toThrow("no longer current");
     await db.update(issues).set({ statusVersion: 1 }).where(eq(issues.id, issueId));
 
     const reviewIssue = { id: issueId, companyId: identity.companyId, projectId: null, goalId: null, status: "in_review" as const };
     const rejectUnboundReview = async (runId?: string) => issueThreadInteractionService(db).acceptInteraction(
-      reviewIssue, agentReview.id, {}, { agentId: reviewerAgentId, ...(runId ? { runId } : {}) },
+      reviewIssue, agentReview.id, {}, { via: null, agentId: reviewerAgentId, ...(runId ? { runId } : {}) },
     );
     await expect(rejectUnboundReview("35000000-0000-4000-8000-000000000025"))
       .rejects.toThrow("no longer current");
@@ -1528,7 +1528,7 @@ describe("PaperclipControlPlanePort conformance", () => {
       { id: issueId, companyId: identity.companyId, projectId: null, goalId: null, status: "in_review" },
       reviewInteraction!.id,
       {},
-      { userId: "reviewer-24" },
+      { via: null, userId: "reviewer-24" },
     );
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
       expect.objectContaining({ status: "in_review" }),
@@ -1538,7 +1538,7 @@ describe("PaperclipControlPlanePort conformance", () => {
     const secondReview = remaining.find((entry) => entry.status === "pending")!;
     await issueThreadInteractionService(db).acceptInteraction(
       { id: issueId, companyId: identity.companyId, projectId: null, goalId: null, status: "in_review" },
-      secondReview.id, {}, { agentId: reviewerAgentId, runId: reviewRunId },
+      secondReview.id, {}, { via: null, agentId: reviewerAgentId, runId: reviewRunId },
     );
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
       expect.objectContaining({ status: "done" }),
@@ -1628,19 +1628,19 @@ describe("PaperclipControlPlanePort conformance", () => {
           resolverPolicy: "human_only", continuationPolicy: "wake_assignee", sourceRunId: runId,
           payload: { version: 1, prompt: `Approve ${key}`, acceptLabel: "Approve", rejectLabel: "Decline", allowDeclineReason: true,
             target: { type: "custom", key: "native_completion_review", revisionId: newRevision } } },
-        { systemId: "test-multiple-reviewers", runId },
+        { via: null, systemId: "test-multiple-reviewers", runId },
       ));
     }
     await issueThreadInteractionService(db).rejectInteraction(
       { id: issueId, companyId: identity.companyId }, reviews[0]!.id,
-      { reason: "Needs another change" }, { userId: "reviewer-24" },
+      { reason: "Needs another change" }, { via: null, userId: "reviewer-24" },
     );
     // Even if another actor puts the task back in review, a declined decision
     // in the same review round must not be erased by another reviewer's approval.
     await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
     await issueThreadInteractionService(db).acceptInteraction(
       { id: issueId, companyId: identity.companyId, projectId: null, goalId: null, status: "in_review" },
-      reviews[1]!.id, {}, { userId: "reviewer-24" },
+      reviews[1]!.id, {}, { via: null, userId: "reviewer-24" },
     );
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_review");
     await db.update(heartbeatRuns).set({ wakeupRequestId: null }).where(eq(heartbeatRuns.id, reviewRunId));
@@ -2076,7 +2076,7 @@ describe("PaperclipControlPlanePort conformance", () => {
       { id: issueId, companyId: identity.companyId, status: "in_review" },
       interaction!.id,
       { reason: "Add the missing external verification." },
-      { userId: "reviewer-25" },
+      { via: null, userId: "reviewer-25" },
     );
 
     expect(rejected).toMatchObject({

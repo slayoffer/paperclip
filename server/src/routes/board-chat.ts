@@ -1,3 +1,4 @@
+import { resolutionViaFromActor } from "./interaction-resolution-actor.js";
 import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@paperclipai/shared";
 import { enqueueFastResponse, supersedeFastResponse } from "../services/fast-responses.js";
 import { Router } from "express";
@@ -190,6 +191,7 @@ export function boardChatRoutes(
       agentId: actor.agentId ?? undefined,
       userId: actor.agentId ? undefined : actor.actorId,
       runId: actor.runId,
+      via: resolutionViaFromActor(req.actor),
     });
     await db.transaction(tx => enqueueFastResponse(tx as unknown as Db, { companyId, issueId: resolvedIssueId, agentId: null,
       responsibleUserId: actor.actorId, sourceCommentId: humanComment.id, sourceKey: `board:${humanComment.id}`, acceptedAt: new Date(humanComment.createdAt) })).catch(() => undefined);

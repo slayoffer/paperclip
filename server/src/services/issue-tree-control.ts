@@ -1,3 +1,4 @@
+import type { InteractionActor } from "./interaction-resolution-input.js";
 import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -861,6 +862,7 @@ export function issueTreeControlService(db: Db) {
     companyId: string,
     rootIssueId: string,
     holdId: string,
+    via?: InteractionActor["via"],
   ): Promise<TreeStatusUpdateResult> {
     const hold = await getHold(companyId, holdId);
     if (!hold) throw notFound("Issue tree hold not found");
@@ -872,8 +874,7 @@ export function issueTreeControlService(db: Db) {
     }
 
     const issueIds = [...new Set((hold.members ?? [])
-      .filter((member) => !member.skipped)
-      .map((member) => member.issueId))];
+      .filter(member => !member.skipped).map(member => member.issueId))];
     if (issueIds.length === 0) return { updatedIssueIds: [], updatedIssues: [] };
 
     const now = new Date();
@@ -881,31 +882,18 @@ export function issueTreeControlService(db: Db) {
     const { executeIssuePostCommitActions, issueService } = await import("./issues.js");
     const svc = issueService(db);
     const updated = await db.transaction(async (tx) => {
-      const eligibleIssues = await tx
-        .select({ id: issues.id })
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, companyId),
-            inArray(issues.id, issueIds),
-            notInArray(issues.status, ["done", "cancelled"]),
-          ),
-        );
+      const eligibleIssues = await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.companyId, companyId), inArray(issues.id, issueIds),
+        notInArray(issues.status, ["done", "cancelled"]),
+      ));
 
       const rows = [];
       for (const issue of eligibleIssues) {
-        const updatedIssue = await svc.update(
-          issue.id,
-          {
-            status: "cancelled",
-            cancelledAt: now,
-            actorAgentId: hold.createdByAgentId,
-            actorUserId: hold.createdByUserId,
-          },
-          tx,
-          undefined,
-          postCommitIssueActions,
-        );
+        const updatedIssue = await svc.update(issue.id, {
+          status: "cancelled", cancelledAt: now,
+          actorAgentId: hold.createdByAgentId, actorUserId: hold.createdByUserId,
+          actorResolvedVia: via,
+        }, tx, undefined, postCommitIssueActions);
         if (updatedIssue) rows.push(updatedIssue);
       }
       return rows;

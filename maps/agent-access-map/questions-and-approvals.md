@@ -24,11 +24,11 @@ API: `present` — GET /api/issues/{id}/interactions.
 
 Agent access: `available` — agent REST, CLI issue interactions, native get_task_context or admitted call_api reads; each actual runtime needs its binding.
 
-Policy: Company/issue read authorization, private-task and responsible-user visibility. GET does not persist lifecycle expiration.
+Policy: Company/issue access. Reads expose `resolvedVia` and `resolvedViaKeyId`; null never proves human action.
 
 Evidence: `source-only` — [interaction routes](../../server/src/routes/issues.ts), [interaction service](../../server/src/services/issue-thread-interactions.ts); reviewed at `3bbc2104b65caf9f7763938a01260a5673e12f7a`. No live proof.
 
-Verification: `not-run` — Read as permitted human/agent; deny foreign/private issue; compare pending and terminal saved receipts after reload.
+Verification: `not-run` — Read as human/agent; deny foreign/private issues; reload receipts and [resolver channels](../../doc/interaction-resolution.md).
 
 Gaps: Run context read is not provider receipt or live answer delivery proof.
 

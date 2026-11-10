@@ -6,6 +6,7 @@ import { assertCanResolveProposal } from "./secret-proposal-authorization.js";
 import { createSecretProposalsService } from "./secret-proposals.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
+import { resolutionViaFromActor } from "./interaction-resolution-attribution.js";
 
 /** The accepted interaction and its outbox row are the durable execution intent.
  * Resume under issue -> proposal locks. Approval saves the binding and execution
@@ -56,6 +57,7 @@ export async function resumeAcceptedBinding(db: Db, intent: {
       }
       await proposals.approve(intent.companyId, proposal.id, {
         resolvedByUserId: userId,
+        via: resolutionViaFromActor(actor),
         assertCanResolve: (lockedProposal, txDb) => assertCanResolveProposal({
           db: txDb, companyId: intent.companyId, proposal: lockedProposal,
           actor,

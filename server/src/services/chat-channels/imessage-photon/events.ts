@@ -1,4 +1,5 @@
 import type { EndpointRow, DbTransaction, RuntimeContext, LifecycleRuntimeFence } from "../../chat-channels/runtime-types.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { notifyChatPublicationWork } from "../../chat-work-notifications.js";
 
@@ -473,13 +474,11 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
           )
           .then((rows) => rows[0]);
         if (!issue) return true;
-        const answered = await issueThreadInteractionService(
-          db,
-        ).answerQuestions(
+        const answered = await issueThreadInteractionService(db).answerQuestions(
           issue,
           interaction.id,
           { answers },
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {
@@ -669,7 +668,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
             issue,
             interaction.id,
             {},
-            { userId: principal.userId },
+            { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
             mutation,
           );
         else
@@ -677,7 +676,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
             issue,
             interaction.id,
             { reason },
-            { userId: principal.userId },
+            { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
             mutation,
           );
         scheduleMessageProcessing(async () => {

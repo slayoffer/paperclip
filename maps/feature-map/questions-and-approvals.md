@@ -9,6 +9,10 @@ history. A question, plan confirmation, governance approval, and app-tool review
 can look similar but have different authority and continuation rules. Each
 decision must stay attached to its original request and survive reload.
 
+Interaction API reads include `resolvedVia` and `resolvedViaKeyId`, fixed while resolved.
+See [resolution channels](../../doc/interaction-resolution.md). This evidence does
+not change resolver permissions or prove that a requested tool action executed.
+
 Feature ID: `questions-and-approvals`.
 
 Agent access: [companion](../agent-access-map/questions-and-approvals.md).

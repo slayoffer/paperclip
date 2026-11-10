@@ -3,6 +3,8 @@ import request from "supertest";
 import { getTableName } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../errors.js";
+import { issueRoutes } from "../routes/issues.js";
+import { errorHandler } from "../middleware/index.js";
 
 vi.mock("../services/fast-responses.js", () => ({
   enqueueFastResponse: vi.fn(async () => undefined),
@@ -233,10 +235,6 @@ async function installActor(
   app: express.Express,
   actor?: Record<string, unknown>,
 ) {
-  const [{ issueRoutes }, { errorHandler }] = await Promise.all([
-    import("../routes/issues.js"),
-    import("../middleware/index.js"),
-  ]);
   app.use((req, _res, next) => {
     (req as any).actor = actor ?? {
       type: "board",
@@ -1513,10 +1511,8 @@ describe("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       "Paperclip needs a disposition before this issue can continue.",
       {
-        agentId: undefined,
-        userId: "local-board",
-        runId: null,
-        onBehalfOfUserId: undefined,
+        agentId: undefined, userId: "local-board", runId: null,
+        onBehalfOfUserId: undefined, via: null,
       },
       {
         attachmentIds: undefined,
@@ -1565,7 +1561,7 @@ describe("issue comment reopen routes", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
-  it("derives compact presentation for comments from source-scoped recovery runs", async () => {
+  it("uses compact source-scoped recovery comments", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
     mockDbSelectWhere.mockImplementation(() => ({
       then: (
@@ -1596,10 +1592,8 @@ describe("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       "Recovered the execution path.\nHanded back to the original owner.",
       {
-        agentId: "22222222-2222-4222-8222-222222222222",
-        userId: undefined,
-        runId: "run-1",
-        onBehalfOfUserId: null,
+        agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({
         attachmentIds: undefined,
@@ -1628,17 +1622,15 @@ describe("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       "Normal work update.",
       {
-        agentId: "22222222-2222-4222-8222-222222222222",
-        userId: undefined,
-        runId: "run-1",
-        onBehalfOfUserId: null,
+        agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({ attachmentIds: undefined, presentation: null }),
       mockDb,
     );
   });
 
-  it("keeps successful-run missing-state recovery comments fully visible", async () => {
+  it("keeps successful-run recovery comments visible", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
     mockDbSelectWhere.mockImplementation(() => ({
       then: (
@@ -1667,10 +1659,8 @@ describe("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       "The run completed; here is the required summary.",
       {
-        agentId: "22222222-2222-4222-8222-222222222222",
-        userId: undefined,
-        runId: "run-1",
-        onBehalfOfUserId: null,
+        agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({ attachmentIds: undefined, presentation: null }),
       mockDb,

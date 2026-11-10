@@ -1,4 +1,5 @@
 import { notifyChatDeliveryWork } from "../chat-work-notifications.js";
+import { CHAT_RESOLUTION_VIA } from "../interaction-resolution-attribution.js";
 import { environmentService } from "../environments.js";
 import { logger } from "../../middleware/logger.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -371,7 +372,7 @@ export function voiceSessionStore(db: Db, options: { allowLocalBoard: boolean; n
             sql`${chatVoiceReplies.deliveredAt} is not null`, sql`${chatPublications.payload}->>'interactionId' = ${interactionId}`)).limit(1);
         if (!published) throw forbidden("This question was not presented to this voice session");
         const answered = await issueThreadInteractionService(tx as unknown as Db).answerQuestions(context.task, interactionId,
-          { answers }, { userId: session.callerId });
+          { answers }, { userId: session.callerId, via: CHAT_RESOLUTION_VIA });
         response = { status: "answered", interactionId, resultSha256: nativeSha256(answered.result), message: "Your answer was saved." };
       } else {
         await collectMissedReplies(tx, session);

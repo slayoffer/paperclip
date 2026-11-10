@@ -1,4 +1,5 @@
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
+import { SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { approvals, companyMemberships, connectionIntentDeliveries, issueApprovals, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { connectionIntentPayloadSchema } from "@paperclipai/shared";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -112,6 +113,7 @@ export function satisfiedConnectionIntentService(db: Db) {
             const now = new Date();
             // Retire the obsolete request without inventing a human approval.
             await tx.update(issueThreadInteractions).set({ status: "expired", resolvedAt: now, updatedAt: now,
+              ...SYSTEM_RESOLUTION_VIA,
               result: { version: 1, outcome: "expired", connectionId: connection.id,
                 reason: "An already authorized connection is available to the requesting agent." },
             }).where(and(eq(issueThreadInteractions.id, intent.id), eq(issueThreadInteractions.status, "pending")));

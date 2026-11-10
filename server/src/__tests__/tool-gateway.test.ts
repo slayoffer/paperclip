@@ -59,6 +59,7 @@ import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool
 import { resolveConnectionGrantSecret } from "../services/connection-credentials.js";
 import { secretService } from "../services/secrets.js";
 import { createRemoteMcpTool } from "./helpers/tool-gateway-remote-fixture.js";
+import { assertAuthorizationResolutionHistory } from "./helpers/authorization-resolution-history.js";
 import * as cogneeBridge from "../services/cognee-connection.js";
 import { createKvDemoHttpServer, type KvDemoHttpServer } from "../../../packages/kv-demo-mcp-server/src/http.js";
 import {
@@ -2406,6 +2407,7 @@ rl.on("line", (line) => {
         prompt: `Connect your ${connection.name} account to continue`,
         target: { key: `connection:${connection.uid}:user:carol` },
       });
+      await assertAuthorizationResolutionHistory(db, interaction!, () => call().expect(409));
 
       await db.insert(connectionGrants).values({
         companyId: company.id,

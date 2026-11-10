@@ -983,6 +983,7 @@ export async function materializeRuntimeQuestionFallback(input: {
       agentId: input.binding.agentId,
       runId: input.binding.runId,
       systemId: "native-runtime-question-handoff",
+      via: { resolvedVia: "system", resolvedViaKeyId: null },
     },
   );
   return { fallback, interaction };
@@ -1593,6 +1594,7 @@ export async function synchronizeCompletedProviderPlan(input: {
       {
         agentId: input.execution.binding.agentId,
         runId: input.execution.binding.runId,
+        via: null,
       },
     );
     confirmationId = confirmation.id;

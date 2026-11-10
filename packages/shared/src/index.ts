@@ -1,5 +1,6 @@
 export * from "./slack-app-manifest.js";
 export type { LightIssue } from "./types/issue-light.js";
+export type { ResolutionVia } from "./types/issue-interaction-base.js";
 export type { RunExecutionEvidenceReport } from "./types/execution-evidence.js";
 export type * from "./types/issue-exports.js";
 export * from "./interaction-exports.js";

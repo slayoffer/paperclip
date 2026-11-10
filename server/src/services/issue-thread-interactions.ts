@@ -1,3 +1,4 @@
+import { interactionResolutionAttribution, SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { historicalQuestionCondition } from "./issue-question-context.js";
 import { resolveInteractionRevisionForService } from "./interaction-revision-service.js";
@@ -1586,9 +1587,8 @@ async function expireStaleRequestConfirmationTarget(
         result: {
           ...buildStaleTargetResult(args.row, target),
         },
-        resolvedByAgentId: args.actor.agentId ?? null,
+        ...interactionResolutionAttribution(args.actor),
         resolvedByRunId: args.actor.runId ?? null,
-        resolvedByUserId: args.actor.userId ?? null,
         resolvedAt: now,
         updatedAt: now,
       })
@@ -1945,9 +1945,8 @@ export function issueThreadInteractionService(
             outcome: "accepted",
             ...(selectedOptionIds ? { selectedOptionIds } : {}),
           },
-          resolvedByAgentId: args.actor.agentId ?? null,
+          ...interactionResolutionAttribution(args.actor),
           resolvedByRunId: args.actor.runId ?? null,
-          resolvedByUserId: args.actor.userId ?? null,
           resolvedAt: now,
           updatedAt: now,
         })
@@ -2235,9 +2234,8 @@ export function issueThreadInteractionService(
                 }
               : {}),
           },
-          resolvedByAgentId: args.actor.agentId ?? null,
+          ...interactionResolutionAttribution(args.actor),
           resolvedByRunId: args.actor.runId ?? null,
-          resolvedByUserId: args.actor.userId ?? null,
           resolvedAt: now,
           updatedAt: now,
         })
@@ -2435,6 +2433,7 @@ export function issueThreadInteractionService(
                 outcome: "superseded",
                 supersededByInteractionId: row.id,
               },
+              ...SYSTEM_RESOLUTION_VIA,
               resolvedAt: now(),
               updatedAt: now(),
             })
@@ -2521,6 +2520,8 @@ export function issueThreadInteractionService(
           status,
           result,
           resolvedByUserId: actor.userId,
+          resolvedVia: actor.via?.resolvedVia ?? null,
+          resolvedViaKeyId: actor.via?.resolvedViaKeyId ?? null,
           resolvedAt,
           updatedAt: resolvedAt,
         })
@@ -2658,6 +2659,7 @@ export function issueThreadInteractionService(
             input: {},
             actor: {
               systemId: "system:pr-merged",
+              via: SYSTEM_RESOLUTION_VIA,
               resolutionDetails: {
                 source: "merged_pull_request_sweep",
                 pullRequests: candidate.references.map(
@@ -2958,9 +2960,8 @@ export function issueThreadInteractionService(
                 "addressee_deleted",
                 "Cancelled because the addressed agent was deleted",
               ),
-              resolvedByAgentId: null,
+              ...interactionResolutionAttribution({ via: SYSTEM_RESOLUTION_VIA }),
               resolvedByRunId: null,
-              resolvedByUserId: null,
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3040,8 +3041,7 @@ export function issueThreadInteractionService(
               result: buildSupersededByNewerRequestResult(
                 replacementInteractionId,
               ),
-              resolvedByAgentId: null,
-              resolvedByUserId: null,
+              ...interactionResolutionAttribution({ via: SYSTEM_RESOLUTION_VIA }),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3056,7 +3056,7 @@ export function issueThreadInteractionService(
           await resolveLinkedToolActionRequests(tx, updatedRow, {
             status: "expired",
             fromStatuses: ["pending", "approved"],
-            actor: {},
+            actor: { via: SYSTEM_RESOLUTION_VIA },
             now,
           });
           await enqueueTerminalIssueInteractionChatPublications(
@@ -3457,8 +3457,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: supersededResult,
-              resolvedByAgentId: actor.agentId,
-              resolvedByUserId: actor.userId ?? null,
+              ...interactionResolutionAttribution(actor),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3726,9 +3725,8 @@ export function issueThreadInteractionService(
           .update(issueThreadInteractions)
           .set({
             status: "accepted",
-            resolvedByAgentId: actor.agentId ?? null,
+            ...interactionResolutionAttribution(actor),
             resolvedByRunId: actor.runId ?? null,
-            resolvedByUserId: actor.userId ?? null,
             resolvedAt,
             updatedAt: resolvedAt,
           })
@@ -3814,6 +3812,8 @@ export function issueThreadInteractionService(
         current.result = updated.result;
         current.resolvedByAgentId = updated.resolvedByAgentId;
         current.resolvedByUserId = updated.resolvedByUserId;
+        current.resolvedVia = updated.resolvedVia;
+        current.resolvedViaKeyId = updated.resolvedViaKeyId;
         current.resolvedAt = updated.resolvedAt;
         current.updatedAt = updated.updatedAt;
       });
@@ -3967,9 +3967,8 @@ export function issueThreadInteractionService(
           .set({
             status: complete ? "answered" : "pending",
             result,
-            resolvedByAgentId: complete ? (actor.agentId ?? null) : null,
+            ...interactionResolutionAttribution(complete ? actor : { via: null }),
             resolvedByRunId: complete ? (actor.runId ?? null) : null,
-            resolvedByUserId: complete ? (actor.userId ?? null) : null,
             resolvedAt: complete ? now : null,
             updatedAt: now,
           })
@@ -4030,9 +4029,8 @@ export function issueThreadInteractionService(
             version: 1,
             rejectionReason: input.reason?.trim() || null,
           },
-          resolvedByAgentId: actor.agentId ?? null,
+          ...interactionResolutionAttribution(actor),
           resolvedByRunId: actor.runId ?? null,
-          resolvedByUserId: actor.userId ?? null,
           resolvedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -4119,8 +4117,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: buildSupersededByCommentResult(row, comment.id),
-              resolvedByAgentId: actor.agentId ?? null,
-              resolvedByUserId: actor.userId ?? null,
+              ...interactionResolutionAttribution({ ...actor, via: null }),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -4252,8 +4249,7 @@ export function issueThreadInteractionService(
                   sampleQuestionRow,
                   comment.id,
                 ),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4290,8 +4286,7 @@ export function issueThreadInteractionService(
                   sampleConfirmationRow,
                   comment.id,
                 ),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4320,8 +4315,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: buildSupersededByCommentResult(row, comment.id),
-              resolvedByAgentId: null,
-              resolvedByUserId: comment.authorUserId,
+              ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -4345,8 +4339,7 @@ export function issueThreadInteractionService(
               .set({
                 status: "expired",
                 result: buildSupersededByCommentResult(row, comment.id),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4433,8 +4426,7 @@ export function issueThreadInteractionService(
                   }
                 : interaction.payload,
               result: buildStaleTargetResult(row, target),
-              resolvedByAgentId: actor.agentId ?? null,
-              resolvedByUserId: actor.userId ?? null,
+              ...interactionResolutionAttribution(actor),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -4493,6 +4485,7 @@ export function issueThreadInteractionService(
               outcome: "expired",
               reason: `The task was reassigned before the connection request was answered, so ${subject} is still not connected. Reconnect it or choose an available connection.`,
             },
+            ...SYSTEM_RESOLUTION_VIA,
             resolvedAt: now(),
             updatedAt: now(),
           })
@@ -4508,7 +4501,7 @@ export function issueThreadInteractionService(
     },
     expirePendingInteractionsForTerminalIssue: async (
       issue: { id: string; companyId: string; status: string },
-      actor: InteractionActor = {},
+      actor: InteractionActor,
     ) => {
       if (!isTerminalIssueStatus(issue.status)) return [];
       const rows = await db
@@ -4561,8 +4554,7 @@ export function issueThreadInteractionService(
               .set({
                 status: "expired",
                 result: buildAdministrativeOutcomeResult(row, "issue_closed"),
-                resolvedByAgentId: actor.agentId ?? null,
-                resolvedByUserId: actor.userId ?? null,
+                ...interactionResolutionAttribution(actor),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4667,9 +4659,8 @@ export function issueThreadInteractionService(
               "withdrawn",
               reason,
             ),
-            resolvedByAgentId: actor.agentId ?? null,
+            ...interactionResolutionAttribution(actor),
             resolvedByRunId: actor.runId ?? null,
-            resolvedByUserId: actor.userId ?? null,
             resolvedAt: now,
             updatedAt: now,
           })
@@ -4780,9 +4771,8 @@ export function issueThreadInteractionService(
               answers: normalizedAnswers,
               summaryMarkdown: input.summaryMarkdown ?? null,
             },
-            resolvedByAgentId: actor.agentId ?? null,
+            ...interactionResolutionAttribution(actor),
             resolvedByRunId: actor.runId ?? null,
-            resolvedByUserId: actor.userId ?? null,
             resolvedAt,
             updatedAt: resolvedAt,
           })
@@ -4939,9 +4929,8 @@ export function issueThreadInteractionService(
           .set({
             status: "cancelled",
             result: buildSkippedOutcomeResult(current, reason),
-            resolvedByAgentId: actor.agentId ?? null,
+            ...interactionResolutionAttribution(actor),
             resolvedByRunId: actor.runId ?? null,
-            resolvedByUserId: actor.userId ?? null,
             resolvedAt: now,
             updatedAt: now,
           })
@@ -5012,9 +5001,8 @@ export function issueThreadInteractionService(
               cancellationReason: reason,
               summaryMarkdown: null,
             },
-            resolvedByAgentId: actor.agentId ?? null,
+            ...interactionResolutionAttribution(actor),
             resolvedByRunId: actor.runId ?? null,
-            resolvedByUserId: actor.userId ?? null,
             resolvedAt,
             updatedAt: resolvedAt,
           })

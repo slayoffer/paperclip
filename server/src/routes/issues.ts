@@ -1,3 +1,5 @@
+import { interactionResolutionActor, resolutionViaFromActor, interactionIssueUpdateActor } from "./interaction-resolution-actor.js";
+import type { InteractionActor } from "../services/interaction-resolution-input.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
 import { registerUploadCorrelation } from "./upload-correlation.js";
@@ -3143,7 +3145,7 @@ export function issueRoutes(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
     approveToolActionRequest?: (input: {
       rememberAction?: boolean;
@@ -3153,14 +3155,14 @@ export function issueRoutes(
       issueId: string;
       interactionId: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
     approveSecretProposal?: (input: {
       companyId: string;
       issueId: string;
       interactionId: string;
       proposalId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
   } = {},
 ) {
@@ -9648,11 +9650,7 @@ export function issueRoutes(
             }
           }
 
-          const issueUpdate = {
-            ...updateFields,
-            actorAgentId: actor.agentId ?? null,
-            actorUserId: actor.actorType === "user" ? actor.actorId : null,
-          };
+          const issueUpdate = { ...updateFields, ...interactionIssueUpdateActor(req) };
           const updatedIssue =
             sourceIssueStatus === "done" || sourceIssueStatus === "cancelled"
               ? await svc.update(
@@ -10438,10 +10436,7 @@ export function issueRoutes(
             latestRevisionId: doc.latestRevisionId,
             latestRevisionNumber: doc.latestRevisionNumber,
           },
-          {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          interactionResolutionActor(req),
         );
         await logExpiredRequestConfirmations({
           issue,
@@ -10732,10 +10727,7 @@ export function issueRoutes(
           latestRevisionId: result.document.latestRevisionId,
           latestRevisionNumber: result.document.latestRevisionNumber,
         },
-        {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        },
+        interactionResolutionActor(req),
       );
       await logExpiredRequestConfirmations({
         issue,
@@ -10842,10 +10834,7 @@ export function issueRoutes(
         latestRevisionId: null,
         latestRevisionNumber: null,
       },
-      {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      },
+      interactionResolutionActor(req),
     );
     await logExpiredRequestConfirmations({
       issue,
@@ -12265,7 +12254,7 @@ export function issueRoutes(
               continuationPolicy: "wake_assignee",
               payload: await buildOnboardingFirstTaskOpeningQuestion(),
             },
-            { agentId: issue.assigneeAgentId },
+            { agentId: issue.assigneeAgentId, via: null },
           );
         } catch (err) {
           logger.warn(
@@ -13968,6 +13957,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
+        actorResolvedVia: resolutionViaFromActor(req.actor),
         workspaceSelectionActor: req.actor,
         expectedExecutionPolicy,
         expectedStatusVersion,
@@ -14172,6 +14162,7 @@ export function issueRoutes(
                     actor.actorType === "user" ? actor.actorId : undefined,
                   runId: actor.runId,
                   onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+                  via: resolutionViaFromActor(req.actor),
                 },
                 {
                   attachmentIds: commentAttachmentIds,
@@ -14785,6 +14776,7 @@ export function issueRoutes(
             userId: actor.actorType === "user" ? actor.actorId : undefined,
             runId: actor.runId,
             onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+            via: resolutionViaFromActor(req.actor),
           },
           {
             authorizationReason: issueMutationAuthorizationReason,
@@ -14926,10 +14918,7 @@ export function issueRoutes(
 
         const expiredInteractions = await issueThreadInteractionService(
           db,
-        ).expireRequestConfirmationsSupersededByComment(issue, comment, {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        });
+        ).expireRequestConfirmationsSupersededByComment(issue, comment, interactionResolutionActor(req));
         await logExpiredRequestConfirmations({
           issue,
           interactions: expiredInteractions,
@@ -15281,10 +15270,7 @@ export function issueRoutes(
         if (becameTerminal) {
           const expiredInteractions = await issueThreadInteractionService(
             db,
-          ).expirePendingInteractionsForTerminalIssue(issue, {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          });
+          ).expirePendingInteractionsForTerminalIssue(issue, interactionResolutionActor(req));
           await logExpiredRequestConfirmations({
             issue,
             interactions: expiredInteractions,
@@ -16321,6 +16307,7 @@ export function issueRoutes(
           identityContextId: req.actor.identityContextId,
           agentId: actor.agentId,
           userId: actor.actorType === "user" ? actor.actorId : null,
+          via: resolutionViaFromActor(req.actor),
         },
       );
 
@@ -16422,7 +16409,7 @@ export function issueRoutes(
         companyId: issue.companyId, issueId: issue.id,
         interactionId: req.params.interactionId as string,
         input: req.body,
-        actor: { agentId: actor.agentId!, runId: actor.runId!,
+        actor: { ...interactionResolutionActor(req), agentId: actor.agentId!, runId: actor.runId!,
           resolverPolicyRestriction: authorization.resolutionAuthorization.resolverPolicyRestriction },
       });
       // The authenticated responding run already owns this turn. Do not enqueue
@@ -16503,10 +16490,7 @@ export function issueRoutes(
           interactionId: current.id,
           actionRequestId: current.payload.toolAction.actionRequestId,
           rememberAction: req.body.rememberAction === true,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         res.json(await interactionSvc.getById(current.id));
         return;
@@ -16517,9 +16501,8 @@ export function issueRoutes(
         );
       const { interaction, createdIssues, continuationIssue } =
         await interactionSvc.acceptInteraction(issue, interactionId, req.body, {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
@@ -16544,10 +16527,7 @@ export function issueRoutes(
           issueId: issue.id,
           interactionId: interaction.id,
           actionRequestId: toolAction.actionRequestId,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         const approval = readObject(approvalResult);
         const executionStatus = readToolActionExecutionStatus(approval.status);
@@ -16582,10 +16562,7 @@ export function issueRoutes(
               issueId: issue.id,
               interactionId: interaction.id,
               proposalId: secretProposal.proposalId,
-              actor: {
-                agentId: actor.agentId,
-                userId: actor.actorType === "user" ? actor.actorId : null,
-              },
+              actor: interactionResolutionActor(req),
             });
           } else {
             const proposal = await secretProposals.getById(
@@ -16602,6 +16579,7 @@ export function issueRoutes(
             }
             await secretProposals.approve(issue.companyId, proposal.id, {
               resolvedByUserId,
+              via: resolutionViaFromActor(req.actor),
               assertCanResolve: (lockedProposal, txDb) =>
                 assertCanResolveProposal({
                   db: txDb,
@@ -16730,10 +16708,7 @@ export function issueRoutes(
           interactionId: current.id,
           actionRequestId: current.payload.toolAction.actionRequestId,
           reason: req.body.reason,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         res.json(await interactionSvc.getById(current.id));
         return;
@@ -16743,9 +16718,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
@@ -16814,9 +16788,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
@@ -16880,9 +16853,8 @@ export function issueRoutes(
           interactionId,
           req.body,
           {
-            agentId: actor.agentId,
+            ...interactionResolutionActor(req),
             runId: actor.runId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
             resolverPolicyRestriction:
               resolutionAuthorization.resolverPolicyRestriction,
           },
@@ -16978,9 +16950,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
         },
         {
           afterResolveInTransaction: async (tx, resolved) => {
@@ -17061,7 +17032,7 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const interaction = await issueThreadInteractionService(db).dismissInteraction(
         issue, req.params.interactionId as string,
-        { userId: actor.actorType === "user" ? actor.actorId : null },
+        { userId: actor.actorType === "user" ? actor.actorId : null, via: resolutionViaFromActor(req.actor) },
       );
       await logActivity(db, {
         companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
@@ -17098,9 +17069,8 @@ export function issueRoutes(
       const interaction = await issueThreadInteractionService(
         db,
       ).skipInteraction(issue, interactionId, req.body, {
-        agentId: actor.agentId,
+        ...interactionResolutionActor(req),
         runId: actor.runId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
       });
 
       await logActivity(db, {
@@ -17161,8 +17131,7 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
+          ...interactionResolutionActor(req),
         },
         {
           afterResolveInTransaction: async (tx, resolved) => {
@@ -17647,7 +17616,7 @@ export function issueRoutes(
             eq(issueComments.issueId, issue.id), eq(issueComments.authorUserId, userId),
             eq(issueComments.clientRequestId, req.body.clientRequestId),
           ));
-          const saved = await svc.addComment(issue.id, req.body.body, { userId }, {
+          const saved = await svc.addComment(issue.id, req.body.body, { userId, via: resolutionViaFromActor(req.actor) }, {
             clientRequestId: req.body.clientRequestId, authorType: "user", attachmentIds: req.body.attachmentIds,
           }, tx);
           if (!existing) await logActivity(tx as unknown as Db, {
@@ -18024,6 +17993,7 @@ export function issueRoutes(
         issueBeforeCommentDecision = currentIssue;
         const updatePatch = {
           ...transition.patch,
+          actorResolvedVia: resolutionViaFromActor(req.actor),
           status:
             typeof transition.patch.status === "string"
               ? transition.patch.status
@@ -18060,6 +18030,7 @@ export function issueRoutes(
                 userId: actor.actorType === "user" ? actor.actorId : undefined,
                 runId: actor.runId,
                 onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+                via: resolutionViaFromActor(req.actor),
               },
               {
                 ...commentOptions,
@@ -18167,6 +18138,7 @@ export function issueRoutes(
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
               onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+              via: resolutionViaFromActor(req.actor),
             },
             commentOptions,
             dbOrTx,
@@ -18314,10 +18286,7 @@ export function issueRoutes(
 
       const expiredInteractions = await issueThreadInteractionService(
         db,
-      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, interactionResolutionActor(req));
       await logExpiredRequestConfirmations({
         issue: currentIssue,
         interactions: expiredInteractions,
@@ -18539,10 +18508,7 @@ export function issueRoutes(
         if (becameTerminal) {
           const expiredInteractions = await issueThreadInteractionService(
             db,
-          ).expirePendingInteractionsForTerminalIssue(currentIssue, {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          });
+          ).expirePendingInteractionsForTerminalIssue(currentIssue, interactionResolutionActor(req));
           await logExpiredRequestConfirmations({
             issue: currentIssue,
             interactions: expiredInteractions,

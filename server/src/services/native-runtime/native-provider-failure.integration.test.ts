@@ -261,7 +261,7 @@ describe("native completed failure diagnostics", () => {
           expect(await getNativeReviewAssignment(db, { companyId, issueId, agentId, contextSnapshot: reviewContext, actingRunId: retryRunId, issueExecutionRunId: retryRunId })).not.toBeNull();
           await issueThreadInteractionService(db).acceptInteraction(
             { id: issueId, companyId, projectId: null, goalId: null, status: "in_review" },
-            reviewContext.nativeReviewInteractionId, {}, { agentId, runId: retryRunId },
+            reviewContext.nativeReviewInteractionId, {}, { via: null, agentId, runId: retryRunId },
           );
           const [resolved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, reviewContext.nativeReviewInteractionId));
           expect(resolved).toMatchObject({ status: "accepted", resolvedByAgentId: agentId, resolvedByRunId: retryRunId });

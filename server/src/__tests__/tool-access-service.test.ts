@@ -1,3 +1,4 @@
+import { assertAuthorizationResolutionHistory } from "./helpers/authorization-resolution-history.js";
 import * as fs from "node:fs/promises";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -10105,7 +10106,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .map((ref) => ref.secretId)
       .sort();
 
-    const started = await service.startAuthorizationForAgent({
+    const startAuthorization = () => service.startAuthorizationForAgent({
       companyId: company.id,
       connectionId: connected.connectionId,
       agentId: agent.id,
@@ -10114,6 +10115,7 @@ describeEmbeddedPostgres("tool access service", () => {
       scopes: ["channels:read"],
       redirectUri: "https://paperclip.example/api/tools/oauth/callback",
     });
+    const started = await startAuthorization();
     const authorizationUrl = new URL(started.authorizationUrl);
     expect(authorizationUrl.searchParams.get("scope")).toBe("channels:read");
 
@@ -10138,7 +10140,7 @@ describeEmbeddedPostgres("tool access service", () => {
       state: state.state,
       code: "user-authorization-code",
       redirectUri: "https://paperclip.example/api/tools/oauth/callback",
-      actor: { actorType: "user", actorId: "user-for-run" },
+      actor: { actorType: "user", actorId: "user-for-run", via: { resolvedVia: "user_session", resolvedViaKeyId: null } },
     });
 
     const [grant] = await db
@@ -10196,6 +10198,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.id, interaction.id));
     expect(resolved).toMatchObject({
+      resolvedVia: null, resolvedViaKeyId: null,
       status: "accepted",
       result: { version: 1, outcome: "accepted" },
     });
@@ -10240,15 +10243,10 @@ describeEmbeddedPostgres("tool access service", () => {
           eq(companyMemberships.principalId, "user-for-run"),
         ),
       );
-    const retry = await service.startAuthorizationForAgent({
-      companyId: company.id,
-      connectionId: connected.connectionId,
-      agentId: agent.id,
-      runId: run.id,
-      subjectUserId: "user-for-run",
-      scopes: ["channels:read"],
-      redirectUri: "https://paperclip.example/api/tools/oauth/callback",
-    });
+    const retry = await startAuthorization();
+    const [pending] = await db.select().from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.idempotencyKey, `connection-authorization:${connected.connectionId}:user-for-run`));
+    await assertAuthorizationResolutionHistory(db, pending!, startAuthorization);
     await db
       .update(companyMemberships)
       .set({ membershipRole: "viewer" })
@@ -10289,15 +10287,7 @@ describeEmbeddedPostgres("tool access service", () => {
           eq(companyMemberships.principalId, "user-for-run"),
         ),
       );
-    const suspendedRetry = await service.startAuthorizationForAgent({
-      companyId: company.id,
-      connectionId: connected.connectionId,
-      agentId: agent.id,
-      runId: run.id,
-      subjectUserId: "user-for-run",
-      scopes: ["channels:read"],
-      redirectUri: "https://paperclip.example/api/tools/oauth/callback",
-    });
+    const suspendedRetry = await startAuthorization();
     await db
       .update(companyMemberships)
       .set({ status: "suspended" })

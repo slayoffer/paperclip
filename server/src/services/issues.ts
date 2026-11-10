@@ -1,3 +1,4 @@
+import type { InteractionActor } from "./interaction-resolution-input.js";
 import { applyIssueCreateAdmission, assertIssueCreateQuota, hasIssueCreateQuota, type IssueCreateAdmission } from "./issue-create-admission.js";
 import { insertIssueComment } from "./issue-comment-writes.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
@@ -10298,6 +10299,7 @@ export function issueService(db: Db) {
         actorRunStopId?: string | null;
         blockedWaitCommentBody?: string | null;
         actorUserId?: string | null;
+        actorResolvedVia?: InteractionActor["via"];
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
         expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
@@ -10350,6 +10352,7 @@ export function issueService(db: Db) {
         actorRunStopId,
         blockedWaitCommentBody,
         actorUserId,
+        actorResolvedVia,
         companyGuard,
         workspaceSelectionActor,
         expectedExecutionPolicy,
@@ -10861,6 +10864,7 @@ export function issueService(db: Db) {
             ).expirePendingInteractionsForTerminalIssue(updated, {
               agentId: actorAgentId ?? null,
               userId: actorUserId ?? null,
+              via: actorResolvedVia ?? null,
             });
             const {
               nativeQuestionCancellationIdentity,
@@ -11972,6 +11976,7 @@ export function issueService(db: Db) {
       issueId: string,
       body: string,
       actor: {
+        via?: InteractionActor["via"];
         agentId?: string;
         userId?: string;
         runId?: string | null;
@@ -12184,7 +12189,7 @@ export function issueService(db: Db) {
         );
       let comment: typeof issueComments.$inferSelect | null = null;
       if (createdByRunId) {
-        const existing = await dbOrTx
+        const existing: typeof issueComments.$inferSelect | null = await dbOrTx
           .select()
           .from(issueComments)
           .where(
@@ -12602,7 +12607,7 @@ export function issueService(db: Db) {
         ).expireRequestConfirmationsSupersededByComment(
           { id: issueId, companyId: issue.companyId },
           comment,
-          { agentId: actor.agentId, userId: actor.userId },
+          { agentId: actor.agentId, userId: actor.userId, via: actor.via ?? null },
         );
         for (const interaction of expiredInteractions) {
           await logActivity(dbOrTx, {

@@ -1,3 +1,4 @@
+import type { InteractionActor } from "./interaction-resolution-input.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { checkInteractionAnswerPreconditions, interactionAnswerReceipt, markInteractionResolutionReplay } from "./interaction-revision.js";
 import { and, eq } from "drizzle-orm";
@@ -32,7 +33,7 @@ export async function commitToolActionReview(
     idempotencyKey?: string;
     rememberAction?: boolean;
     reason?: string;
-    actor: { agentId?: string | null; userId?: string | null };
+    actor: InteractionActor;
   },
 ) {
   if (input.actor.agentId)
@@ -88,7 +89,10 @@ export async function commitToolActionReview(
       )
       .for("update");
     if (!current) throw notFound("Tool action request not found");
-    const receipt = interactionAnswerReceipt(input.decision, input, input.actor);
+    // Preserve existing receipt hashes: channel evidence is not a new decision or identity.
+    const { via: _channel, ...receiptActor } = input.actor;
+    const receiptInput = { ...input, actor: receiptActor };
+    const receipt = interactionAnswerReceipt(input.decision, receiptInput, receiptActor);
     if (interaction) {
       assertIssueThreadInteractionResolverAudience({
         actor: { type: "user", userId: input.actor.userId ?? "board" },
@@ -209,6 +213,7 @@ export async function commitToolActionReview(
           status: input.decision === "approved" ? "accepted" : "rejected",
           ...(receipt ? { resolutionRequest: receipt } : {}),
           resolvedByUserId: input.actor.userId ?? "board",
+          ...(input.actor.via ?? { resolvedVia: null, resolvedViaKeyId: null }),
           resolvedAt: now,
           updatedAt: now,
           result:

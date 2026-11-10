@@ -89,7 +89,9 @@ import {
   type IssuePrivacyRow,
 } from "./authorization.js";
 import { redactEventPayload, sanitizeRecord } from "../redaction.js";
-import type { WorkerHostCallContext } from "@paperclipai/plugin-sdk";
+import type {
+  WorkerHostCallContext,
+} from "@paperclipai/plugin-sdk";
 import {
   normalizeProviderFamily,
   SANDBOX_STARTUP_SPAN_ATTRS,
@@ -2685,6 +2687,7 @@ export function buildHostServices(
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
         const interaction = await issueThreadInteractionService(db).create(issue, params.interaction as CreateIssueThreadInteraction, {
           agentId: params.authorAgentId ?? null,
+          via: null,
         });
         await logPluginActivity({
           companyId,
@@ -2735,7 +2738,7 @@ export function buildHostServices(
           return { interaction: current as any, applied: false };
         }
 
-        const actor = { userId: params.actorUserId };
+        const actor = { userId: params.actorUserId, via: null };
         let resolved: typeof current;
         let continuationTarget = {
           id: issue.id,
