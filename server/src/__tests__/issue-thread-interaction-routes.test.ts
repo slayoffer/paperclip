@@ -1500,11 +1500,9 @@ describe("issue thread interaction routes", () => {
 
     expect(res.status).toBe(200);
     expect(approveSecretProposal).toHaveBeenCalledWith({
-      companyId: "company-1",
-      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      interactionId: "interaction-secret-proposal",
-      proposalId,
-      actor: { agentId: null, userId: "local-board" },
+      companyId: "company-1", issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      interactionId: "interaction-secret-proposal", proposalId,
+      actor: { agentId: null, userId: "local-board", via: null },
     });
     expect(mockInteractionService.recordSecretProposalExecutionResult).toHaveBeenCalledWith(
       expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
