@@ -56,6 +56,7 @@ export const issueThreadInteractions = pgTable(
     resolvedByRunId: uuid("resolved_by_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     resolvedByUserId: text("resolved_by_user_id"),
     resolvedVia: text("resolved_via").$type<NonNullable<IssueThreadInteractionBase["resolvedVia"]>>(),
+    resolvedViaKeyId: uuid("resolved_via_key_id"),
     payload: jsonb("payload").$type<IssueThreadInteractionPayload>().notNull(),
     result: jsonb("result").$type<IssueThreadInteractionResult>(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
@@ -66,7 +67,11 @@ export const issueThreadInteractions = pgTable(
   },
   (table) => ({
     resolvedViaCheck: check("issue_thread_interactions_resolved_via_check",
-      sql`${table.resolvedVia} IN ('user_session', 'board_api_key', 'agent_key')`),
+      sql`${table.resolvedVia} IN ('user_session', 'board_api_key', 'agent_key', 'chat_channel', 'system')`),
+    resolvedViaKeyCheck: check("issue_thread_interactions_resolved_via_key_check",
+      sql`(${table.resolvedVia} IS NOT DISTINCT FROM 'board_api_key') = (${table.resolvedViaKeyId} IS NOT NULL)`),
+    resolvedViaTimestampCheck: check("issue_thread_interactions_resolved_via_timestamp_check",
+      sql`${table.resolvedAt} IS NOT NULL OR (${table.resolvedVia} IS NULL AND ${table.resolvedViaKeyId} IS NULL)`),
     issueIdx: index("issue_thread_interactions_issue_idx").on(table.issueId),
     companyIssueCreatedAtIdx: index("issue_thread_interactions_company_issue_created_at_idx").on(
       table.companyId,

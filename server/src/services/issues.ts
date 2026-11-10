@@ -6554,7 +6554,6 @@ export function issueService(db: Db) {
       authorUserId?: string | null;
       presentation?: unknown;
       metadata?: unknown;
-      authorAuthSource?: unknown;
       deletedAt?: Date | string | null;
       deletedByType?: "agent" | "user" | null;
       deletedByAgentId?: string | null;
@@ -6564,16 +6563,15 @@ export function issueService(db: Db) {
   >(
     comment: T,
     censorUsernameInLogs: boolean,
-  ): Omit<T, "authorAuthSource"> & {
+  ): T & {
     authorType: IssueCommentAuthorType;
     presentation: IssueCommentPresentation | null;
     metadata: IssueCommentMetadata | null;
   } {
-    const { authorAuthSource: _authSource, ...publicComment } = comment;
     const deletedAt = comment.deletedAt ?? null;
     if (deletedAt) {
       return {
-        ...publicComment,
+        ...comment,
         authorType: deriveIssueCommentAuthorType(comment),
         body: "",
         presentation: null,
@@ -6587,7 +6585,7 @@ export function issueService(db: Db) {
     }
 
     return {
-      ...publicComment,
+      ...comment,
       authorType: deriveIssueCommentAuthorType(comment),
       body: redactCurrentUserText(comment.body, {
         enabled: censorUsernameInLogs,
@@ -10299,7 +10297,7 @@ export function issueService(db: Db) {
         actorRunStopId?: string | null;
         blockedWaitCommentBody?: string | null;
         actorUserId?: string | null;
-        actorResolvedVia?: InteractionActor["resolvedVia"];
+        actorResolvedVia?: InteractionActor["via"];
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
         expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
@@ -10858,7 +10856,7 @@ export function issueService(db: Db) {
             ).expirePendingInteractionsForTerminalIssue(updated, {
               agentId: actorAgentId ?? null,
               userId: actorUserId ?? null,
-              resolvedVia: actorResolvedVia,
+              via: actorResolvedVia ?? null,
             });
             const {
               nativeQuestionCancellationIdentity,
@@ -11970,7 +11968,7 @@ export function issueService(db: Db) {
       issueId: string,
       body: string,
       actor: {
-        resolvedVia?: InteractionActor["resolvedVia"];
+        via?: InteractionActor["via"];
         agentId?: string;
         userId?: string;
         runId?: string | null;
@@ -12262,7 +12260,6 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           onBehalfOfUserId,
-          authorAuthSource: actor.resolvedVia ?? null,
           authorType,
           createdByRunId,
           body: redactedBody,
@@ -12593,7 +12590,7 @@ export function issueService(db: Db) {
         ).expireRequestConfirmationsSupersededByComment(
           { id: issueId, companyId: issue.companyId },
           comment,
-          { agentId: actor.agentId, userId: actor.userId, resolvedVia: actor.resolvedVia },
+          { agentId: actor.agentId, userId: actor.userId, via: actor.via ?? null },
         );
         for (const interaction of expiredInteractions) {
           await logActivity(dbOrTx, {

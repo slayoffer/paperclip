@@ -197,7 +197,7 @@ describe("issueThreadInteractionService", () => {
         version: 1,
         tasks: [{ clientKey: "task-1", title: "One" }],
       },
-    }, {
+    }, { via: null,
       agentId: "agent-1",
     });
 
@@ -265,7 +265,7 @@ describe("issueThreadInteractionService", () => {
         { questionId: "extras", optionIds: ["docs", "tests", "docs"] },
       ],
       summaryMarkdown: "Phase 1 with tests and docs.",
-    }, {
+    }, { via: null,
       userId: "local-board",
     });
 
@@ -304,7 +304,7 @@ describe("issueThreadInteractionService", () => {
     };
     const state = createFakeDb({ interactionRow });
     const svc = issueThreadInteractionService(state.db as never);
-    const withdrawn = await svc.withdrawInteraction({ id: interactionRow.issueId, companyId: "company-1" }, interactionRow.id, { reason: "Replanning" }, { agentId: "agent-1" });
+    const withdrawn = await svc.withdrawInteraction({ id: interactionRow.issueId, companyId: "company-1" }, interactionRow.id, { reason: "Replanning" }, { via: null, agentId: "agent-1" });
     expect(withdrawn.status).toBe("cancelled");
     expect(withdrawn.result).toEqual({ version: 1, outcome: "withdrawn", reason: "Replanning" });
     expect(withdrawn.resolvedByAgentId).toBe("agent-1");
@@ -316,7 +316,7 @@ describe("issueThreadInteractionService", () => {
       { id: interactionRow.issueId, companyId: "company-1" },
       interactionRow.id,
       {},
-      { agentId: "agent-1" },
+      { via: null, agentId: "agent-1" },
     )).rejects.toMatchObject({ status: 409 });
   });
 
@@ -336,7 +336,7 @@ describe("issueThreadInteractionService", () => {
       { id: interactionRow.issueId, companyId: "company-1" },
       interactionRow.id,
       {},
-      { agentId: "agent-1" },
+      { via: null, agentId: "agent-1" },
     )).rejects.toMatchObject({ status: 409 });
     expect(state.interactionUpdates).toHaveLength(0);
   });
@@ -353,7 +353,7 @@ describe("issueThreadInteractionService", () => {
     };
     const state = createFakeDb({ interactionRow });
     const svc = issueThreadInteractionService(state.db as never);
-    const expired = await svc.expirePendingInteractionsForTerminalIssue({ id: interactionRow.issueId, companyId: "company-1", status: "done" });
+    const expired = await svc.expirePendingInteractionsForTerminalIssue({ id: interactionRow.issueId, companyId: "company-1", status: "done" }, { via: null });
     expect(expired).toHaveLength(1);
     expect(expired[0]?.status).toBe("expired");
     expect(expired[0]?.result).toMatchObject({ version: 1, outcome: "issue_closed", answers: [] });
@@ -392,7 +392,7 @@ describe("issueThreadInteractionService", () => {
     const svc = issueThreadInteractionService(state.db as never);
     const expired = await svc.expirePendingInteractionsForTerminalIssue(
       { id: interactionRow.issueId, companyId: "company-1", status: "cancelled" },
-      { userId: "local-board" },
+      { via: null, userId: "local-board" },
     );
     expect(expired).toHaveLength(1);
     expect(expired[0]?.result).toMatchObject({ version: 1, outcome: "issue_closed" });

@@ -196,7 +196,7 @@ export async function projectNativeRuntimeRequest(input: {
       ...(typeof request.prompt === "string" ? { summary: request.prompt.slice(0, 1000) } : {}),
       payload: toInteractionPayload(questionSet, request.requestId),
     },
-    { agentId: input.binding.agentId, runId: input.binding.runId },
+    { agentId: input.binding.agentId, runId: input.binding.runId, via: null },
     { supersedePendingSiblingInteractions: false },
   ) as AskUserQuestionsInteraction;
   if (!existing) {

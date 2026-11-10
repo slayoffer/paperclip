@@ -1,4 +1,4 @@
-import { interactionResolutionAttribution } from "./interaction-resolution-attribution.js";
+import { interactionResolutionAttribution, SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { historicalQuestionCondition } from "./issue-question-context.js";
 import { resolveInteractionRevisionForService } from "./interaction-revision-service.js";
@@ -903,11 +903,8 @@ function buildSupersededByNewerRequestResult(replacementInteractionId: string) {
   } as const;
 }
 
-// An agent that posts a fresh ask_user_questions while its own earlier ones on
-// the same issue are still pending has replaced them — the newer card carries
-// the real ask, so the stale siblings auto-expire (PAP-437). Mirrors the
-// `superseded_by_comment` shape (ask_user_questions results key expiry off
-// `expirationReason`, not `outcome`) so the UI can hide them cleanly.
+// New agent questions replace pending siblings (PAP-437). Match comment expiry:
+// question results use expirationReason, not outcome, so the UI can hide them.
 function buildSupersededByNewerInteractionResult(
   replacementInteractionId: string,
 ) {
@@ -1004,19 +1001,14 @@ function buildSkippedOutcomeResult(
   return { version: 1, outcome: "skipped", reason } as const;
 }
 
-// Rollback sentinel: the interaction was resolved by another actor between the
-// pending-rows read and the conditional update, so the enclosing transaction's
-// tool-action revocation must be undone.
+// A lost resolution race must roll back the enclosing tool-action revocation.
 class InteractionResolvedConcurrentlyError extends Error {
   constructor() {
     super("Interaction was resolved concurrently");
   }
 }
 
-// A request_confirmation card can govern a parked tool call via a linked
-// tool_action_requests row. Administrative resolutions (withdraw, terminal-issue
-// expiry) must settle that row too, or the parked call stays approvable under
-// its own one-hour lifecycle after its card is gone.
+// Administrative card resolution must also settle its linked parked tool call.
 async function resolveLinkedToolActionRequests(
   db: Pick<Db, "update">,
   interaction: Pick<IssueThreadInteractionRow, "id" | "companyId" | "kind">,
@@ -2433,6 +2425,7 @@ export function issueThreadInteractionService(
                 outcome: "superseded",
                 supersededByInteractionId: row.id,
               },
+              ...SYSTEM_RESOLUTION_VIA,
               resolvedAt: now(),
               updatedAt: now(),
             })
@@ -2519,7 +2512,8 @@ export function issueThreadInteractionService(
           status,
           result,
           resolvedByUserId: actor.userId,
-          resolvedVia: actor.resolvedVia ?? null,
+          resolvedVia: actor.via?.resolvedVia ?? null,
+          resolvedViaKeyId: actor.via?.resolvedViaKeyId ?? null,
           resolvedAt,
           updatedAt: resolvedAt,
         })
@@ -2657,6 +2651,7 @@ export function issueThreadInteractionService(
             input: {},
             actor: {
               systemId: "system:pr-merged",
+              via: SYSTEM_RESOLUTION_VIA,
               resolutionDetails: {
                 source: "merged_pull_request_sweep",
                 pullRequests: candidate.references.map(
@@ -2957,9 +2952,8 @@ export function issueThreadInteractionService(
                 "addressee_deleted",
                 "Cancelled because the addressed agent was deleted",
               ),
-              resolvedByAgentId: null,
+              ...interactionResolutionAttribution({ via: SYSTEM_RESOLUTION_VIA }),
               resolvedByRunId: null,
-              resolvedByUserId: null,
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3039,8 +3033,7 @@ export function issueThreadInteractionService(
               result: buildSupersededByNewerRequestResult(
                 replacementInteractionId,
               ),
-              resolvedByAgentId: null,
-              resolvedByUserId: null,
+              ...interactionResolutionAttribution({ via: SYSTEM_RESOLUTION_VIA }),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3055,7 +3048,7 @@ export function issueThreadInteractionService(
           await resolveLinkedToolActionRequests(tx, updatedRow, {
             status: "expired",
             fromStatuses: ["pending", "approved"],
-            actor: {},
+            actor: { via: SYSTEM_RESOLUTION_VIA },
             now,
           });
           await enqueueTerminalIssueInteractionChatPublications(
@@ -3427,11 +3420,8 @@ export function issueThreadInteractionService(
             }, null, { agentId: actor.agentId, userId: actor.userId });
           }
 
-          // An agent replacing its own still-pending card supersedes the older
-          // one so the thread never accumulates stale sibling cards. This covers
-          // request_confirmation drafts and ordinary task questions. Agent Chat
-          // questions remain answerable in history even when another is asked.
-          // Scoped to the same agent + issue + kind; other actors are untouched.
+          // Replace pending cards for the same agent, issue, and kind.
+          // Agent Chat questions remain answerable in history.
           const canSupersedeSiblingCards =
             options.supersedePendingSiblingInteractions !== false &&
             ((data.kind === "request_confirmation" &&
@@ -3456,8 +3446,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: supersededResult,
-              resolvedByAgentId: actor.agentId,
-              resolvedByUserId: actor.userId ?? null,
+              ...interactionResolutionAttribution(actor),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -3813,6 +3802,7 @@ export function issueThreadInteractionService(
         current.resolvedByAgentId = updated.resolvedByAgentId;
         current.resolvedByUserId = updated.resolvedByUserId;
         current.resolvedVia = updated.resolvedVia;
+        current.resolvedViaKeyId = updated.resolvedViaKeyId;
         current.resolvedAt = updated.resolvedAt;
         current.updatedAt = updated.updatedAt;
       });
@@ -3966,10 +3956,8 @@ export function issueThreadInteractionService(
           .set({
             status: complete ? "answered" : "pending",
             result,
-            resolvedByAgentId: complete ? (actor.agentId ?? null) : null,
+            ...interactionResolutionAttribution(complete ? actor : { via: null }),
             resolvedByRunId: complete ? (actor.runId ?? null) : null,
-            resolvedByUserId: complete ? (actor.userId ?? null) : null,
-            resolvedVia: complete ? (actor.resolvedVia ?? null) : null,
             resolvedAt: complete ? now : null,
             updatedAt: now,
           })
@@ -4250,8 +4238,7 @@ export function issueThreadInteractionService(
                   sampleQuestionRow,
                   comment.id,
                 ),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4288,8 +4275,7 @@ export function issueThreadInteractionService(
                   sampleConfirmationRow,
                   comment.id,
                 ),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4318,8 +4304,7 @@ export function issueThreadInteractionService(
             .set({
               status: "expired",
               result: buildSupersededByCommentResult(row, comment.id),
-              resolvedByAgentId: null,
-              resolvedByUserId: comment.authorUserId,
+              ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
               resolvedAt: now,
               updatedAt: now,
             })
@@ -4343,8 +4328,7 @@ export function issueThreadInteractionService(
               .set({
                 status: "expired",
                 result: buildSupersededByCommentResult(row, comment.id),
-                resolvedByAgentId: null,
-                resolvedByUserId: comment.authorUserId,
+                ...interactionResolutionAttribution({ userId: comment.authorUserId, via: null }),
                 resolvedAt: now,
                 updatedAt: now,
               })
@@ -4490,6 +4474,7 @@ export function issueThreadInteractionService(
               outcome: "expired",
               reason: `The task was reassigned before the connection request was answered, so ${subject} is still not connected. Reconnect it or choose an available connection.`,
             },
+            ...SYSTEM_RESOLUTION_VIA,
             resolvedAt: now(),
             updatedAt: now(),
           })
@@ -4505,7 +4490,7 @@ export function issueThreadInteractionService(
     },
     expirePendingInteractionsForTerminalIssue: async (
       issue: { id: string; companyId: string; status: string },
-      actor: InteractionActor = {},
+      actor: InteractionActor,
     ) => {
       if (!isTerminalIssueStatus(issue.status)) return [];
       const rows = await db

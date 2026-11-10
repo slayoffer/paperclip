@@ -1,4 +1,5 @@
 import type { DbTransaction, RuntimeContext, LifecycleRuntimeFence } from "../runtime-types.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { notifyChatPublicationWork } from "../../chat-work-notifications.js";
 
@@ -140,7 +141,7 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           issue,
           interaction.id,
           {},
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {
@@ -190,7 +191,7 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           issue,
           interaction.id,
           {},
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {
@@ -512,10 +513,8 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
         )
         .returning({ id: chatActions.id });
       if (!completed) {
-        // A publication sweep may reconcile the durable action while the
-        // original provider callback is still in flight. Treat that CAS loss
-        // as success once the winner has processed the same action so the
-        // provider does not receive a spurious 5xx and redeliver it.
+        // A sweep can win the race. A processed action counts as success;
+        // do not return a retryable 5xx that causes provider redelivery.
         const winner = await tx
           .select({ status: chatActions.status })
           .from(chatActions)
@@ -597,10 +596,8 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           })
           .onConflictDoNothing();
       }
-      // A provider callback can lose the pending -> terminal interaction race
-      // to the Paperclip UI. In that case this transaction only retires the
-      // now-redundant provider action and must not fabricate a second external
-      // resolution event attributed to the board winner.
+      // If the UI won the resolution race, retire only the provider action.
+      // Do not emit a second resolution event attributed to the UI winner.
       if (resolvedByThisProviderAction) {
         await logActivity(tx as unknown as Db, {
           companyId: issue.companyId,

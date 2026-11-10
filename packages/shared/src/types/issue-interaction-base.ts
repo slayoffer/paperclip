@@ -1,5 +1,9 @@
 import type { IssueThreadInteractionContinuationPolicy, IssueThreadInteractionCanonicalResolverPolicy, IssueThreadInteractionEffectiveResolverPolicySource, IssueThreadInteractionKind, IssueThreadInteractionLegacyResolverPolicyAlias, IssueThreadInteractionResolverPolicyProvenance, IssueThreadInteractionStatus } from "../constants.js";
 
+export type ResolutionVia =
+  | { resolvedVia: "board_api_key"; resolvedViaKeyId: string }
+  | { resolvedVia: "user_session" | "agent_key" | "chat_channel" | "system"; resolvedViaKeyId: null };
+
 export interface IssueThreadInteractionActorFields {
   createdByAgentId?: string | null;
   createdByUserId?: string | null;
@@ -7,7 +11,8 @@ export interface IssueThreadInteractionActorFields {
   resolvedByRunId?: string | null;
   resolvedByUserId?: string | null;
   /** Server-authenticated resolution channel. Null means unknown. */
-  readonly resolvedVia?: "user_session" | "board_api_key" | "agent_key" | null;
+  readonly resolvedVia?: ResolutionVia["resolvedVia"] | null;
+  readonly resolvedViaKeyId?: string | null;
 }
 
 export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {

@@ -45,7 +45,7 @@ describe("authenticated interaction resolution channel", () => {
     }).returning();
     const actor: express.Request["actor"] = source === "agent_key"
       ? { type: "agent", source, agentId: agent.id, companyId, runId: run.id }
-      : { type: "board", source, userId: "same-user", companyIds: [companyId], isInstanceAdmin: true };
+      : { type: "board", source, keyId: randomUUID(), userId: "same-user", companyIds: [companyId], isInstanceAdmin: true };
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { req.actor = actor; next(); });
@@ -98,7 +98,7 @@ describe("authenticated interaction resolution channel", () => {
   });
 
   it.each([["session", "user_session"], ["board_key", "board_api_key"]] as const)(
-    "retains %s provenance through a deferred /new and its retry", async (source, expected) => {
+    "leaves deferred %s /new provenance unknown", async (source) => {
       const f = await fixture(source);
       try {
         await instanceSettingsService(db).updateExperimental({ enableAgentChat: true });
@@ -112,13 +112,11 @@ describe("authenticated interaction resolution channel", () => {
         const retry = await request(f.server).post(`/api/issues/${f.issue.id}/comments`).send(body);
         expect(retry.status).toBe(201);
         expect(retry.body.id).toBe(response.body.id);
-        await expect(db.execute(sql`UPDATE issue_comments SET author_auth_source = 'agent_key' WHERE id = ${response.body.id}`))
-          .rejects.toThrow();
         const run = { ...f.run, contextSnapshot: { issueId: f.issue.id, wakeCommentId: response.body.id } };
         await prepareConversationTurn(db, run);
         const [saved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
         expect(saved.status).toBe("expired");
-        expect(saved.resolvedVia).toBe(expected);
+        expect(saved.resolvedVia).toBeNull();
         expect(saved.resolvedByUserId).toBe("same-user");
         expect(response.body).not.toHaveProperty("authorAuthSource");
         expect(retry.body).not.toHaveProperty("authorAuthSource");
@@ -177,8 +175,9 @@ describe("authenticated interaction resolution channel", () => {
       expect(read.body.resolvedVia).toBe("board_api_key");
       await db.update(issueThreadInteractions).set({ status: "pending", resolvedAt: null })
         .where(eq(issueThreadInteractions.id, card.id));
-      await expect(db.execute(sql`UPDATE issue_thread_interactions SET resolved_via = 'user_session' WHERE id = ${card.id}`))
-        .rejects.toThrow();
+      await db.execute(sql`UPDATE issue_thread_interactions SET resolved_via = 'user_session' WHERE id = ${card.id}`);
+      const [pending] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(pending).toMatchObject({ resolvedAt: null, resolvedVia: null, resolvedViaKeyId: null });
     } finally { await f.close(); }
   });
 
@@ -223,7 +222,7 @@ describe("authenticated interaction resolution channel", () => {
       const result = await service.createHold(f.issue.companyId, f.issue.id, {
         mode: "cancel", actor: { actorType: "user", actorId: "same-user", userId: "same-user" },
       });
-      await service.cancelIssueStatusesForHold(f.issue.companyId, f.issue.id, result.hold.id, "board_api_key");
+      await service.cancelIssueStatusesForHold(f.issue.companyId, f.issue.id, result.hold.id, { resolvedVia: "board_api_key", resolvedViaKeyId: f.actor.keyId! });
       const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
       expect(stored).toMatchObject({ status: "expired", resolvedVia: "board_api_key" });
     } finally { await f.close(); }
@@ -234,7 +233,7 @@ describe("authenticated interaction resolution channel", () => {
     try {
       const interaction = await f.card();
       const service = statusCardService(db);
-      const actor = { agentId: null, userId: "same-user", resolvedVia: "board_api_key" as const };
+      const actor = { agentId: null, userId: "same-user", via: { resolvedVia: "board_api_key" as const, resolvedViaKeyId: f.actor.keyId! } };
       const card = await service.create(f.issue.companyId, {
         interestPrompt: "Watch this task", titlePinned: false, refreshPolicy: defaultStatusCardRefreshPolicy,
       }, actor);
@@ -261,7 +260,7 @@ describe("authenticated interaction resolution channel", () => {
     } finally { await f.close(); }
   });
 
-  it("preserves a callback resolution concurrent with an authorization retry", async () => {
+  it("clears provenance when an authorization retry reopens the same card", async () => {
     const f = await fixture("board_key");
     const values = {
       companyId: f.issue.companyId, issueId: f.issue.id, kind: "request_confirmation" as const,
@@ -297,10 +296,10 @@ describe("authenticated interaction resolution channel", () => {
     try {
       await callback;
       const next = await retry;
-      expect(next.id).not.toBe(card.id);
+      expect(next.id).toBe(card.id);
       expect(next).toMatchObject({ status: "pending", resolvedVia: null });
       const [original] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
-      expect(original).toMatchObject({ status: "accepted", resolvedVia: "user_session" });
+      expect(original).toMatchObject({ status: "pending", resolvedVia: null, resolvedViaKeyId: null });
     } finally { await f.close(); }
   });
 
@@ -331,6 +330,7 @@ describe("authenticated interaction resolution channel", () => {
       expect(result.body.resolvedVia).toBe("board_api_key");
       const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
       expect(stored.resolvedVia).toBe("board_api_key");
+      expect(stored.resolvedViaKeyId).toBe(f.actor.keyId);
       f.actor.source = "session";
       const retry = await request(f.server).post(endpoint).send(body);
       expect(retry.status, JSON.stringify(retry.body)).toBe(200);

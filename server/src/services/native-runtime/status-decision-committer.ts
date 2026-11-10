@@ -1,4 +1,5 @@
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
+import { SYSTEM_RESOLUTION_VIA } from "../interaction-resolution-attribution.js";
 import { readNativeMonitorDelivery, type NativeMonitorDelivery } from "./native-monitor-delivery.js";
 import { readNativePlanWait, type NativePlanWaitSource } from "./native-plan-wait.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
@@ -577,7 +578,7 @@ async function materializeDecisionEffect(input: {
           ],
         },
       },
-      { systemId: "native-status-committer", runId: input.runId },
+      { systemId: "native-status-committer", runId: input.runId, via: SYSTEM_RESOLUTION_VIA },
     );
     return {
       effectKind: effect.kind,
@@ -625,10 +626,9 @@ async function materializeDecisionEffect(input: {
     const interaction = await issueThreadInteractionService(input.tx).create(
       input.issue,
       reviewInput,
-      { systemId: "native-status-committer", runId: input.runId },
+      { systemId: "native-status-committer", runId: input.runId, via: SYSTEM_RESOLUTION_VIA },
     );
-    // The card and its next actor commit together. The post-commit dispatcher
-    // revalidates this exact review before granting a scoped reviewer run.
+    // Commit card and reviewer together; revalidate the review before dispatch.
     const reviewContext = {
       nativeReviewInteractionId: interaction.id,
       nativeReviewDecisionId: input.decisionId,
@@ -888,7 +888,7 @@ async function materializeDecisionEffect(input: {
     if (!input.issue.assigneeAgentId)
       throw new Error("native_recovery_owner_missing");
     const interaction = await input.tx
-      .select({ id: issueThreadInteractions.id })
+      .select({ id: issueThreadInteractions.id, resolvedAt: issueThreadInteractions.resolvedAt })
       .from(issueThreadInteractions)
       .where(
         and(
@@ -905,6 +905,7 @@ async function materializeDecisionEffect(input: {
       .update(issueThreadInteractions)
       .set({
         status: "expired",
+        ...(interaction.resolvedAt === null ? SYSTEM_RESOLUTION_VIA : {}),
         resolvedAt: new Date(),
         updatedAt: new Date(),
       })
@@ -1047,6 +1048,7 @@ async function materializeDecisionEffect(input: {
         .update(issueThreadInteractions)
         .set({
           status: "cancelled",
+          ...SYSTEM_RESOLUTION_VIA,
           resolvedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -1162,10 +1164,7 @@ async function materializeDecisionEffect(input: {
     if (!assessment?.supersedesAssessmentId) {
       throw new Error("native_superseding_assessment_not_linked");
     }
-    // Status decisions form one issue-wide sequence and may supersede a
-    // decision from another run. Work-assessment lineage is deliberately
-    // run-local, so retain the parent recorded when this reassessment was
-    // created instead of replacing it with the prior decision's assessment.
+    // Decisions span runs; assessment lineage is run-local. Retain its saved parent.
     const [decision] = await input.tx
       .update(statusDecisions)
       .set({
@@ -1613,8 +1612,7 @@ export async function commitNativeStatusDecision(input: {
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!issue) throw new NativeStatusRaceError();
-    // A completed model turn cannot close a persistent conversation. Preserve
-    // the task here; the response finalizer records its durable waiting state.
+    // Preserve persistent conversations; their response finalizer records waiting.
     if (issue.conversationAgentId && input.decision.statusAction === "done") {
       input = { ...input, decision: { ...input.decision, statusAction: "preserve", toStatus: issue.status as NativeStatusDecision["toStatus"], effects: [] } };
     }
@@ -1781,8 +1779,7 @@ export async function commitNativeStatusDecision(input: {
     let boardResponseWait: Awaited<
       ReturnType<typeof readNativeBoardResponseWaitSource>
     > = null;
-    // Corrective continuations also carry this precondition. Revalidate it
-    // under the same locks before any decision effects can restart old work.
+    // Revalidate continuation preconditions under the locks before restarting work.
     if (reasonCode === "board_response_waiting" || input.requireBoardResponseWaitSource) {
       const expected = input.requireBoardResponseWaitSource;
       if (

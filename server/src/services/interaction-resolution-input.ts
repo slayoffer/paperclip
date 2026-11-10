@@ -4,7 +4,7 @@ import { unprocessable } from "../errors.js";
 import { type IssueThreadInteractionResolverRestriction } from "./issue-thread-interaction-resolution.js";
 
 export type InteractionActor = {
-  resolvedVia?: import("@paperclipai/shared").IssueThreadInteractionBase["resolvedVia"];
+  via: import("@paperclipai/shared").ResolutionVia | null;
   identityContextId?: string | null;
   agentId?: string | null;
   runId?: string | null;

@@ -952,11 +952,8 @@ export function runtimeQuestionFallbackFromEvent(
 }
 
 /**
- * Materialize the durable replacement for a non-replayable runtime question.
- *
- * The interaction service enforces the fallback's stable idempotency key, so
- * this is safe both immediately after the event commit and while recovering an
- * exact duplicate whose original post-commit callback did not finish.
+ * Materialize a non-replayable question's replacement. Its stable idempotency key
+ * permits recovery when the original post-commit callback did not finish.
  */
 export async function materializeRuntimeQuestionFallback(input: {
   db: Db;
@@ -983,6 +980,7 @@ export async function materializeRuntimeQuestionFallback(input: {
       agentId: input.binding.agentId,
       runId: input.binding.runId,
       systemId: "native-runtime-question-handoff",
+      via: { resolvedVia: "system", resolvedViaKeyId: null },
     },
   );
   return { fallback, interaction };
@@ -1593,6 +1591,7 @@ export async function synchronizeCompletedProviderPlan(input: {
       {
         agentId: input.execution.binding.agentId,
         runId: input.execution.binding.runId,
+        via: null,
       },
     );
     confirmationId = confirmation.id;

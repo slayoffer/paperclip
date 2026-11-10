@@ -11,6 +11,13 @@ type ReadPath = {
   responses: Record<string, Record<string, unknown>>;
 };
 
+const interactionEvidence = z.object({
+  resolvedVia: z.enum(["user_session", "board_api_key", "agent_key", "chat_channel", "system"])
+    .nullable().describe("Server-recorded resolution channel. Null means unknown and is never human proof."),
+  resolvedViaKeyId: z.string().uuid().nullable()
+    .describe("Authenticated board API key ID, present only for board_api_key. Never a key value."),
+}).passthrough();
+
 const issueReads = [
   "/api/issues/{id}/interactions",
   "/api/issues/{id}/interactions/{interactionId}",
@@ -27,7 +34,9 @@ const issueReads = [
     ...(path.endsWith("{interactionId}") ? { interactionId: z.string() } : {}),
   }) },
   responses: {
-    200: { description: "Saved interaction evidence", content: { "application/json": { schema: {} } } },
+    200: { description: "Saved interaction evidence", content: { "application/json": {
+      schema: path.endsWith("{interactionId}") ? interactionEvidence : z.array(interactionEvidence),
+    } } },
     401: { description: "Authentication required" },
     403: { description: "Issue access denied" },
     404: { description: "Issue or interaction not found" },
@@ -47,7 +56,9 @@ export const issueInteractionReadApiPaths: ReadPath[] = [
       query: listCompanyInteractionsQuerySchema,
     },
     responses: {
-      200: { description: "Interaction page with issue identifiers", content: { "application/json": { schema: {} } } },
+      200: { description: "Interaction page with issue identifiers", content: { "application/json": {
+        schema: z.object({ items: z.array(interactionEvidence), nextCursor: z.string().nullable() }),
+      } } },
       400: { description: "Invalid query" },
       401: { description: "Authentication required" },
       403: { description: "Company access denied" },

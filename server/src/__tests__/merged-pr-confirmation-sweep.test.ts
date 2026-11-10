@@ -283,7 +283,9 @@ describeEmbeddedPostgres("merged pull-request confirmation sweep", () => {
     });
 
     const stored = await db
-      .select({ id: issueThreadInteractions.id, status: issueThreadInteractions.status })
+      .select({ id: issueThreadInteractions.id, status: issueThreadInteractions.status,
+        resolvedVia: issueThreadInteractions.resolvedVia, resolvedViaKeyId: issueThreadInteractions.resolvedViaKeyId,
+        resolvedByUserId: issueThreadInteractions.resolvedByUserId, resolvedByAgentId: issueThreadInteractions.resolvedByAgentId })
       .from(issueThreadInteractions)
       .where(inArray(issueThreadInteractions.id, Object.values(interactionIds)));
     expect(new Map(stored.map((row) => [row.id, row.status]))).toEqual(new Map([
@@ -294,6 +296,10 @@ describeEmbeddedPostgres("merged pull-request confirmation sweep", () => {
       [interactionIds.toolAction, "pending"],
       [interactionIds.extraAction, "pending"],
     ]));
+    for (const row of stored) expect(row).toMatchObject({
+      resolvedVia: row.status === "accepted" ? "system" : null,
+      resolvedViaKeyId: null, resolvedByUserId: null, resolvedByAgentId: null,
+    });
     expect(wakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
       requestedByActorType: "system",
       requestedByActorId: "system:pr-merged",

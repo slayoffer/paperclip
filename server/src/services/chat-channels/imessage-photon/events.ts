@@ -1,4 +1,5 @@
 import type { EndpointRow, DbTransaction, RuntimeContext, LifecycleRuntimeFence } from "../../chat-channels/runtime-types.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { notifyChatPublicationWork } from "../../chat-work-notifications.js";
 
@@ -460,8 +461,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
           return true;
         }
         await validateNativeQuestionResponseInput(interaction, { answers });
-        // Canonical service rechecks required fields, options, audience, and
-        // pending -> answered atomically with the response-delivery receipt.
+        // The service validates the answer and atomically saves its delivery receipt.
         const issue = await db
           .select()
           .from(issues)
@@ -473,13 +473,11 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
           )
           .then((rows) => rows[0]);
         if (!issue) return true;
-        const answered = await issueThreadInteractionService(
-          db,
-        ).answerQuestions(
+        const answered = await issueThreadInteractionService(db).answerQuestions(
           issue,
           interaction.id,
           { answers },
-          { userId: principal.userId },
+          { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
           {
             beforeResolveInTransaction: async (tx) => {
               await requireCurrentExternalActionAuthorization(tx, {
@@ -669,7 +667,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
             issue,
             interaction.id,
             {},
-            { userId: principal.userId },
+            { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
             mutation,
           );
         else
@@ -677,7 +675,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
             issue,
             interaction.id,
             { reason },
-            { userId: principal.userId },
+            { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
             mutation,
           );
         scheduleMessageProcessing(async () => {
@@ -754,8 +752,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
           ).kind !== "owned"
         )
           throw new Error("Photon receiver lease was replaced");
-        // Removal can be the first retained event after activation. Preserve a
-        // tombstone even when the group has never been discovered locally.
+        // Retain removal tombstones even for groups not yet discovered locally.
         await tx
           .insert(chatEndpointResources)
           .values({
@@ -787,8 +784,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
     const groupIdentity = photonThreadId({ lineId: adapter.authentication.identity.lineId, chatGuid: event.chatGuid, isGroup: true });
     const removedGroup = await db.select({ metadata: chatEndpointResources.metadata }).from(chatEndpointResources).where(and(eq(chatEndpointResources.companyId, record.endpoint.companyId), eq(chatEndpointResources.endpointId, endpointId), eq(chatEndpointResources.providerResourceId, groupIdentity))).limit(1).then((rows) => rows[0]);
     const readded = event.type === "group.changed" && event.change.type === "participantAdded" && event.change.participant.address === record.endpoint.botExternalId;
-    // Late events from a removed chat must still advance recovery without a
-    // now-forbidden chat lookup holding every other conversation behind them.
+    // Skip forbidden removed-chat lookups so late events do not block recovery.
     if (removedGroup?.metadata.photonRemoved === true && !readded) return;
     const chat = await adapter.client.chats
       .get(event.chatGuid)

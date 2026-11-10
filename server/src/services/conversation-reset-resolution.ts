@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { issueComments, issueThreadInteractions, type Db } from "@paperclipai/db";
 
-/** Run inside the reset transaction. Only the saved command supplies provenance. */
+/** A saved command identifies its author, not the authenticated resolution channel. */
 export function expireConversationQuestions(
   db: Db,
   issue: { id: string; companyId: string },
@@ -10,7 +10,7 @@ export function expireConversationQuestions(
   return db.update(issueThreadInteractions).set({
     status: "expired", resolvedAt: new Date(), updatedAt: new Date(),
     resolvedByUserId: comment.authorUserId,
-    resolvedVia: comment.authorAuthSource ?? null,
+    resolvedVia: null, resolvedViaKeyId: null,
     result: { version: 1, outcome: "withdrawn", reason: "New conversation session", answers: [], summaryMarkdown: null },
   }).where(and(eq(issueThreadInteractions.companyId, issue.companyId),
     eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"),

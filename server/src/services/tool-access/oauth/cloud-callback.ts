@@ -1,4 +1,3 @@
-import { oauthResolutionAttribution } from "./resolution-attribution.js";
 import { managedConnectorProfile } from "./client-settings.js";
 import type { ActorInfo } from "../types.js";
 import { oauthConfig, normalizeOauthScopes } from "./metadata.js";
@@ -422,7 +421,7 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
             status: "accepted",
             result: { version: 1, outcome: "accepted" },
             resolvedByUserId: authorizingUserId,
-            ...oauthResolutionAttribution(input.actor),
+            // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
             resolvedAt: now(),
             updatedAt: now(),
           })

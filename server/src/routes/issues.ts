@@ -1,4 +1,4 @@
-import { interactionResolutionActor, interactionResolvedVia, interactionIssueUpdateActor } from "./interaction-resolution-actor.js";
+import { interactionResolutionActor, resolutionViaFromActor, interactionIssueUpdateActor } from "./interaction-resolution-actor.js";
 import type { InteractionActor } from "../services/interaction-resolution-input.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
@@ -12239,12 +12239,7 @@ export function issueRoutes(
           );
         }
 
-        // Seed the opening question card right after the greeting so the first
-        // task is not open-ended: "Interview me and propose a plan and an agent
-        // team" or "I have a task in mind" (free text). Posted as the assignee,
-        // deterministic (no LLM), and best-effort like the greeting. Answering
-        // the card wakes the assignee through the normal question-response path;
-        // typing a message instead supersedes the card and wakes on the comment.
+        // Seed the opening question as the assignee. An answer or comment wakes it.
         try {
           await issueThreadInteractionService(db).create(
             issue,
@@ -12254,7 +12249,7 @@ export function issueRoutes(
               continuationPolicy: "wake_assignee",
               payload: await buildOnboardingFirstTaskOpeningQuestion(),
             },
-            { agentId: issue.assigneeAgentId },
+            { agentId: issue.assigneeAgentId, via: null },
           );
         } catch (err) {
           logger.warn(
@@ -13957,7 +13952,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
-        actorResolvedVia: interactionResolvedVia(req.actor),
+        actorResolvedVia: resolutionViaFromActor(req.actor),
         workspaceSelectionActor: req.actor,
         expectedExecutionPolicy,
         expectedStatusVersion,
@@ -14162,7 +14157,7 @@ export function issueRoutes(
                     actor.actorType === "user" ? actor.actorId : undefined,
                   runId: actor.runId,
                   onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-                  resolvedVia: interactionResolvedVia(req.actor),
+                  via: resolutionViaFromActor(req.actor),
                 },
                 {
                   attachmentIds: commentAttachmentIds,
@@ -14776,7 +14771,7 @@ export function issueRoutes(
             userId: actor.actorType === "user" ? actor.actorId : undefined,
             runId: actor.runId,
             onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-            resolvedVia: interactionResolvedVia(req.actor),
+            via: resolutionViaFromActor(req.actor),
           },
           {
             authorizationReason: issueMutationAuthorizationReason,
@@ -16307,6 +16302,7 @@ export function issueRoutes(
           identityContextId: req.actor.identityContextId,
           agentId: actor.agentId,
           userId: actor.actorType === "user" ? actor.actorId : null,
+          via: resolutionViaFromActor(req.actor),
         },
       );
 
@@ -17033,7 +17029,7 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const interaction = await issueThreadInteractionService(db).dismissInteraction(
         issue, req.params.interactionId as string,
-        { userId: actor.actorType === "user" ? actor.actorId : null },
+        { userId: actor.actorType === "user" ? actor.actorId : null, via: resolutionViaFromActor(req.actor) },
       );
       await logActivity(db, {
         companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
@@ -17617,7 +17613,7 @@ export function issueRoutes(
             eq(issueComments.issueId, issue.id), eq(issueComments.authorUserId, userId),
             eq(issueComments.clientRequestId, req.body.clientRequestId),
           ));
-          const saved = await svc.addComment(issue.id, req.body.body, { userId, resolvedVia: interactionResolvedVia(req.actor) }, {
+          const saved = await svc.addComment(issue.id, req.body.body, { userId, via: resolutionViaFromActor(req.actor) }, {
             clientRequestId: req.body.clientRequestId, authorType: "user", attachmentIds: req.body.attachmentIds,
           }, tx);
           if (!existing) await logActivity(tx as unknown as Db, {
@@ -17994,7 +17990,7 @@ export function issueRoutes(
         issueBeforeCommentDecision = currentIssue;
         const updatePatch = {
           ...transition.patch,
-          actorResolvedVia: interactionResolvedVia(req.actor),
+          actorResolvedVia: resolutionViaFromActor(req.actor),
           status:
             typeof transition.patch.status === "string"
               ? transition.patch.status
@@ -18031,7 +18027,7 @@ export function issueRoutes(
                 userId: actor.actorType === "user" ? actor.actorId : undefined,
                 runId: actor.runId,
                 onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-                resolvedVia: interactionResolvedVia(req.actor),
+                via: resolutionViaFromActor(req.actor),
               },
               {
                 ...commentOptions,
@@ -18139,7 +18135,7 @@ export function issueRoutes(
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
               onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-              resolvedVia: interactionResolvedVia(req.actor),
+              via: resolutionViaFromActor(req.actor),
             },
             commentOptions,
             dbOrTx,

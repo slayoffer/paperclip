@@ -3,8 +3,8 @@ import { connectionIntentOAuthFinisher } from "../routes/connection-intent-oauth
 
 describe("OAuth connection-intent resolution attribution", () => {
   it.each([["session", "user_session"], ["board_key", "board_api_key"]] as const)(
-    "forwards the authenticated %s channel", async (source, resolvedVia) => {
-      const complete = vi.fn().mockResolvedValue({ status: "accepted", resolvedVia });
+    "leaves provider callback provenance unknown for %s", async (source) => {
+      const complete = vi.fn().mockResolvedValue({ status: "accepted", resolvedVia: null });
       const updatePhase = vi.fn();
       const deliver = vi.fn();
       const finish = connectionIntentOAuthFinisher({
@@ -17,9 +17,9 @@ describe("OAuth connection-intent resolution attribution", () => {
         canManageOrganizationGrant: false, bypassCurrentMembershipCheck: false,
       });
       expect(complete).toHaveBeenCalledWith("card", "connection", "user", {
-        canManageOrganizationGrant: false, bypassCurrentMembershipCheck: false, resolvedVia,
+        canManageOrganizationGrant: false, bypassCurrentMembershipCheck: false, via: null,
       });
-      expect(result.resolvedVia).toBe(resolvedVia);
+      expect(result.resolvedVia).toBeNull();
       expect(updatePhase).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledWith("card");
     },

@@ -6,50 +6,23 @@ import path from "node:path";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agentWakeupRequests,
-  agents,
-  approvals,
-  chatActions,
-  chatConversations,
-  chatDeliveries,
-  chatEndpointResources,
-  chatEndpoints,
-  chatExternalPrincipals,
-  chatGitHubConfigurations,
-  chatIdentityLinks,
-  chatMessageLinks,
-  chatPublications,
-  companies,
-  companyMemberships,
-  completionContracts,
-  closeRegisteredClients,
-  createDb,
-  heartbeatRuns,
-  issueComments,
-  issueAttachments,
-  issueApprovals,
-  issueThreadInteractions,
-  issueQuestionResponseDeliveries,
-  issues,
-  nativeRunFinalizations,
-  nativeRunResults,
-  statusDecisions,
-  toolApplications,
-  toolConnections,
-  chatVoiceSessions, chatVoiceReplies, chatVoiceToolCalls,
-  workspaceOperations,
+  agentWakeupRequests, agents, approvals, chatActions, chatConversations, chatDeliveries,
+  chatEndpointResources, chatEndpoints, chatExternalPrincipals, chatGitHubConfigurations,
+  chatIdentityLinks, chatMessageLinks, chatPublications, companies, companyMemberships,
+  completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issueComments,
+  issueAttachments, issueApprovals, issueThreadInteractions, issueQuestionResponseDeliveries,
+  issues, nativeRunFinalizations, nativeRunResults, statusDecisions, toolApplications,
+  toolConnections, chatVoiceSessions, chatVoiceReplies, chatVoiceToolCalls, workspaceOperations,
 } from "@paperclipai/db";
 import type {
-  PrpStructuredRunResult,
-  PrpTerminalState,
+  PrpStructuredRunResult, PrpTerminalState,
 } from "../../vendor/paperclip-runner/index.js";
 
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { finalizeNativeRun } from "./native-run-finalizer.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import {
-  authorizeNativeChatReviewPresentation,
-  hasMaterializedNativeReviewResponse,
+  authorizeNativeChatReviewPresentation, hasMaterializedNativeReviewResponse,
 } from "./native-chat-review-presentation.js";
 import * as nativeChatReviewPresentation from "./native-chat-review-presentation.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
@@ -58,8 +31,7 @@ import { issueService } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { reconcileNativeFinalizations } from "./native-finalization-reconciler.js";
 import {
-  authorizeChatConversationForBoundRun,
-  isExternalChatWaitAuthorizationContention,
+  authorizeChatConversationForBoundRun, isExternalChatWaitAuthorizationContention,
   resolveExternalChatResponseWaitAuthorization,
 } from "./chat-attachment-reuse.js";
 import { attestReviewedExternalChatRun, buildPaperclipWakePayload } from "../heartbeat.js";
@@ -759,7 +731,7 @@ describe("native external-chat response wait", () => {
             ],
           },
         },
-        { agentId: fixture.agentId, runId: sourceRunId },
+        { via: null, agentId: fixture.agentId, runId: sourceRunId },
       );
     } finally {
       if (previousPublicUrl === undefined)
@@ -781,7 +753,7 @@ describe("native external-chat response wait", () => {
       { id: fixture.issueId, companyId: fixture.companyId },
       interaction.id,
       { answers: [{ questionId: "color", optionIds: ["cobalt"] }] },
-      { userId: fixture.userId },
+      { via: null, userId: fixture.userId },
     );
     const [delivery] = await db
       .update(issueQuestionResponseDeliveries)

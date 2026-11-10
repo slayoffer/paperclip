@@ -1,4 +1,3 @@
-import { oauthResolutionAttribution } from "./resolution-attribution.js";
 import { credentialScope } from "./client-settings.js";
 import { withoutOAuthRefreshLease } from "./refresh-leases.js";
 import type { ActorInfo } from "../types.js";
@@ -379,7 +378,7 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
               status: "accepted",
               result: { version: 1, outcome: "accepted" },
               resolvedByUserId: stateRow.subjectUserId!,
-              ...oauthResolutionAttribution(input.actor),
+              // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
               resolvedAt: new Date(),
               updatedAt: new Date(),
             })

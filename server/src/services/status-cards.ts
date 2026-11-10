@@ -42,7 +42,7 @@ import {
   type StatusCardFingerprint,
 } from "./status-card-update-engine.js";
 
-type StatusCardActor = { agentId: string | null; userId: string | null; resolvedVia?: InteractionActor["resolvedVia"] };
+type StatusCardActor = { agentId: string | null; userId: string | null; via?: InteractionActor["via"] };
 type StatusCardWriter = { agentId: string | null; runId: string | null };
 type StatusCardRow = typeof statusCards.$inferSelect;
 type StatusCardReadOptions = { issueReadCondition?: SQL<boolean> };
@@ -317,7 +317,7 @@ export function statusCardService(
     if (archiveChanged && input.archived && card.generatingIssueId) {
       const generationIssue = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       if (generationIssue && !TERMINAL_ISSUE_STATUSES.has(generationIssue.status)) {
-        await issuesSvc.update(generationIssue.id, { status: "cancelled", actorResolvedVia: actor.resolvedVia });
+        await issuesSvc.update(generationIssue.id, { status: "cancelled", actorResolvedVia: actor.via });
       }
     }
     return next;
@@ -739,12 +739,12 @@ export function statusCardService(
       const winner = await getById(card.id);
       if (!winner?.generatingIssueId) {
         if (!TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-          await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.resolvedVia });
+          await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.via });
         }
         throw conflict("Status-card refresh claim was lost");
       }
       if (generationIssue!.id !== winner.generatingIssueId && !TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-        await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.resolvedVia });
+        await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.via });
       }
       const winnerIssue = await db.select().from(issues).where(eq(issues.id, winner.generatingIssueId)).then((rows) => rows[0] ?? null);
       return { card: winner, generatingIssue: winnerIssue, alreadyGenerating: true, enqueued: false, kind, changes };

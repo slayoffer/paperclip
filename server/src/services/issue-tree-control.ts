@@ -862,7 +862,7 @@ export function issueTreeControlService(db: Db) {
     companyId: string,
     rootIssueId: string,
     holdId: string,
-    resolvedVia?: InteractionActor["resolvedVia"],
+    via?: InteractionActor["via"],
   ): Promise<TreeStatusUpdateResult> {
     const hold = await getHold(companyId, holdId);
     if (!hold) throw notFound("Issue tree hold not found");
@@ -892,7 +892,7 @@ export function issueTreeControlService(db: Db) {
         const updatedIssue = await svc.update(issue.id, {
           status: "cancelled", cancelledAt: now,
           actorAgentId: hold.createdByAgentId, actorUserId: hold.createdByUserId,
-          actorResolvedVia: resolvedVia,
+          actorResolvedVia: via,
         }, tx, undefined, postCommitIssueActions);
         if (updatedIssue) rows.push(updatedIssue);
       }

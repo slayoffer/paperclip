@@ -1,4 +1,5 @@
 import { createDiscordQuestionForms } from "../discord/question-forms.js";
+import { CHAT_RESOLUTION_VIA } from "../../interaction-resolution-attribution.js";
 
 import { createProviderEffects, type ProviderEffectPayload } from "../provider-effects.js";
 import { createTelegramCallbackNoticeAuthority } from "../telegram/callback-notices.js";
@@ -1203,7 +1204,7 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
         {
           answers: [{ questionId: question.id, optionIds: [option.id] }],
         },
-        { userId: principal.userId },
+        { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
         {
           beforeResolveInTransaction: async (tx) => {
             await requireCurrentExternalActionAuthorization(tx, {
@@ -1328,12 +1329,8 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
       if (isExternalActionAuthorizationChange(error)) {
         return deny(safelyKnown);
       }
-      // `answerQuestions` commits the interaction and this action in one
-      // transaction, then performs a best-effort issue timestamp touch. If
-      // that post-commit touch fails, the provider callback is nevertheless
-      // durably complete. Do not corrupt the processed token to `failed` or
-      // return a retryable webhook response that turns Telegram's redelivery
-      // into a misleading stale-action notice.
+      // Interaction and token commit together before the issue timestamp touch.
+      // A failed touch must not mark a committed token failed or request redelivery.
       try {
         const raceResult = await db.transaction(async (tx) => {
           const currentAction = await tx
@@ -1837,7 +1834,7 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
         issue,
         interaction.id,
         { answers: validation.answers },
-        { userId: principal.userId },
+        { userId: principal.userId, via: CHAT_RESOLUTION_VIA },
         {
           beforeResolveInTransaction: async (tx) => {
             await requireCurrentExternalActionAuthorization(tx, {

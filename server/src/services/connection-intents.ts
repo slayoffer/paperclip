@@ -944,7 +944,7 @@ export function connectionIntentService(db: Db) {
     interactionId: string, connectionId: string, userId: string,
     options: {
       canManageOrganizationGrant?: boolean;
-      resolvedVia?: ConnectionIntentInteraction["resolvedVia"];
+      via?: import("@paperclipai/shared").ResolutionVia | null;
       bypassCurrentMembershipCheck?: boolean;
       validatedAdoption?: { agentUpdatedAt: Date; binding: AiConnectionBinding };
     } = {},
@@ -1008,7 +1008,7 @@ export function connectionIntentService(db: Db) {
         return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, {
           version: 1, outcome: "connected", connectionId: selectedConnection.id,
           instruction: "Your AgentMail inbox is ready. Use agentmail_inboxes to read its verified address and continue the user's request.",
-        }, { userId, resolvedVia: options.resolvedVia });
+        }, { userId, via: options.via ?? null });
       }
       if (selectedConnection.connectionPurpose === "channel") throw conflict("An email inbox cannot satisfy a tool connection request");
       if (payload.purpose === "ai" && selectedConnection.connectionPurpose !== "ai") throw conflict("Select an AI account for this authentication request");
@@ -1048,7 +1048,7 @@ export function connectionIntentService(db: Db) {
         }
         const selected = await service.select({ companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, userId, adapterType: managed.agent.adapterType, model: managed.adapterConfig.model, runnerProvider: managed.adapterConfig.provider, acpxAgent: managed.adapterConfig.acpxAgent, binding: managed.binding });
         if (selected.connection.id !== selectedConnection.id) throw conflict("This is not the account selected for the agent");
-        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId, resolvedVia: options.resolvedVia });
+        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId, via: options.via ?? null });
       }
 
       let { grants } = await txAccess.listConnectionGrants(
@@ -1137,14 +1137,14 @@ export function connectionIntentService(db: Db) {
         { version: 1, outcome: "connected", connectionId: selectedConnection.id,
           ...(isRemoteMcpConnectorId(payload.serviceSlug) ? { instruction: aggregatorContinuationInstruction(payload.serviceSlug, payload.upstreamService?.name ?? "The requested app") } : {}),
         },
-        { userId, resolvedVia: options.resolvedVia },
+        { userId, via: options.via ?? null },
       );
     });
   }
 
   async function decline(
     interactionId: string, userId: string, reason?: string,
-    options: { bypassCurrentMembershipCheck?: boolean; resolvedVia?: ConnectionIntentInteraction["resolvedVia"] } = {},
+    options: { bypassCurrentMembershipCheck?: boolean; via?: import("@paperclipai/shared").ResolutionVia | null } = {},
   ) {
     const loaded = await loadIntent(interactionId);
     if (loaded.interaction.addresseeUserId !== userId) throw forbidden("Only the addressed user can decline this request");
@@ -1153,7 +1153,7 @@ export function connectionIntentService(db: Db) {
       loaded.issue,
       interactionId,
       { version: 1, outcome: "declined", reason: reason?.trim() || null },
-      { userId, resolvedVia: options.resolvedVia },
+      { userId, via: options.via ?? null },
     );
   }
 
@@ -1206,7 +1206,7 @@ export function connectionIntentService(db: Db) {
         userId,
         options.bypassCurrentMembershipCheck,
       );
-      return interactions.updateConnectionIntentPhase(loaded.issue, interactionId, phase, { userId });
+      return interactions.updateConnectionIntentPhase(loaded.issue, interactionId, phase, { userId, via: null });
     },
   };
 }

@@ -1,4 +1,4 @@
-import { interactionResolvedVia } from "./interaction-resolution-attribution.js";
+import { resolutionViaFromActor } from "./interaction-resolution-attribution.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -314,7 +314,7 @@ export function caseHandoffService(db: Db) {
     const comment = await issueService(tx).addComment(issue.id, `Case completion requested\n\n${input.instructions}`, {
       agentId: actor.type === "agent" ? actor.agentId! : undefined,
       userId: actor.type === "board" ? actor.userId ?? undefined : undefined, runId: source?.id,
-      resolvedVia: interactionResolvedVia(actor),
+      via: resolutionViaFromActor(actor),
     }, { sourceTrust: trust ?? undefined }, tx);
     const version = caseRow.handoffVersion + 1;
     const workflow = await captureCaseWorkflow(tx, companyId, caseRow, issue.id, "done");
@@ -506,7 +506,7 @@ export function caseHandoffService(db: Db) {
         if (trust) throw forbidden("Low-trust work must use its governed review path before handing off");
         const comment = await issueService(tx).addComment(issue.id, `Handoff to ${input.phase}\n\n${input.instructions}`, {
           agentId: actor.type === "agent" ? actor.agentId! : undefined, userId: actor.type === "board" ? actor.userId ?? undefined : undefined, runId: source?.id,
-          resolvedVia: interactionResolvedVia(actor),
+          via: resolutionViaFromActor(actor),
         }, { sourceTrust: trust ?? undefined }, tx);
         const sourceRunId = issue.executionRunId ?? issue.checkoutRunId;
         const workflow = await captureCaseWorkflow(tx, companyId, caseRow!, issue.id, input.phase, input.workflowId);

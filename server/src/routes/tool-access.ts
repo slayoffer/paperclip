@@ -1,4 +1,4 @@
-import { interactionResolvedVia } from "./interaction-resolution-actor.js";
+import { resolutionViaFromActor } from "./interaction-resolution-actor.js";
 import { connectionIntentOAuthFinisher } from "./connection-intent-oauth-resolution.js";
 import { isCrossSiteOAuthCallbackNavigation, oauthCallbackInterstitialHtml } from "../lib/oauth-browser-return.js";
 import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
@@ -1123,7 +1123,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         state,
         claimId,
         error,
-        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
+        actor: { ...getActorInfo(req), via: resolutionViaFromActor(req.actor) },
       });
       const pendingConfig = pendingConnection.config ?? {};
       const oauthConfig = pendingConfig.oauth && typeof pendingConfig.oauth === "object"
@@ -1238,7 +1238,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       const result = await svc.completeVercelConnectCallback({
         state,
         error,
-        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
+        actor: { ...getActorInfo(req), via: resolutionViaFromActor(req.actor) },
       });
       await logActivity(db, {
         companyId: result.connection.companyId,
@@ -1353,7 +1353,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         iss,
         // Denials consume state without an origin check. Code exchange still checks it.
         redirectUri: error ? "" : oauthRedirectUri(req),
-        actor: { ...getActorInfo(req), resolvedVia: interactionResolvedVia(req.actor) },
+        actor: { ...getActorInfo(req), via: resolutionViaFromActor(req.actor) },
       });
     } catch (callbackError) {
       if (!acceptsHtml) throw callbackError;

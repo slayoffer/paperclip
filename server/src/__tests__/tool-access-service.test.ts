@@ -14,67 +14,30 @@ import {
   vi,
 } from "vitest";
 import {
-  activityLog,
-  agents,
-  authUsers,
-  companies,
-  companyMemberships,
-  companySecretBindings,
-  connectionGrantMembers,
-  connectionGrantDelegations,
-  connectionGrants,
-  connectionTokenIssuances,
-  companySecrets,
-  companySecretVersions,
-  createDb,
-  heartbeatRuns,
-  issueThreadInteractions,
-  issues,
-  principalPermissionGrants,
-  secretAccessEvents,
-  toolAccessAuditEvents,
-  toolActionRequests,
-  toolApplications,
-  toolCallEvents,
-  toolCatalogEntries,
-  toolConnectionInstalls,
-  toolConnections,
-  toolOauthStates,
-  toolInvocations,
-  toolMcpGateways,
-  toolPolicies,
-  toolProfileBindings,
-  toolProfileEntries,
-  toolProfiles,
-  toolRuntimeMetricCounters,
-  toolRuntimeSlots,
-  toolStdioCommandTemplates,
-  userSecretDefinitions,
+  activityLog, agents, authUsers, companies, companyMemberships, companySecretBindings,
+  connectionGrantMembers, connectionGrantDelegations, connectionGrants,
+  connectionTokenIssuances, companySecrets, companySecretVersions, createDb, heartbeatRuns,
+  issueThreadInteractions, issues, principalPermissionGrants, secretAccessEvents,
+  toolAccessAuditEvents, toolActionRequests, toolApplications, toolCallEvents,
+  toolCatalogEntries, toolConnectionInstalls, toolConnections, toolOauthStates, toolInvocations,
+  toolMcpGateways, toolPolicies, toolProfileBindings, toolProfileEntries, toolProfiles,
+  toolRuntimeMetricCounters, toolRuntimeSlots, toolStdioCommandTemplates, userSecretDefinitions,
   userSecretDeclarations,
 } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
-  APP_DEFINITIONS,
-  APP_STORE_HIDDEN_SLUGS,
-  GITHUB_CONNECTOR_PROFILES,
-  GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS,
-  GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
-  googleWorkspaceSelectedScopes,
-  GOOGLE_WORKSPACE_DEFAULT_SELECTION,
-  getAvailableConnectionMethod,
-  getConnectableAppDefinition,
+  APP_DEFINITIONS, APP_STORE_HIDDEN_SLUGS, GITHUB_CONNECTOR_PROFILES,
+  GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS, GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
+  googleWorkspaceSelectedScopes, GOOGLE_WORKSPACE_DEFAULT_SELECTION,
+  getAvailableConnectionMethod, getConnectableAppDefinition,
   type GoogleWorkspaceConnectorProfileId,
 } from "@paperclipai/shared";
 import {
-  getEmbeddedPostgresTestSupport,
-  startEmbeddedPostgresTestDatabase,
+  getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
-  classifyRisk,
-  normalizeConnectionMethodConfig,
-  projectedConnectionHeaders,
-  projectConnectionMethodToolInputSchema,
-  projectConnectionMethodToolArguments,
+  classifyRisk, normalizeConnectionMethodConfig, projectedConnectionHeaders,
+  projectConnectionMethodToolInputSchema, projectConnectionMethodToolArguments,
   toolAccessService,
 } from "../services/tool-access.js";
 import { accessService } from "../services/access.js";
@@ -82,12 +45,10 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
 import {
-  canonicalToolArguments,
-  signToolArguments,
+  canonicalToolArguments, signToolArguments,
 } from "../services/tool-content-guards.js";
 import {
-  createToolGatewayService as createToolGatewayServiceBase,
-  type ToolGatewayService,
+  createToolGatewayService as createToolGatewayServiceBase, type ToolGatewayService,
 } from "../services/tool-gateway.js";
 import { toolAccessRoutes } from "../routes/tool-access.js";
 import { errorHandler } from "../middleware/index.js";
@@ -10140,7 +10101,7 @@ describeEmbeddedPostgres("tool access service", () => {
       state: state.state,
       code: "user-authorization-code",
       redirectUri: "https://paperclip.example/api/tools/oauth/callback",
-      actor: { actorType: "user", actorId: "user-for-run", resolvedVia: "user_session" },
+      actor: { actorType: "user", actorId: "user-for-run", via: { resolvedVia: "user_session", resolvedViaKeyId: null } },
     });
 
     const [grant] = await db
@@ -10198,7 +10159,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.id, interaction.id));
     expect(resolved).toMatchObject({
-      resolvedVia: "user_session",
+      resolvedVia: null, resolvedViaKeyId: null,
       status: "accepted",
       result: { version: 1, outcome: "accepted" },
     });

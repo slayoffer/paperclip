@@ -1,7 +1,6 @@
 import type { Request } from "express";
 import type { connectionIntentService } from "../services/connection-intents.js";
 import { forbidden } from "../errors.js";
-import { interactionResolvedVia } from "./interaction-resolution-actor.js";
 
 export function connectionIntentOAuthFinisher(
   intents: Pick<ReturnType<typeof connectionIntentService>, "loadIntent" | "complete" | "updatePhase">,
@@ -25,7 +24,7 @@ export function connectionIntentOAuthFinisher(
       ? await intents.complete(input.interactionId, input.connectionId, input.userId, {
           canManageOrganizationGrant: input.canManageOrganizationGrant,
           bypassCurrentMembershipCheck: input.bypassCurrentMembershipCheck,
-          resolvedVia: interactionResolvedVia(input.actor),
+          via: null,
         })
       : await intents.updatePhase(input.interactionId, "needs_retry", input.userId, {
           bypassCurrentMembershipCheck: input.bypassCurrentMembershipCheck,

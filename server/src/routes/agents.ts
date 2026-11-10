@@ -1,4 +1,4 @@
-import { interactionResolvedVia } from "./interaction-resolution-actor.js";
+import { resolutionViaFromActor } from "./interaction-resolution-actor.js";
 import { prepareRuntimeSettingsPatch } from "../services/agent-runtime-settings.js";
 import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
 import { readRunExecutionEvidence } from "../services/run-execution-evidence.js";
@@ -5344,7 +5344,7 @@ export function agentRoutes(
     const validatedConnection = await validateManagedAgentBinding(req, agent.companyId, agent.id, agent.adapterType, agent.adapterConfig, setup.aiConnection, agent.defaultEnvironmentId, true, true);
     if (validatedConnection?.connectionId !== connectionId) throw conflict("This is no longer the selected account. Reload the task and try again.");
     const completed = await intents.complete(interactionId, connectionId, userId, {
-      resolvedVia: interactionResolvedVia(req.actor),
+      via: resolutionViaFromActor(req.actor),
       validatedAdoption: { agentUpdatedAt: agent.updatedAt, binding: setup.aiConnection },
     });
     // The sweeper retries this durable continuation if immediate delivery fails.

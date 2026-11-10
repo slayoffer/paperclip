@@ -1,4 +1,3 @@
-import { oauthResolutionAttribution } from "./resolution-attribution.js";
 import type { ActorInfo } from "../types.js";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -173,7 +172,7 @@ async function rejectPendingOAuthInteraction(
             "Authorization was declined or cancelled in the provider's window",
         },
         resolvedByUserId: actor?.actorType === "user" ? actor.actorId : null,
-        ...oauthResolutionAttribution(actor),
+        // Provider callbacks preserve stored provenance; unresolved rows have null provenance.
         resolvedAt: now,
         updatedAt: now,
       })

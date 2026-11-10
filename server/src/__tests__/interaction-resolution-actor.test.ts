@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { interactionResolvedVia } from "../routes/interaction-resolution-actor.js";
+import { resolutionViaFromActor } from "../routes/interaction-resolution-actor.js";
 
 describe("interaction authentication channel", () => {
+  const keyId = "ea6557da-2200-4cf4-bb67-24c5c8cafcbb";
   it.each([
     ["session", "user_session"], ["board_key", "board_api_key"],
-    ["local_implicit", null], ["cloud_tenant", null], ["mcp_oauth", null], [undefined, null],
-  ] as const)("classifies board source %s without inferring from userId", (source, expected) => {
-    expect(interactionResolvedVia({ type: "board", source, userId: "same-user" })).toBe(expected);
+    ["agent_key", "agent_key"], ["agent_jwt", "agent_key"],
+  ] as const)("classifies authenticated source %s", (source, resolvedVia) => {
+    expect(resolutionViaFromActor({ source, keyId })).toEqual({
+      resolvedVia, resolvedViaKeyId: source === "board_key" ? keyId : null,
+    });
   });
-  it.each(["agent_key", "agent_jwt"] as const)("classifies %s as agent_key", (source) => {
-    expect(interactionResolvedVia({ type: "agent", source, agentId: "agent" })).toBe("agent_key");
-  });
-  it("does not trust a channel without its matching authenticated actor type", () => {
-    expect(interactionResolvedVia({ type: "none", source: "session" })).toBeNull();
-    expect(interactionResolvedVia({ type: "agent", source: "session" })).toBeNull();
+  it.each(["local_implicit", "cloud_tenant", "cloud_control", "mcp_oauth", "none", undefined])(
+    "keeps unmapped source %s unknown", (source) => {
+      expect(resolutionViaFromActor({ source, keyId, userId: "same-user" })).toBeNull();
+    },
+  );
+  it("keeps a board source without authenticated key identity unknown", () => {
+    expect(resolutionViaFromActor({ source: "board_key" })).toBeNull();
   });
 });

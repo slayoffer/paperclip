@@ -2685,6 +2685,7 @@ export function buildHostServices(
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
         const interaction = await issueThreadInteractionService(db).create(issue, params.interaction as CreateIssueThreadInteraction, {
           agentId: params.authorAgentId ?? null,
+          via: null,
         });
         await logPluginActivity({
           companyId,
@@ -2729,13 +2730,12 @@ export function buildHostServices(
         if (!current || current.issueId !== issue.id || current.companyId !== companyId) {
           throw new Error(`Interaction "${params.interactionId}" not found for this issue`);
         }
-        // Idempotent replay: an already-resolved interaction converges without
-        // re-applying, so a duplicate button tap from chat is a safe no-op.
+        // Resolved interactions return without repeating side effects.
         if (current.status !== "pending") {
           return { interaction: current as any, applied: false };
         }
 
-        const actor = { userId: params.actorUserId };
+        const actor = { userId: params.actorUserId, via: null };
         let resolved: typeof current;
         let continuationTarget = {
           id: issue.id,

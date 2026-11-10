@@ -422,41 +422,28 @@ describe("issue tree control routes", () => {
 
   it("records session channel on cancellation", async () => {
     const app = await createApp({
-      type: "board",
-      userId: "user-1",
-      companyIds: ["company-2"],
-      source: "session",
-      isInstanceAdmin: false,
+      type: "board", userId: "user-1", companyIds: ["company-2"], source: "session", isInstanceAdmin: false,
     });
     mockTreeControlService.createHold.mockResolvedValue({
       hold: {
         id: "33333333-3333-4333-8333-333333333333",
-        mode: "cancel",
-        reason: "cancel subtree",
+        mode: "cancel", reason: "cancel subtree",
       },
       preview: {
-        mode: "cancel",
-        totals: { affectedIssues: 2 },
-        warnings: [],
-        activeRuns: [],
+        mode: "cancel", totals: { affectedIssues: 2 }, warnings: [], activeRuns: [],
       },
     });
     mockTreeControlService.cancelIssueStatusesForHold.mockResolvedValue({
-      updatedIssueIds: [
-        "11111111-1111-4111-8111-111111111111",
-        "55555555-5555-4555-8555-555555555555",
-      ],
+      updatedIssueIds: ["11111111-1111-4111-8111-111111111111", "55555555-5555-4555-8555-555555555555"],
       updatedIssues: [],
     });
-
     const res = await request(app)
       .post("/api/issues/11111111-1111-4111-8111-111111111111/tree-holds")
       .send({ mode: "cancel", reason: "cancel subtree" });
-
     expect(res.status).toBe(201);
     expect(mockTreeControlService.cancelIssueStatusesForHold).toHaveBeenCalledWith(
       "company-2", "11111111-1111-4111-8111-111111111111",
-      "33333333-3333-4333-8333-333333333333", "user_session"
+      "33333333-3333-4333-8333-333333333333", { resolvedVia: "user_session", resolvedViaKeyId: null }
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -511,7 +498,7 @@ describe("issue tree control routes", () => {
     );
     expect(mockTreeControlService.cancelIssueStatusesForHold).toHaveBeenCalledWith(
       "company-2", "11111111-1111-4111-8111-111111111111",
-      "33333333-3333-4333-8333-333333333333", "user_session"
+      "33333333-3333-4333-8333-333333333333", { resolvedVia: "user_session", resolvedViaKeyId: null }
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),

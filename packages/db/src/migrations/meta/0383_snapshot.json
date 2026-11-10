@@ -1,5 +1,5 @@
 {
-  "id": "a8d47a04-5580-4176-9b00-2954672f416a",
+  "id": "eb4f1776-cf99-4336-969d-14148098507f",
   "prevId": "656b3b7c-595c-4aae-9d37-3b0411033837",
   "version": "7",
   "dialect": "postgresql",
@@ -39417,6 +39417,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "resolved_via_key_id": {
+          "name": "resolved_via_key_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "payload": {
           "name": "payload",
           "type": "jsonb",
@@ -39718,7 +39724,15 @@
       "checkConstraints": {
         "issue_thread_interactions_resolved_via_check": {
           "name": "issue_thread_interactions_resolved_via_check",
-          "value": "\"issue_thread_interactions\".\"resolved_via\" IN ('user_session', 'board_api_key', 'agent_key')"
+          "value": "\"issue_thread_interactions\".\"resolved_via\" IN ('user_session', 'board_api_key', 'agent_key', 'chat_channel', 'system')"
+        },
+        "issue_thread_interactions_resolved_via_key_check": {
+          "name": "issue_thread_interactions_resolved_via_key_check",
+          "value": "(\"issue_thread_interactions\".\"resolved_via\" IS NOT DISTINCT FROM 'board_api_key') = (\"issue_thread_interactions\".\"resolved_via_key_id\" IS NOT NULL)"
+        },
+        "issue_thread_interactions_resolved_via_timestamp_check": {
+          "name": "issue_thread_interactions_resolved_via_timestamp_check",
+          "value": "\"issue_thread_interactions\".\"resolved_at\" IS NOT NULL OR (\"issue_thread_interactions\".\"resolved_via\" IS NULL AND \"issue_thread_interactions\".\"resolved_via_key_id\" IS NULL)"
         }
       },
       "isRLSEnabled": false

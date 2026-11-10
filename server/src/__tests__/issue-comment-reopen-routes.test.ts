@@ -1064,9 +1064,7 @@ describe("issue comment reopen routes", () => {
     );
   });
 
-  // The guard must block explicit reopen=true + comment by the assignee agent
-  // on their own done issue (assignee self-comments are log lines, not reopen
-  // signals; explicit resume intent is delivered via `resume: true` instead).
+  // Assignee self-comments cannot reopen done issues. Explicit resume uses `resume: true`.
   it("does not reopen via PATCH comment+reopen when the assignee agent is the actor on a done issue", async () => {
     const assigneeAgentId = "22222222-2222-4222-8222-222222222222";
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
@@ -1512,7 +1510,7 @@ describe("issue comment reopen routes", () => {
       "Paperclip needs a disposition before this issue can continue.",
       {
         agentId: undefined, userId: "local-board", runId: null,
-        onBehalfOfUserId: undefined, resolvedVia: null,
+        onBehalfOfUserId: undefined, via: null,
       },
       {
         attachmentIds: undefined,
@@ -1593,7 +1591,7 @@ describe("issue comment reopen routes", () => {
       "Recovered the execution path.\nHanded back to the original owner.",
       {
         agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
-        runId: "run-1", onBehalfOfUserId: null, resolvedVia: "agent_key",
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({
         attachmentIds: undefined,
@@ -1623,7 +1621,7 @@ describe("issue comment reopen routes", () => {
       "Normal work update.",
       {
         agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
-        runId: "run-1", onBehalfOfUserId: null, resolvedVia: "agent_key",
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({ attachmentIds: undefined, presentation: null }),
       mockDb,
@@ -1660,7 +1658,7 @@ describe("issue comment reopen routes", () => {
       "The run completed; here is the required summary.",
       {
         agentId: "22222222-2222-4222-8222-222222222222", userId: undefined,
-        runId: "run-1", onBehalfOfUserId: null, resolvedVia: "agent_key",
+        runId: "run-1", onBehalfOfUserId: null, via: { resolvedVia: "agent_key", resolvedViaKeyId: null },
       },
       expect.objectContaining({ attachmentIds: undefined, presentation: null }),
       mockDb,

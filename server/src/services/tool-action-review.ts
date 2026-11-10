@@ -90,7 +90,7 @@ export async function commitToolActionReview(
       .for("update");
     if (!current) throw notFound("Tool action request not found");
     // Preserve existing receipt hashes: channel evidence is not a new decision or identity.
-    const { resolvedVia: _channel, ...receiptActor } = input.actor;
+    const { via: _channel, ...receiptActor } = input.actor;
     const receiptInput = { ...input, actor: receiptActor };
     const receipt = interactionAnswerReceipt(input.decision, receiptInput, receiptActor);
     if (interaction) {
@@ -213,7 +213,7 @@ export async function commitToolActionReview(
           status: input.decision === "approved" ? "accepted" : "rejected",
           ...(receipt ? { resolutionRequest: receipt } : {}),
           resolvedByUserId: input.actor.userId ?? "board",
-          resolvedVia: input.actor.resolvedVia ?? null,
+          ...(input.actor.via ?? { resolvedVia: null, resolvedViaKeyId: null }),
           resolvedAt: now,
           updatedAt: now,
           result:

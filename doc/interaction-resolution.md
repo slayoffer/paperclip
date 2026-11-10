@@ -6,41 +6,51 @@ The Attention feed also includes the token in the interaction subject metadata.
 
 Use the existing routes. Company access and resolver restrictions still apply.
 
-Resolution reads also include `resolvedVia`. The server records this field from
-the authenticated actor when it saves the resolution:
+Resolution reads include `resolvedVia` and `resolvedViaKeyId`. The server records
+the authenticated channel and board-key ID when it saves the resolution:
 
 | Value | Authentication channel |
 | --- | --- |
 | `user_session` | Signed-in user session, including a TMA request authenticated with that session |
 | `board_api_key` | Board API key, even when its owner is the addressed user |
 | `agent_key` | Agent API key or authenticated agent run JWT |
+| `chat_channel` | Paperclip's native chat or voice callback |
+| `system` | Automatic cleanup or sweep |
 | `null` | Unknown channel, including old rows and internal calls without authentication provenance |
 
-The request body cannot set this field. A user ID alone does not prove a session.
-Local implicit access, cloud tenant claims, public assistant OAuth, and native
-chat callbacks without a session source remain unknown. A TMA relay that uses a
-board key records `board_api_key`; a Telegram tap alone does not change the
-server's authentication channel.
+Request bodies cannot set either field. `resolvedViaKeyId` is non-null only for
+`board_api_key`, and stores the authenticated key's ID, never its value. It has no
+foreign key, so key deletion does not remove the evidence. A user ID alone does
+not prove a session. Local implicit access, cloud tenant claims, public assistant
+OAuth, provider callbacks, and plugin calls without channel evidence remain unknown.
 
-The channel is saved with the terminal status and existing resolver IDs. Partial
-item verdicts keep it null until the final verdict resolves the interaction.
-Retries return the original channel. A database trigger prevents later changes,
-including relabeling an old null resolution. The migration adds no default and
-does not backfill historical rows. List, single-interaction, and company reads
-return the saved value. These fields record evidence; resolver permissions and
-existing identity fields retain their current behavior.
+A TMA relay that uses a board key records `board_api_key`. A Telegram tap alone
+does not change that channel. Count a board-key resolution as Anton's own tap
+only after the operator verifies that the recorded key ID belongs to a key used
+exclusively by the TMA. Different automation and TMA key IDs do not prove this
+exclusivity: another process can still use the TMA key. Until exclusive use is
+verified, only `user_session` is human proof. `chat_channel`, `system`, and null
+are never human proof. This PR does not change a verifier or `human_only` policy.
+
+Both fields are saved with `resolvedAt` and the existing resolver IDs. Partial
+item verdicts keep them null until completion. Retries return the first values.
+A database trigger prevents either value from changing while a row stays resolved,
+including relabeling a legacy null. Reopening a row by clearing `resolvedAt`
+clears both provenance fields; the next resolution records its own channel.
+The migration has no default or backfill. List, single-interaction, and company
+reads expose both fields. Resolver permissions and existing identity fields keep
+their current behavior, including existing resolver IDs on reopened rows.
 
 An authenticated comment, document change, or issue closure can expire a card.
 These implicit resolutions record the initiating authentication channel too.
-Deferred Agent Chat `/new` commands use the immutable `author_auth_source` saved
-on the command comment by the server. Retries retain the original source; old
-comments remain unknown. Comment bodies and request metadata cannot set it.
-OAuth confirmation callbacks record their authenticated channel and preserve
-the original channel if a late callback reaches an already resolved card.
-An authorization retry creates a new card after a completed resolution. It
-retains the old card and its attribution. The old lookup key gains that card's
-ID as a suffix; the new pending card receives the stable lookup key. Repeated
-requests refresh the pending card without creating another one.
+Historical comment sweeps and deferred Agent Chat `/new` commands have no live
+authenticated channel and record null. OAuth provider callbacks also record null
+on first resolution and preserve existing attribution on late result updates.
+An authorization retry reopens the existing card and clears its provenance through
+the database trigger. Repeated requests retain the same card ID.
+An existing limitation remains: reopening retains the previous resolution receipt
+and outbox entry. A second revision-protected confirmation answer can fail with an
+outbox primary key conflict. Provenance reset does not repair that answer lifecycle.
 
 | Method | Path | Answer fields |
 | --- | --- | --- |

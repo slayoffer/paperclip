@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { SYSTEM_RESOLUTION_VIA } from "../interaction-resolution-attribution.js";
 import {
   completionContracts,
   issueThreadInteractions,
@@ -136,6 +137,7 @@ export async function dismissAutomaticCompletionReviews(
               outcome: "withdrawn",
               reason: withdrawalReason,
             },
+            ...SYSTEM_RESOLUTION_VIA,
             resolvedAt: now,
             updatedAt: now,
           })

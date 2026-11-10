@@ -141,7 +141,7 @@ describe("native completed failure diagnostics", () => {
       expect(adapter.errorCode).toBe(classified ? "native_provider_model_rejected" : undefined);
       expect(adapter.errorMessage).toBe(classified ? NATIVE_MODEL_REJECTION_MESSAGE : scenario === "succeeded" ? null : `Native session ${terminal.runTerminalState}`);
       expect(adapter.resultJson?.nativeProviderFailure).toEqual(classified ? NATIVE_MODEL_REJECTION_DIAGNOSTIC : undefined);
-      // Only a committed, unclassified failure of the terminal turn explains the generic message.
+      // A committed, unclassified terminal-turn failure explains the generic message.
       const turnFailure = scenario === "unknown-error" ? { provider: "codex", category: "turn_failed", codexErrorInfo: "other" }
         : opencode ? { provider: "opencode", category: "turn_failed", runnerFailureCode: "opencode_server_exited", streamFailure: "server_exited", signal: "SIGKILL", connectionError: "ECONNREFUSED" }
           : undefined;
@@ -261,7 +261,7 @@ describe("native completed failure diagnostics", () => {
           expect(await getNativeReviewAssignment(db, { companyId, issueId, agentId, contextSnapshot: reviewContext, actingRunId: retryRunId, issueExecutionRunId: retryRunId })).not.toBeNull();
           await issueThreadInteractionService(db).acceptInteraction(
             { id: issueId, companyId, projectId: null, goalId: null, status: "in_review" },
-            reviewContext.nativeReviewInteractionId, {}, { agentId, runId: retryRunId },
+            reviewContext.nativeReviewInteractionId, {}, { via: null, agentId, runId: retryRunId },
           );
           const [resolved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, reviewContext.nativeReviewInteractionId));
           expect(resolved).toMatchObject({ status: "accepted", resolvedByAgentId: agentId, resolvedByRunId: retryRunId });

@@ -2480,11 +2480,8 @@ export class PaperclipRunnerToolAuthority {
     await tx.select({ id: issues.id }).from(issues).where(and(
       eq(issues.id, this.binding.issueId), eq(issues.companyId, this.binding.companyId),
     )).for("update");
-    // Authorization for writes is intentionally re-read only after the
-    // transaction starts. Locking the run and issue in the same statement
-    // closes the gap between the discovery-time check and the mutation: a
-    // reassignment, replacement run, or terminal transition must commit either
-    // before this check (and be rejected) or after this transaction completes.
+    // Recheck write authorization under run/issue locks. Reassignment, replacement,
+    // or terminal transition must commit before this check or after this transaction.
     const [context] = await tx
       .select({ run: heartbeatRuns, issue: issues, actor: agents })
       .from(heartbeatRuns)
@@ -2600,7 +2597,7 @@ export class PaperclipRunnerToolAuthority {
               supersedeOnUserComment: normalizedPayload.supersedeOnUserComment ?? false,
             } : {}),
           },
-        } as never, { agentId: this.binding.agentId, userId: null, identityContextId });
+        } as never, { agentId: this.binding.agentId, userId: null, identityContextId, via: null });
         const activity = await persistActivity(tx, {
           companyId: this.binding.companyId,
           actorType: "agent",
