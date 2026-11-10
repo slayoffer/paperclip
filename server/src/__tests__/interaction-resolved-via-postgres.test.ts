@@ -14,6 +14,8 @@ import { saveConnectionAuthorizationInteraction } from "../services/connection-a
 import { issueTreeControlService } from "../services/issue-tree-control.js";
 import { statusCardService } from "../services/status-cards.js";
 import { defaultStatusCardRefreshPolicy } from "@paperclipai/shared";
+import { instanceSettingsService } from "../services/instance-settings.js";
+import { prepareConversationTurn } from "../services/agent-conversations.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 describe("authenticated interaction resolution channel", () => {
@@ -55,7 +57,7 @@ describe("authenticated interaction resolution channel", () => {
     const server = app.listen(0, "127.0.0.1");
     await new Promise<void>((resolve) => server.once("listening", resolve));
     return {
-      issue, actor, server,
+      issue, actor, server, run,
       async card(question = false) {
         const [row] = await db.insert(issueThreadInteractions).values({
           companyId, issueId: issue.id, kind: question ? "ask_user_questions" : "request_confirmation",
@@ -94,6 +96,33 @@ describe("authenticated interaction resolution channel", () => {
       }
     } finally { await f.close(); }
   });
+
+  it.each([["session", "user_session"], ["board_key", "board_api_key"]] as const)(
+    "retains %s provenance through a deferred /new and its retry", async (source, expected) => {
+      const f = await fixture(source);
+      try {
+        await instanceSettingsService(db).updateExperimental({ enableAgentChat: true });
+        await db.update(issues).set({ conversationAgentId: f.run.agentId,
+          conversationUserId: "same-user", conversationState: "waiting" }).where(eq(issues.id, f.issue.id));
+        const card = await f.card(true);
+        const body = { body: "/new", clientRequestId: randomUUID(), authorAuthSource: "user_session" };
+        const response = await request(f.server).post(`/api/issues/${f.issue.id}/comments`).send(body);
+        expect(response.status, JSON.stringify(response.body)).toBe(201);
+        f.actor.source = source === "session" ? "board_key" : "session";
+        const retry = await request(f.server).post(`/api/issues/${f.issue.id}/comments`).send(body);
+        expect(retry.status).toBe(201);
+        expect(retry.body.id).toBe(response.body.id);
+        await expect(db.execute(sql`UPDATE issue_comments SET author_auth_source = 'agent_key' WHERE id = ${response.body.id}`))
+          .rejects.toThrow();
+        const run = { ...f.run, contextSnapshot: { issueId: f.issue.id, wakeCommentId: response.body.id } };
+        await prepareConversationTurn(db, run);
+        const [saved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+        expect(saved.status).toBe("expired");
+        expect(saved.resolvedVia).toBe(expected);
+        expect(saved.resolvedByUserId).toBe("same-user");
+      } finally { await f.close(); }
+    },
+  );
 
   it("ignores a forged body channel and preserves the first channel on retries", async () => {
     const f = await fixture("board_key");

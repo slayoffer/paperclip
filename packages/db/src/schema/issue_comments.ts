@@ -4,6 +4,7 @@ import type {
   IssueCommentMetadata,
   IssueCommentPresentation,
   SourceTrustMetadata,
+  IssueThreadInteractionBase,
 } from "@paperclipai/shared";
 import { pgTable, uuid, text, timestamp, index, jsonb, unique, integer } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
@@ -20,6 +21,8 @@ export const issueComments = pgTable(
     issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
     authorAgentId: uuid("author_agent_id").references(() => agents.id),
     authorUserId: text("author_user_id"),
+    // Server-only provenance for deferred commands; never derived from comment content.
+    authorAuthSource: text("author_auth_source").$type<IssueThreadInteractionBase["resolvedVia"]>(),
     onBehalfOfUserId: text("on_behalf_of_user_id").references(() => authUsers.id, { onDelete: "set null" }),
     authorType: text("author_type").$type<IssueCommentAuthorType>(),
     createdByRunId: uuid("created_by_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),

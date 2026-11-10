@@ -18,6 +18,7 @@ import {
 } from "@paperclipai/db";
 
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
+import { expireConversationQuestions } from "./conversation-reset-resolution.js";
 
 export type ConversationIdentity = {
   conversationAgentId?: string | null;
@@ -179,13 +180,7 @@ export async function prepareConversationTurn(
         .where(eq(issueComments.id, comment.id));
       // Questions from the previous session must not keep occupying the
       // composer or wake the old topic, even if they survive normal comments.
-      const expiredQuestions = await tx.update(issueThreadInteractions).set({
-        status: "expired", resolvedAt: new Date(), updatedAt: new Date(),
-        resolvedByUserId: comment.authorUserId,
-        result: { version: 1, outcome: "withdrawn", reason: "New conversation session", answers: [], summaryMarkdown: null },
-      }).where(and(eq(issueThreadInteractions.companyId, issue.companyId),
-        eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"),
-        eq(issueThreadInteractions.kind, "ask_user_questions"))).returning({ id: issueThreadInteractions.id });
+      const expiredQuestions = await expireConversationQuestions(tx as unknown as Db, issue, comment);
       publication = (
         await persistActivity(tx as unknown as Db, {
           companyId: issue.companyId,

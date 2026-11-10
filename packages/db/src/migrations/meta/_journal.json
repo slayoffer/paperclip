@@ -2675,6 +2675,13 @@
       "when": 1794283560717,
       "tag": "0383_watery_kid_colt",
       "breakpoints": true
+    },
+    {
+      "idx": 384,
+      "version": "7",
+      "when": 1794287908785,
+      "tag": "0384_omniscient_doorman",
+      "breakpoints": true
     }
   ]
 }

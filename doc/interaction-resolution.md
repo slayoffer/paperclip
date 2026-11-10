@@ -32,6 +32,9 @@ existing identity fields retain their current behavior.
 
 An authenticated comment, document change, or issue closure can expire a card.
 These implicit resolutions record the initiating authentication channel too.
+Deferred Agent Chat `/new` commands use the immutable `author_auth_source` saved
+on the command comment by the server. Retries retain the original source; old
+comments remain unknown. Comment bodies and request metadata cannot set it.
 OAuth confirmation callbacks record their authenticated channel and preserve
 the original channel if a late callback reaches an already resolved card.
 An authorization retry creates a new card after a completed resolution. It

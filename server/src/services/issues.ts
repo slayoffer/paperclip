@@ -11995,10 +11995,7 @@ export function issueService(db: Db) {
       if (dbOrTx === db && (actor.runId || actor.userId)) {
         const append = () =>
           measureRunTransaction(db, "response", async (tx) => {
-            // Serialize run-authored comments on the issue so a provider retry
-            // cannot publish the same visible result twice. This needs no schema
-            // change: the issue row is the transaction fence, and the recursive
-            // call below performs the lookup and insert while holding it.
+            // Lock the issue through lookup and insert so retries cannot duplicate comments.
             await measureRunPhase("response.row_lock", () => tx
               .select({ id: issues.id })
               .from(issues)
@@ -12271,6 +12268,7 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           onBehalfOfUserId,
+          authorAuthSource: actor.resolvedVia ?? null,
           authorType,
           createdByRunId,
           body: redactedBody,
