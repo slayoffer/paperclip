@@ -120,6 +120,12 @@ describe("authenticated interaction resolution channel", () => {
         expect(saved.status).toBe("expired");
         expect(saved.resolvedVia).toBe(expected);
         expect(saved.resolvedByUserId).toBe("same-user");
+        expect(response.body).not.toHaveProperty("authorAuthSource");
+        expect(retry.body).not.toHaveProperty("authorAuthSource");
+        const listed = await request(f.server).get(`/api/issues/${f.issue.id}/comments`);
+        expect(listed.status).toBe(200);
+        expect(listed.body.find((entry: { id: string }) => entry.id === response.body.id))
+          .not.toHaveProperty("authorAuthSource");
       } finally { await f.close(); }
     },
   );
