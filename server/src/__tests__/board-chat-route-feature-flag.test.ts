@@ -33,6 +33,10 @@ async function createApp(deploymentMode: "local_trusted" | "authenticated" = "lo
   const { boardChatRoutes } = await import("../routes/board-chat.js");
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    req.actor = { type: "board", source: "local_implicit", userId: "user-1", isInstanceAdmin: true };
+    next();
+  });
   app.use("/api", boardChatRoutes({ transaction: async (effect: (tx: unknown) => unknown) => effect({}) } as any, { deploymentMode }));
   return app;
 }
