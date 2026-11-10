@@ -5,12 +5,15 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, agents, companies, createDb,
-  heartbeatRuns, issues, issueThreadInteractions, toolInvocations, toolActionRequests,
+  heartbeatRuns, issues, issueThreadInteractions, toolInvocations, toolActionRequests, statusCards,
 } from "@paperclipai/db";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { commitToolActionReview } from "../services/tool-action-review.js";
 import { saveConnectionAuthorizationInteraction } from "../services/connection-authorization-interaction.js";
+import { issueTreeControlService } from "../services/issue-tree-control.js";
+import { statusCardService } from "../services/status-cards.js";
+import { defaultStatusCardRefreshPolicy } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 describe("authenticated interaction resolution channel", () => {
@@ -172,6 +175,37 @@ describe("authenticated interaction resolution channel", () => {
       const complete = await request(f.server).post(endpoint).send({ verdicts: [{ id: "two", verdict: "approve" }] });
       expect(complete.status, JSON.stringify(complete.body)).toBe(200);
       expect(complete.body).toMatchObject({ status: "answered", resolvedVia: "user_session" });
+    } finally { await f.close(); }
+  });
+
+  it("records the board-key channel when tree cancellation resolves a card", async () => {
+    const f = await fixture("board_key");
+    try {
+      const card = await f.card();
+      const service = issueTreeControlService(db);
+      const result = await service.createHold(f.issue.companyId, f.issue.id, {
+        mode: "cancel", actor: { actorType: "user", actorId: "same-user", userId: "same-user" },
+      });
+      await service.cancelIssueStatusesForHold(f.issue.companyId, f.issue.id, result.hold.id, "board_api_key");
+      const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(stored).toMatchObject({ status: "expired", resolvedVia: "board_api_key" });
+    } finally { await f.close(); }
+  });
+
+  it("records the board-key channel when status-card archival resolves a card", async () => {
+    const f = await fixture("board_key");
+    try {
+      const interaction = await f.card();
+      const service = statusCardService(db);
+      const actor = { agentId: null, userId: "same-user", resolvedVia: "board_api_key" as const };
+      const card = await service.create(f.issue.companyId, {
+        interestPrompt: "Watch this task", titlePinned: false, refreshPolicy: defaultStatusCardRefreshPolicy,
+      }, actor);
+      const [generating] = await db.update(statusCards).set({ generatingIssueId: f.issue.id })
+        .where(eq(statusCards.id, card.id)).returning();
+      await service.update(generating, { archived: true }, actor);
+      const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id));
+      expect(stored).toMatchObject({ status: "expired", resolvedVia: "board_api_key" });
     } finally { await f.close(); }
   });
 

@@ -1,3 +1,4 @@
+import { interactionResolvedVia } from "./interaction-resolution-actor.js";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import {
@@ -244,7 +245,7 @@ export function issueTreeControlRoutes(
     }
 
     if (result.hold.mode === "cancel") {
-      const statusUpdate = await treeControlSvc.cancelIssueStatusesForHold(root.companyId, root.id, result.hold.id);
+      const statusUpdate = await treeControlSvc.cancelIssueStatusesForHold(root.companyId, root.id, result.hold.id, interactionResolvedVia(req.actor));
       await logActivity(db, {
         companyId: root.companyId,
         actorType: actor.actorType,

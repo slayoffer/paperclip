@@ -151,6 +151,10 @@ describePostgres("recovery resolution through the sandbox bridge", () => {
 
   it("lets the assignee read and resolve a board-escalated recovery without a board card", async () => {
     const fixture = await seed();
+    const [card] = await db.insert(issueThreadInteractions).values({
+      companyId: fixture.companyId, issueId: fixture.issueId, kind: "request_confirmation",
+      payload: { version: 1, prompt: "Still needed?" },
+    }).returning();
     const read = await throughBridge(fixture, { method: "GET" });
     expect(read.status).toBe(200);
     expect(read.body.active.id).toBe(fixture.action.id);
@@ -160,6 +164,8 @@ describePostgres("recovery resolution through the sandbox bridge", () => {
     expect(resolved.body.recoveryAction).toMatchObject({ id: fixture.action.id, status: "resolved", outcome: "owner_completed" });
     const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, fixture.action.id));
     expect(action).toMatchObject({ status: "resolved", outcome: "owner_completed" });
+    const [expired] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+    expect(expired).toMatchObject({ status: "expired", resolvedVia: "agent_key" });
     const log = await db.select().from(activityLog).where(eq(activityLog.entityId, fixture.issueId));
     expect(log).toEqual(expect.arrayContaining([expect.objectContaining({
       action: "issue.recovery_action_resolved", actorId: fixture.agentId, runId: fixture.runId,

@@ -1960,7 +1960,7 @@ describe("company skill mutation permissions", () => {
     );
   });
 
-  it("creates and cancels skill test runs through hidden issue orchestration", async () => {
+  it("tracks board-key cancellation", async () => {
     mockCompanySkillService.createTestRun.mockImplementationOnce(async (
       _companyId: string,
       _skillId: string,
@@ -2001,14 +2001,13 @@ describe("company skill mutation permissions", () => {
       await deps.cancelHarnessIssue("44444444-4444-4444-8444-444444444444");
       return {
         ...createSkillTestRunDetails({ status: "cancelled", error: "Cancelled by operator" }),
-        createdAt: new Date("2026-05-26T00:00:00.000Z"),
-        updatedAt: new Date("2026-05-26T00:01:00.000Z"),
+        createdAt: new Date("2026-05-26T00:00:00Z"), updatedAt: new Date("2026-05-26T00:01:00Z"),
         cost: { costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
         taskExpired: false,
       };
     });
 
-    const app = await createApp(boardActor());
+    const app = await createApp(boardActor("local-board", "board_key"));
 
     const created = await request(app)
       .post("/api/companies/company-1/skills/skill-1/test-runs")
@@ -2031,8 +2030,7 @@ describe("company skill mutation permissions", () => {
     expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-1", "Cancelled by skill test run request");
     expect(mockIssueService.update).toHaveBeenCalledWith("44444444-4444-4444-8444-444444444444", expect.objectContaining({
-      status: "cancelled",
-      actorUserId: "local-board",
+      status: "cancelled", actorUserId: "local-board", actorResolvedVia: "board_api_key",
     }));
   });
 

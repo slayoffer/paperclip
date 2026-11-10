@@ -1,4 +1,4 @@
-import { interactionResolutionActor, interactionResolvedVia } from "./interaction-resolution-actor.js";
+import { interactionResolutionActor, interactionResolvedVia, interactionIssueUpdateActor } from "./interaction-resolution-actor.js";
 import type { InteractionActor } from "../services/interaction-resolution-input.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
@@ -9650,11 +9650,7 @@ export function issueRoutes(
             }
           }
 
-          const issueUpdate = {
-            ...updateFields,
-            actorAgentId: actor.agentId ?? null,
-            actorUserId: actor.actorType === "user" ? actor.actorId : null,
-          };
+          const issueUpdate = { ...updateFields, ...interactionIssueUpdateActor(req) };
           const updatedIssue =
             sourceIssueStatus === "done" || sourceIssueStatus === "cancelled"
               ? await svc.update(

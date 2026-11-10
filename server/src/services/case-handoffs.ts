@@ -1,3 +1,4 @@
+import { interactionResolvedVia } from "./interaction-resolution-attribution.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -179,9 +180,7 @@ async function assertCaseContentsFitTask(tx: Db, caseRow: CaseRow, issue: IssueR
     if (project?.visibility === "private" && issue.projectId !== sourceIssue.projectId) throw unprocessable("Primary task must preserve the case's private project boundary");
     if (sourceIssue.visibility === "private") {
       if (issue.visibility !== "private") throw unprocessable("Primary task must preserve the case's private task boundary");
-      // Match the canonical privacy ancestry: private task/project grants flow
-      // down parent edges, never sideways to a sibling sharing root metadata.
-      // UNION limits traversal to distinct task identities, including cycles.
+      // Grants flow down parent edges, never to siblings. UNION removes cycles.
       const [ancestry] = await tx.execute<{ inherited: boolean }>(sql`
         WITH RECURSIVE privacy_ancestors AS (
           SELECT p.id, p.company_id, p.privacy_parent_issue_id FROM issues p
@@ -247,13 +246,11 @@ export function caseHandoffService(db: Db) {
     await eligible(tx, issue);
     const sourceAuthorizer = await assertCaseHandoffDispatchAuthority(tx, row, issue, caseRow);
     const assigningActor = originalActor ?? await restoreCaseHandoffActor(tx, row, issue, sourceAuthorizer, cloudAuthority);
-    // Acceptance does not reserve permission. Recheck the original principal at
-    // the actual transfer, while it still owns/reads the outgoing task.
+    // Recheck the original principal at transfer; acceptance reserves no permission.
     try {
       await authorizeTask(tx, assigningActor, row.companyId, issue, issue.projectId, row.toAgentId);
     } catch (error) {
-      // The records were just locked and exist. A hidden task is a revocable
-      // actor-access hold, not a deleted task that should cancel durable intent.
+      // Locked records exist. Hidden tasks suspend access without cancelling intent.
       if (!originalActor && error instanceof HttpError && error.status === 404) throw forbidden("Handoff original actor can no longer access the task");
       throw error;
     }
@@ -317,6 +314,7 @@ export function caseHandoffService(db: Db) {
     const comment = await issueService(tx).addComment(issue.id, `Case completion requested\n\n${input.instructions}`, {
       agentId: actor.type === "agent" ? actor.agentId! : undefined,
       userId: actor.type === "board" ? actor.userId ?? undefined : undefined, runId: source?.id,
+      resolvedVia: interactionResolvedVia(actor),
     }, { sourceTrust: trust ?? undefined }, tx);
     const version = caseRow.handoffVersion + 1;
     const workflow = await captureCaseWorkflow(tx, companyId, caseRow, issue.id, "done");
@@ -508,6 +506,7 @@ export function caseHandoffService(db: Db) {
         if (trust) throw forbidden("Low-trust work must use its governed review path before handing off");
         const comment = await issueService(tx).addComment(issue.id, `Handoff to ${input.phase}\n\n${input.instructions}`, {
           agentId: actor.type === "agent" ? actor.agentId! : undefined, userId: actor.type === "board" ? actor.userId ?? undefined : undefined, runId: source?.id,
+          resolvedVia: interactionResolvedVia(actor),
         }, { sourceTrust: trust ?? undefined }, tx);
         const sourceRunId = issue.executionRunId ?? issue.checkoutRunId;
         const workflow = await captureCaseWorkflow(tx, companyId, caseRow!, issue.id, input.phase, input.workflowId);

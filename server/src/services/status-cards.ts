@@ -1,3 +1,4 @@
+import type { InteractionActor } from "./interaction-resolution-input.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import {
@@ -41,7 +42,7 @@ import {
   type StatusCardFingerprint,
 } from "./status-card-update-engine.js";
 
-type StatusCardActor = { agentId: string | null; userId: string | null };
+type StatusCardActor = { agentId: string | null; userId: string | null; resolvedVia?: InteractionActor["resolvedVia"] };
 type StatusCardWriter = { agentId: string | null; runId: string | null };
 type StatusCardRow = typeof statusCards.$inferSelect;
 type StatusCardReadOptions = { issueReadCondition?: SQL<boolean> };
@@ -316,7 +317,7 @@ export function statusCardService(
     if (archiveChanged && input.archived && card.generatingIssueId) {
       const generationIssue = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       if (generationIssue && !TERMINAL_ISSUE_STATUSES.has(generationIssue.status)) {
-        await issuesSvc.update(generationIssue.id, { status: "cancelled" });
+        await issuesSvc.update(generationIssue.id, { status: "cancelled", actorResolvedVia: actor.resolvedVia });
       }
     }
     return next;
@@ -380,10 +381,8 @@ export function statusCardService(
     if (card.generatingIssueId) {
       const active = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
       const payload = parseGenerationPayload(active?.description ?? null);
-      // Only treat an existing setup task as "already generating" while it is
-      // genuinely in flight. A `blocked` task is stuck awaiting a human and will
-      // never finish on its own, so a manual re-kick must supersede it (reopened
-      // to `todo` below) rather than silently no-op.
+      // A blocked setup task needs a human. A manual retry reopens it as todo.
+      // Only an active, unblocked task counts as already generating.
       if (active && !TERMINAL_ISSUE_STATUSES.has(active.status) && active.status !== "blocked" && payload?.promptHash === hash) {
         return { card, generatingIssue: active, alreadyGenerating: true };
       }
@@ -634,8 +633,7 @@ export function statusCardService(
     if (card.queries.length === 0) throw conflict("Compile the status-card query before refreshing it");
     if (card.generatingIssueId) {
       const active = await db.select().from(issues).where(eq(issues.id, card.generatingIssueId)).then((rows) => rows[0] ?? null);
-      // As in requestCompile: a `blocked` update task is stuck, not in flight, so
-      // a manual refresh must be allowed to supersede it instead of no-opping.
+      // Manual refresh can replace blocked tasks.
       if (active && !TERMINAL_ISSUE_STATUSES.has(active.status) && active.status !== "blocked") {
         return { card, generatingIssue: active, alreadyGenerating: true, enqueued: false };
       }
@@ -741,12 +739,12 @@ export function statusCardService(
       const winner = await getById(card.id);
       if (!winner?.generatingIssueId) {
         if (!TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-          await issuesSvc.update(generationIssue!.id, { status: "cancelled" });
+          await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.resolvedVia });
         }
         throw conflict("Status-card refresh claim was lost");
       }
       if (generationIssue!.id !== winner.generatingIssueId && !TERMINAL_ISSUE_STATUSES.has(generationIssue!.status)) {
-        await issuesSvc.update(generationIssue!.id, { status: "cancelled" });
+        await issuesSvc.update(generationIssue!.id, { status: "cancelled", actorResolvedVia: input.actor?.resolvedVia });
       }
       const winnerIssue = await db.select().from(issues).where(eq(issues.id, winner.generatingIssueId)).then((rows) => rows[0] ?? null);
       return { card: winner, generatingIssue: winnerIssue, alreadyGenerating: true, enqueued: false, kind, changes };

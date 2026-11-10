@@ -1,3 +1,4 @@
+import { interactionIssueUpdateActor } from "./interaction-resolution-actor.js";
 import { projectSkillSetupIdentity } from "../services/project-skill-source-bindings.js";
 import { adoptProjectSkillRepository, projectSkillRepositories, skillSourceSyncService } from "../services/skill-source-sync.js";
 import { skillAccessRequestContext, skillAccessService } from "../services/skill-access.js";
@@ -801,8 +802,7 @@ export function companySkillRoutes(db: Db) {
           await issues.update(issueId, {
             status: "cancelled",
             hiddenAt: new Date(),
-            actorAgentId: actor.agentId ?? null,
-            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            ...interactionIssueUpdateActor(req),
           });
           await logActivity(db, {
             companyId,
@@ -858,8 +858,7 @@ export function companySkillRoutes(db: Db) {
         if (issue.status !== "done" && issue.status !== "cancelled") {
           await issues.update(issueId, {
             status: "cancelled",
-            actorAgentId: actor.agentId ?? null,
-            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            ...interactionIssueUpdateActor(req),
           });
         }
       },
@@ -897,8 +896,7 @@ export function companySkillRoutes(db: Db) {
         if (!issue || issue.companyId !== companyId) return;
         await issues.update(issueId, {
           hiddenAt: new Date(),
-          actorAgentId: actor.agentId ?? null,
-          actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          ...interactionIssueUpdateActor(req),
         });
       },
     });

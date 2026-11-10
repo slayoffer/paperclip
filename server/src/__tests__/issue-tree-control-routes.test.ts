@@ -420,7 +420,7 @@ describe("issue tree control routes", () => {
     );
   });
 
-  it("marks affected issues cancelled when creating a cancel hold", async () => {
+  it("records session channel on cancellation", async () => {
     const app = await createApp({
       type: "board",
       userId: "user-1",
@@ -455,9 +455,8 @@ describe("issue tree control routes", () => {
 
     expect(res.status).toBe(201);
     expect(mockTreeControlService.cancelIssueStatusesForHold).toHaveBeenCalledWith(
-      "company-2",
-      "11111111-1111-4111-8111-111111111111",
-      "33333333-3333-4333-8333-333333333333",
+      "company-2", "11111111-1111-4111-8111-111111111111",
+      "33333333-3333-4333-8333-333333333333", "user_session"
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -511,9 +510,8 @@ describe("issue tree control routes", () => {
       { resultJson: { cancelledByActorType: "user", cancelledByUserId: "user-1" } },
     );
     expect(mockTreeControlService.cancelIssueStatusesForHold).toHaveBeenCalledWith(
-      "company-2",
-      "11111111-1111-4111-8111-111111111111",
-      "33333333-3333-4333-8333-333333333333",
+      "company-2", "11111111-1111-4111-8111-111111111111",
+      "33333333-3333-4333-8333-333333333333", "user_session"
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
