@@ -2668,6 +2668,13 @@
       "when": 1793058290067,
       "tag": "0382_last_meteorite",
       "breakpoints": true
+    },
+    {
+      "idx": 383,
+      "version": "7",
+      "when": 1794283560717,
+      "tag": "0383_watery_kid_colt",
+      "breakpoints": true
     }
   ]
 }

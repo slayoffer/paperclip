@@ -6,6 +6,30 @@ The Attention feed also includes the token in the interaction subject metadata.
 
 Use the existing routes. Company access and resolver restrictions still apply.
 
+Resolution reads also include `resolvedVia`. The server records this field from
+the authenticated actor when it saves the resolution:
+
+| Value | Authentication channel |
+| --- | --- |
+| `user_session` | Signed-in user session, including a TMA request authenticated with that session |
+| `board_api_key` | Board API key, even when its owner is the addressed user |
+| `agent_key` | Agent API key or authenticated agent run JWT |
+| `null` | Unknown channel, including old rows and internal calls without authentication provenance |
+
+The request body cannot set this field. A user ID alone does not prove a session.
+Local implicit access, cloud tenant claims, public assistant OAuth, and native
+chat callbacks without a session source remain unknown. A TMA relay that uses a
+board key records `board_api_key`; a Telegram tap alone does not change the
+server's authentication channel.
+
+The channel is saved with the terminal status and existing resolver IDs. Partial
+item verdicts keep it null until the final verdict resolves the interaction.
+Retries return the original channel. A database trigger prevents later changes,
+including relabeling an old null resolution. The migration adds no default and
+does not backfill historical rows. List, single-interaction, and company reads
+return the saved value. These fields record evidence; resolver permissions and
+existing identity fields retain their current behavior.
+
 | Method | Path | Answer fields |
 | --- | --- | --- |
 | POST | `/api/issues/:issueId/interactions/:interactionId/accept` | Existing confirmation or suggestion fields |

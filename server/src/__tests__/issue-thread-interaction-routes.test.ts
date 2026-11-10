@@ -1288,7 +1288,7 @@ describe("issue thread interaction routes", () => {
       issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       interactionId: "interaction-tool-action",
       actionRequestId: "action-request-1",
-      actor: { agentId: null, userId: "local-board" },
+      actor: { agentId: null, userId: "local-board", resolvedVia: null },
     });
     const expectedToolAction = {
       toolName: "google_sheets_add_row",
@@ -2471,15 +2471,9 @@ describe("issue thread interaction routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockInteractionService.acceptInteraction).toHaveBeenCalledWith(
-      expect.anything(),
-      "interaction-agent-review",
-      {},
-      {
-        agentId: ASSIGNEE_AGENT_ID,
-        runId: RUN_2,
-        userId: null,
-        resolverPolicyRestriction: "anyone",
-        suggestedTaskEffectsAuthorized: true,
+      expect.anything(), "interaction-agent-review", {}, {
+        agentId: ASSIGNEE_AGENT_ID, runId: RUN_2, userId: null, resolvedVia: null,
+        resolverPolicyRestriction: "anyone", suggestedTaskEffectsAuthorized: true,
       }, {},
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

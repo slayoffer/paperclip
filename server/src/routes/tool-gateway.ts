@@ -1,3 +1,4 @@
+import { interactionResolutionActor } from "./interaction-resolution-actor.js";
 import { Router, type Request, type Response } from "express";
 import { and, desc, eq, gte, ilike, inArray, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -621,10 +622,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
         companyId,
         actionRequestId: req.params.id,
         rememberAction: body.rememberAction,
-        actor: {
-          agentId: actor.agentId,
-          userId: req.actor.type === "board" ? req.actor.userId : null,
-        },
+        actor: interactionResolutionActor(req),
       });
       res.json(actionRequest);
     } catch (err) {
@@ -648,10 +646,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
         companyId,
         actionRequestId: req.params.id,
         reason: body.reason,
-        actor: {
-          agentId: actor.agentId,
-          userId: req.actor.type === "board" ? req.actor.userId : null,
-        },
+        actor: interactionResolutionActor(req),
       });
       res.json(actionRequest);
     } catch (err) {

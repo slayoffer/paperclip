@@ -1,3 +1,4 @@
+import type { InteractionActor as Actor } from "./interaction-resolution-input.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
@@ -9657,7 +9658,7 @@ export function createToolGatewayService(
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: Actor;
     }) {
       if (input.actor.agentId)
         throw new ToolGatewayHttpError(
@@ -9938,7 +9939,7 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: Actor;
     }) {
       const updated = await commitToolActionReview(db, {
         ...input,

@@ -941,11 +941,10 @@ export function connectionIntentService(db: Db) {
   }
 
   async function complete(
-    interactionId: string,
-    connectionId: string,
-    userId: string,
+    interactionId: string, connectionId: string, userId: string,
     options: {
       canManageOrganizationGrant?: boolean;
+      resolvedVia?: ConnectionIntentInteraction["resolvedVia"];
       bypassCurrentMembershipCheck?: boolean;
       validatedAdoption?: { agentUpdatedAt: Date; binding: AiConnectionBinding };
     } = {},
@@ -956,26 +955,15 @@ export function connectionIntentService(db: Db) {
       throw conflict("Connection intent is already resolved");
     }
     if (loaded.interaction.addresseeUserId !== userId) throw forbidden("Only the addressed user can connect this service");
-    await assertCurrentUserWriteAccess(
-      loaded.issue.companyId,
-      userId,
-      options.bypassCurrentMembershipCheck,
-    );
+    await assertCurrentUserWriteAccess(loaded.issue.companyId, userId, options.bypassCurrentMembershipCheck);
     const payload = connectionIntentPayloadSchema.parse(loaded.interaction.payload);
     await checkUncheckedIntentConnection(access, loaded.issue, payload, connectionId, userId, options.canManageOrganizationGrant);
     return db.transaction(async (tx) => {
       const [task] = await tx.select().from(issues).where(and(eq(issues.id, loaded.issue.id), eq(issues.companyId, loaded.issue.companyId))).for("update");
       if (!task || task.assigneeAgentId !== payload.requestingAgentId || ["done", "cancelled"].includes(task.status)) throw conflict("Connection request no longer belongs to an active task");
-      // Membership downgrade/removal takes the same row lock. Whichever side
-      // commits first is authoritative: a completed revocation makes this
-      // revalidation fail, while completion holds authority through OAuth
-      // finalization, every install/delegation, and intent resolution.
-      await lockCurrentUserWriteAccess(
-        tx,
-        loaded.issue.companyId,
-        userId,
-        options.bypassCurrentMembershipCheck,
-      );
+      // Serialize membership changes through OAuth, installs, delegation, and resolution.
+      // A removal that commits first fails this recheck.
+      await lockCurrentUserWriteAccess(tx, loaded.issue.companyId, userId, options.bypassCurrentMembershipCheck);
       const txDb = tx as unknown as Db;
       const txAccess = toolAccessService(txDb);
       const txInteractions = issueThreadInteractionService(txDb);
@@ -1020,7 +1008,7 @@ export function connectionIntentService(db: Db) {
         return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, {
           version: 1, outcome: "connected", connectionId: selectedConnection.id,
           instruction: "Your AgentMail inbox is ready. Use agentmail_inboxes to read its verified address and continue the user's request.",
-        }, { userId });
+        }, { userId, resolvedVia: options.resolvedVia });
       }
       if (selectedConnection.connectionPurpose === "channel") throw conflict("An email inbox cannot satisfy a tool connection request");
       if (payload.purpose === "ai" && selectedConnection.connectionPurpose !== "ai") throw conflict("Select an AI account for this authentication request");
@@ -1060,7 +1048,7 @@ export function connectionIntentService(db: Db) {
         }
         const selected = await service.select({ companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, userId, adapterType: managed.agent.adapterType, model: managed.adapterConfig.model, runnerProvider: managed.adapterConfig.provider, acpxAgent: managed.adapterConfig.acpxAgent, binding: managed.binding });
         if (selected.connection.id !== selectedConnection.id) throw conflict("This is not the account selected for the agent");
-        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId });
+        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId, resolvedVia: options.resolvedVia });
       }
 
       let { grants } = await txAccess.listConnectionGrants(
@@ -1149,29 +1137,23 @@ export function connectionIntentService(db: Db) {
         { version: 1, outcome: "connected", connectionId: selectedConnection.id,
           ...(isRemoteMcpConnectorId(payload.serviceSlug) ? { instruction: aggregatorContinuationInstruction(payload.serviceSlug, payload.upstreamService?.name ?? "The requested app") } : {}),
         },
-        { userId },
+        { userId, resolvedVia: options.resolvedVia },
       );
     });
   }
 
   async function decline(
-    interactionId: string,
-    userId: string,
-    reason?: string,
-    options: { bypassCurrentMembershipCheck?: boolean } = {},
+    interactionId: string, userId: string, reason?: string,
+    options: { bypassCurrentMembershipCheck?: boolean; resolvedVia?: ConnectionIntentInteraction["resolvedVia"] } = {},
   ) {
     const loaded = await loadIntent(interactionId);
     if (loaded.interaction.addresseeUserId !== userId) throw forbidden("Only the addressed user can decline this request");
-    await assertCurrentUserWriteAccess(
-      loaded.issue.companyId,
-      userId,
-      options.bypassCurrentMembershipCheck,
-    );
+    await assertCurrentUserWriteAccess(loaded.issue.companyId, userId, options.bypassCurrentMembershipCheck);
     return interactions.resolveConnectionIntent(
       loaded.issue,
       interactionId,
       { version: 1, outcome: "declined", reason: reason?.trim() || null },
-      { userId },
+      { userId, resolvedVia: options.resolvedVia },
     );
   }
 

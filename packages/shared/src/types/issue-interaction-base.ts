@@ -6,6 +6,8 @@ export interface IssueThreadInteractionActorFields {
   resolvedByAgentId?: string | null;
   resolvedByRunId?: string | null;
   resolvedByUserId?: string | null;
+  /** Server-authenticated resolution channel. Null means unknown. */
+  readonly resolvedVia?: "user_session" | "board_api_key" | "agent_key" | null;
 }
 
 export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {

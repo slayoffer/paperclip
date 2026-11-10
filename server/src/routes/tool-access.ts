@@ -1,3 +1,4 @@
+import { connectionIntentOAuthFinisher } from "./connection-intent-oauth-resolution.js";
 import { isCrossSiteOAuthCallbackNavigation, oauthCallbackInterstitialHtml } from "../lib/oauth-browser-return.js";
 import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
@@ -270,32 +271,10 @@ export function toolAccessRoutes(
     return req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true;
   }
 
-  async function finishConnectionIntentOAuth(input: {
-    interactionId: string;
-    connectionId?: string;
-    userId: string;
-    outcome: "connected" | "declined" | "failed";
-    canManageOrganizationGrant: boolean;
-    bypassCurrentMembershipCheck: boolean;
-  }) {
-    const loaded = await connectionIntents.loadIntent(input.interactionId);
-    if (loaded.interaction.addresseeUserId !== input.userId) {
-      throw forbidden("OAuth callback user does not match the connection request");
-    }
-    if (loaded.interaction.status !== "pending") return loaded.interaction;
-    const interaction = input.outcome === "connected" && input.connectionId
-      ? await connectionIntents.complete(input.interactionId, input.connectionId, input.userId, {
-          canManageOrganizationGrant: input.canManageOrganizationGrant,
-          bypassCurrentMembershipCheck: input.bypassCurrentMembershipCheck,
-        })
-      : await connectionIntents.updatePhase(input.interactionId, "needs_retry", input.userId, {
-            bypassCurrentMembershipCheck: input.bypassCurrentMembershipCheck,
-          });
-    if (interaction.status === "accepted" && options.connectionIntentHeartbeat) {
-      await connectionIntentDeliveryService(db, options.connectionIntentHeartbeat).tryDeliver(input.interactionId);
-    }
-    return interaction;
-  }
+  const finishConnectionIntentOAuth = connectionIntentOAuthFinisher(connectionIntents,
+    options.connectionIntentHeartbeat
+      ? (id) => connectionIntentDeliveryService(db, options.connectionIntentHeartbeat!).tryDeliver(id)
+      : undefined);
 
   function sendConnectionIntentOAuthOutcome(
     res: import("express").Response,
@@ -1178,6 +1157,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       });
       if (acceptsHtml && pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
         await finishConnectionIntentOAuth({
+          actor: req.actor,
           interactionId: pendingState.interactionId,
           connectionId: result.connection.id,
           userId: req.actor.userId,
@@ -1207,6 +1187,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       if (pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
         const outcome = details?.code === "oauth_authorization_denied" ? "declined" : "failed";
         await finishConnectionIntentOAuth({
+          actor: req.actor,
           interactionId: pendingState.interactionId,
           userId: req.actor.userId,
           outcome,
@@ -1273,6 +1254,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       });
       if (acceptsHtml && pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
         await finishConnectionIntentOAuth({
+          actor: req.actor,
           interactionId: pendingState.interactionId,
           connectionId: result.connection.id,
           userId: req.actor.userId,
@@ -1312,6 +1294,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       if (pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
         const outcome = callbackCode === "oauth_authorization_denied" ? "declined" : "failed";
         await finishConnectionIntentOAuth({
+          actor: req.actor,
           interactionId: pendingState.interactionId,
           userId: req.actor.userId,
           outcome,
@@ -1407,6 +1390,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       if (pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
         const outcome = callbackErrorCode === "oauth_authorization_denied" ? "declined" : "failed";
         await finishConnectionIntentOAuth({
+          actor: req.actor,
           interactionId: pendingState.interactionId,
           userId: req.actor.userId,
           outcome,
@@ -1442,6 +1426,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     });
     if (acceptsHtml && pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
       await finishConnectionIntentOAuth({
+          actor: req.actor,
         interactionId: pendingState.interactionId,
         connectionId: result.connection.id,
         userId: req.actor.userId,

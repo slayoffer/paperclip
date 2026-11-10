@@ -1,3 +1,5 @@
+import { interactionResolutionActor } from "./interaction-resolution-actor.js";
+import type { InteractionActor } from "../services/interaction-resolution-input.js";
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { dispatchBridgeWakes } from "../services/review-bridge-wakes.js";
 import { registerUploadCorrelation } from "./upload-correlation.js";
@@ -3143,7 +3145,7 @@ export function issueRoutes(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
     approveToolActionRequest?: (input: {
       rememberAction?: boolean;
@@ -3153,7 +3155,7 @@ export function issueRoutes(
       issueId: string;
       interactionId: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: InteractionActor;
     }) => Promise<unknown>;
     approveSecretProposal?: (input: {
       companyId: string;
@@ -16422,7 +16424,7 @@ export function issueRoutes(
         companyId: issue.companyId, issueId: issue.id,
         interactionId: req.params.interactionId as string,
         input: req.body,
-        actor: { agentId: actor.agentId!, runId: actor.runId!,
+        actor: { ...interactionResolutionActor(req), agentId: actor.agentId!, runId: actor.runId!,
           resolverPolicyRestriction: authorization.resolutionAuthorization.resolverPolicyRestriction },
       });
       // The authenticated responding run already owns this turn. Do not enqueue
@@ -16503,10 +16505,7 @@ export function issueRoutes(
           interactionId: current.id,
           actionRequestId: current.payload.toolAction.actionRequestId,
           rememberAction: req.body.rememberAction === true,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         res.json(await interactionSvc.getById(current.id));
         return;
@@ -16517,9 +16516,8 @@ export function issueRoutes(
         );
       const { interaction, createdIssues, continuationIssue } =
         await interactionSvc.acceptInteraction(issue, interactionId, req.body, {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
@@ -16544,10 +16542,7 @@ export function issueRoutes(
           issueId: issue.id,
           interactionId: interaction.id,
           actionRequestId: toolAction.actionRequestId,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         const approval = readObject(approvalResult);
         const executionStatus = readToolActionExecutionStatus(approval.status);
@@ -16730,10 +16725,7 @@ export function issueRoutes(
           interactionId: current.id,
           actionRequestId: current.payload.toolAction.actionRequestId,
           reason: req.body.reason,
-          actor: {
-            agentId: actor.agentId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
-          },
+          actor: interactionResolutionActor(req),
         });
         res.json(await interactionSvc.getById(current.id));
         return;
@@ -16743,9 +16735,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
@@ -16814,9 +16805,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
@@ -16880,9 +16870,8 @@ export function issueRoutes(
           interactionId,
           req.body,
           {
-            agentId: actor.agentId,
+            ...interactionResolutionActor(req),
             runId: actor.runId,
-            userId: actor.actorType === "user" ? actor.actorId : null,
             resolverPolicyRestriction:
               resolutionAuthorization.resolverPolicyRestriction,
           },
@@ -16978,9 +16967,8 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
+          ...interactionResolutionActor(req),
           runId: actor.runId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
         },
         {
           afterResolveInTransaction: async (tx, resolved) => {
@@ -17098,9 +17086,8 @@ export function issueRoutes(
       const interaction = await issueThreadInteractionService(
         db,
       ).skipInteraction(issue, interactionId, req.body, {
-        agentId: actor.agentId,
+        ...interactionResolutionActor(req),
         runId: actor.runId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
       });
 
       await logActivity(db, {
@@ -17161,8 +17148,7 @@ export function issueRoutes(
         interactionId,
         req.body,
         {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
+          ...interactionResolutionActor(req),
         },
         {
           afterResolveInTransaction: async (tx, resolved) => {
