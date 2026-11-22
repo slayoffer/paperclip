@@ -2380,6 +2380,7 @@ rl.on("line", (line) => {
         continuationPolicy: "none",
         requestedResolverPolicy: "anyone",
         effectiveResolverPolicy: "anyone",
+        addresseeUserId: "carol",
         idempotencyKey: `connection-authorization:${connection.id}:carol`,
         title: "Connect your account",
         summary: `Connect ${connection.name} to continue`,
@@ -2388,6 +2389,7 @@ rl.on("line", (line) => {
           prompt: `Connect your account to ${connection.name}`,
           acceptLabel: "Open authorization",
           rejectLabel: "Not now",
+          target: { type: "custom", key: `connection:${connection.uid}:user:carol` },
         },
       });
 

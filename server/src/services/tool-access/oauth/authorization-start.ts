@@ -1,3 +1,4 @@
+import { requestConnectionAuthorizationCard } from "../../connection-authorization-card.js";
 import { vercelConnectHttpError, vercelCredentialFor, vercelConnectResourcesFor } from "../vercel-credentials.js";
 import { credentialScope, managedConnectorProfile } from "./client-settings.js";
 import { createOAuthClientRegistration } from "./client-registration.js";
@@ -484,7 +485,6 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
       input.issueId &&
       binding.actorType === "agent"
     ) {
-      const idempotencyKey = `connection-authorization:${connection.id}:${authorizationSubjectUserId}`;
       // Provider label for the card's copy. The gallery definition's name when we
       // have one, else the connection's own name — never a secret name or ref.
       const sourceTemplateKey =
@@ -532,65 +532,24 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
           href: authorizationUrl.toString(),
         },
       };
-      const [existingInteraction] = await db
-        .select()
-        .from(issueThreadInteractions)
-        .where(
-          and(
-            eq(issueThreadInteractions.companyId, companyId),
-            eq(issueThreadInteractions.issueId, input.issueId),
-            eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
-          ),
-        )
-        .limit(1);
-      const [interaction] = existingInteraction
-        ? await db
-            .update(issueThreadInteractions)
-            .set({
-              status: "pending",
-              requestedResolverPolicy: "human_only",
-              effectiveResolverPolicy: "human_only",
-              resolverPolicyProvenance: "explicit",
-              effectiveResolverPolicySource: "requested",
-              addresseeUserId: authorizationSubjectUserId,
-              payload,
-              result: null,
-              resolvedAt: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(issueThreadInteractions.id, existingInteraction.id))
-            .returning()
-        : await db
-            .insert(issueThreadInteractions)
-            .values({
-              companyId,
-              issueId: input.issueId,
-              kind: "request_confirmation",
-              status: "pending",
-              continuationPolicy: "none",
-              requestedResolverPolicy: "human_only",
-              effectiveResolverPolicy: "human_only",
-              resolverPolicyProvenance: "explicit",
-              effectiveResolverPolicySource: "requested",
-              addresseeUserId: authorizationSubjectUserId,
-              idempotencyKey,
-              sourceRunId:
-                binding.actorType === "agent"
-                  ? (input.actor.sessionId ?? null)
-                  : null,
-              title: `Connect your ${providerName} to continue`,
-              summary: `${requestingAgent?.name ?? "An agent"} needs your ${providerName} identity for work running as you.`,
-              createdByAgentId:
-                binding.actorType === "agent" ? binding.actorId : null,
-              payload,
-            })
-            .returning();
-      if (interaction) {
-        await db
+      const issueId = input.issueId;
+      await db.transaction(async (tx) => {
+        const interaction = await requestConnectionAuthorizationCard(tx, {
+          companyId,
+          issueId,
+          connectionId: connection.id,
+          addresseeUserId: authorizationSubjectUserId,
+          sourceRunId: input.actor.sessionId ?? null,
+          title: `Connect your ${providerName} to continue`,
+          summary: `${requestingAgent?.name ?? "An agent"} needs your ${providerName} identity for work running as you.`,
+          createdByAgentId: binding.actorId,
+          payload,
+        });
+        await tx
           .update(toolOauthStates)
           .set({ interactionId: interaction.id })
           .where(eq(toolOauthStates.state, state));
-      }
+      });
     }
 
     const nextConfig = {

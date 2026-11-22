@@ -168,6 +168,10 @@ task-bound OAuth, popup handoff, and verifying a saved connection before closing
 Withdrawn requests render a terminal acknowledgement with no setup action; the
 interaction-body test and narrow Storybook journey cover this recovery state.
 The connection-intents browser suite above exercises fixture-backed continuation.
+The [gateway](../../server/src/__tests__/tool-gateway.test.ts) and
+[OAuth start](../../server/src/__tests__/tool-access-service.test.ts) tests
+cover authorization retries. After a rejection, the next attempt creates a
+new card and preserves the completed card in the task thread.
 
 Manual: ask an agent to use an unavailable app, open its request as the named
 user, and complete setup in the dialog. Verify the card settles, the exact task

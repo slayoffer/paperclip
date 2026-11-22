@@ -1,4 +1,5 @@
 import { interactionResolutionAttribution, SYSTEM_RESOLUTION_VIA } from "./interaction-resolution-attribution.js";
+import { isConnectionAuthorizationCardKey } from "./connection-authorization-card.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { historicalQuestionCondition } from "./issue-question-context.js";
 import { resolveInteractionRevisionForService } from "./interaction-revision-service.js";
@@ -3089,6 +3090,9 @@ export function issueThreadInteractionService(
       const data = normalizeCreateInteractionInput(
         createIssueThreadInteractionSchema.parse(input),
       );
+      if (data.idempotencyKey && isConnectionAuthorizationCardKey(data.idempotencyKey)) {
+        throw unprocessable("This interaction idempotency key is reserved for connection authorization");
+      }
       // Chat ownership is server-owned and immutable. Ordinary human questions
       // must not depend on a model copying an opaque user identity correctly.
       let defaultAddresseeUserId: string | null = null;
