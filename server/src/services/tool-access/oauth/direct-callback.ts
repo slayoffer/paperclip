@@ -371,18 +371,7 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
             updatedAt: new Date(),
           })
           .where(eq(toolApplications.id, connection.applicationId));
-        const linkedInteractionKind = stateRow.interactionId
-          ? await tx
-              .select({ kind: issueThreadInteractions.kind })
-              .from(issueThreadInteractions)
-              .where(eq(issueThreadInteractions.id, stateRow.interactionId))
-              .limit(1)
-              .then((rows) => rows[0]?.kind ?? null)
-          : null;
-        if (
-          stateRow.interactionId &&
-          linkedInteractionKind === "request_confirmation"
-        ) {
+        if (stateRow.interactionId) {
           await tx
             .update(issueThreadInteractions)
             .set({
@@ -392,12 +381,12 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
               resolvedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(
-              and(
-                eq(issueThreadInteractions.id, stateRow.interactionId),
-                eq(issueThreadInteractions.companyId, connection.companyId),
-              ),
-            );
+            .where(and(
+              eq(issueThreadInteractions.id, stateRow.interactionId),
+              eq(issueThreadInteractions.companyId, connection.companyId),
+              eq(issueThreadInteractions.kind, "request_confirmation"),
+              eq(issueThreadInteractions.status, "pending"),
+            ));
         }
         await syncCredentialBindings(
           connection,

@@ -212,6 +212,9 @@ Agent access: `available` — Native connection_request / run-bound runtime-tool
 
 Policy: Setup and credentials belong to the addressed authorized human; active-run tools
 can search/request access.
+The tool gateway and agent-initiated OAuth start reuse a pending authorization
+confirmation for the same task, connection, and user. A request after resolution
+creates a new confirmation with its own answer receipt and continuation.
 
 Evidence: `source-only` —
 [implementation](../../server/src/routes/connection-intents.ts#L130) at the reviewed

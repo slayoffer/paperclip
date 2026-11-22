@@ -405,18 +405,7 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
         personalCredential || agentCredential ? credentialSecretRefs : [],
         tx,
       );
-      const linkedInteractionKind = stateRow.interactionId
-        ? await tx
-            .select({ kind: issueThreadInteractions.kind })
-            .from(issueThreadInteractions)
-            .where(eq(issueThreadInteractions.id, stateRow.interactionId))
-            .limit(1)
-            .then((rows) => rows[0]?.kind ?? null)
-        : null;
-      if (
-        stateRow.interactionId &&
-        linkedInteractionKind === "request_confirmation"
-      ) {
+      if (stateRow.interactionId) {
         await tx
           .update(issueThreadInteractions)
           .set({
@@ -426,7 +415,12 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
             resolvedAt: now(),
             updatedAt: now(),
           })
-          .where(eq(issueThreadInteractions.id, stateRow.interactionId));
+          .where(and(
+            eq(issueThreadInteractions.id, stateRow.interactionId),
+            eq(issueThreadInteractions.companyId, stateRow.companyId),
+            eq(issueThreadInteractions.kind, "request_confirmation"),
+            eq(issueThreadInteractions.status, "pending"),
+          ));
       }
     });
     // The transaction above committed the connection's lifecycle write; a

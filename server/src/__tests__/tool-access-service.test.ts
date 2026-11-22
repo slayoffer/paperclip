@@ -10244,9 +10244,20 @@ describeEmbeddedPostgres("tool access service", () => {
         ),
       );
     const retry = await startAuthorization();
+    const retryState = new URL(retry.authorizationUrl).searchParams.get("state")!;
+    const [retryBinding] = await db.select().from(toolOauthStates)
+      .where(eq(toolOauthStates.state, retryState));
     const [pending] = await db.select().from(issueThreadInteractions)
-      .where(eq(issueThreadInteractions.idempotencyKey, `connection-authorization:${connected.connectionId}:user-for-run`));
-    await assertAuthorizationResolutionHistory(db, pending!, startAuthorization);
+      .where(eq(issueThreadInteractions.id, retryBinding.interactionId!));
+    const reopenedStates: string[] = [];
+    await assertAuthorizationResolutionHistory(db, pending!, async () => {
+      const restarted = await startAuthorization();
+      const state = new URL(restarted.authorizationUrl).searchParams.get("state")!;
+      reopenedStates.push(state);
+      const [binding] = await db.select().from(toolOauthStates)
+        .where(eq(toolOauthStates.state, state));
+      expect(binding.interactionId).not.toBe(pending.id);
+    });
     await db
       .update(companyMemberships)
       .set({ membershipRole: "viewer" })
@@ -10258,7 +10269,7 @@ describeEmbeddedPostgres("tool access service", () => {
       );
     await expect(
       service.completeOAuthCallback({
-        state: new URL(retry.authorizationUrl).searchParams.get("state")!,
+        state: retryState,
         code: "user-authorization-code",
         redirectUri: "https://paperclip.example/api/tools/oauth/callback",
         actor: { actorType: "user", actorId: "user-for-run" },
@@ -10320,6 +10331,23 @@ describeEmbeddedPostgres("tool access service", () => {
           )
       ).length,
     ).toBe(versionCountBeforeAccessRevocation);
+
+    await db.update(companyMemberships).set({ status: "active" }).where(and(
+      eq(companyMemberships.companyId, company.id),
+      eq(companyMemberships.principalId, "user-for-run"),
+    ));
+    await startAuthorization();
+    const readCards = () => db.select().from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.issueId, issue.id));
+    const cards = await readCards();
+    expect(cards.filter((card) => card.status === "pending")).toHaveLength(1);
+    await service.completeOAuthCallback({
+      state: reopenedStates[0],
+      code: "user-authorization-code",
+      redirectUri: "https://paperclip.example/api/tools/oauth/callback",
+      actor: { actorType: "user", actorId: "user-for-run" },
+    });
+    expect(await readCards()).toEqual(expect.arrayContaining(cards));
   });
 
   it.each(["page", "task"] as const)(

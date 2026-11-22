@@ -45,13 +45,19 @@ existing resolver IDs.
 Comments, document changes, and issue closures can expire cards. Comment-triggered
 expiries record null: a comment is not an answer to the card. Document changes and
 issue closures record the initiating channel. Historical comment sweeps and
-deferred Agent Chat `/new` commands also record null. OAuth provider callbacks record null
-on first resolution and preserve existing attribution on late result updates.
-An authorization retry reopens the existing card and clears its provenance through
-the database trigger. Repeated requests retain the same card ID.
-An existing limitation remains: reopening retains the previous resolution receipt
-and outbox entry. A second revision-protected confirmation answer can fail with an
-outbox primary key conflict. Provenance reset does not repair that answer lifecycle.
+deferred Agent Chat `/new` commands also record null. An OAuth callback that
+accepts a pending authorization card records null for the channel.
+
+The tool gateway and agent-initiated OAuth start reuse an authorization card
+while it is pending. After an answer, a new authorization request creates a
+pending card with a new ID and revision. Use those values to answer the new card.
+The completed card keeps its answer, resolver attribution, and resolution receipt.
+Each card that schedules a continuation has its own outbox entry.
+Late OAuth callbacks preserve the completed card. The provider can still save
+the grant from its own OAuth request. A newer card keeps its own decision.
+If an older version already reset a card and left its answer receipt or outbox
+entry, the next authorization request retires that card as expired. It keeps
+the saved receipt and outbox entry.
 
 | Method | Path | Answer fields |
 | --- | --- | --- |
