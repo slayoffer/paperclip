@@ -1,3 +1,4 @@
+import { recordPullQueueParking } from "./pull-queue-state.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
 import type { IssueDisplayStatus } from "@paperclipai/shared";
 import { issueDisplayStatusSql } from "./issue-display-status.js";
@@ -11903,6 +11904,7 @@ export function issueService(db: Db) {
           agentId: actorAgentId ?? null,
           userId: actorUserId ?? null,
         });
+        await recordPullQueueParking(tx, receiptExisting, updated, issueData.status);
         await recordChatCompletion(tx, receiptExisting, updated);
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.

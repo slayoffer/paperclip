@@ -51,6 +51,7 @@ export type LegacyRestartDispatchClaim = {
 export type DispatchResolvedInteractionInput<T> = CancelStaleQueuedRunInput & {
   reservationId: string;
   recoveryLeaseOwner?: string;
+  reattachingExistingRunner?: boolean;
   legacyRestartClaim?: LegacyRestartDispatchClaim;
   enforceContinuationOwnership?: boolean;
   dispatch: (markDispatchStarted: () => void) => Promise<T>;

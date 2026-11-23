@@ -19,19 +19,32 @@ export function subscribeTaskDrainExpiry(listener: () => void) {
   return () => { expiryListeners.delete(listener); };
 }
 
-// The shared coordinator owns this process-local deadline and its shutdown.
-// Reading admission can also establish expiry, so both paths notify the same
-// listener. No database scan or recurring timer is needed while idle.
+// The coordinator owns local and persisted drain deadlines and their shutdown.
+// A lease write rechecks the persisted deadline through the database wake signal.
+// Empty state requires no recurring scans or timers.
 export function registerTaskDrainExpiryWork(
   coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
   onExpired: () => void,
+  readActiveLease?: () => Promise<{ expiresAt: string } | null>,
 ) {
+  let durableDeadline: number | null = null;
   const worker = coordinator.register(DELIVERY_QUEUES.taskDrainExpiry, {
     retryMs: 1000,
     runDuringDrain: true,
-    run: async () => { readTaskDrain(new Date()); },
+    run: async () => {
+      readTaskDrain(new Date());
+      if (!readActiveLease) return;
+      const lease = await readActiveLease();
+      const previousDeadline = durableDeadline;
+      durableDeadline = lease ? Date.parse(lease.expiresAt) : null;
+      if (previousDeadline !== null && durableDeadline === null) onExpired();
+    },
     hasPending: async () => false,
-    nextRunAt: () => taskDrainState?.expiresAt?.getTime() ?? null,
+    nextRunAt: () => {
+      const localDeadline = taskDrainState?.expiresAt?.getTime();
+      if (localDeadline === undefined) return durableDeadline;
+      return durableDeadline === null ? localDeadline : Math.min(localDeadline, durableDeadline);
+    },
   });
   expiryListeners.add(onExpired);
   changeListeners.add(worker.wake);
@@ -49,6 +62,9 @@ export function registerTaskDrainExpiryWork(
 // dispatching new work until the lease is renewed (or it exits). It never
 // replaces an operator's drain and has no idle owner, so HTTP stays open.
 let controllerLeaseQuiesce: TaskDrainState | null = null;
+export function isControllerLeaseQuiesced(): boolean {
+  return controllerLeaseQuiesce !== null;
+}
 export function setControllerLeaseQuiesce(quiesced: boolean): void {
   if (quiesced === (controllerLeaseQuiesce !== null)) return;
   controllerLeaseQuiesce = quiesced ? { startedAt: new Date(), expiresAt: null } : null;

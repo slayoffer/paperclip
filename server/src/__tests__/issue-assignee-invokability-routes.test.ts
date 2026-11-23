@@ -131,6 +131,14 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({}),
 }));
 
+vi.mock("../services/external-objects.js", () => ({
+  externalObjectService: () => ({ syncIssueSafely: async () => undefined, syncCommentSafely: async () => undefined }),
+}));
+
+vi.mock("../services/fast-responses.js", () => ({
+  enqueueFastResponse: vi.fn(async () => undefined),
+}));
+
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 
@@ -160,11 +168,14 @@ function agentActor(): Actor {
 // Run containment is mocked because this suite targets assignee invokability.
 function stubDb(): any {
   const query: any = {};
-  for (const method of ["select", "from", "where", "innerJoin", "leftJoin", "orderBy", "limit", "groupBy", "for"]) {
+  for (const method of ["select", "from", "where", "innerJoin", "leftJoin", "orderBy", "limit", "groupBy", "for",
+    "update", "set", "insert", "values", "returning", "onConflictDoNothing"]) {
     query[method] = () => query;
   }
   query.then = (resolve: (rows: unknown[]) => unknown) => Promise.resolve(resolve([]));
-  return { select: () => query };
+  const database = { select: () => query, update: () => query, insert: () => query,
+    transaction: async (callback: (tx: unknown) => unknown) => callback(database) };
+  return database;
 }
 
 function createApp(actor: Actor) {
@@ -271,6 +282,22 @@ describe("issue assignee invokability guard", () => {
 
     expect(res.status).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalled();
+  });
+
+  it("leaves a blocked reassignment with a comment quiet without explicit resume", async () => {
+    const existing = makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "local-board" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id, patch) => ({ ...existing, ...patch }));
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-1", issueId: existing.id, companyId: existing.companyId, body: "Assignment context",
+    });
+    const res = await request(createApp(boardActor()))
+      .patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: IDLE_AGENT_ID, assigneeUserId: null, comment: "Assignment context" });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(res.status, res.text).toBe(200);
+    expect(res.body).toMatchObject({ status: "blocked", assigneeAgentId: IDLE_AGENT_ID });
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 });
 

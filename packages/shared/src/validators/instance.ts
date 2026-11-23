@@ -135,13 +135,32 @@ export const patchInstanceSettingsSchema = z.object({
 // caller can send a shorter `ttlMs`, but not a longer one — the request must
 // fail instead of the server silently clamping the value.
 export const MAX_TASK_DRAIN_TTL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_OWNED_TASK_DRAIN_TTL_MS = 15 * 60 * 1000;
 
 export const startTaskDrainRequestSchema = z.object({
-  purpose: z.literal("idle").optional(),
+  purpose: z.enum(["idle", "owned", "unowned"]).optional(),
   ttlMs: z.number().int().positive().max(MAX_TASK_DRAIN_TTL_MS).nullable().optional(),
 }).strict().refine(value => value.purpose !== "idle" ||
   (typeof value.ttlMs === "number" && value.ttlMs >= 5_000 && value.ttlMs <= 300_000),
-  { message: "Idle holds require ttlMs between 5000 and 300000", path: ["ttlMs"] });
+  { message: "Idle holds require ttlMs between 5000 and 300000", path: ["ttlMs"] })
+  .refine(value => value.purpose !== "owned" || value.ttlMs !== null,
+    { message: "An owned drain requires a finite duration", path: ["ttlMs"] });
+
+export const stopTaskDrainRequestSchema = z.object({
+  leaseId: z.string().uuid(),
+}).strict();
+
+export const taskDrainLeaseSchema = z.object({
+  leaseId: z.string().uuid(),
+  ownerId: z.string().min(1),
+  startedAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+}).strict().refine((lease) => {
+  const duration = Date.parse(lease.expiresAt) - Date.parse(lease.startedAt);
+  return duration > 0 && duration <= MAX_TASK_DRAIN_TTL_MS;
+}, "Invalid drain lease duration");
+
+export type TaskDrainLease = z.infer<typeof taskDrainLeaseSchema>;
 
 export type InstanceGeneralSettings = z.infer<typeof instanceGeneralSettingsSchema>;
 // The patch schema removes each default so an absent key stays absent. Declare

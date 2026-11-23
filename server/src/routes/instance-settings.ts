@@ -8,8 +8,10 @@ import {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
   startTaskDrainRequestSchema,
+  stopTaskDrainRequestSchema,
 } from "@paperclipai/shared";
-import { conflict, forbidden } from "../errors.js";
+import { badRequest, conflict, forbidden } from "../errors.js";
+import { assertNoActiveTaskDrainLease, taskDrainService } from "../services/task-drain.js";
 import { assertAgentsReadyForEnvironmentChange } from "../services/plugin-environment-driver.js";
 import {
   cloudTenantPrimaryCompanyId,
@@ -144,6 +146,33 @@ export function instanceSettingsRoutes(
   const svc = instanceSettingsService(db);
   const environments = environmentService(db);
   const heartbeat = heartbeatService(db, { pluginWorkerManager: pluginWorkers });
+  const durableDrain = taskDrainService(db);
+
+  function auditDrainTransition(req: Request, action: string, publications: ActivityPublication[]) {
+    const actor = getActorInfo(req);
+    return async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0], details: Record<string, unknown>) => {
+      const transactionDb = tx as unknown as Db;
+      const companyIds = await instanceSettingsService(transactionDb).listCompanyIds();
+      await Promise.all(companyIds.map(companyId => logActivity(transactionDb, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action,
+        entityType: "instance_settings",
+        entityId: "task-drain",
+        details,
+      }, publications)));
+    };
+  }
+
+  function resumeAfterDrain() {
+    void heartbeat.resumeQueuedRunsAfterDrain().catch(err => {
+      logger.error({ err }, "failed to resume queued work after task drain; durable work remains queued");
+    });
+  }
 
   router.get("/instance/settings", async (req, res) => {
     assertBoardOrgAccess(req);
@@ -307,7 +336,7 @@ export function instanceSettingsRoutes(
     if (req.query.upgradeReadiness === "1") {
       // This covers all companies and must not expose instance-wide work to a member.
       assertCanManageInstanceSettings(req);
-      res.json({ ...heartbeat.getTaskDrainStatus(), upgradeReadiness: await heartbeat.readUpgradeReadiness() });
+      res.json({ ...(await durableDrain.status(heartbeat.getTaskDrainStatus())), upgradeReadiness: await heartbeat.readUpgradeReadiness() });
       return;
     }
     if (req.query.idleSleepSafety === "1") {
@@ -344,10 +373,17 @@ export function instanceSettingsRoutes(
             return prepareIdlePluginLifecycle ? prepareIdlePluginLifecycle({ canRetire: canPrepare }) : "none";
           },
           ...(req.query.idleSleepDiagnostics === "1" ? { collectDiagnostics: true } : {}) });
-      res.json({ ...heartbeat.getTaskDrainStatus(), idleSleepSafety });
+      res.json({ ...(await durableDrain.status(heartbeat.getTaskDrainStatus())), idleSleepSafety });
       return;
     }
-    res.json(heartbeat.getTaskDrainStatus());
+    const local = heartbeat.getTaskDrainStatus();
+    if (req.actor.type === "board" && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      res.json(await durableDrain.status(local));
+      return;
+    }
+    // Instance-wide counters and the lease owner are reserved for operators.
+    const lease = await durableDrain.activeLease();
+    res.json(lease ? { ...local, draining: true, startedAt: lease.startedAt, expiresAt: lease.expiresAt } : local);
   });
 
   router.post(
@@ -356,8 +392,19 @@ export function instanceSettingsRoutes(
     async (req, res) => {
       assertCanManageInstanceSettings(req);
       const actor = getActorInfo(req);
-      const companyIds = await svc.listCompanyIds();
       const ttlMs = req.body.ttlMs ?? null;
+      if (req.body.purpose === "owned" || (req.body.purpose === undefined && ttlMs !== null)) {
+        const action = "instance.task_drain.started";
+        const publications: ActivityPublication[] = [];
+        const lease = await withTaskDrainTransition(async () => {
+          if (heartbeat.getTaskDrainStatus()?.draining) throw conflict("Another task drain is already active");
+          return durableDrain.acquire(actor.actorId, req.body, auditDrainTransition(req, action, publications));
+        });
+        publishActivitiesBestEffort(publications, action);
+        res.json(lease);
+        return;
+      }
+      const companyIds = await svc.listCompanyIds();
       // The whole read-audit-apply sequence runs as one queued transition
       // (see withTaskDrainTransition above), so an overlapping start or
       // stop cannot commit its audit row, or apply its live state, out of
@@ -378,8 +425,9 @@ export function instanceSettingsRoutes(
         // this transaction commits, so a failed write leaves the live
         // drain untouched and there is no partial state to roll back.
         const postCommitActivityPublications: ActivityPublication[] = [];
-        await db.transaction((tx) =>
-          Promise.all(
+        await db.transaction(async tx => {
+          await assertNoActiveTaskDrainLease(tx);
+          return Promise.all(
             companyIds.map((companyId) =>
               logActivity(tx as unknown as Db, {
                 companyId,
@@ -398,8 +446,8 @@ export function instanceSettingsRoutes(
                 },
               }, postCommitActivityPublications),
             ),
-          ),
-        );
+          );
+        });
         heartbeat.applyTaskDrain(computed);
         // The audit record already committed, so a failure to publish it
         // here is not a reason to undo the drain: reverting the in-memory
@@ -416,6 +464,20 @@ export function instanceSettingsRoutes(
   router.delete("/instance/task-drain", async (req, res) => {
     assertCanManageInstanceSettings(req);
     const actor = getActorInfo(req);
+    if (req.body !== undefined) {
+      if (req.query.ownerId !== undefined) throw badRequest("Specify a lease or an idle owner");
+      const parsed = stopTaskDrainRequestSchema.safeParse(req.body);
+      if (!parsed.success) throw badRequest("A valid task drain lease ID is required");
+      const action = "instance.task_drain.stopped";
+      const publications: ActivityPublication[] = [];
+      const result = await withTaskDrainTransition(() =>
+        durableDrain.release(actor.actorId, parsed.data.leaseId, auditDrainTransition(req, action, publications)),
+      );
+      publishActivitiesBestEffort(publications, action);
+      if (result.wasActive) resumeAfterDrain();
+      res.json(result);
+      return;
+    }
     const companyIds = await svc.listCompanyIds();
     // See the POST handler above for why the whole read-audit-apply
     // sequence runs inside withTaskDrainTransition: it queues this stop
@@ -436,8 +498,9 @@ export function instanceSettingsRoutes(
       // See the POST handler above for why this is one transaction, and why
       // the drain mutation runs only after it commits.
       const postCommitActivityPublications: ActivityPublication[] = [];
-      await db.transaction((tx) =>
-        Promise.all(
+      await db.transaction(async tx => {
+        await assertNoActiveTaskDrainLease(tx);
+        return Promise.all(
           companyIds.map((companyId) =>
             logActivity(tx as unknown as Db, {
               companyId,
@@ -454,8 +517,8 @@ export function instanceSettingsRoutes(
               },
             }, postCommitActivityPublications),
           ),
-        ),
-      );
+        );
+      });
       heartbeat.stopTaskDrain();
       pluginWorkers?.releaseIdleSleep?.();
       // See the POST handler above for why a publish failure here is
@@ -466,11 +529,7 @@ export function instanceSettingsRoutes(
       publishActivitiesBestEffort(postCommitActivityPublications, "instance.task_drain.stopped");
       return wasActive;
     });
-    if (wasActive) {
-      void heartbeat.resumeQueuedRunsAfterDrain().catch(err => {
-        logger.error({ err }, "failed to resume queued work after task drain; durable work remains queued");
-      });
-    }
+    if (wasActive) resumeAfterDrain();
     res.json({ wasActive });
   });
 

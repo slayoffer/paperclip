@@ -1,3 +1,4 @@
+import { isPullQueueEnabled } from "../../../services/pull-queue-policy.js";
 import { notifyStrandedAgentStatus } from "../../../services/live-run-recovery-notifications.js";
 import { notifyDeferredExecutionWork } from "../../../services/deferred-execution-notifications.js";
 import { notifyRunDispatch } from "../../../services/run-dispatch-notifications.js";
@@ -1240,6 +1241,10 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
             await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: input.companyId, issueId: issue.id });
             await notifyNativeStatusReassessment(tx, { companyId: input.companyId, issueId: issue.id });
           }
+        }
+        // The run status can publish before this checkout is available.
+        if (isPullQueueEnabled() && candidateIssues.some(issue => issue.executionRunId === run.id || issue.checkoutRunId === run.id)) {
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.pullQueue, input.companyId);
         }
         // Two separate updates: a retry can move `executionRunId` to a new run
         // while `checkoutRunId` still points at this one finishing.

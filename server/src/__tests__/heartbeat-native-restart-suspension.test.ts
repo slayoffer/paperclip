@@ -1,3 +1,5 @@
+import { claimNativeRestartRecoveries } from "../services/native-runtime/native-restart-recovery.js";
+import { taskDrainService } from "../services/task-drain.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { activityLog, authUsers, budgetReservations, issueRecoveryActions, companyMemberships, completionContracts, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults, workspaceOperations } from "@paperclipai/db";
@@ -35,6 +37,26 @@ describeEmbeddedPostgres("heartbeat native recovery interrupted by graceful shut
       completionContractSha256: null }).where(eq(heartbeatRuns.id, f.runId));
     return f;
   }
+
+  it("keeps an incomplete bootstrap unclaimed during a durable task drain", async () => {
+    const f = await seedRecoverableRun("DURABLE-DRAIN-BOOTSTRAP");
+    const drains = taskDrainService(f.db);
+    const audit = async () => {};
+    const lease = await drains.acquire("drain-owner", { ttlMs: 60_000 }, audit);
+    const findOwner = async () => (await f.db.select().from(nativeRunFinalizations)
+      .where(eq(nativeRunFinalizations.runId, f.runId)))[0];
+    const previous = await findOwner();
+    const input = { db: f.db, restartKind: "hard" as const, runIds: [f.runId] };
+    try {
+      expect(await claimNativeRestartRecoveries(input)).toEqual([]);
+      expect(await findOwner()).toEqual(previous);
+    } finally {
+      await drains.release("drain-owner", lease.leaseId, audit);
+    }
+    expect(await claimNativeRestartRecoveries(input)).toEqual([
+      expect.objectContaining({ runId: f.runId, kind: "bootstrap_incomplete" }),
+    ]);
+  });
 
   it.each(["before_budget_reservation", "before_dispatch_gate"] as const)(
     "leaves a recovery execution suspended %s for the next controller",

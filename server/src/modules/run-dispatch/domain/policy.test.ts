@@ -67,6 +67,14 @@ function baseStalenessFacts(): QueuedRunFacts {
   };
 }
 
+it("keeps parked issues out of retry promotion and queued dispatch", () => {
+  const ownerParkingReason = "issue.owner_parked";
+  expect(decideScheduledRetryGate({ ...baseGateFacts(), ownerParkingReason }, NOW))
+    .toMatchObject({ allowed: false, errorCode: "issue_owner_parked" });
+  expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), ownerParkingReason }, NOW))
+    .toMatchObject({ stale: true, errorCode: "issue_owner_parked" });
+});
+
 describe("decideScheduledRetryGate", () => {
   it("allows the current reviewer and rejects a replaced participant", () => {
     const facts: ScheduledRetryFacts = {

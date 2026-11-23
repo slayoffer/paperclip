@@ -1,3 +1,5 @@
+import { taskDrainBlocksAdmission } from "./task-drain.js";
+import { readTaskDrain } from "./task-admission.js";
 import { isDeepStrictEqual } from "node:util";
 import { boundRunIssueId } from "./run-task-binding.js";
 import { withStopRequestEvidence } from "./run-execution-evidence.js";
@@ -168,7 +170,10 @@ export async function hasConfirmedLegacySshRestart(db: Db, run: Run) {
 /** The caller proves the previous provider stopped with local process evidence
  * or a confirmed SSH restart checkpoint. An expired lease alone is insufficient. */
 export async function claimLegacyRestartRecovery(
-  db: Db, run: Run, adapterType: string, { requireSshProof = false } = {},
+  db: Db,
+  run: Run,
+  adapterType: string,
+  { requireSshProof = false, onAdmissionHeld }: { requireSshProof?: boolean; onAdmissionHeld?: () => void } = {},
 ) {
   const checkpoint = readLegacyRestartCheckpoint(run);
   const preparation = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
@@ -211,8 +216,12 @@ export async function claimLegacyRestartRecovery(
     await recordLegacyRestartFallback(db, run, reason ?? "restart_session_missing");
     return null;
   }
-  // Lock the issue first, matching checkout and terminalization lock order.
+  // Take the admission lock before the issue and run, as queued claims do.
   return db.transaction(async tx => {
+    if (readTaskDrain(new Date()) || await taskDrainBlocksAdmission(tx)) {
+      onAdmissionHeld?.();
+      return null;
+    }
     const [issue] = await tx.select().from(issues).where(and(eq(issues.id, checkpoint.issueId),
       eq(issues.companyId, run.companyId))).for("update");
     if (!issue || issue.assigneeAgentId !== run.agentId || issue.executionRunId !== run.id ||

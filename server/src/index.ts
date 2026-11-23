@@ -61,12 +61,16 @@ import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { registerBudgetEnforcementWork, registerCostAccountingWork } from "./services/budget-enforcement-worker.js";
 import { caseHandoffDeliveryService } from "./services/case-handoff-delivery.js";
+import { taskDrainService } from "./services/task-drain.js";
 import { registerScheduledWork } from "./services/scheduled-work.js";
+import { registerDeadlineWork } from "./services/deadline-work.js";
+import { createHeartbeatPullQueue, isPullQueueSignal } from "./services/pull-queue.js";
+import { isPullQueueEnabled } from "./services/pull-queue-policy.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
 import { assertEphemeralServerConfig, assertEphemeralServerData } from "./services/ephemeral-server-contract.js";
 import { deploymentNotifications } from "./services/deployment-notifications.js";
 import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./services/terminal-workspace-work.js";
-import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWork, registerTaskDrainExpiryWork } from "./services/task-admission.js";
+import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWork, registerTaskDrainExpiryWork, subscribeTaskDrainChanges } from "./services/task-admission.js";
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
 import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
@@ -1214,6 +1218,10 @@ async function startServerWithDatabaseTeardown(
     drainRunIds?: string[];
   }>) | null = null;
   let heartbeatSchedulerStopped = false;
+  let stopPullQueue: (() => Promise<void>) | undefined;
+  let wakePullQueue: (() => void) | undefined;
+  let wakeResidualRecovery: (() => void) | undefined;
+  let wakeHeartbeatSchedules: (() => void) | undefined;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
   const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
     const finishIdleWork = beginIdleTrackedWork();
@@ -1302,10 +1310,16 @@ async function startServerWithDatabaseTeardown(
   }
   const taskDrainExpiryWork = registerTaskDrainExpiryWork(deliveryWork, () => {
     if (heartbeatSchedulerStopped || isWarmStandby()) return;
+    wakePullQueue?.();
+    wakeResidualRecovery?.();
+    wakeHeartbeatSchedules?.();
+    if (heartbeat) trackHeartbeatSchedulerWork(heartbeat.recoverNativeRunsAfterRestart(new Date(), undefined, {
+      skipDelegatedWork: true,
+    }).catch(err => logger.error({ err }, "failed to recover deferred native work after task drain expiry")));
     trackHeartbeatSchedulerWork(accountingHeartbeat.resumeQueuedRunsAfterDrain().catch(err => {
       logger.error({ err }, "failed to resume queued work after task drain expiry");
     }));
-  });
+  }, taskDrainService(db as any).activeLease);
   server.on("close", () => { void taskDrainExpiryWork.stop(); });
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
@@ -1630,7 +1644,7 @@ async function startServerWithDatabaseTeardown(
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
-    if (heartbeatSchedulingSuppression.suppressed) {
+    if (heartbeatSchedulingSuppression.suppressed && heartbeatSchedulingSuppression.reason !== "task_drain") {
       logger.warn(
         { reason: heartbeatSchedulingSuppression.reason },
         "heartbeat scheduling suppressed for this runtime instance",
@@ -1665,6 +1679,7 @@ async function startServerWithDatabaseTeardown(
           );
           throw err;
         }
+        if (heartbeatSchedulingSuppression.suppressed) return;
         try {
           const hotRestart = await timeStartupRecovery("hot_restart", () => heartbeat.reconcileHotRestartAdoption());
           if (hotRestart.mode === "reported") {
@@ -1711,8 +1726,12 @@ async function startServerWithDatabaseTeardown(
       await startupHeartbeatRecovery;
     }
 
-    if (config.heartbeatSchedulerEnabled) await heartbeat.registerResidualRecoveryWork(deliveryWork,
-      () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped).ready;
+    if (config.heartbeatSchedulerEnabled) {
+      const residualRecovery = heartbeat.registerResidualRecoveryWork(deliveryWork,
+        () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
+      wakeResidualRecovery = residualRecovery.wake;
+      await residualRecovery.ready;
+    }
     // Report-only ownership reconciliation (durable ownership plan, Phase 1).
     // Its first pass runs in the background so it never delays readiness.
     if (config.heartbeatSchedulerEnabled) void registerOwnershipReconciliationWork(db as any, deliveryWork,
@@ -1871,6 +1890,48 @@ async function startServerWithDatabaseTeardown(
           () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
         trackHeartbeatSchedulerWork(status.ready);
       }
+      if (isPullQueueEnabled()) {
+        const canPull = () => !heartbeatSchedulerStopped && !isWarmStandby() && readTaskDrain(new Date()) === null;
+        const pullQueue = createHeartbeatPullQueue(db as any, {
+          wakeup: heartbeat.wakeup,
+          isSuppressed: async () => canPull()
+            ? heartbeat.resolveSchedulingSuppression()
+            : { suppressed: true },
+        });
+        let pullSuppressed = false;
+        const reconcilePullQueue = registerDeadlineWork(deliveryWork, DELIVERY_QUEUES.pullQueue, {
+          run: async () => {
+            pullSuppressed = (await heartbeat.resolveSchedulingSuppression()).suppressed;
+            if (!pullSuppressed) await pullQueue.reconcile();
+          },
+          next: () => pullSuppressed ? Promise.resolve(null) : pullQueue.nextReconcileAt(),
+          canRun: canPull,
+          retryMs: config.heartbeatSchedulerIntervalMs,
+          notificationCoalesceMs: config.heartbeatSchedulerIntervalMs,
+        });
+        wakePullQueue = reconcilePullQueue.wake;
+        trackHeartbeatSchedulerWork(reconcilePullQueue.ready);
+        const unsubscribeDrain = subscribeTaskDrainChanges(reconcilePullQueue.wake);
+        const unsubscribe = subscribeAllCompanyLiveEvents(event => {
+          if (heartbeatSchedulerStopped || !isPullQueueSignal(event)) return;
+          reconcilePullQueue.wake();
+          if (!canPull()) return;
+          trackHeartbeatSchedulerWork(pullQueue.notify(event.companyId).catch(err => {
+            logger.error({ err }, "Pull queue notification failed");
+          }));
+        });
+        const detachPullQueue = () => {
+          unsubscribe();
+          unsubscribeDrain();
+          wakePullQueue = undefined;
+        };
+        stopPullQueue = async () => {
+          detachPullQueue();
+          await reconcilePullQueue.stop();
+          await pullQueue.stop();
+        };
+        server.on("close", detachPullQueue);
+      }
       const scheduled = registerScheduledWork(deliveryWork, {
         retryMs: config.heartbeatSchedulerIntervalMs,
         tickAgentTimers: async signal => {
@@ -1889,6 +1950,11 @@ async function startServerWithDatabaseTeardown(
           if (result.triggered > 0) logger.info({ ...result }, "routine scheduler tick enqueued runs");
         }),
       });
+      wakeHeartbeatSchedules = () => {
+        scheduled.timers.wake();
+        scheduled.monitors.wake();
+        scheduled.routines.wake();
+      };
       idleDeadlineOwners.quota = bindIdleDeadlineOwner(scheduled.monitors.reconciliationSnapshot, readIdleQuotaSchedule,
         snapshot => ({ issueWaits: snapshot.issueWaits }));
       trackHeartbeatSchedulerWork(Promise.all([scheduled.timers.ready, scheduled.monitors.ready, scheduled.routines.ready]));
@@ -2027,6 +2093,7 @@ async function startServerWithDatabaseTeardown(
     nativeRunnerEvidenceRetentionWorker?.unsubscribe();
     await preDrain.run("skill_source_sync_stop", () => skillSourceSync.stop());
     unsubscribeChatCompletions();
+    if (stopPullQueue) await preDrain.run("pull_queue_stop", stopPullQueue);
     unsubscribeNativeResponsePresentation?.();
     unsubscribeNativeWorkspaceFinalization?.();
     unsubscribeRetainedNativeSessionCleanup?.();

@@ -23,10 +23,12 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueDocuments,
+  issueLabels,
   issueRelations,
   issueRecoveryActions,
   issueTreeHolds,
   issues,
+  labels,
   nativeRunFinalizations,
   projects,
 } from "@paperclipai/db";
@@ -988,6 +990,36 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       leaseOwner: owner, leaseExpiresAt: new Date(Date.now() + 60_000) });
     return { companyId, agentId, issueId, runId, owner, reservation };
   }
+
+  it.each(["reattach_existing_runner", "reattach_remote_runner", "bootstrap_incomplete"] as const)(
+    "preserves a parked run only when its exact native claim is %s and has an existing runner",
+    async disposition => {
+      const f = await seedRecoveryAdmission();
+      const [label] = await db.insert(labels).values({
+        companyId: f.companyId, name: "owner:stopped", color: "#ff0000",
+      }).returning();
+      await db.insert(issueLabels).values({ companyId: f.companyId, issueId: f.issueId, labelId: label.id });
+      await db.update(nativeRunFinalizations).set({
+        controllerGeneration: 2, attempt: 1,
+        recoveryState: disposition === "bootstrap_incomplete" ? "bootstrap_incomplete" : "awaiting_runner_reattach",
+        recoveryHistory: [{ disposition, controllerGeneration: 2, providerAttempt: 1 }],
+      }).where(eq(nativeRunFinalizations.runId, f.runId));
+      const dispatch = vi.fn(async () => "existing provider");
+      const gate = await createPostgresRunDispatchAdapter(db).dispatchResolvedInteractionIfCurrent({
+        companyId: f.companyId, runId: f.runId, reservationId: f.reservation.id, expectedStatus: "running",
+        recoveryLeaseOwner: f.owner, reattachingExistingRunner: true, now: new Date(), dispatch,
+      });
+      if (disposition === "bootstrap_incomplete") {
+        expect(gate).toMatchObject({ dispatched: false, admissionBlockReason: "Native recovery no longer owns an existing runner" });
+        expect(dispatch).not.toHaveBeenCalled();
+      } else {
+        expect(gate.dispatched).toBe(true);
+        if (gate.dispatched) await expect(gate.resultPromise).resolves.toBe("existing provider");
+        expect(dispatch).toHaveBeenCalledOnce();
+      }
+      const [run] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
+      expect(run.status).toBe("running");
+    });
 
   it.each(["fresh", "bootstrap", "dead-runner", "expired", "foreign-owner", "foreign-intent", "missing-audit", "foreign-audit", "stale-generation", "terminal", "no-hold", "settled-hold"] as const)(
     "keeps %s work fenced while a company is paused for budget", async mode => {

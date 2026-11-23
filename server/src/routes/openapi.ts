@@ -248,6 +248,7 @@ import {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
   startTaskDrainRequestSchema,
+  stopTaskDrainRequestSchema,
   // Resource memberships
   updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
@@ -7129,8 +7130,8 @@ registry.registerPath({
   path: "/api/instance/task-drain",
   tags: ["instance"],
   summary:
-    "Get process task-drain status, with optional bounded upgrade-readiness or idle-safety reports for instance operators",
-  description: "With idleSleepSafety=1, the exact current idle owner can retire idle native sessions before a fresh safety inspection. Busy or failed retirement prevents sleep. Native retirement is skipped for diagnostic inspection. scheduledWake=domain-deadlines-v1 requires signed Cloud authority with idleCapabilities.deadlineCatalog=domain_deadlines_v1 and returns a mandatory deadlineProof even when no wake is scheduled. Cloud must acknowledge any returned durable alarm and revalidate the report before stopping the instance.",
+    "Get task-drain status, including any owned lease that survives server recreation",
+  description: "Instance operators can inspect persisted running, queued, scheduled-retry, and pending wake records. With idleSleepSafety=1, the exact current idle owner can retire idle native sessions before a fresh safety inspection. Busy or failed retirement prevents sleep. Native retirement is skipped for diagnostic inspection. scheduledWake=domain-deadlines-v1 requires signed Cloud authority with idleCapabilities.deadlineCatalog=domain_deadlines_v1 and returns a mandatory deadlineProof even when no wake is scheduled. Cloud must acknowledge any returned durable alarm and revalidate the report before stopping the instance.",
   request: { query: z.object({ upgradeReadiness: z.literal("1").optional().describe("Instance operators can request a bounded aggregate report of current remote-runner recovery eligibility. This read does not hold admission or detach runners."), ownerId: z.string().uuid().optional(), idleSleepSafety: z.literal("1").optional().describe("Instance admins can request a conservative durable-work report while admission and ingress are held. Unknown or present work must prevent automatic sleep."), scheduledWake: z.enum(["1", "2", "domain-deadlines-v1"]).optional().describe("Cloud control callers may request routine deadlines (1), routines and issue monitors (2), or the domain deadline catalog (domain-deadlines-v1). The domain catalog requires signed Cloud authority with idleCapabilities.deadlineCatalog=domain_deadlines_v1 and returns a deadlineProof even when no wake is scheduled. Cloud must acknowledge any returned durable alarm and revalidate this report before stopping the instance.") }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
@@ -7140,7 +7141,8 @@ registry.registerPath({
   path: "/api/instance/task-drain",
   tags: ["instance"],
   summary:
-    "Start a task drain, so new run admission holds until active runs finish",
+    "Start a task drain and hold new run admission",
+  description: "A finite duration starts a persisted owned lease by default. Use purpose=owned for the default lease duration, purpose=unowned for a process-local drain, or purpose=idle for a bounded idle hold. An omitted or null duration without a purpose starts an indefinite process-local drain.",
   request: { body: jsonBody(startTaskDrainRequestSchema) },
   responses: {
     200: r.ok(),
@@ -7156,8 +7158,12 @@ registry.registerPath({
   path: "/api/instance/task-drain",
   tags: ["instance"],
   summary: "End a task drain and restore run admission",
-  request: { query: z.object({ ownerId: z.string().uuid().optional() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+  description: "An owned lease requires its leaseId and the acquiring actor. An idle hold requires its ownerId query parameter. An unowned drain can be ended without either identifier.",
+  request: {
+    query: z.object({ ownerId: z.string().uuid().optional() }),
+    body: { ...jsonBody(stopTaskDrainRequestSchema), required: false },
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registry.registerPath({

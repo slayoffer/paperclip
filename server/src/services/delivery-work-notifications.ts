@@ -154,6 +154,7 @@ export const DELIVERY_QUEUES = {
   routineSchedules: "routine-schedules",
   issueMonitors: "issue-monitors",
   agentTimers: "agent-timers",
+  pullQueue: "pull-queue",
   caseHandoffs: "case-handoffs",
   nativeHarnessBackupExpiration: "native-harness-backup-expiration",
   nativeCheckpointExpiration: "native-checkpoint-expiration",

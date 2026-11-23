@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, issues } from "@paperclipai/db";
+import { agents, companies, createDb, issueRelations, issues } from "@paperclipai/db";
+import { companyFlowService } from "./company-flow.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -72,6 +73,26 @@ const support = await getEmbeddedPostgresTestSupport();
   it("counts only active statuses and can exclude the issue being changed", async () => {
     expect(await countAgentActiveIssues(db, { companyId, agentId: busy })).toBe(3);
     expect(await countAgentActiveIssues(db, { companyId, agentId: busy, excludeIssueId: activeId })).toBe(2);
+  });
+
+  it("excludes typed external waits without treating a cancelled dependency as ready", async () => {
+    const owner = randomUUID();
+    await db.insert(agents).values({ id: owner, companyId, name: "Waiting", role: "engineer", adapterType: "process" });
+    const [external, untyped, cancelled] = await db.insert(issues).values([
+      { companyId, title: "External wait", status: "blocked", assigneeAgentId: owner,
+        unblockDescriptor: { owner: "board", action: "Resume after the vendor responds." } },
+      { companyId, title: "Needs review", status: "blocked", assigneeAgentId: owner },
+      { companyId, title: "Cancelled blocker", status: "cancelled", assigneeAgentId: free },
+    ]).returning();
+    await db.insert(issueRelations).values({
+      companyId, issueId: cancelled.id, relatedIssueId: untyped.id, type: "blocks",
+    });
+    expect(await countAgentActiveIssues(db, { companyId, agentId: owner })).toBe(1);
+    expect(await countAgentActiveIssues(db, { companyId, agentId: owner, excludeIssueId: external.id })).toBe(1);
+    const flow = await companyFlowService(db).report(companyId);
+    expect(flow.agents.find((agent) => agent.id === owner)).toMatchObject({
+      wip: 1, runnableWip: 1, waitingWip: 1,
+    });
   });
 
   it("is never full while the switch is off", async () => {

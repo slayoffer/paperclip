@@ -1,3 +1,5 @@
+import { taskDrainBlocksAdmission } from "../task-drain.js";
+import { issueOwnerParkingReason } from "../issue-owner-parking.js";
 import { getProcessRunningRunsCap } from "../instance-run-cap.js";
 import { ownerRecoveryResumeEnabled } from "../recovery/owner-resume.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
@@ -581,7 +583,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const issueId = readNonEmptyString(
       parseObject(run.contextSnapshot).issueId,
     );
-    if (!issueId || run.invocationSource !== "automation") return onClear(db);
+    if (!issueId || run.invocationSource !== "automation") {
+      if (stage !== "claim") return onClear(db);
+      return db.transaction(async tx => {
+        const claimDb = tx as unknown as Db;
+        return await taskDrainBlocksAdmission(claimDb) ? null : onClear(claimDb);
+      });
+    }
     await options.beforeChatControlRecoveryCheck?.({
       runId: run.id,
       issueId,
@@ -622,6 +630,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     try {
       const attempt = () => db.transaction(async (tx) => {
         terminal = null;
+        if (stage === "claim" && await taskDrainBlocksAdmission(tx as unknown as Db)) return null;
         // Same queue-edit lock order, then the close committer's conversation
         // row. NOWAIT releases partial locks on contention. Claim defers to the
         // queue; dispatch retries this transaction before considering failure.
@@ -1229,6 +1238,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
         ? await db
             .transaction(async (tx) => {
+              if (await taskDrainBlocksAdmission(tx as unknown as Db)) return { kind: "stale" as const, run: null };
               // Match the queue-edit lock order: issue, wake, then run. Once the
               // run becomes running, a concurrent discard must observe the
               // claimed wake and return an explicit conflict; if discard wins,
@@ -1551,7 +1561,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) => {
+      : await withChatControlRecoveryGate(run, "claim", async tx => {
           const claimValues = {
             status: "running",
             runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
@@ -2787,6 +2797,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         error: `Wake suppressed because company status is ${companyStatus}`,
       }, { companyStatus });
       return null;
+    }
+
+    if (issueId && isUuidLike(issueId)) {
+      const parked = await issueOwnerParkingReason(db, { companyId: agent.companyId, id: issueId }, "heartbeat.admission");
+      if (parked) {
+        await writeSkippedRequest(parked);
+        return null;
+      }
     }
 
     // Guild model v2 rule 5: stop wakes on an issue over its token budget; raise one card. Only a person's Run now /

@@ -1,3 +1,4 @@
+import { issueOwnerParkingReason } from "../../../services/issue-owner-parking.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
 import { notifyDeferredExecutionWork } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
@@ -416,6 +417,8 @@ export function createPostgresRunDispatchAdapter(
 
     facts.issueFound = issue !== null;
     if (!facts.issueFound) return { agentFound: true, facts };
+    facts.ownerParkingReason = await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "retry.promotion");
+    if (facts.ownerParkingReason) return { agentFound: true, facts };
 
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
@@ -577,6 +580,7 @@ export function createPostgresRunDispatchAdapter(
     input: LoadStalenessFactsInput,
     _now: Date,
     tx?: unknown,
+    reattachingExistingRunner = false,
   ): Promise<QueuedRunFacts> {
     const dbOrTx = (tx as Db | undefined) ?? db;
     const issueId = input.issueId;
@@ -675,6 +679,9 @@ export function createPostgresRunDispatchAdapter(
       } : null,
       pendingResponse: issue && (input.conversationContinuation || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")
         ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
+        : null,
+      ownerParkingReason: issue && !reattachingExistingRunner
+        ? await issueOwnerParkingReason(dbOrTx, { companyId: input.companyId, id: issueId }, "run.dispatch")
         : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
@@ -1238,7 +1245,9 @@ export function createPostgresRunDispatchAdapter(
       };
   }
 
-  async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date, publications?: ActivityPublication[]) {
+  async function decideCurrentRunStaleness(
+    tx: Db, run: HeartbeatRun, now: Date, publications?: ActivityPublication[], reattachingExistingRunner = false,
+  ) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return { issueId: null, facts: null, executionBlocker: null, decision: { stale: false as const } };
@@ -1277,6 +1286,7 @@ export function createPostgresRunDispatchAdapter(
       },
       now,
       tx,
+      reattachingExistingRunner,
     );
     return { issueId, facts, executionBlocker: null, decision: decideQueuedRunStaleness(facts, now) };
   }
@@ -1396,15 +1406,44 @@ export function createPostgresRunDispatchAdapter(
     return JSON.stringify([claim.controllerBootId, claim.attempt, claim.sessionId]);
   }
 
+  async function ownsExistingNativeRunner(tx: Db, run: HeartbeatRun, leaseOwner: string | undefined) {
+    if (!leaseOwner || run.runtimeMode !== "native" || !run.nativeIssueId) return false;
+    const [coordinator] = await tx.select({
+      history: nativeRunFinalizations.recoveryHistory,
+      controllerGeneration: nativeRunFinalizations.controllerGeneration,
+      attempt: nativeRunFinalizations.attempt,
+    }).from(nativeRunFinalizations).where(and(
+      eq(nativeRunFinalizations.companyId, run.companyId),
+      eq(nativeRunFinalizations.issueId, run.nativeIssueId),
+      eq(nativeRunFinalizations.runId, run.id),
+      eq(nativeRunFinalizations.leaseOwner, leaseOwner),
+      eq(nativeRunFinalizations.phase, "observed"),
+      eq(nativeRunFinalizations.recoveryState, "awaiting_runner_reattach"),
+      isNull(nativeRunFinalizations.resultId),
+      sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`,
+    )).limit(1);
+    if (!coordinator) return false;
+    const latest = parseObject(coordinator.history.at(-1));
+    return (latest.disposition === "reattach_existing_runner" || latest.disposition === "reattach_remote_runner")
+      && latest.controllerGeneration === coordinator.controllerGeneration && latest.providerAttempt === coordinator.attempt;
+  }
+
   async function dispatchResolvedInteractionIfCurrent<T>(
     input: DispatchResolvedInteractionInput<T>,
   ): Promise<DispatchResolvedInteractionOutcome<T>> {
     const ownershipInput = input.legacyRestartClaim
       ? { ...input, enforceContinuationOwnership: true } : input;
+    const reattachingExistingRunner = input.reattachingExistingRunner === true;
+    const staleReattachment = {
+      dispatched: false as const, admissionBlockReason: "Native recovery no longer owns an existing runner",
+    };
     const dispatchLockedRun = async (tx: Db, run: HeartbeatRun, publications: ActivityPublication[]) => {
       const stopRecovery = await readClaimedNativeStopRecovery(tx, run, input.recoveryLeaseOwner);
       if (run.status !== input.expectedStatus || ((run.resultJson?.cancellation || run.resultJson?.startupCancellation) && !stopRecovery)) {
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
+      }
+      if (reattachingExistingRunner && !await ownsExistingNativeRunner(tx, run, input.recoveryLeaseOwner)) {
+        return staleReattachment;
       }
       const legacyGeneration = legacyRestartGeneration(run, input.legacyRestartClaim);
       if (input.legacyRestartClaim && (!legacyGeneration || input.recoveryLeaseOwner))
@@ -1416,6 +1455,7 @@ export function createPostgresRunDispatchAdapter(
           run,
           input.now,
           publications,
+          reattachingExistingRunner,
         );
         const decision =
           !initialDecision.stale && issueId
@@ -1506,6 +1546,10 @@ export function createPostgresRunDispatchAdapter(
         || claim.admittedAt !== admission.claim.admittedAt || claim.handedOffAt)
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
 
+      if (reattachingExistingRunner && !await ownsExistingNativeRunner(tx, run, input.recoveryLeaseOwner)) {
+        return staleReattachment;
+      }
+
       const [scope] = await tx.select({ companyStatus: companies.status, agentStatus: agents.status,
         lifecycleState: agents.lifecycleState, reservationId: budgetReservations.id,
         projectId: budgetReservations.projectId, currentProjectId: projects.id, projectPausedAt: projects.pausedAt })
@@ -1532,7 +1576,7 @@ export function createPostgresRunDispatchAdapter(
           const facts = await loadStalenessFacts({ runId: run.id, companyId: run.companyId, agentId: run.agentId,
             responsibleUserId: run.responsibleUserId,
             conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
-            issueId, contextSnapshot, scheduledRetryReason: run.scheduledRetryReason }, input.now, tx);
+            issueId, contextSnapshot, scheduledRetryReason: run.scheduledRetryReason }, input.now, tx, reattachingExistingRunner);
           const semantic = decideQueuedRunStaleness(facts, input.now);
           const decision = semantic.stale || facts.issueExecutionRunId === run.id ? semantic : {
             stale: true as const, errorCode: "issue_execution_lock_changed" as const,

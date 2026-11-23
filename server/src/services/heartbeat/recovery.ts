@@ -2635,7 +2635,12 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       }
 
       if (confirmedSshRestart || (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType))) {
-        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType, { requireSshProof: confirmedSshRestart });
+        let restartHeldByDrain = false;
+        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType, {
+          requireSshProof: confirmedSshRestart,
+          onAdmissionHeld: () => { restartHeldByDrain = true; },
+        });
+        if (restartHeldByDrain) continue;
         if (checkpoint) {
           restartSuspendedLegacyRuns.delete(run.id);
           const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {

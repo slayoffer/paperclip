@@ -3,6 +3,8 @@ import { buildOwnerRecoveryWake } from "./recovery/owner-resume.js";
 import { resolveOwnerSession, ownerSessionEngineEligible, shouldResetOwnerSessionForWake } from "./owner-sessions.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { copyLegacyRestartProviderState } from "./legacy-restart-provider-state.js";
+import { taskDrainService } from "./task-drain.js";
+import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { markLegacyRestartBoundary, readLegacyRestartCheckpoint, saveLegacyRestartCheckpoint, saveLegacyRestartProviderHome, recordLegacyRestartFallback, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "./legacy-restart-recovery.js";
 import { registerHeldPreparationResumer } from "./interrupted-preparation-hold-settlement.js";
 import { resolveProviderApiPlacement } from "./native-runtime/provider-api-placement.js";
@@ -569,7 +571,7 @@ import { resolveAndRetainRunTrustPreset } from "./run-trust-preset.js";
 import { effectiveProjectWorkspacePolicy, sourcelessProjectWorkspacePolicy } from "./project-workspace-provider.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
-import { computeTaskDrain, applyTaskDrain, startTaskDrain, stopTaskDrain, readTaskDrain } from "./task-admission.js";
+import { computeTaskDrain, applyTaskDrain, startTaskDrain, stopTaskDrain, isControllerLeaseQuiesced, readTaskDrain } from "./task-admission.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = [
@@ -968,11 +970,14 @@ export function heartbeatService(
     }
     return cachedWorktreeRunExecutionOverride;
   };
+  const durableTaskDrain = taskDrainService(db);
   const getSchedulingSuppression = async (fresh = false) => {
     const override = await resolveWorktreeRunExecutionOverride(fresh);
-    return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
+    const local = resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,
     });
+    if (local.suppressed || !await durableTaskDrain.blocksAdmission()) return local;
+    return { suppressed: true, reason: "task_drain" as const };
   };
   const getWorktreeExecutionCutoff = async () => {
     const override = await resolveWorktreeRunExecutionOverride();
@@ -1912,7 +1917,13 @@ export function heartbeatService(
   ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
-    if ((await getSchedulingSuppression()).suppressed) {
+    const suppression = await getSchedulingSuppression();
+    const reattachingRunner = runOptions.nativeRestartRecovery?.kind === "reattach_existing_runner" ||
+      runOptions.nativeRestartRecovery?.kind === "reattach_remote_runner";
+    const admittedRestart = reattachingRunner || Boolean(runOptions.legacyRestartRecovery || runOptions.nativeRestartRecovery);
+    const admittedBeforeDrain = admittedRestart && suppression.reason === "task_drain" && !isControllerLeaseQuiesced();
+    if (suppression.suppressed && !admittedBeforeDrain) {
+      if (runOptions.nativeLeaseOwner || runOptions.nativeRestartRecovery || runOptions.legacyRestartRecovery) return;
       try {
         await releaseRunClaimedJustBeforeSuppression(runId);
       } catch (err) {
@@ -2962,11 +2973,13 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
-        const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
+        const parkedOwner = issueId && !reattachingRunner ? await issueOwnerParkingReason(db,
+          { companyId: run.companyId, id: issueId }, "provider.dispatch") : null;
+        const repairBlock = parkedOwner ?? await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            finishedAt: new Date(), errorCode: parkedOwner ? "issue_owner_parked" : "legacy_disposition_repair_suppressed",
+            error: parkedOwner ?? `Disposition repair suppressed: ${repairBlock}`,
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
@@ -2989,6 +3002,7 @@ export function heartbeatService(
           reservationId: reservation.id,
           enforceContinuationOwnership,
           ...(runOptions.nativeLeaseOwner ? { recoveryLeaseOwner: runOptions.nativeLeaseOwner } : {}),
+          reattachingExistingRunner: reattachingRunner,
           ...(runOptions.legacyRestartRecovery ? { legacyRestartClaim: {
             controllerBootId: legacyControllerBootId,
             attempt: Number(parseObject(run.resultJson?.restartRecovery).attempt),
@@ -3917,6 +3931,7 @@ export function heartbeatService(
         });
       } else if (
         nativeOwnershipHeld ||
+        (!nativeDispatchStarted && reattachingRunner) ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
         nativeOwnershipHeld = true;

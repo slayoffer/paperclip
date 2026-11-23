@@ -64,6 +64,7 @@ export function createDispatchResolvedInteractionIfCurrent(deps: { writer: RunDi
     expectedStatus: "queued" | "running";
     reservationId: string;
     recoveryLeaseOwner?: string;
+    reattachingExistingRunner?: boolean;
     legacyRestartClaim?: LegacyRestartDispatchClaim;
     enforceContinuationOwnership?: boolean;
     dispatch: (markDispatchStarted: () => void) => Promise<T>;

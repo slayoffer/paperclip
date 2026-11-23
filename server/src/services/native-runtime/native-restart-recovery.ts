@@ -1,3 +1,5 @@
+import { isControllerLeaseQuiesced, readTaskDrain } from "../task-admission.js";
+import { taskDrainBlocksAdmission } from "../task-drain.js";
 import { readPendingNativeRunStop } from "./native-cancellation-request.js";
 import { CONTROLLER_LEASE_RENEW_MS } from "../controller-instance-lease.js";
 import { currentControllerProcessStamp, UNKNOWN_PROCESS_SPACE } from "../controller-process-identity.js";
@@ -989,6 +991,8 @@ export async function claimNativeRestartRecoveries(input: {
       await tx.execute(
         sql`select set_config('statement_timeout', '15000', true), set_config('lock_timeout', '1000', true)`,
       );
+      if (isControllerLeaseQuiesced()) return null;
+      const drainActive = Boolean(readTaskDrain(new Date())) || await taskDrainBlocksAdmission(tx);
       const busy = () => ({ kind: "awaiting_evidence" as const, runId: candidate.runId,
         reason: "recovery_rows_busy", retryAt: new Date(now.getTime() + 1_000) });
       // During overlap the serving controller can be committing this run.
@@ -1629,6 +1633,8 @@ export async function claimNativeRestartRecoveries(input: {
         return { kind: "blocked", runId: row.run.id, reason } as const;
       }
 
+      if (isControllerLeaseQuiesced()) return null;
+      if (drainActive && claimKind !== "reattach_existing_runner" && claimKind !== "reattach_remote_runner") return null;
       const providerAttempt = failedRemoteRetry
         ? nextNativeProviderAttempt(row.coordinator.attempt)
         : row.coordinator.attempt;
@@ -1801,6 +1807,7 @@ export async function claimNativeRestartRecoveries(input: {
     });
     if (terminalRunToReport)
       void reportRunFailure(input.db, terminalRunToReport);
+    if (!disposition) continue;
     if (claimScope && "leaseOwner" in disposition) input.onClaim?.(disposition, claimScope);
     dispositions.push(disposition);
   }

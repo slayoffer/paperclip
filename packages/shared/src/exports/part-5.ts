@@ -28,6 +28,10 @@ export {
 
 export {
   MAX_TASK_DRAIN_TTL_MS,
+  DEFAULT_OWNED_TASK_DRAIN_TTL_MS,
+  stopTaskDrainRequestSchema,
+  taskDrainLeaseSchema,
+  type TaskDrainLease,
   startTaskDrainRequestSchema,
   type StartTaskDrainRequest,
 } from "../validators/instance.js";

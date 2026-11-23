@@ -52,6 +52,26 @@ describe("task drain deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("restores a stored expiry deadline once and makes no recurring idle reads", async () => {
+    await worker.stop();
+    await coordinator.stop();
+    const expiresAt = Date.now() + 1000;
+    const readLease = vi.fn(async () => Date.now() < expiresAt
+      ? { expiresAt: new Date(expiresAt).toISOString() }
+      : null);
+    coordinator = createDeliveryWorkCoordinator({ owner: installDatabaseWorkSignals({ execute, transaction }), canRun: () => true, onError: vi.fn() });
+    worker = registerTaskDrainExpiryWork(coordinator, resume, readLease);
+    await worker.ready;
+    expect(coordinator.nextWakeAt()).toBe(expiresAt);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(resume).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resume).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(readLease).toHaveBeenCalledTimes(2);
+    expect(coordinator.nextWakeAt()).toBeNull();
+  });
+
   it("removes its listener on close and rearms an existing drain on a new lifecycle", async () => {
     startTaskDrain({ ttlMs: 1000 });
     await vi.advanceTimersByTimeAsync(0);

@@ -1,3 +1,4 @@
+import { taskDrainService } from "./task-drain.js";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
@@ -77,6 +78,23 @@ const support = await getEmbeddedPostgresTestSupport();
       sessionIdAfter: "01234567-89ab-4cde-8f01-23456789abcd", resultJson: { restartRecovery: { outcome: "resuming", attempt: 1 } } });
     const [issue] = await db.select().from(issues).where(eq(issues.id, String(run.contextSnapshot?.issueId)));
     expect(issue).toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+  });
+  it("keeps a saved restart claim intact during a durable task drain", async () => {
+    const run = await expire((await seed()).id);
+    const service = taskDrainService(db);
+    const audit = async () => {};
+    const lease = await service.acquire("restart-user", { ttlMs: 60_000 }, audit);
+    const held = vi.fn();
+    try {
+      expect(await claimLegacyRestartRecovery(db, run, "codex_local", { onAdmissionHeld: held })).toBeNull();
+      expect(held).toHaveBeenCalledOnce();
+      const current = await read(run.id);
+      expect(current.controllerBootId).toBe(run.controllerBootId);
+      expect(current.resultJson).toEqual(run.resultJson);
+    } finally {
+      await service.release("restart-user", lease.leaseId, audit);
+    }
+    expect(await claimLegacyRestartRecovery(db, run, "codex_local")).not.toBeNull();
   });
   it("does not claim an unexpired controller or permit two concurrent claims", async () => {
     const run = await seed();

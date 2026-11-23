@@ -1,12 +1,11 @@
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
+import { issueWipReason, RUNNABLE_WIP_REASONS } from "./agent-wip-policy.js";
 
 /**
- * Agent WIP limit (synthiq fork, Guild model v2 rule 2, 2026-10-17). With PAPERCLIP_AGENT_WIP_LIMIT=N, a NEW assignment
- * that would give an agent more than N active issues (todo, in_progress, blocked) is stored in `backlog`, which skips the
- * assignment wake. An agent that moves its own backlog issue to an active status over the limit gets 409. Existing load
- * is untouched. A person in the board UI (browser session) is not limited, and a `critical` issue is never deferred. The promote step that moves the next backlog
- * issue to `todo` when a slot frees lives outside the server (the homelab watchdog).
+ * Guild model v2, rule 2. A new assignment over PAPERCLIP_AGENT_WIP_LIMIT goes
+ * to backlog. Typed external waits do not take a runnable slot. Human board
+ * sessions and critical work are exempt.
  */
 export const WIP_ACTIVE_STATUSES = ["todo", "in_progress", "blocked"] as const;
 
@@ -27,13 +26,14 @@ export function wipLimitAppliesToActor(actor: { type?: string; source?: string }
 }
 
 export async function countAgentActiveIssues(
-  db: Db,
+  db: Pick<Db, "select">,
   input: { companyId: string; agentId: string; excludeIssueId?: string | null },
 ): Promise<number> {
   const rows = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(issues)
     .where(and(
+      inArray(issueWipReason(), RUNNABLE_WIP_REASONS),
       eq(issues.companyId, input.companyId),
       eq(issues.assigneeAgentId, input.agentId),
       inArray(issues.status, [...WIP_ACTIVE_STATUSES]),
@@ -44,7 +44,7 @@ export async function countAgentActiveIssues(
 
 /** True when one more active issue for this agent would exceed the limit. */
 export async function agentWipFull(
-  db: Db,
+  db: Pick<Db, "select">,
   actor: { type?: string; source?: string } | undefined | null,
   input: {
     companyId: string; agentId: string | null | undefined; status: unknown; excludeIssueId?: string | null; pending?: number;
@@ -60,6 +60,6 @@ export async function agentWipFull(
 }
 
 export function wipPullRefusal(limit: number): string {
-  return `WIP limit reached: this agent already has ${limit} or more active issues (todo, in_progress, blocked). ` +
+  return `WIP limit reached: this agent already has ${limit} or more runnable issues. ` +
     "Finish or hand off one of them first; the next backlog issue is promoted when a slot frees.";
 }

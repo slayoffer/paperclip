@@ -36,8 +36,19 @@ const mockCompanyService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockPublishActivity = vi.hoisted(() => vi.fn());
 const mockReadIdleSleepSafety = vi.hoisted(() => vi.fn());
+const mockDurableDrain = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: vi.fn(),
+  status: vi.fn(),
+  activeLease: vi.fn(),
+  assertNoActiveTaskDrainLease: vi.fn(),
+}));
 
 function registerModuleMocks() {
+  vi.doMock("../services/task-drain.js", () => ({
+    taskDrainService: () => mockDurableDrain,
+    assertNoActiveTaskDrainLease: mockDurableDrain.assertNoActiveTaskDrainLease,
+  }));
   vi.doMock("../services/idle-sleep-safety.js", () => ({ readIdleSleepSafety: mockReadIdleSleepSafety }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => mockCompanyService,
@@ -113,6 +124,11 @@ describe("instance settings routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDurableDrain.acquire.mockReset();
+    mockDurableDrain.release.mockReset();
+    mockDurableDrain.status.mockReset().mockImplementation(async local => local);
+    mockDurableDrain.activeLease.mockReset().mockResolvedValue(null);
+    mockDurableDrain.assertNoActiveTaskDrainLease.mockReset().mockResolvedValue(undefined);
     mockReadIdleSleepSafety.mockReset();
     // vi.clearAllMocks() clears recorded calls only; it does not remove a
     // mockImplementation a prior test installed. Reinstall the default here
@@ -1335,7 +1351,7 @@ describe("instance settings routes", () => {
 
       const res = await request(app)
         .post("/api/instance/task-drain")
-        .send({ ttlMs: 21_600_000 });
+        .send({ purpose: "unowned", ttlMs: 21_600_000 });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual(drain);
@@ -1354,6 +1370,57 @@ describe("instance settings routes", () => {
       expect(mockHeartbeatService.applyTaskDrain).toHaveBeenCalledTimes(1);
       expect(mockHeartbeatService.applyTaskDrain).toHaveBeenCalledWith(drain);
       expect(mockPublishActivity).toHaveBeenCalledTimes(2);
+    });
+
+    it("restricts persisted drain identity and counts to instance operators", async () => {
+      const lease = { leaseId: randomUUID(), ownerId: "admin-1", startedAt: "2026-08-29T00:00:00.000Z",
+        expiresAt: "2026-08-29T00:10:00.000Z" };
+      mockHeartbeatService.getTaskDrainStatus.mockReturnValue(idleStatus);
+      mockDurableDrain.activeLease.mockResolvedValue(lease);
+      mockDurableDrain.status.mockResolvedValue({ ...idleStatus, lease, draining: true, persistedRunningRuns: 4 });
+      const member = await request(createApp(nonAdminActor)).get("/api/instance/task-drain").expect(200);
+      expect(member.body).toMatchObject({ draining: true, expiresAt: lease.expiresAt });
+      expect(member.body).not.toHaveProperty("lease");
+      expect(member.body).not.toHaveProperty("persistedRunningRuns");
+      const admin = await request(createApp(adminActor)).get("/api/instance/task-drain").expect(200);
+      expect(admin.body).toMatchObject({ lease, draining: true, persistedRunningRuns: 4 });
+    });
+
+    it("acquires a persisted lease for the deployed client and uses authenticated release", async () => {
+      const lease = { leaseId: randomUUID(), ownerId: "admin-1", startedAt: "2026-08-29T00:00:00.000Z",
+        expiresAt: "2026-08-29T00:10:00.000Z" };
+      mockDurableDrain.acquire.mockImplementation(async (_actor, _body, audit) => {
+        await audit(TX_SENTINEL, lease);
+        return lease;
+      });
+      mockDurableDrain.release.mockImplementation(async (_actor, _leaseId, audit) => {
+        await audit(TX_SENTINEL, { leaseId: lease.leaseId, wasActive: true });
+        return { wasActive: true };
+      });
+      mockHeartbeatService.getTaskDrainStatus.mockReturnValue(idleStatus);
+      const app = createApp(adminActor);
+      const started = await request(app).post("/api/instance/task-drain").send({ ttlMs: 600_000 }).expect(200);
+      expect(started.body).toEqual(lease);
+      expect(mockDurableDrain.acquire).toHaveBeenCalledWith("admin-1", { ttlMs: 600_000 }, expect.any(Function));
+      expect(mockHeartbeatService.applyTaskDrain).not.toHaveBeenCalled();
+      const stopped = await request(app).delete("/api/instance/task-drain").send({ leaseId: lease.leaseId }).expect(200);
+      expect(stopped.body).toEqual({ wasActive: true });
+      expect(mockDurableDrain.release).toHaveBeenCalledWith("admin-1", lease.leaseId, expect.any(Function));
+      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.resumeQueuedRunsAfterDrain).toHaveBeenCalledOnce();
+      expect(mockLogActivity).toHaveBeenCalledWith(TX_SENTINEL, expect.objectContaining({
+        action: "instance.task_drain.started", details: lease,
+      }), expect.any(Array));
+    });
+
+    it("does not let a bare stop clear or resume an owned lease", async () => {
+      const { conflict } = await import("../errors.js");
+      mockDurableDrain.assertNoActiveTaskDrainLease.mockRejectedValueOnce(conflict("An owned task drain is active"));
+      mockHeartbeatService.getTaskDrainStatus.mockReturnValue(idleStatus);
+      await request(createApp(adminActor)).delete("/api/instance/task-drain").expect(409);
+      expect(mockDurableDrain.release).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.stopTaskDrain).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.resumeQueuedRunsAfterDrain).not.toHaveBeenCalled();
     });
 
     it("starts an indefinite drain when the caller sends no ttlMs", async () => {
