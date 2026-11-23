@@ -1,12 +1,14 @@
+import { isDeepStrictEqual } from "node:util";
 import { boundRunIssueId } from "./run-task-binding.js";
 import { withStopRequestEvidence } from "./run-execution-evidence.js";
 import fs from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { heartbeatRunEvents, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.js";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
+import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "./native-local-process-stop.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 /** Runs this process suspended for a graceful restart. Process-local by design. */
@@ -137,9 +139,37 @@ export async function markLegacyRestartBoundary(db: Db, run: Run, boundary: "pro
     sql`${heartbeatRuns.resultJson}->'restartCheckpoint' is not null`));
 }
 
-/** The caller first proves that no provider PID or process group is alive.
- * A lease expiry alone never permits overlapping provider work. */
-export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: string) {
+export async function hasConfirmedLegacySshRestart(db: Db, run: Run) {
+  if (run.runtimeMode !== "legacy") return false;
+  const checkpoint = readLegacyRestartCheckpoint(run);
+  const remote = checkpoint?.sessionParams.remoteExecution as { transport?: unknown } | undefined;
+  if (remote?.transport !== "ssh" ||
+    checkpoint?.providerStopped !== true || checkpoint.workspaceSettled !== true) return false;
+  if (run.processHostHash !== null) return run.processHostHash === "remote";
+  if (!run.processPid || !run.processStartedAt) return false;
+
+  // Runs saved before process_host_hash rely on the latest server launch record.
+  const [identity] = await db.select({
+    eventType: heartbeatRunEvents.eventType,
+    agentId: heartbeatRunEvents.agentId,
+    payload: heartbeatRunEvents.payload,
+  }).from(heartbeatRunEvents).where(and(
+    eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
+    isNull(heartbeatRunEvents.sourceEventId),
+    inArray(heartbeatRunEvents.eventType, [PROCESS_START_REQUESTED, PROCESS_IDENTITY_RECORDED]),
+  )).orderBy(desc(heartbeatRunEvents.seq)).limit(1);
+  const recorded = identity?.payload;
+  return identity?.eventType === PROCESS_IDENTITY_RECORDED && identity.agentId === run.agentId &&
+    recorded?.targetKind === "remote" && recorded.processPid === run.processPid &&
+    recorded.processGroupId === run.processGroupId &&
+    recorded.processStartedAt === run.processStartedAt.toISOString();
+}
+
+/** The caller proves the previous provider stopped with local process evidence
+ * or a confirmed SSH restart checkpoint. An expired lease alone is insufficient. */
+export async function claimLegacyRestartRecovery(
+  db: Db, run: Run, adapterType: string, { requireSshProof = false } = {},
+) {
   const checkpoint = readLegacyRestartCheckpoint(run);
   const preparation = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
   // Upstream revocation reads the committed stage before it grants bootstrap retry.
@@ -187,6 +217,16 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
       eq(issues.companyId, run.companyId))).for("update");
     if (!issue || issue.assigneeAgentId !== run.agentId || issue.executionRunId !== run.id ||
         ["done", "cancelled"].includes(issue.status)) return null;
+    // Compare the stored checkpoint under the run lock. The column encoder
+    // can redact older data when encoding a new value and is for writes only.
+    const [current] = await tx.select({
+      checkpoint: sql<unknown>`${heartbeatRuns.resultJson}->'restartCheckpoint'`,
+    }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    )).for("update");
+    if (!current || !isDeepStrictEqual(current.checkpoint, checkpoint)) return null;
+    if (requireSshProof && !await hasConfirmedLegacySshRestart(tx as unknown as Db, run)) return null;
+
     const [claimed] = await tx.update(heartbeatRuns).set({
       ...legacyControllerClaim("legacy"), processPid: null, processGroupId: null, processStartedAt: null,
       error: null, errorCode: null, executionControlDeadlineAt: null,
@@ -199,6 +239,8 @@ export async function claimLegacyRestartRecovery(db: Db, run: Run, adapterType: 
       run.controllerBootId ? eq(heartbeatRuns.controllerBootId, run.controllerBootId) : isNull(heartbeatRuns.controllerBootId),
       run.processPid ? eq(heartbeatRuns.processPid, run.processPid) : isNull(heartbeatRuns.processPid),
       run.processGroupId ? eq(heartbeatRuns.processGroupId, run.processGroupId) : isNull(heartbeatRuns.processGroupId),
+      run.processStartedAt ? eq(heartbeatRuns.processStartedAt, run.processStartedAt) : isNull(heartbeatRuns.processStartedAt),
+      run.processHostHash ? eq(heartbeatRuns.processHostHash, run.processHostHash) : isNull(heartbeatRuns.processHostHash),
       or(isNull(heartbeatRuns.controllerLeaseExpiresAt), lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`)),
     )).returning();
     return claimed ? checkpoint : null;

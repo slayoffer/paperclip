@@ -12,9 +12,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, heartbeatRunEvents, issueRecoveryActions, issues, projects, projectWorkspaces, executionWorkspaces } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { legacyControllerBootId, legacyControllerClaim } from "./legacy-controller-lease.js";
-import { claimLegacyRestartRecovery, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint, suspendLegacyRunForRestart } from "./legacy-restart-recovery.js";
+import { claimLegacyRestartRecovery, hasConfirmedLegacySshRestart, markLegacyRestartBoundary, readLegacyRestartCheckpoint, recordLegacyRestartFallback, saveLegacyRestartCheckpoint, suspendLegacyRunForRestart } from "./legacy-restart-recovery.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "./adapter-execution-control.js";
 import { heartbeatService } from "./heartbeat.js";
+import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
+import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "./native-local-process-stop.js";
 import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 
@@ -144,6 +146,49 @@ const support = await getEmbeddedPostgresTestSupport();
     const expired = await expire(run.id);
     expect(await claimLegacyRestartRecovery(db, expired, "codex_local")).not.toBeNull();
     expect(readLegacyRestartCheckpoint(await read(run.id))).toMatchObject({ providerStopped: false, workspaceSettled: false });
+  });
+
+  it("keeps an SSH run held when its saved stop evidence changes before the claim", async () => {
+    const original = await seed(true, { remoteExecution: { transport: "ssh", host: "host" } });
+    await db.update(heartbeatRuns).set({ processHostHash: "remote" }).where(eq(heartbeatRuns.id, original.id));
+    await markLegacyRestartBoundary(db, original, "providerStopped");
+    expect(await hasConfirmedLegacySshRestart(db, await read(original.id))).toBe(false);
+    await markLegacyRestartBoundary(db, original, "workspaceSettled");
+    const confirmed = await expire(original.id);
+    expect(await hasConfirmedLegacySshRestart(db, confirmed)).toBe(true);
+    expect(await hasConfirmedLegacySshRestart(db, { ...confirmed, processHostHash: "local" })).toBe(false);
+
+    await db.update(heartbeatRuns).set({
+      resultJson: sql`jsonb_set(${heartbeatRuns.resultJson}, '{restartCheckpoint,workspaceSettled}', 'false'::jsonb)`,
+    }).where(eq(heartbeatRuns.id, original.id));
+
+    expect(await claimLegacyRestartRecovery(db, confirmed, "codex_local")).toBeNull();
+    expect((await read(original.id)).controllerBootId).toBe(confirmed.controllerBootId);
+  });
+
+  it("checks the latest launch evidence for an SSH checkpoint saved before process_host_hash", async () => {
+    const original = await seed(true, { remoteExecution: { transport: "ssh", host: "host" } });
+    const startedAt = new Date();
+    await db.update(heartbeatRuns).set({ processStartedAt: startedAt }).where(eq(heartbeatRuns.id, original.id));
+    await markLegacyRestartBoundary(db, original, "providerStopped");
+    await markLegacyRestartBoundary(db, original, "workspaceSettled");
+    const confirmed = await expire(original.id);
+    const binding = { runId: confirmed.id, companyId: confirmed.companyId, agentId: confirmed.agentId,
+      stream: "system", level: "info" } as const;
+    expect(confirmed.processHostHash).toBeNull();
+    expect(await hasConfirmedLegacySshRestart(db, confirmed)).toBe(false);
+
+    await appendHeartbeatRunEvent(db, {
+      ...binding, eventType: PROCESS_IDENTITY_RECORDED, message: "Fixture launch recorded",
+      payload: { targetKind: "remote", processPid: confirmed.processPid, processGroupId: confirmed.processGroupId,
+        processStartedAt: startedAt.toISOString() },
+    });
+    expect(await hasConfirmedLegacySshRestart(db, confirmed)).toBe(true);
+    await appendHeartbeatRunEvent(db, {
+      ...binding, eventType: PROCESS_START_REQUESTED, message: "Fixture launch superseded",
+    });
+    expect(await claimLegacyRestartRecovery(db, confirmed, "codex_local", { requireSshProof: true })).toBeNull();
+    expect((await read(confirmed.id)).controllerBootId).toBe(confirmed.controllerBootId);
   });
 
   it.each(["control", "process", "missing", "owner", "scope_changed"] as const)("a graceful restart preserves the session through its %s owner", async ownership => {

@@ -29,7 +29,7 @@ import type { WorkspaceWorkers } from "../plugin-workspaces.js";
 import { listExpiredNativeRunnerAuthorities } from "../native-runtime/native-runner-checkpoint.js";
 import { createHeartbeatAgentStatus } from "./agent-status.js";
 import { stopSshInPlaceWritersForRestart } from "../ssh-in-place-termination.js";
-import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
+import { suspendLegacyRunForRestart, claimLegacyRestartRecovery, hasConfirmedLegacySshRestart, restartSuspendedLegacyRuns, type LegacyRestartCheckpoint } from "../legacy-restart-recovery.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { preserveCancelledNativeWorkspaces, preserveOrphanedNativeWorkspace } from "../native-runtime/native-failed-workspace-recovery.js";
 import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
@@ -2599,7 +2599,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         scope.onDeferredDeadline?.(Date.now() + 30_000);
         continue;
       }
-      if (processPidAlive || processGroupAlive) {
+      // The local probe cannot judge a remote SSH stamp. A confirmed SSH
+      // checkpoint can enter the restart claim, with the stamp still intact.
+      const confirmedSshRestart = await hasConfirmedLegacySshRestart(db, run);
+      if ((processPidAlive || processGroupAlive) && !confirmedSshRestart) {
         if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
           const detachedMessage = legacyProcessProof?.verdict === "unprovable"
             ? `Lost in-memory process handle, and cannot prove child pid ${run.processPid ?? run.processGroupId} stopped (${legacyProcessProof.reason}); stop the run to release it`
@@ -2631,8 +2634,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         continue;
       }
 
-      if (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType)) {
-        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType);
+      if (confirmedSshRestart || (run.runtimeMode === "legacy" && ["codex_local", "claude_local"].includes(adapterType))) {
+        const checkpoint = await claimLegacyRestartRecovery(db, run, adapterType, { requireSshProof: confirmedSshRestart });
         if (checkpoint) {
           restartSuspendedLegacyRuns.delete(run.id);
           const execution = executeRun(run.id, { legacyRestartRecovery: checkpoint }).catch(err => {
@@ -2643,6 +2646,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           continue;
         }
       }
+      // An SSH stop receipt cannot authorize a generic retry after a failed claim.
+      if (confirmedSshRestart) continue;
       const runContext = parseObject(run.contextSnapshot);
       const monitorIssueId = readNonEmptyString(runContext.issueId);
       const monitorNextCheckAt = monitorIssueId
