@@ -448,6 +448,8 @@ describeEmbeddedPostgres("question response delivery", () => {
       attemptCount: 1,
       errorCount: 0,
       lastErrorCode: "native_question_session_unavailable",
+      holdCount: 0,
+      nextAttemptAt: null,
     });
   });
 

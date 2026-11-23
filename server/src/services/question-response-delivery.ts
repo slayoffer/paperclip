@@ -328,7 +328,7 @@ export function questionResponseDeliveryService(
     };
   }
 
-  function releaseForRetry(delivery: DeliveryRow, errorCode: string, options = { bounded: true }) {
+  function releaseForRetry(delivery: DeliveryRow, errorCode: string, options: { bounded: boolean; backoff?: boolean } = { bounded: true }) {
     return releaseQuestionResponseForRetry(db, delivery, errorCode, options, now(), MAX_DELIVERY_ATTEMPTS);
   }
 
@@ -799,10 +799,11 @@ export function questionResponseDeliveryService(
           });
         }
         if (nativeDisposition === "pending") {
+          // Another controller may already be ready to deliver to the native session.
           await releaseForRetry(
             claimed,
             "native_question_session_unavailable",
-            { bounded: false },
+            { bounded: false, backoff: false },
           );
           return null;
         }

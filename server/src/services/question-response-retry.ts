@@ -7,7 +7,7 @@ export async function releaseQuestionResponseForRetry(
   db: Db,
   delivery: typeof deliveries.$inferSelect,
   errorCode: string,
-  options: { bounded: boolean },
+  options: { bounded: boolean; backoff?: boolean },
   at: Date,
   maxErrors: number,
 ) {
@@ -22,7 +22,7 @@ export async function releaseQuestionResponseForRetry(
     await tx.update(deliveries).set({
       // Keep an exhausted claim owned until its terminal outcome commits.
       status: exhausted ? "delivering" : "pending",
-      ...(options.bounded ? { errorCount } : outboxBackoff(delivery.holdCount, at)),
+      ...(options.bounded ? { errorCount } : options.backoff === false ? {} : outboxBackoff(delivery.holdCount, at)),
       lastErrorCode: errorCode,
       updatedAt: at,
     }).where(ownedClaim);
