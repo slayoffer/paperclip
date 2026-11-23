@@ -8,6 +8,9 @@ This contract covers the Synthiq fork on `synthiq/2026.1106.0`, not an upstream 
 2. **Where does autonomy end?** Obtain Anton's card for credentials, schema changes, spending, or host writes.
    Never revoke or rotate credentials through an agent approval.
    Review approval and image publication do not authorize a live server switch or database change.
+   For SYNA-5105, require the pull-queue follow-up and its release checks before a switch.
+   Exercise renumbered migrations 0452–0458 on a real fork database before any switch.
+   A disposable test database does not satisfy this upgrade gate.
 3. **Which checks precede merge?** Require the final head's `Fork release checks`
    from [fork-release-tests.yml](../.github/workflows/fork-release-tests.yml).
    It checks the workflow contract, prepares SDK exports and native Runner fixtures,
