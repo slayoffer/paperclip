@@ -1,3 +1,4 @@
+import { agentWipFull } from "./agent-wip-limit.js";
 import { recordPullQueueParking } from "./pull-queue-state.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
 import type { IssueDisplayStatus } from "@paperclipai/shared";
@@ -2042,6 +2043,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
    * under the privacy-tree lock differs, the create is rejected, not written.
    */
   expectedParentId?: string | null;
+  wipAdmissionActor?: { type?: string; source?: string };
   workspaceSelection?: TaskWorkspaceSelection;
   workspaceSelectionSource?: "explicit" | "channel";
   workspaceSelectionActor?: AuthorizationActor;
@@ -2275,6 +2277,7 @@ function normalizeAcceptedPlanDecompositionFingerprintValue(
 }
 
 const ACCEPTED_PLAN_DECOMPOSITION_FINGERPRINT_CHILD_METADATA_KEYS = new Set([
+  "wipAdmissionActor",
   "id",
   "companyId",
   "parentId",
@@ -10230,6 +10233,7 @@ export function issueService(db: Db) {
       dbOrTx: Db | DbTransaction = db,
     ) => {
       const {
+        wipAdmissionActor,
         workspaceSelection, workspaceSelectionSource = "explicit", workspaceSelectionActor,
         initialPlan,
         conversationHandoff,
@@ -10412,6 +10416,13 @@ export function issueService(db: Db) {
             tx,
           );
           return withRelations;
+        }
+
+        if (wipAdmissionActor && issueData.status !== "blocked" && await agentWipFull(tx, wipAdmissionActor, {
+          companyId, agentId: issueData.assigneeAgentId, status: issueData.status ?? "backlog",
+          priority: issueData.priority,
+        })) {
+          issueData.status = "backlog";
         }
 
         if (issueData.status === "done" && requiredQualityReview(issueData.executionPolicy)) {

@@ -1,6 +1,7 @@
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
 import { issueWipReason, RUNNABLE_WIP_REASONS } from "./agent-wip-policy.js";
+import { conflict } from "../errors.js";
 
 /**
  * Guild model v2, rule 2. A new assignment over PAPERCLIP_AGENT_WIP_LIMIT goes
@@ -62,4 +63,25 @@ export async function agentWipFull(
 export function wipPullRefusal(limit: number): string {
   return `WIP limit reached: this agent already has ${limit} or more runnable issues. ` +
     "Finish or hand off one of them first; the next backlog issue is promoted when a slot frees.";
+}
+
+/** The same check runs on the preview and on the saved issue under the company admission lock. */
+export async function applyIssueUpdateWipAdmission(
+  db: Pick<Db, "select">,
+  actor: { type?: string; source?: string },
+  existing: { id: string; companyId: string; assigneeAgentId: string | null; status: string; priority: string },
+  patch: { status?: string; priority?: string },
+  requestedAssignee: string | null | undefined,
+) {
+  const status = patch.status ?? existing.status;
+  const reassigned = requestedAssignee !== undefined && requestedAssignee !== existing.assigneeAgentId;
+  const agentId = reassigned ? requestedAssignee : existing.assigneeAgentId;
+  const input = { companyId: existing.companyId, agentId, status,
+    priority: patch.priority ?? existing.priority, excludeIssueId: existing.id };
+  if (reassigned) {
+    // Blocked work retains its stop condition even when the new owner is full.
+    if (status !== "blocked" && await agentWipFull(db, actor, input)) patch.status = "backlog";
+  } else if (actor.type === "agent" && existing.status === "backlog" && await agentWipFull(db, actor, input)) {
+    throw conflict(wipPullRefusal(agentWipLimit() ?? 0), { code: "agent_wip_limit" });
+  }
 }

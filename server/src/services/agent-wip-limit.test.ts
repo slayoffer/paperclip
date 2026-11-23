@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, issueRelations, issues } from "@paperclipai/db";
 import { companyFlowService } from "./company-flow.js";
+import { issueService } from "./issues.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -93,6 +94,30 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(flow.agents.find((agent) => agent.id === owner)).toMatchObject({
       wip: 1, runnableWip: 1, waitingWip: 1,
     });
+  });
+
+  it("serializes two simultaneous creates into one runnable slot", async () => {
+    process.env.PAPERCLIP_AGENT_WIP_LIMIT = "1";
+    const owner = randomUUID();
+    await db.insert(agents).values({
+      id: owner, companyId, name: "Contended WIP owner", role: "engineer", adapterType: "process",
+    });
+    const service = issueService(db);
+    const created = await Promise.all(["First", "Second"].map(title => service.create(companyId, {
+      title, assigneeAgentId: owner, status: "todo", wipAdmissionActor: agentActor,
+    })));
+    expect(created.map(issue => issue.status).sort()).toEqual(["backlog", "todo"]);
+    expect(await countAgentActiveIssues(db, { companyId, agentId: owner })).toBe(1);
+  });
+
+  it("retains a typed stop when creating blocked work at the limit", async () => {
+    process.env.PAPERCLIP_AGENT_WIP_LIMIT = "1";
+    const unblockDescriptor = { owner: "board", action: "Confirm the external dependency." } as const;
+    const created = await issueService(db).create(companyId, {
+      title: "Explicit blocked assignment", assigneeAgentId: busy,
+      status: "blocked", unblockDescriptor, wipAdmissionActor: agentActor,
+    });
+    expect(created).toMatchObject({ status: "blocked", unblockDescriptor });
   });
 
   it("is never full while the switch is off", async () => {

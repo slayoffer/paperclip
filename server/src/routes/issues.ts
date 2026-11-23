@@ -315,7 +315,7 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
-import { agentWipFull, agentWipLimit, isWipActiveStatus, wipPullRefusal } from "../services/agent-wip-limit.js";
+import { agentWipFull, agentWipLimit, applyIssueUpdateWipAdmission, isWipActiveStatus, wipLimitAppliesToActor } from "../services/agent-wip-limit.js";
 import {
   agentIssueCreateLimits,
   agentIssueCreateRefusal,
@@ -12694,17 +12694,10 @@ export function issueRoutes(
       );
       let deduplicationReason: "idempotency_key" | "recent_open_title" | null =
         null;
-      // Guild model v2 rule 2: a new assignment over the WIP limit waits in backlog (no assignment wake).
-      const wipDeferCreate = await agentWipFull(db, req.actor, {
-        companyId,
-        agentId: createBody.assigneeAgentId as string | null | undefined,
-        status: createBody.status,
-        priority: createBody.priority,
-      });
       const createInput = {
         ...createBody,
         workspaceSelectionActor: req.actor,
-        ...(wipDeferCreate ? { status: "backlog" as const } : {}),
+        wipAdmissionActor: req.actor,
         projectId: createAssignmentScope.projectId,
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
@@ -13113,18 +13106,12 @@ export function issueRoutes(
         },
         actor,
       );
-      const wipDeferChild = await agentWipFull(db, req.actor, {
-        companyId: parent.companyId,
-        agentId: createBody.assigneeAgentId as string | null | undefined,
-        status: createBody.status,
-        priority: createBody.priority,
-      });
       const { issue, parentBlockerAdded } = await svc.createChild(parent.id, {
         ...createBody,
         parentDepthPolicy: childParentDepthPolicy,
         ...(childParentDepthPolicy === "flatten" ? { expectedParentId: childPlacement.effectiveParentId } : {}),
         workspaceSelectionActor: req.actor,
-        ...(wipDeferChild ? { status: "backlog" as const } : {}),
+        wipAdmissionActor: currentSerializedChild ? undefined : req.actor,
         projectId: childAssignmentScope.projectId,
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
@@ -13343,10 +13330,11 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const normalizedChildren = [];
       const wipPendingByAgent = new Map<string, number>();
+      // Keep the existing normalized input for accepted-plan retry fingerprints.
       for (const requestedChild of requestedChildren) {
         let child = requestedChild;
         const wipAgentId = child.assigneeAgentId as string | null | undefined;
-        if (wipAgentId && isWipActiveStatus(child.status ?? "todo")) {
+        if (wipAgentId && child.status !== "blocked" && isWipActiveStatus(child.status ?? "todo")) {
           const pending = wipPendingByAgent.get(wipAgentId) ?? 0;
           if (await agentWipFull(db, req.actor, {
             companyId: sourceIssue.companyId, agentId: wipAgentId, status: child.status ?? "todo", pending,
@@ -13377,6 +13365,7 @@ export function issueRoutes(
         );
         normalizedChildren.push({
           ...child,
+          wipAdmissionActor: req.actor,
           id: childIssueId,
           executionPolicy,
           ...(sourceTrust ? { sourceTrust } : {}),
@@ -13404,6 +13393,7 @@ export function issueRoutes(
           if (!blockerIssueId) continue;
           normalizedChildren[index] = {
             ...normalizedChildren[index],
+            wipAdmissionActor: undefined,
             status: "blocked",
             blockedByIssueIds: mergeIssueBlockerIds(
               normalizedChildren[index].blockedByIssueIds,
@@ -14574,32 +14564,16 @@ export function issueRoutes(
       Object.assign(updateFields, transition.patch);
       if (preserveBlockedAssignment) delete updateFields.status;
 
-      // Guild model v2 rule 2: a new agent assignment over the WIP limit waits in backlog; pulling own backlog work
-      // into an active status over the limit is refused. Reopen, resume and review returns are not new work.
-      {
-        const wipStatus = updateFields.status ?? existing.status;
-        const reassignedTo =
-          normalizedAssigneeAgentId && normalizedAssigneeAgentId !== existing.assigneeAgentId
-            ? normalizedAssigneeAgentId
-            : null;
-        if (reassignedTo && !preserveBlockedAssignment) {
-          if (await agentWipFull(db, req.actor, {
-            companyId: existing.companyId, agentId: reassignedTo, status: wipStatus, excludeIssueId: existing.id,
-            priority: updateFields.priority ?? existing.priority,
-          })) updateFields.status = "backlog";
-        } else if (
-          // Only an agent pulling its own backlog is limited; a board move (watchdog promote, coordinator) passes.
-          req.actor.type === "agent" &&
-          existing.status === "backlog" &&
-          existing.assigneeAgentId &&
-          isWipActiveStatus(wipStatus) &&
-          await agentWipFull(db, req.actor, {
-            companyId: existing.companyId, agentId: existing.assigneeAgentId, status: wipStatus, excludeIssueId: existing.id,
-            priority: updateFields.priority ?? existing.priority,
-          })
-        ) {
-          res.status(409).json({ error: wipPullRefusal(agentWipLimit() ?? 0), details: { code: "agent_wip_limit" } });
-          return;
+      const checkWipAdmission = !preserveBlockedAssignment && agentWipLimit() !== null &&
+        wipLimitAppliesToActor(req.actor) && (Boolean(normalizedAssigneeAgentId) ||
+          (req.actor.type === "agent" && isWipActiveStatus(updateFields.status)));
+      if (checkWipAdmission) {
+        const requestedWipStatus = updateFields.status ?? existing.status;
+        await applyIssueUpdateWipAdmission(db, req.actor, existing, updateFields, normalizedAssigneeAgentId);
+        if (requestedWipStatus !== "backlog" && updateFields.status === "backlog" && nextExecutionPolicy?.monitor) {
+          throw conflict("A scheduled issue monitor prevents moving this issue to backlog.", {
+            code: "scheduled_monitor_status_conflict",
+          });
         }
       }
 
@@ -14998,7 +14972,7 @@ export function issueRoutes(
         updateFields.status === "done" || updateFields.status === "cancelled";
       const updateIssue = (tx?: Parameters<typeof svc.update>[2]) => {
         if (tx) {
-          if (shouldCollectCompletionPublication) {
+          if (checkWipAdmission || shouldCollectCompletionPublication) {
             return svc.update(
               id,
               issueUpdateData,
@@ -15137,7 +15111,7 @@ export function issueRoutes(
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
       const shouldUseTransactionalIssueUpdate =
-        Boolean(commentAttachmentIds?.length) ||
+        checkWipAdmission || Boolean(commentAttachmentIds?.length) ||
         commentWithAdapterOverrides ||
         Boolean(decision) ||
         shouldRelayStop ||
@@ -15146,6 +15120,26 @@ export function issueRoutes(
       try {
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
+            if (checkWipAdmission || issueUpdateData.visibility !== undefined ||
+              issueUpdateData.parentId !== undefined || issueUpdateData.projectId !== undefined) {
+              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
+            }
+            if (checkWipAdmission) {
+              const [lockedIssue] = await tx.select().from(issueRows)
+                .where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
+              if (!lockedIssue) return null;
+              const validatedStatus = issueUpdateData.status;
+              await applyIssueUpdateWipAdmission(tx, req.actor, lockedIssue, issueUpdateData, normalizedAssigneeAgentId);
+              const monitorArmed = issueUpdateData.executionPolicy === undefined
+                ? Boolean(lockedIssue.monitorNextCheckAt)
+                : Boolean(normalizeIssueExecutionPolicy(issueUpdateData.executionPolicy)?.monitor);
+              if (lockedIssue.status !== "backlog" && issueUpdateData.status === "backlog" && monitorArmed) {
+                throw conflict("A scheduled issue monitor prevents moving this issue to backlog.", {
+                  code: "scheduled_monitor_status_conflict",
+                });
+              }
+              if (validatedStatus !== issueUpdateData.status) updateFields.status = issueUpdateData.status;
+            }
             if (
               reviewPolicySensitiveMutationRequested &&
               !(await assertLockedReviewPolicyAllowsMutation(tx))
@@ -15196,7 +15190,7 @@ export function issueRoutes(
               });
             }
 
-            if (shouldRelayStop) {
+            if (shouldRelayStop && ["blocked", "cancelled"].includes(updated.status)) {
               stopRelayResult.value = await svc.addStopRelayCommentIfNeeded(
                 updated,
                 tx,
@@ -15246,7 +15240,7 @@ export function issueRoutes(
         publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
-      if (enteringBlocked) {
+      if (enteringBlocked && issue.status === "blocked") {
         const blockedIssue = issue;
         let ownerNotifiedAt: Date | null = null;
         if (!skipSelfUnblockWake(blockedIssue)) await deliverAgentUnblockNotification({
