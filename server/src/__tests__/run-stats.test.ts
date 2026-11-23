@@ -136,7 +136,9 @@ describe("run statistics contract", () => {
       res.status(err instanceof ZodError ? 400 : err.status ?? 500).json({ error: err.message });
     };
     app.use(onError);
-    await new Promise<void>((resolve) => { server = app.listen(0, "127.0.0.1", resolve); });
+    await new Promise<void>((resolve, reject) => {
+      server = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve());
+    });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Test server has no address");
     base = `http://127.0.0.1:${address.port}/api/companies`;
@@ -147,7 +149,7 @@ describe("run statistics contract", () => {
     await tempDb?.cleanup();
   });
 
-  function request(query = historical, actor = ownerId, company = companyId) {
+  function request(query = historical, actor: string = ownerId, company = companyId) {
     return fetch(`${base}/${company}/run-stats?${new URLSearchParams(Object.entries(query))}`, {
       headers: { "x-actor": actor },
     });

@@ -45,11 +45,12 @@ it.skipIf(!support.supported || !containmentSupported)("stops a live SSH writer 
   await mkdir(worktree);
   const fixture = await startSshEnvLabFixture({ statePath: path.join(root, "ssh", "state.json") });
   const config = await buildSshEnvLabFixtureConfig(fixture);
-  const environment = { id: randomUUID(), companyId: randomUUID(), driver: "ssh", config } as unknown as Environment;
+  const companyId = randomUUID();
+  const environment = { id: randomUUID(), companyId, driver: "ssh", config } as unknown as Environment;
   vi.stubEnv(SSH_IN_PLACE_ENVIRONMENTS_ENV, environment.id);
   vi.stubEnv(SSH_IN_PLACE_LOCK_WAIT_MS_ENV, "0");
   getById.mockResolvedValue(environment);
-  let stored = { id: randomUUID(), companyId: environment.companyId, environmentId: environment.id,
+  let stored = { id: randomUUID(), companyId, environmentId: environment.id,
     heartbeatRunId: randomUUID(), issueId: null, provider: "ssh",
     providerLeaseId: `ssh://${config.username}@${config.host}:${config.port}${config.remoteWorkspacePath}`,
     status: "active", releasedAt: null, cleanupStatus: null,

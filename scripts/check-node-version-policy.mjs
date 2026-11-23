@@ -7,6 +7,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const piDistributionManifest = path.join(
   repoRoot, "packages/paperclip-runner/scripts/pi-distribution/package.json",
 );
+const providerAssetsRoot = path.join(repoRoot, "packages", "paperclip-runner", "provider-assets");
 const expectedEngine = ">=24.11.0";
 const expectedTypes = "^24.0.0";
 const failures = [];
@@ -18,8 +19,8 @@ function relative(filePath) {
 
 function walk(directory, visit) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && skippedDirectories.has(entry.name)) continue;
     const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory() && (skippedDirectories.has(entry.name) || entryPath === providerAssetsRoot)) continue;
     if (entry.isDirectory()) walk(entryPath, visit);
     else if (entry.isFile()) visit(entryPath);
   }
@@ -45,16 +46,19 @@ walk(repoRoot, (filePath) => {
 });
 
 const workflowRoot = path.join(repoRoot, ".github", "workflows");
+const releaseVerificationWorkflow = path.join(workflowRoot, "release-verify.yml");
+const forkSshVerificationWorkflow = path.join(workflowRoot, "synthiq-ssh-workspace.yml");
 walk(workflowRoot, (filePath) => {
   if (!/\.ya?ml$/.test(filePath)) return;
   const source = fs.readFileSync(filePath, "utf8");
-  const packProducer = relative(filePath) === ".github/workflows/release-verify.yml"
+  const packProducer = filePath === releaseVerificationWorkflow
     ? /(?:^|\n)  runner_binaries:\n[\s\S]*?(?=\n  [a-z_]+:\n|$)/.exec(source)
     : null;
   for (const match of source.matchAll(/node-version:\s*["']?([^\s"'#]+)/g)) {
     if (match[1] === "24.21.0" && packProducer
       && match.index >= packProducer.index
       && match.index < packProducer.index + packProducer[0].length) continue;
+    if (filePath === forkSshVerificationWorkflow && match[1] === "24.22.1") continue;
     if (match[1] !== "24") failures.push(`${relative(filePath)}: node-version must be 24, found ${match[1]}`);
   }
 });

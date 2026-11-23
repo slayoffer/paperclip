@@ -6,7 +6,7 @@ import {
   issueRecoveryActions, issues, nativeRunFinalizations,
 } from "@paperclipai/db";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
-import { recoveryService, type RecoveryWakeup } from "../services/recovery/service.js";
+import { recoveryService } from "../services/recovery/service.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { PaperclipControlPlanePort } from "../services/native-runtime/paperclip-control-plane-port.js";
 
@@ -58,7 +58,7 @@ describe("standing timer continuation recovery", () => {
       contextSnapshot: { issueId, timerDriverIssue: true }, livenessState: "blocked",
       finishedAt: new Date(), resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
     });
-    const enqueueWakeup = vi.fn<RecoveryWakeup>(async (targetAgentId, opts) => db.transaction(async tx => {
+    const enqueueWakeup = vi.fn<Parameters<typeof recoveryService>[1]["enqueueWakeup"]>(async (targetAgentId, opts) => db.transaction(async tx => {
       const [wake] = await tx.insert(agentWakeupRequests).values({
         companyId, agentId: targetAgentId, source: "automation", reason: opts?.reason,
         payload: opts?.payload, idempotencyKey: opts?.idempotencyKey, status: "queued",

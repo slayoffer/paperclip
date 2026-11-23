@@ -76,7 +76,7 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.update(agents).set({ status: "idle" }).where(eq(agents.id, f.agentId));
     // Stub successful admission only. All paused gate decisions above use the real heartbeat.
     f.wakeupForOutbox.mockImplementation(async (_agentId, options) => {
-      expect(options.idempotencyKey).toBe(f.key);
+      expect(options?.idempotencyKey).toBe(f.key);
       await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId,
         source: "automation", status: "queued", idempotencyKey: f.key }).onConflictDoNothing();
       return { run: null, suppression: null };

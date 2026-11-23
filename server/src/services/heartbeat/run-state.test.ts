@@ -127,7 +127,7 @@ describe("heartbeat run state module", () => {
   });
 
   it("loads run read bindings without large fields or an encoding probe", async () => {
-    const binding = { id: "run", companyId: "company", scopeKind: "issue", issueId: "issue" };
+    const binding = { id: "run", companyId: "company", agentId: "agent", scopeKind: "issue", issueId: "issue" };
     const reader = readingDatabase("SQL_ASCII", [binding], []);
     const state = extracted.createHeartbeatRunState(reader.db);
     expect(await state.getRunReadAccess("run")).toEqual(binding);
@@ -136,6 +136,7 @@ describe("heartbeat run state module", () => {
     expect(reader.columns).toEqual(Array(2).fill({
       id: heartbeatRuns.id,
       companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
       scopeKind: heartbeatRuns.scopeKind,
       issueId: heartbeatRuns.issueId,
     }));

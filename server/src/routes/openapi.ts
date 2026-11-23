@@ -1,3 +1,4 @@
+import type { OpenApiPathRegistration, OpenApiResponse } from "./openapi-types.js";
 import { registerRunStatsPaths } from "./openapi-run-stats.js";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
@@ -357,22 +358,6 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
-type OpenApiResponse = Record<string, unknown>;
-type OpenApiPathRegistration = {
-  method: string;
-  path: string;
-  request?: {
-    params?: z.ZodTypeAny;
-    query?: z.ZodTypeAny;
-    headers?: z.ZodTypeAny;
-    body?: {
-      content: Record<string, { schema: unknown }>;
-      required?: boolean;
-    };
-  };
-  responses?: Record<string, OpenApiResponse>;
-  [key: string]: unknown;
-};
 
 // Zod 4 stores each schema definition on `_def` with a lowercase `type`
 // discriminator and moves the wrapped members onto that def. This loose view

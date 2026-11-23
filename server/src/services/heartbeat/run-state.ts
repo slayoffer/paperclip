@@ -1214,7 +1214,7 @@ export function createHeartbeatRunState(db: Db) {
 
   async function getRunReadAccess(runId: string) {
     return db
-      .select(heartbeatRunReadAccessColumns)
+      .select({ ...heartbeatRunReadAccessColumns, agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);

@@ -67,7 +67,7 @@ describe.skipIf(!postgresSupport.supported || !sshSupport.supported || !containm
     const seeded = await seedRunTarget(db, { repoRoot: repo, remoteBase: config.remoteWorkspacePath });
     await db.insert(companyMemberships).values({ companyId: seeded.companyId,
       principalType: "user", principalId: "responsible-user", membershipRole: "owner", status: "active" });
-    await db.update(environments).set({ config }).where(eq(environments.id, seeded.environmentId));
+    await db.update(environments).set({ config: { ...config } }).where(eq(environments.id, seeded.environmentId));
     vi.stubEnv(SSH_IN_PLACE_ENVIRONMENTS_ENV, seeded.environmentId);
     const sessionId = "01234567-89ab-4cde-8f01-23456789abcd";
     const command = path.join(root, "codex");

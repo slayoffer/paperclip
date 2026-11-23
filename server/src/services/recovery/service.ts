@@ -4035,7 +4035,6 @@ export function recoveryService(
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(
-        db,
         current,
         "dependency_wait_created",
       );
@@ -4054,7 +4053,6 @@ export function recoveryService(
     if (state.hasActiveExecutionPath) return "skipped";
     if (state.hasDurableWaitingPath) {
       await resolveDispositionRepairActionAsCovered(
-        db,
         current,
         `durable_path_restored:${state.durablePathReason ?? "unknown"}`,
       );

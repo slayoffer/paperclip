@@ -93,7 +93,7 @@ describe("agent statistics grant contract", () => {
     return instance;
   }
 
-  function grant(actor = "owner", agent = targetId, company = companyId, body: unknown = statsBody) {
+  function grant(actor = "owner", agent = targetId, company = companyId, body: object = statsBody) {
     return request(app(actor)).post(`/api/companies/${company}/agents/${agent}/permission-grants`).send(body);
   }
 
