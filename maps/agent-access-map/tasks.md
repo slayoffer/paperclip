@@ -70,7 +70,7 @@ Read task collections, navigation projections and blocked counts; distinguish do
 
 ### `list-filter-page`
 
-API: `present` — GET /api/companies/{companyId}/issues; optional view=compact.
+API: `present` — GET /api/companies/{companyId}/issues. Views: `compact`, `index`. Index skips recovery revalidation and sets `listProjection: "index"`.
 
 Agent access: `partial` — REST/call_api full query; CLI issue list exposes status/agent/project and local --match on one fetched page; native search_tasks query up to 500 characters, statuses, and a declared limit 1..200; production clamps the limit to 1..100 (default 50), without full paging/project/label/workspace knobs.
 
