@@ -7861,6 +7861,7 @@ export function issueRoutes(
     const sortDir = req.query.sortDir as string | undefined;
     const view = req.query.view as string | undefined;
     const compactView = view === "compact";
+    const indexView = view === "index";
     const hasPlanDocument = parseOptionalBooleanQuery(
       req.query.hasPlanDocument,
     );
@@ -7927,8 +7928,8 @@ export function issueRoutes(
         .json({ error: "attention must be 'blocked' when provided" });
       return;
     }
-    if (view !== undefined && view !== "compact") {
-      res.status(400).json({ error: "view must be 'compact' when provided" });
+    if (view !== undefined && !compactView && !indexView) {
+      res.status(400).json({ error: "view must be 'compact' or 'index' when provided" });
       return;
     }
     if (
@@ -8066,7 +8067,7 @@ export function issueRoutes(
       companyId,
       normalizedQuery: {
         ...requestKeyFilters,
-        view: compactView ? "compact" : undefined,
+        view,
       },
     });
     const coordinated = await coordinateIssueListGet({
@@ -8081,44 +8082,21 @@ export function issueRoutes(
           ? rawResult
           : await filterIssuesForActor(req, rawResult);
         const result = await redactIssueRelationEdgesOnRows(req, companyId, visibleRows);
-        const issueIds = result.map((issue) => issue.id);
-        const interruptions = await taskInterruptionPresentations(db, companyId, result);
-        if (compactView) {
-          const [handoffStates, recoveryActionByIssue] = await Promise.all([
-            listSuccessfulRunHandoffStates(db, companyId, issueIds),
-            recoveryActionsSvc.listActiveForIssues(companyId, issueIds),
-          ]);
-          const actor = getActorInfo(req);
-          await Promise.all(
-            result.map(async (issue) => {
-              const activeRecoveryAction =
-                recoveryActionByIssue.get(issue.id) ?? null;
-              if (!activeRecoveryAction) return;
-              const revalidated = await revalidateActiveSourceRecoveryForRead({
-                issue,
-                trigger: "read_projection",
-                actor,
-                activeRecoveryAction,
-              });
-              if (revalidated) recoveryActionByIssue.set(issue.id, revalidated);
-              else recoveryActionByIssue.delete(issue.id);
-            }),
-          );
-          const compactResult = result.map((issue) =>
-            toCompactIssue({
-              ...issue,
-              activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
-              interruption: interruptions.get(issue.id) ?? null,
-              successfulRunHandoff: handoffStates.get(issue.id) ?? null,
-            }),
-          );
+        if (indexView) {
+          // An index read must never reach recovery revalidation.
+          const body = result.map((issue) => ({
+            ...toCompactIssue(issue),
+            listProjection: "index" as const,
+          }));
           return {
             kind: "compact",
-            body: compactResult,
-            etag: compactIssueListEtag(compactResult),
-            cacheControl: "private, must-revalidate",
+            body,
+            etag: compactIssueListEtag(body),
+            cacheControl: "private, no-store",
           };
         }
+        const issueIds = result.map((issue) => issue.id);
+        const interruptions = await taskInterruptionPresentations(db, companyId, result);
         const [handoffStates, recoveryActionByIssue] = await Promise.all([
           listSuccessfulRunHandoffStates(db, companyId, issueIds),
           recoveryActionsSvc.listActiveForIssues(companyId, issueIds),
@@ -8139,6 +8117,22 @@ export function issueRoutes(
             else recoveryActionByIssue.delete(issue.id);
           }),
         );
+        if (compactView) {
+          const compactResult = result.map((issue) =>
+            toCompactIssue({
+              ...issue,
+              activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
+              interruption: interruptions.get(issue.id) ?? null,
+              successfulRunHandoff: handoffStates.get(issue.id) ?? null,
+            }),
+          );
+          return {
+            kind: "compact",
+            body: compactResult,
+            etag: compactIssueListEtag(compactResult),
+            cacheControl: "private, must-revalidate",
+          };
+        }
         return {
           kind: "full",
           body: result.map((issue) => ({
