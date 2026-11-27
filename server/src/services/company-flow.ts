@@ -8,6 +8,8 @@ import { agentWipLimit } from "./agent-wip-limit.js";
 import { buildCompanyFlowReport } from "./company-flow-model.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { listIssueDependencyReadinessMap } from "./issue-dependency-readiness.js";
+import { classifyIssueWip, issueWipEvidence } from "./issue-wip-policy.js";
+import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
 
 export function companyFlowService(db: Db) {
   return {
@@ -23,6 +25,8 @@ export function companyFlowService(db: Db) {
           assigneeUserId: issues.assigneeUserId, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId,
           createdAt: issues.createdAt, updatedAt: issues.updatedAt,
           executionVisible: sql<boolean>`${executionIssueCondition()}`,
+          unblockDescriptor: issues.unblockDescriptor, conversationAgentId: issues.conversationAgentId,
+          hasExecution: issueHasExecution(), ...issueWipEvidence(),
         }).from(issues).where(eq(issues.companyId, companyId)),
         tx.select({ id: agents.id, name: agents.name, status: agents.status })
           .from(agents).where(eq(agents.companyId, companyId)),
@@ -47,7 +51,10 @@ export function companyFlowService(db: Db) {
         .filter((issue) => issue.executionVisible && issue.status !== "done" && issue.status !== "cancelled")
         .map((issue) => issue.id));
       return buildCompanyFlowReport(companyId, {
-        issues: issueRows, agents: agentRows, relations, decisions: [...interactions, ...approvalRows], runs,
+        issues: issueRows.map(row => ({ ...row,
+          wipDecision: classifyIssueWip(row, row, isPullQueueEnabled(), collectedAt.getTime()),
+          unresolvedBlockerIssueIds: readiness.get(row.id)?.unresolvedBlockerIssueIds,
+        })), agents: agentRows, relations, decisions: [...interactions, ...approvalRows], runs,
         pendingFinalizeBlockerIssueIds: [...new Set([...readiness.values()].flatMap((row) => row.pendingFinalizeBlockerIssueIds))],
       }, collectedAt, agentWipLimit());
     }, { isolationLevel: "repeatable read", accessMode: "read only" }),

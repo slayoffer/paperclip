@@ -17,12 +17,3 @@ export function issueHasExecution() {
         and w.payload->>'issueId' = "issues"."id"::text
         and w.status in ('queued', 'deferred_issue_execution')))`;
 }
-
-export function countsTowardPullQueueWip(issue: {
-  status: string;
-  monitorNextCheckAt: Date | null;
-}, hasExecution: boolean) {
-  if (issue.status === "todo") return true;
-  if (issue.status === "in_progress") return hasExecution;
-  return issue.status === "blocked" && !issue.monitorNextCheckAt;
-}

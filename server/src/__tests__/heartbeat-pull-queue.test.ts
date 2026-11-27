@@ -6,13 +6,11 @@ import {
   issueThreadInteractions, issues, agentWakeupRequests,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { createHeartbeatPullQueue, isPullQueueSignal } from "../services/pull-queue.js";
-import { countsTowardPullQueueWip } from "../services/pull-queue-policy.js";
+import { createHeartbeatPullQueue } from "../services/pull-queue.js";
 import { countAgentActiveIssues } from "../services/agent-wip-limit.js";
 import { issueService } from "../services/issues.js";
-import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
 import { heartbeatService } from "../services/heartbeat.js";
-import type { LiveEvent } from "@paperclipai/shared";
+import "./heartbeat-pull-queue-policy-cases.js";
 
 type WakeupOptions = NonNullable<Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]>;
 
@@ -129,7 +127,9 @@ databaseTests("event-driven pull queue", () => {
     await task({ status: "blocked" });
     await task({ status: "blocked" });
     await task({ status: "in_progress", monitorNextCheckAt: new Date(Date.now() + 3_600_000) });
-    await task({ status: "blocked", monitorNextCheckAt: new Date(Date.now() + 3_600_000) });
+    await task({ status: "blocked", monitorNextCheckAt: new Date(Date.now() + 3_600_000),
+      unblockDescriptor: { owner: "board", action: "Resume at the scheduled date", kind: "date",
+        until: new Date(Date.now() + 3_600_000).toISOString() } });
     await task({ status: "in_progress" });
     const next = await task();
     const { queue, wakeup } = scheduler();
@@ -164,7 +164,8 @@ databaseTests("event-driven pull queue", () => {
   it("counts task execution consistently for assignment and selection", async () => {
     await task({ status: "todo" });
     await task({ status: "blocked" });
-    await task({ status: "blocked", monitorNextCheckAt: new Date() });
+    await task({ status: "blocked", monitorNextCheckAt: new Date(),
+      unblockDescriptor: { owner: "board", action: "Resume when the vendor replies", kind: "external" } });
     await task({ status: "in_progress" });
     const running = await task({ status: "in_progress" });
     await run(running.id, { status: "scheduled_retry" });
@@ -173,7 +174,42 @@ databaseTests("event-driven pull queue", () => {
       status: "deferred_issue_execution", payload: { issueId: queued.id } });
     expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(4);
     vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", "false");
-    expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(6);
+    expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(5);
+  });
+
+  it.each(["external_blocker", "pending_human_card", "named_wait"])("selects backlog work when WIP contains only %s waits", async kind => {
+    vi.stubEnv("PAPERCLIP_AGENT_WIP_LIMIT", "1");
+    const waiting = await task({ status: "blocked" });
+    if (kind === "external_blocker") {
+      const otherOwner = randomUUID();
+      await db.insert(agents).values({ id: otherOwner, companyId, name: "Other", role: "engineer", status: "paused" });
+      const blocker = await task({ status: "todo", assigneeAgentId: otherOwner });
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: waiting.id, type: "blocks" });
+    } else if (kind === "pending_human_card") {
+      await db.insert(issueThreadInteractions).values({ companyId, issueId: waiting.id, kind: "request_confirmation",
+        effectiveResolverPolicy: "human_only", payload: { version: 1, prompt: "Approve?" } });
+    } else {
+      await db.update(issues).set({ unblockDescriptor: { owner: "board", kind: "external",
+        action: "Resume when the vendor confirms delivery" } }).where(eq(issues.id, waiting.id));
+    }
+    const next = await task();
+    const { queue, wakeup } = scheduler();
+    expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(0);
+    await queue.notify(companyId);
+    expect(wakeup).toHaveBeenCalledOnce();
+    expect(wakeup.mock.calls[0][1]).toMatchObject({ payload: { issueId: next.id },
+      issueStateGuard: { statuses: ["backlog"], assigneeAgentId: agentId } });
+    expect((await db.select().from(issues).where(eq(issues.id, waiting.id)))[0].status).toBe("blocked");
+  });
+
+  it("does not free a slot for an untyped blocked monitor", async () => {
+    vi.stubEnv("PAPERCLIP_AGENT_WIP_LIMIT", "1");
+    await task({ status: "blocked", monitorNextCheckAt: new Date(Date.now() + 60_000) });
+    await task();
+    const { queue, wakeup } = scheduler();
+    await queue.notify(companyId);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(await countAgentActiveIssues(db, { companyId, agentId })).toBe(1);
   });
 
   it("uses normal heartbeat admission and retains its issue token budget", async () => {
@@ -313,36 +349,5 @@ databaseTests("event-driven pull queue", () => {
     expect(saved).toMatchObject({ status: "in_progress", statusVersion: issue.statusVersion });
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(0);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.nativeIssueId, issue.id))).toHaveLength(1);
-  });
-});
-
-describe("pull queue monitor and event contracts", () => {
-  afterEach(() => vi.unstubAllEnvs());
-  it("refuses a status change that would silently cancel a monitor", () => {
-    vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", "true");
-    const owner = randomUUID();
-    const nextCheckAt = new Date(Date.now() + 3_600_000);
-    const policy = normalizeIssueExecutionPolicy({ stages: [], monitor: { nextCheckAt: nextCheckAt.toISOString(), scheduledBy: "board" } })!;
-    const input = { issue: { status: "in_progress", assigneeAgentId: owner,
-      executionPolicy: policy, monitorNextCheckAt: nextCheckAt },
-      policy, previousPolicy: policy, requestedStatus: "backlog", requestedAssigneePatch: {}, actor: { agentId: owner } };
-    expect(() => applyIssueExecutionPolicyTransition(input)).toThrow(expect.objectContaining({ status: 409 }));
-    vi.stubEnv("PAPERCLIP_PULL_QUEUE_ENABLED", "false");
-    expect(applyIssueExecutionPolicyTransition(input).patch.monitorNextCheckAt).toBeNull();
-  });
-
-  it("does not count a monitor alone as real work", () => {
-    expect(countsTowardPullQueueWip({ status: "in_progress", monitorNextCheckAt: new Date() }, false)).toBe(false);
-    expect(countsTowardPullQueueWip({ status: "in_progress", monitorNextCheckAt: new Date() }, true)).toBe(true);
-    expect(countsTowardPullQueueWip({ status: "todo", monitorNextCheckAt: null }, false)).toBe(true);
-  });
-
-  it.each(["issue.updated", "issue.created", "issue.thread_interaction_answered", "issue.thread_interaction_accepted"])("selects work after %s", (action) => {
-    expect(isPullQueueSignal({ type: "activity.logged", payload: { entityType: "issue", action } } as LiveEvent)).toBe(true);
-  });
-  it("selects work after a terminal run and ignores run output", () => {
-    expect(isPullQueueSignal({ type: "heartbeat.run.status", payload: { status: "succeeded" } } as LiveEvent)).toBe(true);
-    expect(isPullQueueSignal({ type: "heartbeat.run.status", payload: { status: "running" } } as LiveEvent)).toBe(false);
-    expect(isPullQueueSignal({ type: "heartbeat.run.event", payload: {} } as LiveEvent)).toBe(false);
   });
 });

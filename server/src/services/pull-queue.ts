@@ -8,8 +8,9 @@ import type { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
 import { logger } from "../middleware/logger.js";
-import { countsTowardPullQueueWip, isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
+import { isPullQueueEnabled, issueHasExecution } from "./pull-queue-policy.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
+import { classifyIssueWip, issueWipEvidence } from "./issue-wip-policy.js";
 
 type WakeupOptions = NonNullable<Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]>;
 
@@ -56,12 +57,20 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
           .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agent.id),
             inArray(agentWakeupRequests.status, pendingWakeStatuses))).limit(1);
         if (executions.length || wakes.length) return;
-        const assigned = await tx.select({ issue: issues, hasExecution: issueHasExecution() }).from(issues)
+        const assigned = await tx.select({ issue: issues, hasExecution: issueHasExecution(), ...issueWipEvidence() }).from(issues)
           .where(and(eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agent.id),
             isNull(issues.conversationAgentId), inArray(issues.status, ["backlog", "todo", "in_progress", "blocked"])))
           .orderBy(sql`case ${issues.priority} when 'critical' then 0 when 'high' then 1 when 'medium' then 2 else 3 end`,
             asc(issues.createdAt), asc(issues.id));
-        const wip = assigned.filter(({ issue, hasExecution }) => countsTowardPullQueueWip(issue, hasExecution)).length;
+        const now = Date.now();
+        const decisions = assigned.map(row => ({ issueId: row.issue.id,
+          ...classifyIssueWip(row.issue, row, true, now) }));
+        const wip = decisions.filter(row => row.countsTowardWip).length;
+        logger.info({ event: "pull_queue_wip_decision", companyId, agentId: agent.id, runnable: wip,
+          waiting: decisions.filter(row => ["external_blocker", "pending_human_card", "named_wait"].includes(row.reason)).length,
+          untypedBlocked: decisions.filter(row => row.reason === "untyped_blocked").length,
+          limit: agentWipLimit() ?? 3, reason: wip < (agentWipLimit() ?? 3) ? "owner_has_slot" : "owner_at_wip_limit",
+          decisions }, "Checked owner WIP capacity for backlog selection");
         const candidates = assigned.filter(({ issue, hasExecution }) => !hasExecution && !issue.monitorNextCheckAt
           && (issue.status === "todo" || (issue.status === "backlog" && wip < (agentWipLimit() ?? 3))));
         if (!candidates.length) return;

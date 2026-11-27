@@ -1,3 +1,9 @@
+export interface IssueWipDecision {
+  countsTowardWip: boolean;
+  reason: "todo" | "in_progress" | "untyped_blocked" | "external_blocker" | "pending_human_card"
+    | "named_wait" | "inactive_in_progress" | "conversation" | "inactive_status";
+}
+
 export interface FlowIssue {
   id: string;
   identifier: string | null;
@@ -10,6 +16,7 @@ export interface FlowIssue {
   unchangedForMs: number;
   openBlockerIds: string[];
   pendingDecisionCount: number;
+  wipDecision: IssueWipDecision;
 }
 
 export interface FlowAgent {
@@ -17,6 +24,9 @@ export interface FlowAgent {
   name: string;
   status: string;
   wip: number;
+  runnable: number;
+  waiting: number;
+  untypedBlocked: number;
   wipLimit: number | null;
   atWipLimit: boolean;
 }
@@ -36,6 +46,9 @@ export interface FlowCounts {
   readyBacklog: number;
   chainRoots: number;
   wip: number;
+  runnable: number;
+  waiting: number;
+  untypedBlocked: number;
   inProgressWithoutRun: number;
   blockedWithClosedLinks: number;
   reviewHoldsWithoutRound: number;
@@ -62,6 +75,7 @@ export interface CompanyFlowReport {
     inProgressWithoutRun: FlowIssue[];
     blockedWithClosedLinks: FlowIssue[];
     reviewHoldsWithoutRound: FlowIssue[];
+    untypedBlocked: FlowIssue[];
   };
   unassigned: FlowIssue[];
   counts: FlowCounts;

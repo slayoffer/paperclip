@@ -1,7 +1,7 @@
-import type { CompanyFlowReport, FlowAgent, FlowCounts, FlowIssue, FlowStallReason } from "@paperclipai/shared/types/company-flow";
-import { isWipActiveStatus } from "./agent-wip-limit.js";
+import type { CompanyFlowReport, FlowAgent, FlowCounts, FlowIssue, FlowStallReason, IssueWipDecision } from "@paperclipai/shared/types/company-flow";
+import { classifyIssueWip, type WipIssue } from "./issue-wip-policy.js";
 
-export interface FlowIssueRow {
+export interface FlowIssueRow extends WipIssue {
   id: string;
   identifier: string | null;
   title: string;
@@ -15,6 +15,8 @@ export interface FlowIssueRow {
   createdAt: Date;
   updatedAt: Date;
   executionVisible: boolean;
+  wipDecision?: IssueWipDecision;
+  unresolvedBlockerIssueIds?: string[];
 }
 
 export interface FlowSnapshot {
@@ -59,15 +61,30 @@ export function buildCompanyFlowReport(
     if (!dependents.has(source.id)) dependents.set(source.id, new Set());
     dependents.get(source.id)!.add(target.id);
   }
+  const wipDecisions = new Map(snapshot.issues.map(row => [row.id, row.wipDecision ?? classifyIssueWip(row, {
+    hasExternalBlocker: [...(blockers.get(row.id) ?? [])].some(id => {
+      const blocker = rows.get(id)!;
+      return !closed(blocker.status) && Boolean(blocker.assigneeUserId
+        || (blocker.assigneeAgentId && blocker.assigneeAgentId !== row.assigneeAgentId));
+    }),
+    hasPendingHumanCard: (decisions.get(row.id) ?? 0) > 0,
+  }, false, now.getTime())]));
+  const workCounts = (include: (row: FlowIssueRow) => boolean) => {
+    const selected = snapshot.issues.filter(include).map(row => wipDecisions.get(row.id)!);
+    const runnable = selected.filter(row => row.countsTowardWip).length;
+    return { wip: runnable, runnable,
+      waiting: selected.filter(row => ["external_blocker", "pending_human_card", "named_wait"].includes(row.reason)).length,
+      untypedBlocked: selected.filter(row => row.reason === "untyped_blocked").length };
+  };
   const wip = new Map<string, number>();
   for (const row of snapshot.issues) {
-    if (row.assigneeAgentId && isWipActiveStatus(row.status)) {
+    if (row.assigneeAgentId && wipDecisions.get(row.id)!.countsTowardWip) {
       wip.set(row.assigneeAgentId, (wip.get(row.assigneeAgentId) ?? 0) + 1);
     }
   }
   const agents: FlowAgent[] = snapshot.agents.map((agent) => ({
     ...agent,
-    wip: wip.get(agent.id) ?? 0,
+    ...workCounts(row => row.assigneeAgentId === agent.id),
     wipLimit,
     atWipLimit: wipLimit !== null && (wip.get(agent.id) ?? 0) >= wipLimit,
   })).sort((a, b) => a.id.localeCompare(b.id));
@@ -77,9 +94,10 @@ export function buildCompanyFlowReport(
     assigneeAgentId: row.assigneeAgentId, assigneeUserId: row.assigneeUserId,
     ageMs: Math.max(0, now.getTime() - row.createdAt.getTime()),
     unchangedForMs: Math.max(0, now.getTime() - row.updatedAt.getTime()),
-    openBlockerIds: [...(blockers.get(row.id) ?? [])]
-      .filter((id) => rows.get(id)!.status !== "done" || pendingFinalize.has(id)).sort(),
+    openBlockerIds: row.unresolvedBlockerIssueIds ?? [...(blockers.get(row.id) ?? [])]
+      .filter((id) => !closed(rows.get(id)!.status) || pendingFinalize.has(id)).sort(),
     pendingDecisionCount: decisions.get(row.id) ?? 0,
+    wipDecision: wipDecisions.get(row.id)!,
   }]));
   const issues = [...references.values()].sort(issueOrder);
   const readyQueues: CompanyFlowReport["readyQueues"] = [];
@@ -133,6 +151,7 @@ export function buildCompanyFlowReport(
     blockedWithClosedLinks: issues.filter((issue) => issue.status === "blocked" &&
       (blockers.get(issue.id)?.size ?? 0) > 0 && issue.openBlockerIds.length === 0),
     reviewHoldsWithoutRound: issues.filter(orphanHold),
+    untypedBlocked: issues.filter(issue => issue.wipDecision.reason === "untyped_blocked"),
   };
   const unassigned = issues.filter((issue) => !issue.assigneeAgentId && !issue.assigneeUserId && !hold(issue.title));
   const chainRoots = issues.filter((issue) => dependents.has(issue.id)).map((issue) => {
@@ -161,7 +180,7 @@ export function buildCompanyFlowReport(
     readyTodo: readyQueues.reduce((sum, queue) => sum + queue.todo.filter(include).length, 0),
     readyBacklog: readyQueues.reduce((sum, queue) => sum + queue.backlog.filter(include).length, 0),
     chainRoots: chainRoots.filter((root) => include(root.issue)).length,
-    wip: snapshot.issues.filter((row) => include(row) && isWipActiveStatus(row.status)).length,
+    ...workCounts(include),
     inProgressWithoutRun: ghosts.inProgressWithoutRun.filter(include).length,
     blockedWithClosedLinks: ghosts.blockedWithClosedLinks.filter(include).length,
     reviewHoldsWithoutRound: ghosts.reviewHoldsWithoutRound.filter(include).length,

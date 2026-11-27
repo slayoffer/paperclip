@@ -40,14 +40,15 @@ describe("company flow projection", () => {
     expect(result.chainRoots[0]!.issue.openBlockerIds).toEqual(["d"]);
   });
 
-  it.each(["todo", "backlog", "blocked"])("keeps a cancelled blocker unresolved for %s work", (status) => {
+  it.each(["todo", "backlog", "blocked"])("resolves cancelled blocker links for %s work", (status) => {
     const result = report([
       issue("cancelled", { status: "cancelled" }), issue("dependent", { status }),
       issue("child"),
     ], { relations: [edge("cancelled", "dependent"), edge("dependent", "child")] });
-    expect(result.readyQueues).toEqual([]);
-    expect(result.ghosts.blockedWithClosedLinks).toEqual([]);
-    expect(result.chainRoots[0]!.issue.openBlockerIds).toEqual(["cancelled"]);
+    expect(result.chainRoots[0]!.issue.openBlockerIds).toEqual([]);
+    expect(result.ghosts.blockedWithClosedLinks).toHaveLength(status === "blocked" ? 1 : 0);
+    expect(result.readyQueues.flatMap(queue => [...queue.todo, ...queue.backlog]).map(row => row.id))
+      .toEqual(status === "blocked" ? [] : ["dependent"]);
   });
 
   it("keeps done blockers unresolved while their workspace finalization is pending", () => {
