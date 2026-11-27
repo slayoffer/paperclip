@@ -9,6 +9,7 @@ import { githubOperationLauncherDirectory, type GitHubLauncherLocation } from ".
 export { githubOperationLauncherDirectory } from "./github-launcher-directory.js";
 import { githubLauncherSource } from "./github-launcher.js";
 import type { SshRemoteExecutionSpec } from "./ssh.js";
+import { SshTransportError } from "./ssh-transport.js";
 import {
   prepareCommandManagedRuntime,
   type CommandManagedDuplexChannel,
@@ -981,11 +982,7 @@ export async function runAdapterExecutionTargetShellCommand(
     const env = sanitizeRemoteExecutionEnv(options.env);
     if (target.transport === "ssh") {
       try {
-        // Pass the raw command — `runSshCommand` owns profile sourcing and
-        // the outer shell wrapper. Wrapping again here would nest a second
-        // shell after the explicit `env KEY=VAL` overrides, re-sourcing
-        // login profiles AFTER the override and silently undoing any
-        // identity var (NVM_DIR / PATH / etc.) that a profile re-exports.
+        // The SSH runner sources profiles before explicit environment overrides.
         const result = await runSshCommand(target.spec, command, {
           env,
           timeoutMs: (options.timeoutSec ?? 15) * 1000,
@@ -1007,6 +1004,7 @@ export async function runAdapterExecutionTargetShellCommand(
           stderr?: string;
           signal?: string | null;
         };
+        if (error instanceof SshTransportError) throw error;
         const stdout = timedOutError.stdout ?? "";
         const stderr = timedOutError.stderr ?? "";
         if (typeof timedOutError.code === "number") {
