@@ -323,6 +323,10 @@ import {
   wipLimitAppliesToActor,
 } from "../services/agent-wip-limit.js";
 import { tryLockPullQueueOwner } from "../services/pull-queue-owner-lock.js";
+import { notifyLiveRunRecovery } from "../services/live-run-recovery-notifications.js";
+import { boundRunIssueIdSql } from "../services/run-task-binding.js";
+import { requestedRunCancellation } from "../services/run-cancellation.js";
+import { notifyScheduledRetryCancellation } from "../services/scheduled-retry-cancellation-notifications.js";
 import {
   agentIssueCreateLimits,
   agentIssueCreateRefusal,
@@ -3381,7 +3385,7 @@ export function issueRoutes(
       }
     },
   });
-  const stopRunnerGoalForOwnershipChange = async (input: {
+  const readRunnerGoalStopPlan = async (input: {
     companyId: string;
     issueId: string;
     agentId: string;
@@ -3409,10 +3413,19 @@ export function issueRoutes(
         { code: "runner_goal_stop_unsupported", projection: current },
       );
     }
+    return { action, revision: current.revision };
+  };
+  const stopRunnerGoalForOwnershipChange = async (
+    input: Parameters<typeof readRunnerGoalStopPlan>[0],
+    prepared?: NonNullable<Awaited<ReturnType<typeof readRunnerGoalStopPlan>>>,
+  ) => {
+    const plan = prepared ?? await readRunnerGoalStopPlan(input);
+    if (!plan) return null;
+    const { action } = plan;
     await runnerGoals.act(input.companyId, input.issueId, {
       requestId: `ownership_${randomUUID()}`,
       agentId: input.agentId,
-      expectedRevision: current.revision,
+      expectedRevision: plan.revision,
       action,
     });
     const deadline = Date.now() + 30_000;
@@ -4135,6 +4148,28 @@ export function issueRoutes(
       );
       throw err;
     }
+  }
+
+  async function claimScheduledRetrySupersession(tx: Pick<Db, "update">, input: {
+    companyId: string; issueId: string; runId: string; agentId: string;
+  }) {
+    const requestedAt = new Date().toISOString();
+    const fence = {
+      cancellation: requestedRunCancellation({}, "Cancelled", requestedAt),
+      startupCancellation: { requestedAt, beforeNativeSelection: false, errorCode: "cancelled" },
+    };
+    const [claimed] = await tx.update(heartbeatRuns).set({
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(fence)}::jsonb`,
+    }).where(and(
+      eq(heartbeatRuns.id, input.runId),
+      eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.agentId, input.agentId),
+      eq(heartbeatRuns.status, "scheduled_retry"),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${input.issueId}`,
+      sql`${heartbeatRuns.resultJson}->'startupCancellation' is null`,
+    )).returning({ id: heartbeatRuns.id });
+    if (claimed) await notifyScheduledRetryCancellation(tx, { companyId: input.companyId, runId: claimed.id });
+    return Boolean(claimed);
   }
 
   async function classifySourceRecoveryRevalidation(input: {
@@ -14421,6 +14456,8 @@ export function issueRoutes(
       )
         return;
 
+      const deferRunStops = agentWipLimit() !== null && wipLimitAppliesToActor(req.actor);
+      let interruptAfterCommit: { runId: string; interrupt: () => Promise<void> } | undefined;
       if (interruptRequested) {
         if (!commentBody) {
           res.status(400).json({
@@ -14438,33 +14475,37 @@ export function issueRoutes(
 
         const runToInterrupt = await resolveActiveIssueRun(existing);
         if (runToInterrupt) {
-          const cancelled = await heartbeat.cancelRun(
-            runToInterrupt.id,
-            "Interrupted by board comment",
-            operatorInterruptCancelOptions({ issueId: existing.id, actor }),
-          );
-          if (cancelled) {
-            interruptedRunId = cancelled.id;
-            await logActivity(db, {
-              companyId: cancelled.companyId,
-              actorType: actor.actorType,
-              actorId: actor.actorId,
-              agentId: actor.agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "heartbeat.cancelled",
-              entityType: "heartbeat_run",
-              entityId: cancelled.id,
-              issueId: existing.id,
-              details: {
-                agentId: cancelled.agentId,
-                source: "issue_comment_interrupt",
+          const interrupt = async () => {
+            const cancelled = await heartbeat.cancelRun(
+              runToInterrupt.id,
+              "Interrupted by board comment",
+              operatorInterruptCancelOptions({ issueId: existing.id, actor }),
+            );
+            if (cancelled) {
+              interruptedRunId = cancelled.id;
+              await logActivity(db, {
+                companyId: cancelled.companyId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+                agentId: actor.agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "heartbeat.cancelled",
+                entityType: "heartbeat_run",
+                entityId: cancelled.id,
                 issueId: existing.id,
-                cancellationKind: "operator_interrupted",
-                operatorInterrupted: true,
-              },
-            });
-          }
+                details: {
+                  agentId: cancelled.agentId,
+                  source: "issue_comment_interrupt",
+                  issueId: existing.id,
+                  cancellationKind: "operator_interrupted",
+                  operatorInterrupted: true,
+                },
+              });
+            }
+          };
+          if (deferRunStops) interruptAfterCommit = { runId: runToInterrupt.id, interrupt };
+          else await interrupt();
         }
       }
 
@@ -14488,7 +14529,7 @@ export function issueRoutes(
       }
       let cancelledScheduledRetryRunId: string | null = null;
       if (
-        commentBody &&
+        !deferRunStops && commentBody &&
         shouldResumeInProgressScheduledRetry &&
         updateFields.status === "todo"
       ) {
@@ -14825,25 +14866,34 @@ export function issueRoutes(
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
-      if (req.actor.source !== "mcp_oauth" && assigneeWillChange && existing.assigneeAgentId) {
+      const reassignmentStopOwner = req.actor.source !== "mcp_oauth" && assigneeWillChange ? existing.assigneeAgentId : null;
+      const deferReassignmentStop = deferRunStops && Boolean(reassignmentStopOwner);
+      const isHumanSelfHandoff = (run: Awaited<ReturnType<typeof resolveActiveIssueRun>>) =>
+        req.actor.type === "agent" &&
+        req.actor.source === "agent_jwt" &&
+        nextAssigneeAgentId === null &&
+        typeof nextAssigneeUserId === "string" &&
+        req.actor.agentId === existing.assigneeAgentId &&
+        run?.runtimeMode === "legacy" &&
+        run.id === req.actor.runId &&
+        run.agentId === req.actor.agentId &&
+        run.companyId === existing.companyId &&
+        run.contextSnapshot?.issueId === existing.id;
+      if (deferReassignmentStop && reassignmentStopOwner) {
+        await readRunnerGoalStopPlan({
+          companyId: existing.companyId, issueId: existing.id, agentId: reassignmentStopOwner,
+        });
+      }
+      const reassignmentRunCandidate = deferReassignmentStop ? await resolveActiveIssueRun(existing) : null;
+      const deferredReassignmentRun = isHumanSelfHandoff(reassignmentRunCandidate) ? null : reassignmentRunCandidate;
+      if (!deferReassignmentStop && reassignmentStopOwner) {
         await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
           issueId: existing.id,
-          agentId: existing.assigneeAgentId,
+          agentId: reassignmentStopOwner,
         });
         const runToStopForReassignment = await resolveActiveIssueRun(existing);
-        const isHumanSelfHandoff =
-          req.actor.type === "agent" &&
-          req.actor.source === "agent_jwt" &&
-          nextAssigneeAgentId === null &&
-          typeof nextAssigneeUserId === "string" &&
-          req.actor.agentId === existing.assigneeAgentId &&
-          runToStopForReassignment?.runtimeMode === "legacy" &&
-          runToStopForReassignment.id === req.actor.runId &&
-          runToStopForReassignment.agentId === req.actor.agentId &&
-          runToStopForReassignment.companyId === existing.companyId &&
-          runToStopForReassignment.contextSnapshot?.issueId === existing.id;
-        if (runToStopForReassignment && !isHumanSelfHandoff) {
+        if (runToStopForReassignment && !isHumanSelfHandoff(runToStopForReassignment)) {
           let cancelled: Awaited<ReturnType<typeof heartbeat.cancelRun>> = null;
           try {
             cancelled = await heartbeat.cancelRun(
@@ -14896,16 +14946,37 @@ export function issueRoutes(
         typeof updateFields.status === "string" &&
         updateFields.status !== existing.status &&
         isClosedIssueStatus(updateFields.status);
+      const terminalStopOwner = req.actor.source !== "mcp_oauth" && !assigneeWillChange &&
+        terminalizingIssue ? existing.assigneeAgentId : null;
+      const deferredGoalStop = deferRunStops && terminalStopOwner
+        ? await readRunnerGoalStopPlan({ companyId: existing.companyId, issueId: existing.id, agentId: terminalStopOwner })
+        : null;
+      const terminalRunCandidate = deferRunStops && terminalStopOwner &&
+        (deferredGoalStop || (req.actor.type === "board" && existing.executionRunId))
+        ? await resolveActiveIssueRun(existing)
+        : null;
+      const deferredTerminalRun = deferredGoalStop || terminalRunCandidate?.runtimeMode === "native" ? terminalRunCandidate : null;
+      const deferredRun = deferredReassignmentRun ?? deferredTerminalRun;
+      const deferredIssueStop = deferredRun ? {
+        kind: deferredReassignmentRun ? "reassignment" : "terminalization",
+        runId: deferredRun.id,
+        agentId: deferredRun.agentId,
+        issueId: existing.id,
+        status: updateFields.status,
+        issueMutationStopId,
+        cancelledByUserId: actor.actorType === "user" ? actor.actorId : null,
+      } : null;
+      let issueStopStaged = false;
       if (
-        req.actor.source !== "mcp_oauth" && !assigneeWillChange &&
-        terminalizingIssue &&
-        existing.assigneeAgentId
+        !deferredTerminalRun &&
+        !(deferRunStops && deferredGoalStop) &&
+        terminalStopOwner
       ) {
         const goalStopAction = await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
           issueId: existing.id,
-          agentId: existing.assigneeAgentId,
-        });
+          agentId: terminalStopOwner,
+        }, deferredGoalStop ?? undefined);
         const runToStopForTerminalization = goalStopAction ||
           (req.actor.type === "board" && existing.executionRunId)
           ? await resolveActiveIssueRun(existing)
@@ -14947,6 +15018,10 @@ export function issueRoutes(
           interruptedRunId = cancelled.id;
         }
       }
+      const issueAcceptsDeferredStop = (updated: Pick<IssueRouteSnapshot, "status" | "assigneeAgentId" | "assigneeUserId">) =>
+        deferredIssueStop?.kind === "reassignment"
+          ? updated.assigneeAgentId !== existing.assigneeAgentId || updated.assigneeUserId !== existing.assigneeUserId
+          : updated.status === deferredIssueStop?.status && updated.assigneeAgentId === existing.assigneeAgentId;
 
       const nextParentId =
         plannedParentId === undefined
@@ -15152,6 +15227,39 @@ export function issueRoutes(
               issueUpdateData.parentId !== undefined || issueUpdateData.projectId !== undefined) {
               await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
             }
+            if (deferredIssueStop) {
+              const [lockedIssue] = await tx.select({
+                status: issueRows.status, assigneeAgentId: issueRows.assigneeAgentId,
+                executionRunId: issueRows.executionRunId,
+              }).from(issueRows)
+                .where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
+              if (!lockedIssue) return null;
+              if (lockedIssue.status !== existing.status || lockedIssue.assigneeAgentId !== deferredIssueStop.agentId ||
+                  lockedIssue.executionRunId !== existing.executionRunId) {
+                throw conflict("The issue execution changed while preparing the update. Retry the update.", {
+                  code: "issue_execution_owner_changed",
+                });
+              }
+            }
+            if (deferRunStops && shouldResumeInProgressScheduledRetry &&
+                issueUpdateData.status === "todo" && scheduledRetryForHumanComment) {
+              const [lockedIssue] = await tx.select({ status: issueRows.status, assigneeAgentId: issueRows.assigneeAgentId })
+                .from(issueRows).where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
+              if (!lockedIssue) return null;
+              shouldResumeInProgressScheduledRetry = lockedIssue.status === "in_progress" &&
+                lockedIssue.assigneeAgentId === scheduledRetryForHumanComment.agentId &&
+                await claimScheduledRetrySupersession(tx, {
+                  companyId: existing.companyId, issueId: id, runId: scheduledRetryForHumanComment.runId,
+                  agentId: scheduledRetryForHumanComment.agentId,
+                });
+              if (!shouldResumeInProgressScheduledRetry && !explicitMoveToTodoRequested && req.body.status === undefined) {
+                if (decision) throw conflict("The scheduled retry changed before the comment was saved. Retry the update.", {
+                  code: "scheduled_retry_changed",
+                });
+                delete issueUpdateData.status;
+                delete updateFields.status;
+              }
+            }
             if (checkWipReassignment) {
               const [lockedIssue] = await tx.select().from(issueRows)
                 .where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
@@ -15230,6 +15338,23 @@ export function issueRoutes(
             }
 
             await persistReviewTransitionActivity(tx, updated);
+            if (deferredIssueStop && issueAcceptsDeferredStop(updated)) {
+              const [staged] = await tx.update(heartbeatRuns).set({
+                resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+                  jsonb_build_object('executionCancellation', jsonb_build_object('state', 'requested', 'requestedAt', now()),
+                    'issueMutationStop', ${JSON.stringify(deferredIssueStop)}::jsonb)`,
+              }).where(and(
+                eq(heartbeatRuns.id, deferredIssueStop.runId),
+                eq(heartbeatRuns.companyId, updated.companyId),
+                eq(heartbeatRuns.agentId, deferredIssueStop.agentId),
+                sql`${boundRunIssueIdSql()} = ${updated.id}`,
+                inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+              )).returning({ id: heartbeatRuns.id });
+              if (staged) {
+                issueStopStaged = true;
+                await notifyLiveRunRecovery(tx, { companyId: updated.companyId, runId: staged.id });
+              }
+            }
             return updated;
           });
         } else {
@@ -15267,6 +15392,46 @@ export function issueRoutes(
         res.status(404).json({ error: "Issue not found" });
         return;
       }
+      if (interruptAfterCommit && (!issueStopStaged || deferredIssueStop?.runId !== interruptAfterCommit.runId)) {
+        await interruptAfterCommit.interrupt().catch(error => logger.warn(
+          { error, issueId: existing.id }, "post-commit board comment interruption failed",
+        ));
+      }
+      if (deferredGoalStop && terminalStopOwner && isClosedIssueStatus(issue.status) &&
+          issue.assigneeAgentId === terminalStopOwner) {
+        await stopRunnerGoalForOwnershipChange({
+          companyId: issue.companyId, issueId: issue.id, agentId: terminalStopOwner,
+        }, deferredGoalStop).catch(error => logger.warn(
+          { error, issueId: existing.id }, "post-commit terminal goal stop failed",
+        ));
+      }
+      if (issueStopStaged && deferredIssueStop && issueAcceptsDeferredStop(issue)) {
+        try {
+          const reassignment = deferredIssueStop.kind === "reassignment";
+          const cancelled = await heartbeat.cancelRun(deferredIssueStop.runId,
+            reassignment ? "Cancelled before issue reassignment" : "Cancelled before issue terminalization", {
+            errorCode: reassignment ? "issue_reassigned" : "issue_terminalized",
+            resultJson: {
+              ...(reassignment ? { reassignmentStopConfirmed: true } : { terminalizationStopConfirmed: true }),
+              issueMutationStopId,
+              ...(deferredIssueStop.cancelledByUserId ? {
+                cancelledByActorType: "user",
+                cancelledByUserId: deferredIssueStop.cancelledByUserId,
+              } : {}),
+            },
+            eventMessage: reassignment ? "run cancelled before issue reassignment" : "run cancelled before issue terminalization",
+            eventPayload: { issueId: existing.id, status: issue.status },
+          });
+          if (cancelled?.status === "cancelled") interruptedRunId = cancelled.id;
+        } catch (error) {
+          logger.warn({ error, runId: deferredIssueStop.runId }, "issue mutation Stop will retry");
+        }
+      }
+      if (deferRunStops && commentBody && shouldResumeInProgressScheduledRetry && issue.status === "todo") {
+        cancelledScheduledRetryRunId = await cancelScheduledRetrySupersededByComment({
+          scheduledRetryRunId: scheduledRetryForHumanComment?.runId, issue, actor,
+        }).catch(() => null);
+      }
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
@@ -15299,6 +15464,7 @@ export function issueRoutes(
       let cancelledStatusRunId: string | null = null;
       if (
         runToCancelForCancelledStatus &&
+        (!issueStopStaged || runToCancelForCancelledStatus.id !== deferredIssueStop?.runId) &&
         runToCancelForCancelledStatus.id !== interruptedRunId
       ) {
         try {
@@ -19119,7 +19285,12 @@ export function issueRoutes(
 
       let scheduledRetrySupersededByComment = false;
       let cancelledScheduledRetryRunId: string | null = null;
-      if (effectiveMoveToTodoRequested && shouldResumeInProgressScheduledRetry) {
+      const deferRunStops = agentWipLimit() !== null && wipLimitAppliesToActor(req.actor);
+      const transactionalRetryResume = deferRunStops && effectiveMoveToTodoRequested &&
+        shouldResumeInProgressScheduledRetry && scheduledRetryForHumanComment
+        ? scheduledRetryForHumanComment
+        : null;
+      if (!deferRunStops && effectiveMoveToTodoRequested && shouldResumeInProgressScheduledRetry) {
         cancelledScheduledRetryRunId = await cancelScheduledRetrySupersededByComment({
           scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
           issue,
@@ -19128,7 +19299,7 @@ export function issueRoutes(
         shouldResumeInProgressScheduledRetry = cancelledScheduledRetryRunId !== null;
       }
       if (
-        effectiveMoveToTodoRequested &&
+        !transactionalRetryResume && effectiveMoveToTodoRequested &&
         (isClosed ||
           (isBlocked && !hasUnresolvedFirstClassBlockers) ||
           shouldResumeInProgressScheduledRetry)
@@ -19162,7 +19333,7 @@ export function issueRoutes(
             ...(reopened
               ? { reopened: true, reopenedFrom: reopenFromStatus }
               : {}),
-            ...(scheduledRetrySupersededByComment
+            ...(scheduledRetrySupersededByComment && !deferRunStops
               ? {
                   scheduledRetrySupersededByComment: true,
                   scheduledRetryRunId:
@@ -19181,6 +19352,7 @@ export function issueRoutes(
         });
       }
 
+      let interruptAfterCommit: (() => Promise<void>) | undefined;
       if (interruptRequested) {
         if (req.actor.type !== "board") {
           res.status(403).json({
@@ -19192,33 +19364,37 @@ export function issueRoutes(
 
         const runToInterrupt = await resolveActiveIssueRun(currentIssue);
         if (runToInterrupt) {
-          const cancelled = await heartbeat.cancelRun(
-            runToInterrupt.id,
-            "Interrupted by board comment",
-            operatorInterruptCancelOptions({ issueId: currentIssue.id, actor }),
-          );
-          if (cancelled) {
-            interruptedRunId = cancelled.id;
-            await logActivity(db, {
-              companyId: cancelled.companyId,
-              actorType: actor.actorType,
-              actorId: actor.actorId,
-              agentId: actor.agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "heartbeat.cancelled",
-              entityType: "heartbeat_run",
-              entityId: cancelled.id,
-              issueId: currentIssue.id,
-              details: {
-                agentId: cancelled.agentId,
-                source: "issue_comment_interrupt",
+          const interrupt = async () => {
+            const cancelled = await heartbeat.cancelRun(
+              runToInterrupt.id,
+              "Interrupted by board comment",
+              operatorInterruptCancelOptions({ issueId: currentIssue.id, actor }),
+            );
+            if (cancelled) {
+              interruptedRunId = cancelled.id;
+              await logActivity(db, {
+                companyId: cancelled.companyId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+                agentId: actor.agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "heartbeat.cancelled",
+                entityType: "heartbeat_run",
+                entityId: cancelled.id,
                 issueId: currentIssue.id,
-                cancellationKind: "operator_interrupted",
-                operatorInterrupted: true,
-              },
-            });
-          }
+                details: {
+                  agentId: cancelled.agentId,
+                  source: "issue_comment_interrupt",
+                  issueId: currentIssue.id,
+                  cancellationKind: "operator_interrupted",
+                  operatorInterrupted: true,
+                },
+              });
+            }
+          };
+          if (deferRunStops) interruptAfterCommit = interrupt;
+          else await interrupt();
         }
       }
 
@@ -19241,6 +19417,7 @@ export function issueRoutes(
       // Without a single transaction, a 422 (or any error) thrown by the status update after the
       // comment is inserted would leave an orphan comment without the corresponding state change.
       let comment: Awaited<ReturnType<typeof svc.addComment>>;
+      let retryResumedIssue: Awaited<ReturnType<typeof svc.update>> = null;
       let goalCommentSteered = false;
       let fastResponseEnqueued = false;
       const commentSupersession = captureCommentSupersession(req.actor);
@@ -19429,7 +19606,21 @@ export function issueRoutes(
             dbOrTx,
           );
         const needsFastResponse = actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status);
-        comment = needsFastResponse || supersedingComment ? await db.transaction(async tx => {
+        comment = needsFastResponse || supersedingComment || transactionalRetryResume ? await db.transaction(async tx => {
+          if (transactionalRetryResume) {
+            await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${issue.companyId}`}, 0))`);
+            const [lockedIssue] = await tx.select({ status: issueRows.status, assigneeAgentId: issueRows.assigneeAgentId })
+              .from(issueRows).where(and(eq(issueRows.id, id), eq(issueRows.companyId, issue.companyId))).for("update");
+            if (lockedIssue?.status === "in_progress" && lockedIssue.assigneeAgentId === transactionalRetryResume.agentId &&
+                await claimScheduledRetrySupersession(tx, {
+                  companyId: issue.companyId, issueId: id, runId: transactionalRetryResume.runId,
+                  agentId: transactionalRetryResume.agentId,
+                })) {
+              retryResumedIssue = await svc.update(id, { status: "todo", companyGuard: issue.companyId }, tx,
+                undefined, undefined, { wipAdmissionActor: req.actor });
+              if (!retryResumedIssue) throw notFound("Issue not found");
+            }
+          }
           const saved = await add(tx as unknown as Db);
           if (actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
             await enqueueFastResponse(tx as unknown as Db, { companyId: currentIssue.companyId, issueId: currentIssue.id, agentId: currentIssue.assigneeAgentId,
@@ -19439,7 +19630,32 @@ export function issueRoutes(
           return saved;
         }) : await add();
       }
+      if (retryResumedIssue) {
+        currentIssue = retryResumedIssue;
+        scheduledRetrySupersededByComment = true;
+      }
       for (const effect of commentSupersession.effects) await effect(db);
+      if (interruptAfterCommit) {
+        await interruptAfterCommit().catch(error => logger.warn(
+          { error, issueId: currentIssue.id }, "post-commit board comment interruption failed",
+        ));
+      }
+      if (deferRunStops && scheduledRetrySupersededByComment && currentIssue.status === "todo") {
+        cancelledScheduledRetryRunId = await cancelScheduledRetrySupersededByComment({
+          scheduledRetryRunId: scheduledRetryForHumanComment?.runId, issue: currentIssue, actor,
+        }).catch(() => null);
+        await logActivity(db, {
+          companyId: currentIssue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+          agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+          action: "issue.updated", entityType: "issue", entityId: currentIssue.id,
+          details: {
+            source: "comment", status: "todo", identifier: currentIssue.identifier,
+            scheduledRetrySupersededByComment: true, scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
+            ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
+            ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+          },
+        });
+      }
 
       if (!fastResponseEnqueued && actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
         await db.transaction(tx => enqueueFastResponse(tx as unknown as Db, { companyId: currentIssue.companyId, issueId: currentIssue.id, agentId: currentIssue.assigneeAgentId,

@@ -79,12 +79,16 @@ export function registerLiveRecoveryWork(db: Db, coordinator: ReturnType<typeof 
               kind === "native" ? and(eq(heartbeatRuns.runtimeMode, "native"), inArray(heartbeatRuns.status, ["running", "failed"]),
                 legacyWorkspaceRecoveryNotMigrated(),
                 eq(nativeRunFinalizations.phase, "retryable_failure"), isNull(nativeRunFinalizations.resultId),
-                sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is null`)
+                sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is null and
+                  ${heartbeatRuns.resultJson}->'issueMutationStop' is null`)
                 : kind === "question" ? and(or(inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
                     pendingFailedNativeRetryCancellationCondition()),
-                  sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is not null`)
+                  or(sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is not null`,
+                    sql`${heartbeatRuns.resultJson}->'issueMutationStop' is not null`))
                   : kind === "active" ? and(eq(heartbeatRuns.status, "running"),
-                    sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is null`)
+                    sql`${heartbeatRuns.contextSnapshot}->'nativeQuestionCancellation' is null and
+                      (${heartbeatRuns.resultJson}->'issueMutationStop' is null or
+                        ${heartbeatRuns.resultJson}->'nativeCancellation'->>'dispatchState' = 'pending')`)
                     : and(eq(heartbeatRuns.runtimeMode, "native"), inArray(heartbeatRuns.status, ["failed", "cancelled", "timed_out", "interrupted"]),
                       isNotNull(heartbeatRuns.finishedAt), or(pendingApiStop,
                         and(or(isNotNull(heartbeatRuns.processPid), isNotNull(heartbeatRuns.processGroupId),

@@ -2281,13 +2281,13 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
   }
 
   async function recoverQuestionCancellationRequests(scope: RecoveryScope = {}) {
-    // A terminal issue transition writes this intent in the same transaction
-    // that closes the question's task, even when its card is retained. Consume
-    // it before generic orphan recovery so a restart preserves cancellation.
+    // Issue mutations persist these Stop intents with their database writes.
+    // Consume them before generic orphan recovery so a restart preserves cancellation.
     const cancellationRequests = await db
       .select({
         id: heartbeatRuns.id,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        issueMutationStop: sql<unknown>`${heartbeatRuns.resultJson}->'issueMutationStop'`,
       })
       .from(heartbeatRuns)
       .where(
@@ -2297,10 +2297,35 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           or(inArray(heartbeatRuns.status, [
             ...CANCELLABLE_HEARTBEAT_RUN_STATUSES,
           ]), pendingFailedNativeRetryCancellationCondition()),
-          sql`${heartbeatRuns.contextSnapshot} -> ${NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY} is not null`,
+          or(
+            sql`${heartbeatRuns.contextSnapshot} -> ${NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY} is not null`,
+            sql`${heartbeatRuns.resultJson}->'issueMutationStop' is not null`,
+          ),
         ),
       );
     for (const request of cancellationRequests) {
+      const stop = parseObject(request.issueMutationStop);
+      if (typeof stop.issueId === "string" && typeof stop.issueMutationStopId === "string") {
+        const reassignment = stop.kind === "reassignment";
+        try {
+          await cancelRunInternal(request.id, reassignment ? "Cancelled before issue reassignment" : "Cancelled before issue terminalization", {
+            errorCode: reassignment ? "issue_reassigned" : "issue_terminalized",
+            resultJson: {
+              ...(reassignment ? { reassignmentStopConfirmed: true } : { terminalizationStopConfirmed: true }),
+              issueMutationStopId: stop.issueMutationStopId,
+              ...(typeof stop.cancelledByUserId === "string" ? {
+                cancelledByActorType: "user",
+                cancelledByUserId: stop.cancelledByUserId,
+              } : {}),
+              cancelledByIssueStatus: stop.status,
+            },
+          });
+        } catch (err) {
+          scope.onError?.(err);
+          logger.warn({ err, runId: request.id }, "issue mutation Stop will retry");
+        }
+        continue;
+      }
       const marker = parseObject(
         parseObject(request.contextSnapshot)[
           NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY
