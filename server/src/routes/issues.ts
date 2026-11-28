@@ -14567,7 +14567,8 @@ export function issueRoutes(
 
       const checkWipAdmission = !preserveBlockedAssignment && agentWipLimit() !== null &&
         wipLimitAppliesToActor(req.actor) && (Boolean(normalizedAssigneeAgentId) ||
-          (req.actor.type === "agent" && isWipActiveStatus(updateFields.status)));
+          (req.actor.type === "agent" && (isWipActiveStatus(updateFields.status) ||
+            updateFields.unblockDescriptor !== undefined || updateFields.blockedByIssueIds !== undefined)));
       if (checkWipAdmission) {
         const requestedWipStatus = updateFields.status ?? existing.status;
         await applyIssueUpdateWipAdmission(db, req.actor, existing, updateFields, normalizedAssigneeAgentId);

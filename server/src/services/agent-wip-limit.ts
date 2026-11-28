@@ -72,7 +72,7 @@ export async function applyIssueUpdateWipAdmission(
   db: Pick<Db, "select">,
   actor: { type?: string; source?: string },
   existing: { id: string; companyId: string; assigneeAgentId: string | null; status: string; priority: string },
-  patch: { status?: string; priority?: string },
+  patch: NonNullable<Parameters<typeof issueWipReason>[1]> & { priority?: string },
   requestedAssignee: string | null | undefined,
   tryAcquireAdmissionLock?: (agentId: string) => Promise<boolean>,
 ) {
@@ -84,7 +84,20 @@ export async function applyIssueUpdateWipAdmission(
   if (reassigned) {
     // Blocked work retains its stop condition even when the new owner is full.
     if (status !== "blocked" && await agentWipFull(db, actor, input)) patch.status = "backlog";
-  } else if (actor.type === "agent" && existing.status === "backlog" && await agentWipFull(db, actor, input)) {
+    return;
+  }
+  if (actor.type !== "agent" || !agentId || !isWipActiveStatus(status) || input.priority === "critical") return;
+  if (existing.status !== "backlog") {
+    const sameStatus = status === existing.status;
+    if (sameStatus && (status !== "blocked" ||
+      (patch.unblockDescriptor === undefined && patch.blockedByIssueIds === undefined))) return;
+    const [reasons] = await db.select({
+      wasRunnable: inArray(issueWipReason(), RUNNABLE_WIP_REASONS),
+      becomesRunnable: inArray(issueWipReason(undefined, patch), RUNNABLE_WIP_REASONS),
+    }).from(issues).where(and(eq(issues.companyId, existing.companyId), eq(issues.id, existing.id)));
+    if (!reasons?.becomesRunnable || reasons.wasRunnable) return;
+  }
+  if (await agentWipFull(db, actor, input)) {
     throw conflict(wipPullRefusal(agentWipLimit() ?? 0), { code: "agent_wip_limit" });
   }
 }
