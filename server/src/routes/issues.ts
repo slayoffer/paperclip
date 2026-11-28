@@ -14565,10 +14565,10 @@ export function issueRoutes(
       Object.assign(updateFields, transition.patch);
       if (preserveBlockedAssignment) delete updateFields.status;
 
-      const checkWipAdmission = !preserveBlockedAssignment && agentWipLimit() !== null &&
-        wipLimitAppliesToActor(req.actor) && (Boolean(normalizedAssigneeAgentId) ||
-          (req.actor.type === "agent" && (isWipActiveStatus(updateFields.status) ||
-            updateFields.unblockDescriptor !== undefined || updateFields.blockedByIssueIds !== undefined)));
+      const changesRunnableWip = isWipActiveStatus(updateFields.status) ||
+        updateFields.unblockDescriptor !== undefined || updateFields.blockedByIssueIds !== undefined;
+      const checkWipAdmission = agentWipLimit() !== null && wipLimitAppliesToActor(req.actor) &&
+        (changesRunnableWip || (!preserveBlockedAssignment && Boolean(normalizedAssigneeAgentId)));
       if (checkWipAdmission) {
         const requestedWipStatus = updateFields.status ?? existing.status;
         await applyIssueUpdateWipAdmission(db, req.actor, existing, updateFields, normalizedAssigneeAgentId);

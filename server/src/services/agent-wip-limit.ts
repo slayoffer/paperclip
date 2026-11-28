@@ -86,8 +86,8 @@ export async function applyIssueUpdateWipAdmission(
     if (status !== "blocked" && await agentWipFull(db, actor, input)) patch.status = "backlog";
     return;
   }
-  if (actor.type !== "agent" || !agentId || !isWipActiveStatus(status) || input.priority === "critical") return;
-  if (existing.status !== "backlog") {
+  if (!wipLimitAppliesToActor(actor) || !agentId || !isWipActiveStatus(status) || input.priority === "critical") return;
+  if (actor.type !== "agent" || existing.status !== "backlog") {
     const sameStatus = status === existing.status;
     if (sameStatus && (status !== "blocked" ||
       (patch.unblockDescriptor === undefined && patch.blockedByIssueIds === undefined))) return;
