@@ -73,9 +73,10 @@ walk(workflowRoot, (filePath) => {
 });
 
 walk(repoRoot, (filePath) => {
-  if (!path.basename(filePath).startsWith("Dockerfile")) return;
+  // Scan every basename containing Dockerfile, regardless of case or position.
+  if (!/dockerfile/i.test(path.basename(filePath))) return;
   const source = fs.readFileSync(filePath, "utf8");
-  for (const match of source.matchAll(/^\s*FROM\s+node:([^\s]+)/gm)) {
+  for (const match of source.matchAll(/^[ \t]*FROM[ \t]+(?:--platform=[^\s]+[ \t]+)?node:([^\s]+)/gim)) {
     if (!isNode24ImageTag(match[1])) {
       failures.push(`${relative(filePath)}: Node base image requires a Node 24 patch pin at or above ${MINIMUM_NODE_VERSION} and a SHA-256 digest, found node:${match[1]}`);
     }

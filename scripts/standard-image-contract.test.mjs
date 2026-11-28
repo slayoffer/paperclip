@@ -1,10 +1,62 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { standardImageDigest, resolveStandardImageDigest } from "./standard-image-contract.mjs";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
 const nodeImageDigest = `@sha256:${"a".repeat(64)}`;
+
+test("Node image policy scans suffix Dockerfiles and platform-qualified FROM", (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), "node-image-policy-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  mkdirSync(join(fixture, ".github/workflows"), { recursive: true });
+  for (const file of [
+    ".nvmrc",
+    "docker/agent-runtime/Dockerfile.base",
+    "packages/adapter-utils/src/sandbox-install-command.ts",
+    "packages/plugins/sandbox-providers/exe-dev/src/plugin.ts",
+    "packages/plugins/sandbox-providers/modal/src/manifest.ts",
+    "packages/plugins/sdk/src/bundlers.ts",
+    "packages/shared/src/node-version.ts",
+    "cli/esbuild.config.mjs",
+    "scripts/check-node-version-policy.mjs",
+    "scripts/generate-npm-package-json.mjs",
+    "scripts/install.sh",
+    "scripts/node-image-policy.mjs",
+  ]) {
+    const destination = join(fixture, file);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(new URL(`../${file}`, import.meta.url), destination);
+  }
+  const runPolicy = () => spawnSync(process.execPath, [join(fixture, "scripts/check-node-version-policy.mjs")], {
+    encoding: "utf8",
+  });
+  for (const [file, instruction] of [
+    ["context.Dockerfile", "FROM node:"],
+    ["Dockerfile.platform", "FROM --platform=linux/amd64 node:"],
+    ["Dockerfile.lowercase", "from node:"],
+    ["context.dOcKeRfIlE", "from --platform=linux/amd64 node:"],
+  ]) {
+    const dockerfile = join(fixture, file);
+    writeFileSync(dockerfile, `${instruction}24-slim${nodeImageDigest}\n`);
+    const rejected = runPolicy();
+    assert.equal(rejected.status, 1, `${file}: ${rejected.stderr}`);
+    assert.ok(rejected.stderr.includes(`${file}: Node base image requires`), rejected.stderr);
+    writeFileSync(dockerfile, `${instruction}24.22.1-bookworm-slim${nodeImageDigest}\n`);
+    const accepted = runPolicy();
+    assert.equal(accepted.status, 0, accepted.stderr);
+  }
+});
+
+test("Node image policy rejects oversized minor and patch components", () => {
+  const oversized = "9".repeat(320);
+  assert.equal(isNode24ImageTag(`24.${oversized}.1-bookworm-slim${nodeImageDigest}`), false);
+  assert.equal(isNode24ImageTag(`24.22.${oversized}-bookworm-slim${nodeImageDigest}`), false);
+});
 
 for (const tag of [
   `24.22.1-trixie-slim${nodeImageDigest}`,
