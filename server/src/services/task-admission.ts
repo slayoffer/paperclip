@@ -6,6 +6,8 @@ export type TaskDrainState = { startedAt: Date; expiresAt: Date | null; ownerId?
 let taskDrainState: TaskDrainState | null = null;
 const expiryListeners = new Set<() => void>();
 const changeListeners = new Set<() => void>();
+const drainClearedListeners = new Set<() => void>();
+let lastClearedOwnedLeaseId: string | undefined;
 
 function notifyDrainChanged() {
   for (const listener of changeListeners) listener();
@@ -18,30 +20,56 @@ export function subscribeTaskDrainExpiry(listener: () => void) {
   expiryListeners.add(listener);
   return () => { expiryListeners.delete(listener); };
 }
+export function subscribeTaskDrainCleared(listener: () => void) {
+  drainClearedListeners.add(listener);
+  return () => { drainClearedListeners.delete(listener); };
+}
+
+export function notifyTaskDrainCleared(ownedLeaseId?: string): void {
+  // A local release and the database observer can report the same lease.
+  if (ownedLeaseId) {
+    if (ownedLeaseId === lastClearedOwnedLeaseId) return;
+    lastClearedOwnedLeaseId = ownedLeaseId;
+  }
+  for (const listener of drainClearedListeners) {
+    try { listener(); } catch (error) { process.emitWarning(`Task drain cleared notification failed: ${String(error)}`); }
+  }
+}
 
 // The coordinator owns local and persisted drain deadlines and their shutdown.
 // A lease write rechecks the persisted deadline through the database wake signal.
 // Empty state requires no recurring scans or timers.
+type DurableTaskDrainLease = { leaseId?: string; expiresAt: string };
 export function registerTaskDrainExpiryWork(
   coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
   onExpired: () => void,
-  readActiveLease?: () => Promise<{ expiresAt: string } | null>,
+  readActiveLease?: () => Promise<DurableTaskDrainLease | null>,
 ) {
-  let durableDeadline: number | null = null;
+  let activeLease: DurableTaskDrainLease | null = null;
+  let settledRelease: { leaseId: string } | null = null;
   const worker = coordinator.register(DELIVERY_QUEUES.taskDrainExpiry, {
     retryMs: 1000,
     runDuringDrain: true,
+    onSettled: hints => {
+      const leaseId = hints?.values().next().value;
+      if (leaseId) settledRelease = { leaseId };
+    },
     run: async () => {
       readTaskDrain(new Date());
       if (!readActiveLease) return;
-      const lease = await readActiveLease();
-      const previousDeadline = durableDeadline;
-      durableDeadline = lease ? Date.parse(lease.expiresAt) : null;
-      if (previousDeadline !== null && durableDeadline === null) onExpired();
+      const release = settledRelease;
+      const previousLease = activeLease;
+      activeLease = await readActiveLease();
+      if (settledRelease === release) settledRelease = null;
+      if (activeLease === null && (previousLease || release)) {
+        notifyTaskDrainCleared(release?.leaseId ?? previousLease?.leaseId);
+        if (previousLease) onExpired();
+      }
     },
     hasPending: async () => false,
     nextRunAt: () => {
       const localDeadline = taskDrainState?.expiresAt?.getTime();
+      const durableDeadline = activeLease ? Date.parse(activeLease.expiresAt) : null;
       if (localDeadline === undefined) return durableDeadline;
       return durableDeadline === null ? localDeadline : Math.min(localDeadline, durableDeadline);
     },
@@ -69,6 +97,7 @@ export function setControllerLeaseQuiesce(quiesced: boolean): void {
   if (quiesced === (controllerLeaseQuiesce !== null)) return;
   controllerLeaseQuiesce = quiesced ? { startedAt: new Date(), expiresAt: null } : null;
   notifyDrainChanged();
+  if (!quiesced) notifyTaskDrainCleared();
 }
 
 export function readTaskDrain(now: Date): TaskDrainState | null {
@@ -77,6 +106,7 @@ export function readTaskDrain(now: Date): TaskDrainState | null {
     for (const listener of expiryListeners) {
       try { listener(); } catch (error) { process.emitWarning(`Task drain expiry notification failed: ${String(error)}`); }
     }
+    notifyTaskDrainCleared();
   }
   return taskDrainState ?? controllerLeaseQuiesce;
 }
@@ -100,6 +130,7 @@ export function stopTaskDrain(): { wasActive: boolean } {
   const wasActive = readTaskDrain(new Date()) !== null && taskDrainState !== null;
   taskDrainState = null;
   notifyDrainChanged();
+  if (wasActive) notifyTaskDrainCleared();
   return { wasActive };
 }
 export function isIdleTaskDrainActive(): boolean { return Boolean(readTaskDrain(new Date())?.ownerId); }

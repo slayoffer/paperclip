@@ -70,7 +70,7 @@ import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coo
 import { assertEphemeralServerConfig, assertEphemeralServerData } from "./services/ephemeral-server-contract.js";
 import { deploymentNotifications } from "./services/deployment-notifications.js";
 import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./services/terminal-workspace-work.js";
-import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWork, registerTaskDrainExpiryWork, subscribeTaskDrainChanges } from "./services/task-admission.js";
+import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWork, registerTaskDrainExpiryWork, subscribeTaskDrainChanges, subscribeTaskDrainCleared } from "./services/task-admission.js";
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
 import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
@@ -1223,6 +1223,8 @@ async function startServerWithDatabaseTeardown(
   let wakeResidualRecovery: (() => void) | undefined;
   let wakeHeartbeatSchedules: (() => void) | undefined;
   let startupRecoveryDeferredByDrain = false;
+  let startupRecoveryRunning = false;
+  let startupRecoveryWakePending = false;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
   const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
     const finishIdleWork = beginIdleTrackedWork();
@@ -1310,8 +1312,10 @@ async function startServerWithDatabaseTeardown(
     server.on("close", backupExpirationWork.stop);
   }
   async function recoverStartupHeartbeatState(startupHeartbeat: NonNullable<typeof heartbeat>) {
+    let recovered = true;
     try {
       const hotRestart = await timeStartupRecovery("hot_restart", () => startupHeartbeat.reconcileHotRestartAdoption());
+      if (hotRestart.mode === "read_error") recovered = false;
       if (hotRestart.mode === "reported") {
         logger.info(
           hotRestart,
@@ -1319,6 +1323,7 @@ async function startServerWithDatabaseTeardown(
         );
       }
     } catch (err) {
+      recovered = false;
       logger.error(
         { err },
         "startup hot-restart adoption reconciliation failed - recovery deadlines remain registered",
@@ -1326,6 +1331,7 @@ async function startServerWithDatabaseTeardown(
     }
 
     const recoveredGoalActions = await timeStartupRecovery("goal_actions", () => startupHeartbeat.recoverPendingSessionGoalActions()).catch(err => {
+      recovered = false;
       logger.error({ err }, "startup session-goal action recovery failed");
       return { enqueued: 0, invalid: 0 };
     });
@@ -1336,6 +1342,7 @@ async function startServerWithDatabaseTeardown(
       );
     }
     const recoveredGoals = await timeStartupRecovery("active_goals", () => startupHeartbeat.recoverActiveSessionGoals()).catch(err => {
+      recovered = false;
       logger.error({ err }, "startup active session-goal recovery failed");
       return { enqueued: 0 };
     });
@@ -1345,14 +1352,41 @@ async function startServerWithDatabaseTeardown(
         "startup session-goal recovery resumed durable agent goals",
       );
     }
+    return recovered;
   }
 
   async function resumeDeferredStartupRecovery(startupHeartbeat: NonNullable<typeof heartbeat>) {
-    const suppression = await startupHeartbeat.resolveSchedulingSuppression();
-    if (suppression.suppressed || !startupRecoveryDeferredByDrain || heartbeatSchedulerStopped || isWarmStandby()) return;
-    startupRecoveryDeferredByDrain = false;
-    await recoverStartupHeartbeatState(startupHeartbeat);
+    startupRecoveryRunning = true;
+    try {
+      do {
+        startupRecoveryWakePending = false;
+        const suppression = await startupHeartbeat.resolveSchedulingSuppression();
+        if (heartbeatSchedulerStopped || isWarmStandby()) return;
+        if (suppression.suppressed) continue;
+        // A clear that arrived during the admission check is covered by this pass.
+        startupRecoveryWakePending = false;
+        const recovered = await recoverStartupHeartbeatState(startupHeartbeat);
+        const afterRecovery = await startupHeartbeat.resolveSchedulingSuppression();
+        // A goal recovery can return without admitting work during another drain.
+        if (recovered && !afterRecovery.suppressed && !startupRecoveryWakePending) {
+          startupRecoveryDeferredByDrain = false;
+        }
+      } while (startupRecoveryWakePending);
+    } finally {
+      startupRecoveryRunning = false;
+    }
   }
+
+  const stopStartupRecoveryOnDrain = heartbeat && subscribeTaskDrainCleared(() => {
+    if (!startupRecoveryDeferredByDrain || heartbeatSchedulerStopped || isWarmStandby()) return;
+    if (startupRecoveryRunning) {
+      startupRecoveryWakePending = true;
+      return;
+    }
+    trackHeartbeatSchedulerWork(resumeDeferredStartupRecovery(heartbeat).catch(err => {
+      logger.error({ err }, "failed to resume startup heartbeat recovery after task drain cleared");
+    }));
+  });
 
   const taskDrainExpiryWork = registerTaskDrainExpiryWork(deliveryWork, () => {
     if (heartbeatSchedulerStopped || isWarmStandby()) return;
@@ -1362,16 +1396,14 @@ async function startServerWithDatabaseTeardown(
     if (heartbeat) trackHeartbeatSchedulerWork(heartbeat.recoverNativeRunsAfterRestart(new Date(), undefined, {
       skipDelegatedWork: true,
     }).catch(err => logger.error({ err }, "failed to recover deferred native work after task drain expiry")));
-    if (heartbeat && startupRecoveryDeferredByDrain) {
-      trackHeartbeatSchedulerWork(resumeDeferredStartupRecovery(heartbeat).catch(err => {
-        logger.error({ err }, "failed to resume startup heartbeat recovery after task drain expiry");
-      }));
-    }
     trackHeartbeatSchedulerWork(accountingHeartbeat.resumeQueuedRunsAfterDrain().catch(err => {
       logger.error({ err }, "failed to resume queued work after task drain expiry");
     }));
   }, taskDrainService(db as any).activeLease);
-  server.on("close", () => { void taskDrainExpiryWork.stop(); });
+  server.on("close", () => {
+    stopStartupRecoveryOnDrain?.();
+    void taskDrainExpiryWork.stop();
+  });
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
   if (runEvidenceMigrationWork) trackHeartbeatSchedulerWork(runEvidenceMigrationWork.ready);

@@ -4,6 +4,7 @@ import { DEFAULT_OWNED_TASK_DRAIN_TTL_MS, startTaskDrainRequestSchema, taskDrain
 import { eq, sql } from "drizzle-orm";
 import { conflict } from "../errors.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
+import { notifyTaskDrainCleared } from "./task-admission.js";
 
 type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Reader = Pick<Db | Transaction, "select" | "execute">;
@@ -91,18 +92,20 @@ export function taskDrainService(db: Db, now = () => new Date()) {
       });
     },
     async release(ownerId: string, leaseId: string, audit: Audit) {
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(184915, 1)`);
         const lease = await readLease(tx);
         if (!lease || lease.leaseId !== leaseId || lease.ownerId !== ownerId) {
           throw conflict("Drain lease identity does not match");
         }
         const wasActive = isActive(lease, now());
-        await notifyDeliveryWork(tx, DELIVERY_QUEUES.taskDrainExpiry);
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.taskDrainExpiry, leaseId);
         await writeLease(tx, null);
         await audit(tx, { leaseId, ownerId, wasActive });
         return { wasActive };
       });
+      notifyTaskDrainCleared(leaseId);
+      return result;
     },
     // Generic so that local fields such as the idle drain ownerId stay visible to callers.
     async status<Local extends { draining: boolean; startedAt: Date | null; expiresAt: Date | null; activeRuns: number; pendingWakes: number }>(local: Local) {

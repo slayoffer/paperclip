@@ -9,7 +9,7 @@ import { approvalRetentionService } from "../services/approval-retention.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { logger } from "../middleware/logger.js";
 import { getStartupRecoveryState } from "../startup-recovery-state.js";
-import { idleWorkSnapshot } from "../services/task-admission.js";
+import { idleWorkSnapshot, readTaskDrain, startTaskDrain, stopTaskDrain } from "../services/task-admission.js";
 import * as taskDrain from "../services/task-drain.js";
 import { readIdleSleepSafety } from "../services/idle-sleep-safety.js";
 import * as idleLocalWork from "../services/idle-local-work.js";
@@ -1934,6 +1934,123 @@ describe("startServer feedback export wiring", () => {
       }
     } finally {
       drainService.mockRestore();
+    }
+  });
+
+  it.each([true, false])("runs startup recovery once after explicit stop when initially drained is %s", async initiallyDrained => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    resolveHeartbeatSchedulingSuppressionMock.mockImplementation(() => readTaskDrain(new Date())
+      ? { suppressed: true, reason: "task_drain" } : { suppressed: false, reason: null });
+    const recoveries = [heartbeatServiceMock.reconcileHotRestartAdoption,
+      heartbeatServiceMock.recoverPendingSessionGoalActions, heartbeatServiceMock.recoverActiveSessionGoals];
+    if (initiallyDrained) startTaskDrain();
+    const server = await startServer();
+    try {
+      for (const recovery of recoveries) expect(recovery).toHaveBeenCalledTimes(initiallyDrained ? 0 : 1);
+      if (!initiallyDrained) startTaskDrain();
+      expect(stopTaskDrain().wasActive).toBe(true);
+      await settleStartupHousekeeping();
+      for (const recovery of recoveries) expect(recovery).toHaveBeenCalledOnce();
+
+      startTaskDrain();
+      stopTaskDrain();
+      await settleStartupHousekeeping();
+      for (const recovery of recoveries) expect(recovery).toHaveBeenCalledOnce();
+    } finally {
+      stopTaskDrain();
+      await server.shutdown();
+    }
+  });
+
+  it("retries deferred startup recovery when a second drain interrupts it", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    resolveHeartbeatSchedulingSuppressionMock.mockImplementation(() => readTaskDrain(new Date())
+      ? { suppressed: true, reason: "task_drain" } : { suppressed: false, reason: null });
+    const adoption = heartbeatServiceMock.reconcileHotRestartAdoption;
+    const completeGoalAction = vi.fn();
+    let finishAdoption!: () => void;
+    const adoptionHeld = new Promise<void>(resolve => { finishAdoption = resolve; });
+    adoption.mockImplementationOnce(async () => { await adoptionHeld; return { mode: "none" }; });
+    const actions = heartbeatServiceMock.recoverPendingSessionGoalActions;
+    const originalActions = actions.getMockImplementation()!;
+    actions.mockImplementation(async () => {
+      if (!readTaskDrain(new Date())) completeGoalAction();
+      return originalActions();
+    });
+    startTaskDrain();
+    const server = await startServer();
+    try {
+      expect(adoption).not.toHaveBeenCalled();
+      stopTaskDrain();
+      await settleStartupHousekeeping();
+      expect(adoption).toHaveBeenCalledOnce();
+
+      startTaskDrain();
+      finishAdoption();
+      await settleStartupHousekeeping();
+      expect(adoption).toHaveBeenCalledOnce();
+      expect(completeGoalAction).not.toHaveBeenCalled();
+
+      stopTaskDrain();
+      await settleStartupHousekeeping();
+      expect(adoption).toHaveBeenCalledTimes(2);
+      expect(completeGoalAction).toHaveBeenCalledOnce();
+
+      startTaskDrain();
+      stopTaskDrain();
+      await settleStartupHousekeeping();
+      expect(adoption).toHaveBeenCalledTimes(2);
+      expect(completeGoalAction).toHaveBeenCalledOnce();
+    } finally {
+      finishAdoption();
+      stopTaskDrain();
+      await server.shutdown();
+      actions.mockImplementation(originalActions);
+    }
+  });
+
+  it("resumes startup recovery after owned release before the expiry worker observes the lease", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    const lease = {
+      leaseId: "15744b2b-d18d-4de0-9c7d-13ec3bfde50a",
+      ownerId: "instance-admin",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    let currentLease: typeof lease | null = lease;
+    const releaseDb = {
+      transaction: async (operation: (tx: object) => Promise<unknown>) => {
+        let updatedLease = currentLease;
+        const result = await operation({
+          execute: async () => [],
+          select: () => ({ from: () => ({ where: async () => [{ general: { version: 1, lease: currentLease } }] }) }),
+          insert: () => ({ values: ({ general }: { general: { lease: typeof lease | null } }) => ({
+            onConflictDoUpdate: async () => { updatedLease = general.lease; },
+          }) }),
+        });
+        currentLease = updatedLease;
+        return result;
+      },
+    } as unknown as Db;
+    resolveHeartbeatSchedulingSuppressionMock.mockImplementation(() => currentLease
+      ? { suppressed: true, reason: "task_drain" } : { suppressed: false, reason: null });
+    const adoption = heartbeatServiceMock.reconcileHotRestartAdoption;
+    const server = await startServer();
+    try {
+      expect(adoption).not.toHaveBeenCalled();
+      const ownedDrain = taskDrain.taskDrainService(releaseDb);
+      await expect(ownedDrain.release(lease.ownerId, lease.leaseId, async () => { throw new Error("audit failed"); }))
+        .rejects.toThrow("audit failed");
+      await settleStartupHousekeeping();
+      expect(adoption).not.toHaveBeenCalled();
+
+      await expect(ownedDrain.release(lease.ownerId, lease.leaseId, async () => {})).resolves.toEqual({ wasActive: true });
+      await settleStartupHousekeeping();
+      expect(adoption).toHaveBeenCalledOnce();
+      expect(heartbeatServiceMock.recoverPendingSessionGoalActions).toHaveBeenCalledOnce();
+      expect(heartbeatServiceMock.recoverActiveSessionGoals).toHaveBeenCalledOnce();
+    } finally {
+      await server.shutdown();
     }
   });
 

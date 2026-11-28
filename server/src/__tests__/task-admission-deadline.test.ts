@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerTaskDrainExpiryWork, readTaskDrain, startTaskDrain, stopTaskDrain } from "../services/task-admission.js";
+import { notifyTaskDrainCleared, registerTaskDrainExpiryWork, readTaskDrain, startTaskDrain, stopTaskDrain, subscribeTaskDrainCleared } from "../services/task-admission.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../services/delivery-work-notifications.js";
 import { installDatabaseWorkSignals } from "../../../packages/db/src/work-signals.js";
 
 describe("task drain deadline", () => {
@@ -70,6 +71,39 @@ describe("task drain deadline", () => {
     await vi.advanceTimersByTimeAsync(3_600_000);
     expect(readLease).toHaveBeenCalledTimes(2);
     expect(coordinator.nextWakeAt()).toBeNull();
+  });
+
+  it("uses the explicit release hint when the observed lease is stale", async () => {
+    await worker.stop();
+    await coordinator.stop();
+    const readTransactionId = async () => [{ xid: "42" }];
+    const owner = installDatabaseWorkSignals({ execute: readTransactionId,
+      async transaction<T>(operation: (tx: { execute: typeof readTransactionId; transaction: typeof transaction }) => Promise<T>) {
+        return operation({ execute: readTransactionId, transaction });
+      },
+    });
+    const leaseA = { leaseId: "observed-task-drain-lease", expiresAt: new Date(Date.now() + 1000).toISOString() };
+    let lease: typeof leaseA | null = leaseA;
+    const cleared = vi.fn();
+    const unsubscribe = subscribeTaskDrainCleared(cleared);
+    coordinator = createDeliveryWorkCoordinator({ owner, canRun: () => true, onError: vi.fn() });
+    worker = registerTaskDrainExpiryWork(coordinator, resume, async () => lease);
+    try {
+      await worker.ready;
+      notifyTaskDrainCleared(leaseA.leaseId);
+      expect(cleared).toHaveBeenCalledOnce();
+
+      lease = null;
+      await owner.transaction(tx => notifyDeliveryWork(tx, DELIVERY_QUEUES.taskDrainExpiry, "unobserved-released-lease"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cleared).toHaveBeenCalledTimes(2);
+
+      await owner.transaction(tx => notifyDeliveryWork(tx, DELIVERY_QUEUES.taskDrainExpiry));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cleared).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("removes its listener on close and rearms an existing drain on a new lifecycle", async () => {
