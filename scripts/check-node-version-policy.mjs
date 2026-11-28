@@ -90,12 +90,12 @@ const requiredSourceFragments = [
   ["scripts/install.sh", "MIN_NODE_PATCH=1"],
   ["scripts/install.sh", "DEFAULT_NODE_MAJOR=24"],
   ["docker/agent-runtime/Dockerfile.base", "ARG NODE_VERSION=24"],
-  ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.11.0\""],
+  ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.22.1\""],
   ["packages/plugins/sandbox-providers/exe-dev/src/plugin.ts", "nodesource.com/setup_24.x"],
   ["packages/plugins/sandbox-providers/modal/src/manifest.ts", 'default: "node:24"'],
   ["cli/esbuild.config.mjs", 'target: "node24"'],
   ["packages/plugins/sdk/src/bundlers.ts", 'target: "node24"'],
-  ["scripts/generate-npm-package-json.mjs", `engines: { node: "${upstreamEngine}" }`],
+  ["scripts/generate-npm-package-json.mjs", `engines: { node: "${expectedEngine}" }`],
 ];
 
 for (const [filePath, fragment] of requiredSourceFragments) {
