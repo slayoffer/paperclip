@@ -1,13 +1,11 @@
-import { writeInteractionCardStatus } from "../../interaction-card-status.js";
-import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
 import type { ActorInfo } from "../types.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueThreadInteractions, toolOauthStates } from "@paperclipai/db";
-import { connectionIntentPayloadSchema } from "@paperclipai/shared";
+import { toolOauthStates } from "@paperclipai/db";
 import { badRequest, forbidden } from "../../../errors.js";
 
 import { actorBinding } from "../actor.js";
+import { recordOAuthCardOutcome, tryProjectOAuthCardOutcome } from "./card-projection.js";
 function oauthActorType(value: string | null): ActorInfo["actorType"] | null {
   return value === "agent" ||
     value === "user" ||
@@ -66,11 +64,12 @@ export function createOAuthStateStore(db: Db) {
   }
 
   /** Bind a callback to its initiating actor without consuming retryable state. */
-async function validateOAuthState(
+  async function validateOAuthState(
     state: string,
     actor: ActorInfo | undefined,
+    query: Pick<Db, "select"> = db,
   ) {
-    const [stateRow] = await db
+    const [stateRow] = await query
       .select()
       .from(toolOauthStates)
       .where(eq(toolOauthStates.state, state))
@@ -99,90 +98,38 @@ async function validateOAuthState(
    * happens before the atomic delete, so an unbound callback cannot consume a
    * valid flow and concurrent callbacks cannot both complete it.
    */
-async function consumeOAuthState(
+  async function consumeOAuthState(
     state: string,
     actor: ActorInfo | undefined,
+    query: Pick<Db, "select" | "delete"> = db,
   ) {
-    const stateRow = await validateOAuthState(state, actor);
-    const [consumed] = await db
+    await validateOAuthState(state, actor, query);
+    const [consumed] = await query
       .delete(toolOauthStates)
-      .where(eq(toolOauthStates.state, state))
+      .where(and(eq(toolOauthStates.state, state), gt(toolOauthStates.expiresAt, new Date())))
       .returning();
     if (!consumed)
       throw badRequest("OAuth state was not found or has already been used");
     return consumed;
   }
 
-  /**
-   * End the board's "Connect your account" prompt when the user declines in the
-   * provider's window (PAP-17109). Without this the card stays `pending`, so the
-   * board keeps offering an authorization link for a flow the user just refused
-   * and the requesting agent never learns the answer.
-   *
-   * Scoped to a still-`pending` row: a board user who already answered the card
-   * directly keeps their own answer.
-   */
-async function rejectPendingOAuthInteraction(
-    stateRow: typeof toolOauthStates.$inferSelect,
+  /** Persist the denial before the callback returns an error to the caller. */
+  async function rejectPendingOAuthInteraction(
+    state: string | typeof toolOauthStates.$inferSelect,
     actor: ActorInfo | undefined,
+    expectedVerifier?: string,
   ) {
-    const interactionId = stateRow.interactionId;
-    if (!interactionId) return;
-    const now = new Date();
-    const linked = await db
-      .select({
-        kind: issueThreadInteractions.kind,
-        issueId: issueThreadInteractions.issueId,
-        payload: issueThreadInteractions.payload,
-      })
-      .from(issueThreadInteractions)
-      .where(
-        and(
-          eq(issueThreadInteractions.id, interactionId),
-          eq(issueThreadInteractions.companyId, stateRow.companyId),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (linked?.kind === "connection_intent") {
-      const connectionIntentPayload = connectionIntentPayloadSchema.parse(
-        linked.payload,
-      );
-      await db
-        .update(issueThreadInteractions)
-        .set({
-          payload: { ...connectionIntentPayload, phase: "needs_retry" },
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(issueThreadInteractions.id, interactionId),
-            eq(issueThreadInteractions.companyId, stateRow.companyId),
-            eq(issueThreadInteractions.status, "pending"),
-          ),
-        );
-      return;
-    }
-    if (!linked) return;
-    await db.transaction(async tx => {
-      await notifyIssueReviewState(tx, { companyId: stateRow.companyId, issueId: linked.issueId });
-      await writeInteractionCardStatus(tx, {
-        issue: { id: linked.issueId, companyId: stateRow.companyId },
-        actor: actor?.actorType === "user" ? { type: "board", source: "session" } : { type: "system" },
-        where: and(eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.status, "pending")),
-        values: {
-          status: "rejected",
-          result: {
-            version: 1, outcome: "rejected",
-            reason: "Authorization was declined or cancelled in the provider's window",
-          },
-          resolvedByUserId: actor?.actorType === "user" ? actor.actorId : null,
-          resolvedAt: now,
-          updatedAt: now,
-        },
-      });
+    const consumed = await db.transaction(async tx => {
+      const stateRow = typeof state === "string" ? await consumeOAuthState(state, actor, tx) : state;
+      if (expectedVerifier && stateRow.codeVerifier !== expectedVerifier) {
+        throw badRequest("OAuth state does not belong to a Vercel Connect flow");
+      }
+      await recordOAuthCardOutcome(tx, stateRow, "rejected", actor);
+      return stateRow;
     });
+    await tryProjectOAuthCardOutcome(db, consumed);
   }
+
   return { peekOAuthState, validateOAuthState, consumeOAuthState, rejectPendingOAuthInteraction };
 }
 export type OAuthStateStore = ReturnType<typeof createOAuthStateStore>;

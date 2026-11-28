@@ -1,8 +1,7 @@
-import { writeInteractionCardStatus } from "../../interaction-card-status.js";
+import { recordOAuthCardOutcome, tryProjectOAuthCardOutcome } from "./card-projection.js";
 import { notifyGitHubCredentialChange } from "../../github-connection-notifications.js";
 import type { createGitHubGrantContinuity } from "../github-grant-continuity.js";
 import { randomUUID } from "node:crypto";
-import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
 import { notifyToolConnectionHealth } from "../../tool-connection-health-notifications.js";
 import { managedConnectorProfile } from "./client-settings.js";
 import type { ActorInfo } from "../types.js";
@@ -13,7 +12,7 @@ import { googleWorkspaceEffectiveScopes, isGoogleWorkspaceScopeGrant } from "@pa
 import { emitConnectionUpdated } from "../../connector-telemetry.js";
 import { and, eq, gte, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { connectionGrants, companyMemberships, principalPermissionGrants, issueThreadInteractions, toolApplications, toolConnections, toolOauthStates } from "@paperclipai/db";
+import { connectionGrants, companyMemberships, principalPermissionGrants, toolApplications, toolConnections, toolOauthStates } from "@paperclipai/db";
 import type { ConnectionGrantKind, ConnectToolAppResult } from "@paperclipai/shared";
 import { getConnectableAppDefinition, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, forbidden, HttpError, unprocessable } from "../../../errors.js";
@@ -41,7 +40,7 @@ type Dependencies = {
 
 export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
   const { now, getConnectionRow, state, store, refreshCatalog, finishOAuthCatalogWithRecommendedDefaults, currentCloudConnector } = dependencies;
-  const { consumeOAuthState, validateOAuthState, rejectPendingOAuthInteraction } = state;
+  const { validateOAuthState, rejectPendingOAuthInteraction } = state;
   const { createOrRotateOAuthSecret, syncCredentialBindings } = store;
   async function completePaperclipCloudConnectorCallback(input: {
     state: string;
@@ -80,8 +79,7 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
       : null;
     const providerName = galleryEntry?.name ?? "Google Workspace";
     if (input.error) {
-      const consumedState = await consumeOAuthState(input.state, input.actor);
-      await rejectPendingOAuthInteraction(consumedState, input.actor);
+      await rejectPendingOAuthInteraction(input.state, input.actor);
       throw new HttpError(
         400,
         `${providerName} authorization did not complete. Start a new ${providerName} connection to try again.`,
@@ -420,30 +418,9 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
         personalCredential || agentCredential ? credentialSecretRefs : [],
         tx,
       );
-      const linkedInteraction = stateRow.interactionId
-        ? await tx
-            .select({ kind: issueThreadInteractions.kind, issueId: issueThreadInteractions.issueId })
-            .from(issueThreadInteractions)
-            .where(eq(issueThreadInteractions.id, stateRow.interactionId))
-            .limit(1)
-            .then((rows) => rows[0] ?? null)
-        : null;
-      if (
-        stateRow.interactionId &&
-        linkedInteraction?.kind === "request_confirmation"
-      ) {
-        await notifyIssueReviewState(tx, { companyId: connection.companyId, issueId: linkedInteraction.issueId });
-        await writeInteractionCardStatus(tx, {
-          issue: { id: linkedInteraction.issueId, companyId: connection.companyId },
-          actor: { type: "board", source: "session" },
-          where: eq(issueThreadInteractions.id, stateRow.interactionId),
-          values: {
-            status: "accepted", result: { version: 1, outcome: "accepted" },
-            resolvedByUserId: authorizingUserId, resolvedAt: now(), updatedAt: now(),
-          },
-        });
-      }
+      await recordOAuthCardOutcome(tx, stateRow, "accepted", input.actor, authorizingUserId);
     });
+    await tryProjectOAuthCardOutcome(db, stateRow);
     // The transaction above committed the connection's lifecycle write; a
     // Paperclip Cloud connector callback is the managed variant of an OAuth
     // callback completion.

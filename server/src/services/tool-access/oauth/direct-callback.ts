@@ -1,9 +1,8 @@
-import { writeInteractionCardStatus } from "../../interaction-card-status.js";
-import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
+import { recordOAuthCardOutcome, tryProjectOAuthCardOutcome } from "./card-projection.js";
 import { notifyToolConnectionHealth } from "../../tool-connection-health-notifications.js";
 import { credentialScope } from "./client-settings.js";
 import { withoutOAuthRefreshLease } from "./refresh-leases.js";
-import type { ActorInfo } from "../types.js";
+import type { ActorInfo, DbTransaction } from "../types.js";
 import { createOAuthDiscovery } from "./discovery.js";
 import { createOAuthClientProtocol, storedOAuthTokenEndpointAuthMethod } from "./client.js";
 import { normalizeOAuthProviderError, oauthProviderErrorMessage } from "./provider-errors.js";
@@ -13,7 +12,7 @@ import { googleWorkspaceEffectiveScopes, isGoogleWorkspaceScopeGrant } from "@pa
 import { emitConnectionUpdated } from "../../connector-telemetry.js";
 import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { connectionGrants, companyMemberships, principalPermissionGrants, issueThreadInteractions, toolApplications, toolConnections } from "@paperclipai/db";
+import { connectionGrants, companyMemberships, principalPermissionGrants, toolApplications, toolConnections } from "@paperclipai/db";
 import type { ConnectToolAppResult } from "@paperclipai/shared";
 import { getConnectableAppDefinition, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, forbidden, HttpError, unprocessable } from "../../../errors.js";
@@ -52,7 +51,7 @@ type Dependencies = {
 
 export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
   const { now, getConnectionRow, state, store, setupPolicy, refreshCatalog, finishOAuthCatalogWithRecommendedDefaults, checkConnectionHealth, ensureDefaultOrganizationGrant, oauthEndpointsForConnection, exchangeOAuthToken } = dependencies;
-  const { consumeOAuthState, rejectPendingOAuthInteraction } = state;
+  const { consumeOAuthState, validateOAuthState, rejectPendingOAuthInteraction } = state;
   const { createOrRotateOAuthSecret, oauthClientForConnection, syncCredentialBindings } = store;
   const { assertConnectorConnectionSetupEnabled } = setupPolicy;
   async function completeOAuthCallback(input: {
@@ -70,14 +69,9 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
     iss?: string | null;
     actor?: ActorInfo;
   }): Promise<ConnectToolAppResult> {
-    // Binding first, outcome second: the provider's report of a failure is only
-    // acted on once the callback is bound to a state Paperclip issued and to the
-    // actor that started the flow, so an unsolicited callback cannot drive any
-    // path here. Consuming the state up front is what makes a denial terminal —
-    // a refused request must not stay completable by a later code (PAP-17109).
-    const stateRow = await consumeOAuthState(input.state, input.actor);
+    // A verified denial settles the state and records its card outcome together.
     if (input.error) {
-      await rejectPendingOAuthInteraction(stateRow, input.actor);
+      await rejectPendingOAuthInteraction(input.state, input.actor);
       const providerError = normalizeOAuthProviderError(input.error);
       throw new HttpError(
         400,
@@ -94,7 +88,12 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
     // Neither a code nor an error is not a usable answer either. It still spends
     // the request: the recovery is a fresh authorization, not a state left live
     // waiting for a better callback.
-    if (!input.code) throw badRequest("OAuth callback is missing a code");
+    const code = input.code;
+    if (!code) {
+      await consumeOAuthState(input.state, input.actor);
+      throw badRequest("OAuth callback is missing a code");
+    }
+    const stateRow = await validateOAuthState(input.state, input.actor);
 
     let connection = await getConnectionRow(
       stateRow.connectionId,
@@ -132,39 +131,48 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
       endpoints.provider,
       input.actor,
     );
-    if (!client.clientId)
+    const clientId = client.clientId;
+    if (!clientId)
       throw unprocessable(
         `OAuth client id is not configured for ${endpoints.provider}`,
       );
 
-    const token = await exchangeOAuthToken({
-      tokenUrl: endpoints.tokenUrl,
-      clientId: client.clientId,
-      clientSecret: client.clientSecret,
-      tokenEndpointAuthMethod: storedOAuthTokenEndpointAuthMethod(
-        oauthConfig(connection),
-        client.clientSecret,
-      ),
-      redirectUri: input.redirectUri,
-      codeVerifier: stateRow.codeVerifier,
-      code: input.code,
-      resource: endpoints.resource,
-    });
-    if (sourceTemplateKey === "google-workspace" && !isGoogleWorkspaceScopeGrant(normalizeOauthScopes(token.scope))) {
-      throw unprocessable("Google did not return a supported permission grant. Reconnect and choose the Google services you want to use.", { code: "oauth_scope_grant_invalid" });
+    // Claim the one-time callback in the credential transaction. The delete
+    // serializes concurrent exchanges and is rolled back if persistence fails.
+    async function exchangeClaimedToken(tx: DbTransaction, clientId: string, code: string) {
+      const claimed = await consumeOAuthState(input.state, input.actor, tx);
+      const token = await exchangeOAuthToken({
+        tokenUrl: endpoints.tokenUrl,
+        clientId,
+        clientSecret: client.clientSecret,
+        tokenEndpointAuthMethod: storedOAuthTokenEndpointAuthMethod(
+          oauthConfig(connection),
+          client.clientSecret,
+        ),
+        redirectUri: input.redirectUri,
+        codeVerifier: claimed.codeVerifier,
+        code,
+        resource: endpoints.resource,
+        // The state and membership locks must not outlive a slow provider reply.
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (sourceTemplateKey === "google-workspace" && !isGoogleWorkspaceScopeGrant(normalizeOauthScopes(token.scope))) {
+        throw unprocessable("Google did not return a supported permission grant. Reconnect and choose the Google services you want to use.", { code: "oauth_scope_grant_invalid" });
+      }
+      if (sourceTemplateKey === "google-workspace") {
+        token.scope = googleWorkspaceEffectiveScopes(authorizedScopes, normalizeOauthScopes(token.scope)).join(" ");
+        if (!token.scope) throw unprocessable("Google did not grant any selected service permissions", { code: "oauth_scope_grant_invalid" });
+      }
+      const connectedAt = now();
+      const expiresAt = token.expiresIn
+        ? new Date(connectedAt.getTime() + token.expiresIn * 1000).toISOString()
+        : null;
+      return { token, connectedAt, expiresAt };
     }
-    if (sourceTemplateKey === "google-workspace") {
-      token.scope = googleWorkspaceEffectiveScopes(authorizedScopes, normalizeOauthScopes(token.scope)).join(" ");
-      if (!token.scope) throw unprocessable("Google did not grant any selected service permissions", { code: "oauth_scope_grant_invalid" });
-    }
-    const connectedAt = now();
-    const expiresAt = token.expiresIn
-      ? new Date(connectedAt.getTime() + token.expiresIn * 1000).toISOString()
-      : null;
     if (stateRow.subjectUserId) {
       let personalCredentialSecretRefs: typeof connectionGrants.$inferSelect.credentialSecretRefs =
         [];
-      await db.transaction(async (tx) => {
+      const token = await db.transaction(async (tx) => {
         // Serialize callback persistence with suspension/removal. Those paths
         // lock this same membership row before sweeping personal credentials.
         const [membership] = await tx
@@ -186,6 +194,7 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
             "Your company membership no longer permits connection changes. Ask a company owner to restore non-viewer access before you authorize this connection again.",
           );
         }
+        const { token, connectedAt, expiresAt } = await exchangeClaimedToken(tx, clientId, code);
         const txSecrets = secretService(tx);
         const txSecretContext = { dbClient: tx, secretClient: txSecrets };
 
@@ -376,29 +385,7 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
             updatedAt: new Date(),
           })
           .where(eq(toolApplications.id, connection.applicationId));
-        const linkedInteraction = stateRow.interactionId
-          ? await tx
-              .select({ kind: issueThreadInteractions.kind, issueId: issueThreadInteractions.issueId })
-              .from(issueThreadInteractions)
-              .where(eq(issueThreadInteractions.id, stateRow.interactionId))
-              .limit(1)
-              .then((rows) => rows[0] ?? null)
-          : null;
-        if (
-          stateRow.interactionId &&
-          linkedInteraction?.kind === "request_confirmation"
-        ) {
-          await notifyIssueReviewState(tx, { companyId: connection.companyId, issueId: linkedInteraction.issueId });
-          await writeInteractionCardStatus(tx, {
-            issue: { id: linkedInteraction.issueId, companyId: connection.companyId },
-            actor: { type: "board", source: "session" },
-            where: eq(issueThreadInteractions.id, stateRow.interactionId),
-            values: {
-              status: "accepted", result: { version: 1, outcome: "accepted" },
-              resolvedByUserId: stateRow.subjectUserId!, resolvedAt: new Date(), updatedAt: new Date(),
-            },
-          });
-        }
+        await recordOAuthCardOutcome(tx, stateRow, "accepted", input.actor, stateRow.subjectUserId);
         await syncCredentialBindings(
           connection,
           connection.credentialPolicy === "per_user"
@@ -406,7 +393,9 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
             : [],
           tx,
         );
+        return token;
       });
+      await tryProjectOAuthCardOutcome(db, stateRow);
       emitConnectionUpdated(
         connection,
         preCallbackLifecycle,
@@ -518,6 +507,7 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
           "Only a company owner, admin, or member with connection-manager permission can share credentials with the organization.",
         );
       }
+      const { token, connectedAt, expiresAt } = await exchangeClaimedToken(tx, clientId, code);
       await tx.select({ id: connectionGrants.id }).from(connectionGrants)
         .where(and(eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id),
           eq(connectionGrants.kind, "organization"), eq(connectionGrants.isDefault, true)))

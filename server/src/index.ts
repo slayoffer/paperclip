@@ -18,6 +18,7 @@ import { registerRunEvidenceMigrationWork } from "./services/run-evidence-migrat
 import { registerSkillVersionRetentionWork } from "./services/skill-version-retention-work.js";
 import { registerDatabaseBackupWork } from "./services/database-backup-work.js";
 import { registerToolConnectionHealthWork } from "./services/tool-connection-health-work.js";
+import { registerOAuthCardProjectionWork } from "./services/tool-access/oauth/card-projection.js";
 import { approvalQueueSeedingService, registerApprovalQueueSeedingWork } from "./services/approval-queue-seeding-work.js";
 import { joinRequestRetentionService, registerJoinRequestRetentionWork } from "./services/join-request-retention.js";
 import { approvalRetentionService, registerApprovalRetentionWork } from "./services/approval-retention.js";
@@ -1394,6 +1395,10 @@ async function startServerWithDatabaseTeardown(
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby());
   trackHeartbeatSchedulerWork(providerTraceRetentionWork.ready);
   server.on("close", providerTraceRetentionWork.stop);
+  const oauthCardProjectionWork = registerOAuthCardProjectionWork(db, deliveryWork,
+    () => !heartbeatSchedulerStopped && !isWarmStandby() && !isIdleTaskDrainActive());
+  trackHeartbeatSchedulerWork(oauthCardProjectionWork.ready);
+  server.on("close", () => { void oauthCardProjectionWork.stop(); });
   const executionSchedule = executionControlSchedule(db);
   const workspaceRecoveryRuntime = environmentRuntimeService(db, { pluginWorkerManager });
   const nativeRunnerEvidenceRetentionWorker = config.nativeHarnessBackupExpirationEnabled

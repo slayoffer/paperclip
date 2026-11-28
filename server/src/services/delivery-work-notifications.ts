@@ -75,6 +75,7 @@ export const DELIVERY_QUEUES = {
 
   decisionArchiveDelivery: "decision-archive-delivery",
   toolConnectionHealth: "tool-connection-health",
+  oauthCardProjection: "oauth-card-projection",
   toolReviewProjection: "tool-review-projection",
   toolReviewInterruption: "tool-review-interruption",
   toolReviewRecovery: "tool-review-recovery",

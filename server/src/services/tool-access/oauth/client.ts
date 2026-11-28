@@ -309,6 +309,7 @@ export function createOAuthClientProtocol({ fetchRemoteHttpUrl, assertOAuthEndpo
     refreshToken?: string | null;
     /** RFC 8707 resource indicator: the MCP server this token is for. */
     resource?: string | null;
+    signal?: AbortSignal;
   }) {
     const body = new URLSearchParams();
     if (input.grantType === "client_credentials") {
@@ -378,6 +379,7 @@ export function createOAuthClientProtocol({ fetchRemoteHttpUrl, assertOAuthEndpo
       method: "POST",
       headers,
       body,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     const payload = (await response.json().catch(() => ({}))) as unknown;
     const record = asRecord(payload);

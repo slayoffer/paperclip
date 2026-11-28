@@ -177,6 +177,7 @@ export {
   connectionGrantDelegations,
   toolConnectionInstalls,
   toolOauthStates,
+  toolOauthCardProjections,
   toolCatalogEntries,
   toolProfiles,
   toolProfileEntries,

@@ -37,12 +37,8 @@ export function createVercelOAuthCallback(db: Db, dependencies: Dependencies) {
     error?: string | null;
     actor?: ActorInfo;
   }): Promise<ConnectToolAppResult> {
-    const stateRow = await consumeOAuthState(input.state, input.actor);
-    if (stateRow.codeVerifier !== "vercel-connect") {
-      throw badRequest("OAuth state does not belong to a Vercel Connect flow");
-    }
     if (input.error) {
-      await rejectPendingOAuthInteraction(stateRow, input.actor);
+      await rejectPendingOAuthInteraction(input.state, input.actor, "vercel-connect");
       throw new HttpError(
         400,
         "Vercel Connect authorization did not complete. Start a new authorization to try again.",
@@ -53,6 +49,10 @@ export function createVercelOAuthCallback(db: Db, dependencies: Dependencies) {
               : "vercel_connect_authorization_required",
         },
       );
+    }
+    const stateRow = await consumeOAuthState(input.state, input.actor);
+    if (stateRow.codeVerifier !== "vercel-connect") {
+      throw badRequest("OAuth state does not belong to a Vercel Connect flow");
     }
     if (!vercelConnect)
       throw vercelConnectHttpError(

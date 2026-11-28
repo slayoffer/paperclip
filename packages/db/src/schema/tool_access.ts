@@ -9,6 +9,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -364,6 +365,27 @@ export const toolOauthStates = pgTable(
     index("tool_oauth_states_actor_idx").on(table.createdByActorType, table.createdByActorId),
     index("tool_oauth_states_subject_agent_idx").on(table.companyId, table.subjectAgentId),
     index("tool_oauth_states_expires_at_idx").on(table.expiresAt),
+  ],
+);
+
+// The provider outcome and the card's WIP admission settle independently.
+export const toolOauthCardProjections = pgTable(
+  "tool_oauth_card_projections",
+  {
+    interactionId: uuid("interaction_id").notNull().references(() => issueThreadInteractions.id, { onDelete: "cascade" }),
+    cardGeneration: text("card_generation").notNull(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    issueId: uuid("issue_id").notNull(),
+    outcome: text("outcome").$type<"accepted" | "rejected">().notNull(),
+    actorType: text("actor_type").notNull(),
+    actorSource: text("actor_source"),
+    resolvedByUserId: text("resolved_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ name: "tool_oauth_card_projections_generation_pk", columns: [table.interactionId, table.cardGeneration] }),
+    check("tool_oauth_card_projections_outcome_check", sql`${table.outcome} in ('accepted', 'rejected')`),
+    index("tool_oauth_card_projections_company_idx").on(table.companyId),
   ],
 );
 
