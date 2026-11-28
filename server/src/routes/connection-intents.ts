@@ -207,6 +207,7 @@ export function connectionIntentBoardRoutes(db: Db, heartbeat: Heartbeat) {
     const interaction = await service.complete(loaded.interaction.id, input.connectionId, userId, {
       canManageOrganizationGrant: await canManageCompanyConnections(req, loaded.issue.companyId),
       bypassCurrentMembershipCheck: bypassCurrentMembershipCheck(req),
+      wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
     });
     await logActivity(db, {
       companyId: loaded.issue.companyId,
@@ -230,6 +231,7 @@ export function connectionIntentBoardRoutes(db: Db, heartbeat: Heartbeat) {
     const input = declineConnectionIntentSchema.parse(req.body ?? {});
     const interaction = await service.decline(loaded.interaction.id, userId, input.reason, {
       bypassCurrentMembershipCheck: bypassCurrentMembershipCheck(req),
+      mutationOptions: { wipAdmissionActor: { type: req.actor.type, source: req.actor.source } },
     });
     await logActivity(db, {
       companyId: loaded.issue.companyId,

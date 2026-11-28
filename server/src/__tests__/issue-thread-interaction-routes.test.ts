@@ -1108,6 +1108,7 @@ describe("issue thread interaction routes", () => {
       "interaction-verdicts",
       { verdicts: [{ id: "docs", verdict: "reject", reason: "Missing examples" }] },
       expect.objectContaining({ userId: "local-board" }),
+      { wipAdmissionActor: expect.objectContaining({ type: "board" }) },
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -1461,7 +1462,7 @@ describe("issue thread interaction routes", () => {
       issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       interactionId: "interaction-tool-action",
       actionRequestId: "action-request-1",
-      actor: { agentId: null, userId: "local-board" },
+      actor: { agentId: null, userId: "local-board", source: "local_implicit" },
     });
     const expectedToolAction = {
       toolName: "google_sheets_add_row",
@@ -3162,7 +3163,9 @@ describe("issue thread interaction routes", () => {
       `interaction-${kind}`,
       body,
       expect.objectContaining({ agentId: CREATED_AGENT_ID, runId: RUN_9 }),
-      ...(service === "submitItemVerdicts" ? [] : [{}]),
+      service === "submitItemVerdicts"
+        ? { wipAdmissionActor: expect.objectContaining({ type: "agent" }) }
+        : {},
     );
   });
 

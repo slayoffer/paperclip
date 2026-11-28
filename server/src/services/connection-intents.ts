@@ -1076,6 +1076,7 @@ export function connectionIntentService(db: Db) {
       canManageOrganizationGrant?: boolean;
       bypassCurrentMembershipCheck?: boolean;
       validatedAdoption?: { agentUpdatedAt: Date; binding: AiConnectionBinding };
+      wipAdmissionActor?: InteractionResolutionMutationOptions["wipAdmissionActor"];
       /** Only the verified OAuth callback applies a saved draft audience. */
       oauthCompletion?: boolean;
     } = {},
@@ -1161,7 +1162,7 @@ export function connectionIntentService(db: Db) {
         return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, {
           version: 1, outcome: "connected", connectionId: selectedConnection.id,
           instruction: "Your AgentMail inbox is ready. Use agentmail_inboxes to read its verified address and continue the user's request.",
-        }, { userId });
+        }, { userId }, { wipAdmissionActor: options.wipAdmissionActor });
       }
       if (selectedConnection.connectionPurpose === "channel") throw conflict("An email inbox cannot satisfy a tool connection request");
       if (payload.purpose === "ai" && selectedConnection.connectionPurpose !== "ai") throw conflict("Select an AI account for this authentication request");
@@ -1201,7 +1202,9 @@ export function connectionIntentService(db: Db) {
         }
         const selected = await service.select({ companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, userId, adapterType: managed.agent.adapterType, model: managed.adapterConfig.model, runnerProvider: managed.adapterConfig.provider, acpxAgent: managed.adapterConfig.acpxAgent, binding: managed.binding });
         if (selected.connection.id !== selectedConnection.id) throw conflict("This is not the account selected for the agent");
-        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId, { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId });
+        return txInteractions.resolveConnectionIntent(loaded.issue, interactionId,
+          { version: 1, outcome: "connected", connectionId: selected.connection.id }, { userId },
+          { wipAdmissionActor: options.wipAdmissionActor });
       }
 
       let { grants } = await txAccess.listConnectionGrants(
@@ -1293,6 +1296,7 @@ export function connectionIntentService(db: Db) {
           ...(isRemoteMcpConnectorId(payload.serviceSlug) ? { instruction: aggregatorContinuationInstruction(payload.serviceSlug, payload.upstreamService?.name ?? "The requested app") } : {}),
         },
         { userId },
+        { wipAdmissionActor: options.wipAdmissionActor },
       );
     });
   }

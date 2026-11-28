@@ -233,7 +233,10 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
 
   router.delete("/agents/me/secret-proposals/:id", async (req, res) => {
     const context = await proposalAgentContext(req);
-    const proposal = await proposals.transition(context.companyId, req.params.id as string, "withdrawn", { proposerAgentId: context.agentId });
+    const proposal = await proposals.transition(context.companyId, req.params.id as string, "withdrawn", {
+      proposerAgentId: context.agentId,
+      wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
+    });
     res.json(agentProposalView(await proposals.view(proposal)));
   });
 
@@ -267,6 +270,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const resolvedByUserId = req.actor.userId ?? "board";
     const approved = await proposals.approve(companyId, proposal.id, {
       resolvedByUserId,
+      wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
       cascade: req.body?.cascade === true,
       overrides: req.body?.overrides,
       assertCanResolve: (lockedProposal, txDb) => assertCanResolveProposal({
@@ -299,6 +303,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const resolvedByUserId = req.actor.userId ?? "board";
     const proposal = await proposals.transition(companyId, req.params.id as string, "rejected", {
       resolvedByUserId, reason,
+      wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
     });
     await notifySecretProposalResolution({
       proposal: existing,

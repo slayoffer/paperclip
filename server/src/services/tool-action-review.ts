@@ -21,6 +21,8 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 
+import { writeInteractionCardStatus } from "./interaction-card-status.js";
+
 /** The shared transaction for both task and Connections review decisions. */
 export async function commitToolActionReview(
   db: Db,
@@ -34,7 +36,7 @@ export async function commitToolActionReview(
     idempotencyKey?: string;
     rememberAction?: boolean;
     reason?: string;
-    actor: { agentId?: string | null; userId?: string | null };
+    actor: { agentId?: string | null; userId?: string | null; source?: string };
   },
 ) {
   if (input.actor.agentId)
@@ -90,7 +92,9 @@ export async function commitToolActionReview(
       )
       .for("update");
     if (!current) throw notFound("Tool action request not found");
-    const receipt = interactionAnswerReceipt(input.decision, input, input.actor);
+    const { source: _wipActorSource, ...receiptActor } = input.actor;
+    const receiptInput = { ...input, actor: receiptActor };
+    const receipt = interactionAnswerReceipt(input.decision, receiptInput, receiptActor);
     if (interaction) {
       assertIssueThreadInteractionResolverAudience({
         actor: { type: "user", userId: input.actor.userId ?? "board" },
@@ -207,9 +211,11 @@ export async function commitToolActionReview(
         ),
       );
     if (interaction && issue) {
-      await tx
-        .update(issueThreadInteractions)
-        .set({
+      await writeInteractionCardStatus(tx, {
+        issue,
+        actor: { type: "board", source: input.actor.source ?? "session" },
+        where: eq(issueThreadInteractions.id, interaction.id),
+        values: {
           status: input.decision === "approved" ? "accepted" : "rejected",
           ...(receipt ? { resolutionRequest: receipt } : {}),
           resolvedByUserId: input.actor.userId ?? "board",
@@ -228,8 +234,8 @@ export async function commitToolActionReview(
                   },
                 }
               : { version: 1, outcome: "rejected", reason: input.reason },
-        })
-        .where(eq(issueThreadInteractions.id, interaction.id));
+        },
+      });
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolAction);
       await tx
         .insert(toolActionDeliveries)

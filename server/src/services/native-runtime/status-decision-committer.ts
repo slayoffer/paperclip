@@ -69,6 +69,7 @@ import {
   resolveExternalChatResponseWaitAuthorizationInTransaction,
 } from "./chat-attachment-reuse.js";
 import { issueService } from "../issues.js";
+import { withInteractionCardStatusWriter, type InteractionCardStatusWriter } from "../interaction-card-status.js";
 import { companySkillService } from "../company-skills.js";
 import { syncRoutineRunStatusForIssue } from "../routine-run-status.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
@@ -574,6 +575,7 @@ async function validateGovernanceGate(
 
 async function materializeDecisionEffect(input: {
   tx: Db;
+  writeCardStatus: InteractionCardStatusWriter;
   companyId: string;
   issue: typeof issues.$inferSelect;
   runId: string;
@@ -948,14 +950,14 @@ async function materializeDecisionEffect(input: {
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!interaction) throw new Error("native_attention_expiry_target_missing");
-    await input.tx
-      .update(issueThreadInteractions)
-      .set({
+    await input.writeCardStatus({
+      where: eq(issueThreadInteractions.id, interaction.id),
+      values: {
         status: "expired",
         resolvedAt: new Date(),
         updatedAt: new Date(),
-      })
-      .where(eq(issueThreadInteractions.id, interaction.id));
+      },
+    });
     const cause = "attention_expired";
     const recovery = await issueRecoveryActionService(
       input.tx,
@@ -1090,19 +1092,14 @@ async function materializeDecisionEffect(input: {
         ),
       );
     if (interactionRows.length > 0) {
-      await input.tx
-        .update(issueThreadInteractions)
-        .set({
+      await input.writeCardStatus({
+        where: inArray(issueThreadInteractions.id, interactionRows.map((row) => row.id)),
+        values: {
           status: "cancelled",
           resolvedAt: new Date(),
           updatedAt: new Date(),
-        })
-        .where(
-          inArray(
-            issueThreadInteractions.id,
-            interactionRows.map((row) => row.id),
-          ),
-        );
+        },
+      });
     }
     await notifyExternalAgentSettlement(input.tx, { companyId: input.companyId, runId: input.runId });
     await notifyInstructionCollection(input.tx, { companyId: input.companyId, runId: input.runId });
@@ -2220,120 +2217,126 @@ export async function commitNativeStatusDecision(input: {
       )).for("update");
     }
 
-    if (input.supersededExternalReviewRequests) {
-      const expected = input.supersededExternalReviewRequests;
-      const binding = { companyId: input.companyId, issueId: input.issueId, runId: input.runId, agentId: expected.agentId };
-      const candidates = await findSupersededExternalReviewRequests(tx as unknown as Db, binding);
-      const ids = candidates.map(({ interaction }) => interaction.id);
-      const [accepted] = await tx.select().from(nativeRunResults).where(and(
-        eq(nativeRunResults.id, coordinator.resultId!), eq(nativeRunResults.companyId, input.companyId),
-        eq(nativeRunResults.issueId, input.issueId), eq(nativeRunResults.runId, input.runId), eq(nativeRunResults.schemaStatus, "accepted"),
-      ));
-      const result = record(accepted?.resultJson.result), terminal = record(accepted?.resultJson.terminal);
-      if (ids.length !== expected.interactionIds.length || expected.interactionIds.some(id => !ids.includes(id)) ||
-          terminal.runTerminalState !== "succeeded" || terminal.turnTerminalState !== "completed" ||
-          !["done", "yielded"].includes(String(result.reportedWorkDisposition)) ||
-          !accepted || accepted.id !== expected.resultId || normalizePrpResultSignals(accepted.resultJson.result as PrpStructuredRunResult).actionableAttentionRequests.length !== 0 ||
-          !["completion_claim_policy_accepted", "completion_contract_satisfied", "external_chat_response_waiting", "scheduled_monitor_waiting"].includes(reasonCode) ||
-          await pendingNativeGovernance({ db: tx as unknown as Db, ...binding, executionState: record(issue.executionState), ignoredInteractionIds: ids })) {
-        throw new NativeStatusRaceError();
-      }
-      await supersedeExternalReviewRequestsInTransaction(tx as unknown as Db, binding, candidates, publications);
-    }
-
-    const materialized: NativeMaterializedStatusEffect[] = [];
-    const preMaterializedEffects = new Map(
-      (input.preMaterializedEffects ?? []).map((effect) => [
-        effect.effectKind,
-        effect,
-      ]),
-    );
-    for (const effect of input.decision.effects) {
-      materialized.push(
-        await materializeDecisionEffect({
-          tx: tx as unknown as Db,
-          companyId: input.companyId,
-          issue,
-          runId: input.runId,
-          decisionId: decisionRow.id,
-          effect,
-          failpoint: input.failpoint,
-          preMaterializedEffects,
-          terminalRunsToEmit,
-        }),
-      );
-    }
-
-    let updated: typeof issues.$inferSelect;
-    if (input.decision.statusAction === "preserve") {
-      updated = (await tx
-        .select()
-        .from(issues)
-        .where(
-          and(
-            eq(issues.id, input.issueId),
-            eq(issues.companyId, input.companyId),
-          ),
-        )
-        .limit(1)
-        .then((rows) => rows[0] ?? null)) as typeof issues.$inferSelect;
-      if (!updated) throw new NativeStatusRaceError();
-    } else {
-      failAt("status_projection", input.failpoint);
-      const projected = await issueService(tx as unknown as Db).update(
-        input.issueId,
-        {
-          status: input.decision.toStatus,
-          statusVersion: input.priorStatusVersion + 1,
-          lastStatusDecisionId: decisionRow.id,
-          unblockDescriptor: input.decision.unblockDescriptor,
-          actorAgentId: null,
-          actorUserId: null,
-        },
-        tx,
-        publications,
-      );
-      if (!projected) throw new NativeStatusRaceError();
-      updated = projected;
-      if (updated.originKind === "routine_execution") {
-        await syncRoutineRunStatusForIssue(tx as unknown as Db, input.issueId);
-      }
-      // Native task completion bypasses the REST issue route. Commit the Studio
-      // output with the authoritative task status so restart cannot lose it.
-      // The durable test row, not a mutable task mode, identifies the obligation.
-      if (issue.status !== updated.status && (updated.status === "done" || updated.status === "cancelled")) {
-        const testRun = await companySkillService(tx as unknown as Db).completeTestRunForIssue({
-          companyId: input.companyId,
-          issueId: input.issueId,
-          outcome: updated.status === "done" ? "succeeded" : "cancelled",
-          error: updated.status === "cancelled" ? "Harness issue was cancelled" : null,
-        });
-        if (testRun) {
-          const { publication } = await persistActivity(tx as unknown as Db, {
-            companyId: input.companyId,
-            actorType: "system",
-            actorId: "native-status-committer",
-            runId: input.runId,
-            action: "company.skill_test_run_completed",
-            entityType: "company_skill_test_run",
-            entityId: testRun.id,
-            issueId: input.issueId,
-            details: { issueId: input.issueId, status: testRun.status, outputDocumentKey: testRun.outputDocumentKey },
-          });
-          publications.push(publication);
+    const { updated, materialized } = await withInteractionCardStatusWriter(tx, {
+      issue, actor: { type: "system" },
+    }, async writeCardStatus => {
+      if (input.supersededExternalReviewRequests) {
+        const expected = input.supersededExternalReviewRequests;
+        const binding = { companyId: input.companyId, issueId: input.issueId, runId: input.runId, agentId: expected.agentId };
+        const candidates = await findSupersededExternalReviewRequests(tx as unknown as Db, binding);
+        const ids = candidates.map(({ interaction }) => interaction.id);
+        const [accepted] = await tx.select().from(nativeRunResults).where(and(
+          eq(nativeRunResults.id, coordinator.resultId!), eq(nativeRunResults.companyId, input.companyId),
+          eq(nativeRunResults.issueId, input.issueId), eq(nativeRunResults.runId, input.runId), eq(nativeRunResults.schemaStatus, "accepted"),
+        ));
+        const result = record(accepted?.resultJson.result), terminal = record(accepted?.resultJson.terminal);
+        if (ids.length !== expected.interactionIds.length || expected.interactionIds.some(id => !ids.includes(id)) ||
+            terminal.runTerminalState !== "succeeded" || terminal.turnTerminalState !== "completed" ||
+            !["done", "yielded"].includes(String(result.reportedWorkDisposition)) ||
+            !accepted || accepted.id !== expected.resultId || normalizePrpResultSignals(accepted.resultJson.result as PrpStructuredRunResult).actionableAttentionRequests.length !== 0 ||
+            !["completion_claim_policy_accepted", "completion_contract_satisfied", "external_chat_response_waiting", "scheduled_monitor_waiting"].includes(reasonCode) ||
+            await pendingNativeGovernance({ db: tx as unknown as Db, ...binding, executionState: record(issue.executionState), ignoredInteractionIds: ids })) {
+          throw new NativeStatusRaceError();
         }
+        await supersedeExternalReviewRequestsInTransaction(tx as unknown as Db, binding, candidates, publications, writeCardStatus);
       }
-      materialized.unshift({
-        effectKind: "issue_status_projection",
-        targetType: "issue",
-        targetId: input.issueId,
-        payload: {
-          fromStatus: issue.status,
-          toStatus: input.decision.toStatus,
-          reasonCode,
-        },
-      });
-    }
+
+      const materialized: NativeMaterializedStatusEffect[] = [];
+      const preMaterializedEffects = new Map(
+        (input.preMaterializedEffects ?? []).map((effect) => [
+          effect.effectKind,
+          effect,
+        ]),
+      );
+      for (const effect of input.decision.effects) {
+        materialized.push(
+          await materializeDecisionEffect({
+            tx: tx as unknown as Db,
+            writeCardStatus,
+            companyId: input.companyId,
+            issue,
+            runId: input.runId,
+            decisionId: decisionRow.id,
+            effect,
+            failpoint: input.failpoint,
+            preMaterializedEffects,
+            terminalRunsToEmit,
+          }),
+        );
+      }
+
+      let updated: typeof issues.$inferSelect;
+      if (input.decision.statusAction === "preserve") {
+        updated = (await tx
+          .select()
+          .from(issues)
+          .where(
+            and(
+              eq(issues.id, input.issueId),
+              eq(issues.companyId, input.companyId),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null)) as typeof issues.$inferSelect;
+        if (!updated) throw new NativeStatusRaceError();
+      } else {
+        failAt("status_projection", input.failpoint);
+        const projected = await issueService(tx as unknown as Db).update(
+          input.issueId,
+          {
+            status: input.decision.toStatus,
+            statusVersion: input.priorStatusVersion + 1,
+            lastStatusDecisionId: decisionRow.id,
+            unblockDescriptor: input.decision.unblockDescriptor,
+            actorAgentId: null,
+            actorUserId: null,
+          },
+          tx,
+          publications,
+        );
+        if (!projected) throw new NativeStatusRaceError();
+        updated = projected;
+        if (updated.originKind === "routine_execution") {
+          await syncRoutineRunStatusForIssue(tx as unknown as Db, input.issueId);
+        }
+        // Native task completion bypasses the REST issue route. Commit the Studio
+        // output with the authoritative task status so restart cannot lose it.
+        // The durable test row, not a mutable task mode, identifies the obligation.
+        if (issue.status !== updated.status && (updated.status === "done" || updated.status === "cancelled")) {
+          const testRun = await companySkillService(tx as unknown as Db).completeTestRunForIssue({
+            companyId: input.companyId,
+            issueId: input.issueId,
+            outcome: updated.status === "done" ? "succeeded" : "cancelled",
+            error: updated.status === "cancelled" ? "Harness issue was cancelled" : null,
+          });
+          if (testRun) {
+            const { publication } = await persistActivity(tx as unknown as Db, {
+              companyId: input.companyId,
+              actorType: "system",
+              actorId: "native-status-committer",
+              runId: input.runId,
+              action: "company.skill_test_run_completed",
+              entityType: "company_skill_test_run",
+              entityId: testRun.id,
+              issueId: input.issueId,
+              details: { issueId: input.issueId, status: testRun.status, outputDocumentKey: testRun.outputDocumentKey },
+            });
+            publications.push(publication);
+          }
+        }
+        materialized.unshift({
+          effectKind: "issue_status_projection",
+          targetType: "issue",
+          targetId: input.issueId,
+          payload: {
+            fromStatus: issue.status,
+            toStatus: input.decision.toStatus,
+            reasonCode,
+          },
+        });
+      }
+      return { updated, materialized };
+    });
 
     if (input.decision.statusAction === "done" && issue.status !== "done") {
       const issueSvc = issueService(tx as unknown as Db);

@@ -3275,7 +3275,7 @@ export function issueRoutes(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; source?: string };
     }) => Promise<unknown>;
     approveToolActionRequest?: (input: {
       rememberAction?: boolean;
@@ -3285,14 +3285,14 @@ export function issueRoutes(
       issueId: string;
       interactionId: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; source?: string };
     }) => Promise<unknown>;
     approveSecretProposal?: (input: {
       companyId: string;
       issueId: string;
       interactionId: string;
       proposalId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; source?: string };
     }) => Promise<unknown>;
   } = {},
 ) {
@@ -11047,6 +11047,7 @@ export function issueRoutes(
             agentId: actor.agentId,
             userId: actor.actorType === "user" ? actor.actorId : null,
           },
+          req.actor,
         );
         await logExpiredRequestConfirmations({
           issue,
@@ -11353,6 +11354,7 @@ export function issueRoutes(
           agentId: actor.agentId,
           userId: actor.actorType === "user" ? actor.actorId : null,
         },
+        req.actor,
       );
       await logExpiredRequestConfirmations({
         issue,
@@ -11463,6 +11465,7 @@ export function issueRoutes(
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
       },
+      req.actor,
     );
     await logExpiredRequestConfirmations({
       issue,
@@ -17695,6 +17698,7 @@ export function issueRoutes(
           actor: {
             agentId: actor.agentId,
             userId: actor.actorType === "user" ? actor.actorId : null,
+            source: req.actor.source,
           },
         });
         res.json(await interactionSvc.getById(current.id));
@@ -17736,6 +17740,7 @@ export function issueRoutes(
           actor: {
             agentId: actor.agentId,
             userId: actor.actorType === "user" ? actor.actorId : null,
+            source: req.actor.source,
           },
         });
         const approval = readObject(approvalResult);
@@ -17774,6 +17779,7 @@ export function issueRoutes(
               actor: {
                 agentId: actor.agentId,
                 userId: actor.actorType === "user" ? actor.actorId : null,
+                source: req.actor.source,
               },
             });
           } else {
@@ -17791,6 +17797,7 @@ export function issueRoutes(
             }
             await secretProposals.approve(issue.companyId, proposal.id, {
               resolvedByUserId,
+              wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
               assertCanResolve: (lockedProposal, txDb) =>
                 assertCanResolveProposal({
                   db: txDb,
@@ -17922,6 +17929,7 @@ export function issueRoutes(
           actor: {
             agentId: actor.agentId,
             userId: actor.actorType === "user" ? actor.actorId : null,
+            source: req.actor.source,
           },
         });
         res.json(await interactionSvc.getById(current.id));
@@ -18075,6 +18083,7 @@ export function issueRoutes(
             resolverPolicyRestriction:
               resolutionAuthorization.resolverPolicyRestriction,
           },
+          { wipAdmissionActor: req.actor },
         );
 
       await logActivity(db, {
@@ -18172,6 +18181,7 @@ export function issueRoutes(
           userId: actor.actorType === "user" ? actor.actorId : null,
         },
         {
+          wipAdmissionActor: req.actor,
           afterResolveInTransaction: async (tx, resolved) => {
             if (resolved.kind !== "ask_user_questions") return;
             nativeRunId = await requestNativeQuestionRunCancellation(
@@ -18286,11 +18296,17 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const interaction = await issueThreadInteractionService(
         db,
-      ).skipInteraction(issue, interactionId, req.body, {
-        agentId: actor.agentId,
-        runId: actor.runId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      ).skipInteraction(
+        issue,
+        interactionId,
+        req.body,
+        {
+          agentId: actor.agentId,
+          runId: actor.runId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        },
+        { wipAdmissionActor: req.actor },
+      );
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -18354,6 +18370,7 @@ export function issueRoutes(
           userId: actor.actorType === "user" ? actor.actorId : null,
         },
         {
+          wipAdmissionActor: req.actor,
           afterResolveInTransaction: async (tx, resolved) => {
             if (resolved.kind !== "ask_user_questions") return;
             nativeRunId = await requestNativeQuestionRunCancellation(

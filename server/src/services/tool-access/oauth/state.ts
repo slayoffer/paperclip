@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "../../interaction-card-status.js";
 import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
 import type { ActorInfo } from "../types.js";
 import { and, eq } from "drizzle-orm";
@@ -165,29 +166,21 @@ async function rejectPendingOAuthInteraction(
     if (!linked) return;
     await db.transaction(async tx => {
       await notifyIssueReviewState(tx, { companyId: stateRow.companyId, issueId: linked.issueId });
-      await tx
-        .update(issueThreadInteractions)
-        .set({
+      await writeInteractionCardStatus(tx, {
+        issue: { id: linked.issueId, companyId: stateRow.companyId },
+        actor: actor?.actorType === "user" ? { type: "board", source: "session" } : { type: "system" },
+        where: and(eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.status, "pending")),
+        values: {
           status: "rejected",
           result: {
-            version: 1,
-            outcome: "rejected",
-
-
-            reason:
-              "Authorization was declined or cancelled in the provider's window",
+            version: 1, outcome: "rejected",
+            reason: "Authorization was declined or cancelled in the provider's window",
           },
           resolvedByUserId: actor?.actorType === "user" ? actor.actorId : null,
           resolvedAt: now,
           updatedAt: now,
-        })
-        .where(
-          and(
-            eq(issueThreadInteractions.id, interactionId),
-            eq(issueThreadInteractions.companyId, stateRow.companyId),
-            eq(issueThreadInteractions.status, "pending"),
-          ),
-        );
+        },
+      });
     });
   }
   return { peekOAuthState, validateOAuthState, consumeOAuthState, rejectPendingOAuthInteraction };

@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "./interaction-card-status.js";
 import { isContextCompactionRun } from "./context-compaction.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
 import { notifyIssueRecovery } from "./issue-recovery-notifications.js";
@@ -221,13 +222,15 @@ export async function prepareConversationTurn(
         .where(eq(issueComments.id, comment.id));
       // Questions from the previous session must not keep occupying the
       // composer or wake the old topic, even if they survive normal comments.
-      const expiredQuestions = await tx.update(issueThreadInteractions).set({
-        status: "expired", resolvedAt: new Date(), updatedAt: new Date(),
-        resolvedByUserId: comment.authorUserId,
-        result: { version: 1, outcome: "withdrawn", reason: "New conversation session", answers: [], summaryMarkdown: null },
-      }).where(and(eq(issueThreadInteractions.companyId, issue.companyId),
-        eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"),
-        eq(issueThreadInteractions.kind, "ask_user_questions"))).returning({ id: issueThreadInteractions.id });
+      const expiredQuestions = await writeInteractionCardStatus(tx, {
+        issue, actor: { type: "system" },
+        where: and(eq(issueThreadInteractions.status, "pending"), eq(issueThreadInteractions.kind, "ask_user_questions")),
+        values: {
+          status: "expired", resolvedAt: new Date(), updatedAt: new Date(),
+          resolvedByUserId: comment.authorUserId,
+          result: { version: 1, outcome: "withdrawn", reason: "New conversation session", answers: [], summaryMarkdown: null },
+        },
+      });
       publication = (
         await persistActivity(tx as unknown as Db, {
           companyId: issue.companyId,

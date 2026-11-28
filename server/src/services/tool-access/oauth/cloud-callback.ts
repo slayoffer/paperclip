@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "../../interaction-card-status.js";
 import { notifyGitHubCredentialChange } from "../../github-connection-notifications.js";
 import type { createGitHubGrantContinuity } from "../github-grant-continuity.js";
 import { randomUUID } from "node:crypto";
@@ -432,16 +433,15 @@ export function createCloudOAuthCallback(db: Db, dependencies: Dependencies) {
         linkedInteraction?.kind === "request_confirmation"
       ) {
         await notifyIssueReviewState(tx, { companyId: connection.companyId, issueId: linkedInteraction.issueId });
-        await tx
-          .update(issueThreadInteractions)
-          .set({
-            status: "accepted",
-            result: { version: 1, outcome: "accepted" },
-            resolvedByUserId: authorizingUserId,
-            resolvedAt: now(),
-            updatedAt: now(),
-          })
-          .where(eq(issueThreadInteractions.id, stateRow.interactionId));
+        await writeInteractionCardStatus(tx, {
+          issue: { id: linkedInteraction.issueId, companyId: connection.companyId },
+          actor: { type: "board", source: "session" },
+          where: eq(issueThreadInteractions.id, stateRow.interactionId),
+          values: {
+            status: "accepted", result: { version: 1, outcome: "accepted" },
+            resolvedByUserId: authorizingUserId, resolvedAt: now(), updatedAt: now(),
+          },
+        });
       }
     });
     // The transaction above committed the connection's lifecycle write; a

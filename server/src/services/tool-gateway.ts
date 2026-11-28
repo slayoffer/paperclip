@@ -7,7 +7,7 @@ import { bindVerifiedToolApprovalArguments, claimToolTestApproval, releaseToolAp
 import { approvedToolReviewCompanies, prepareApprovedToolReview, recoverApprovedToolReviews } from "./tool-review-recovery.js";
 import { toolReviewExpiryService } from "./tool-review-expiry.js";
 import { notifyToolReviewChange, writeToolReviewChange } from "./tool-review-work-notifications.js";
-import { captureInteractionWipAdmission } from "./interaction-wip-admission.js";
+import { writeInteractionCardStatus } from "./interaction-card-status.js";
 import { restConnectorFor } from "./connectors/rest-registry.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
@@ -2230,9 +2230,9 @@ export function createToolGatewayService(
 
     const interactionId = linked.interactionId;
     const changed = await db.transaction(async (tx) => {
-      const checkWip = input.status === "expired"
-        ? await captureInteractionWipAdmission(tx, { id: linked.issueId, companyId: linked.companyId }, { type: "system" })
-        : null;
+      const terminalStatus = input.status === "expired" || input.status === "cancelled" ? input.status : null;
+      if (terminalStatus) await tx.select({ id: issues.id }).from(issues)
+        .where(and(eq(issues.id, linked.issueId), eq(issues.companyId, linked.companyId))).for("update");
       const [interaction] = await tx
         .select({
           status: issueThreadInteractions.status,
@@ -2284,32 +2284,29 @@ export function createToolGatewayService(
         && projection.resultSummary === (input.resultSummary ?? null)) return false;
 
       const now = new Date();
-      const closesPending = interaction.status === "pending" && ["expired", "cancelled"].includes(input.status);
-      if (closesPending) {
+      const result = {
+        ...(currentResult ?? { version: 1, outcome }),
+        toolAction: {
+          ...asRecord(currentResult?.toolAction),
+          version: 1,
+          status: input.status === "cancelled" ? "expired" : input.status,
+          errorCode: input.errorCode ?? null,
+          errorMessage: input.errorMessage ?? null,
+          resultSummary: input.resultSummary ?? null,
+          updatedAt: now.toISOString(),
+        },
+      } as unknown as NonNullable<typeof issueThreadInteractions.$inferInsert.result>;
+      if (interaction.status === "pending" && terminalStatus) {
         await notifyChatRunMilestones(tx, { companyId: linked.companyId, issueId: linked.issueId });
+        await writeInteractionCardStatus(tx, {
+          issue: { id: linked.issueId, companyId: linked.companyId }, actor: { type: "system" },
+          where: eq(issueThreadInteractions.id, interactionId),
+          values: { status: terminalStatus, resolvedAt: now, result, updatedAt: now },
+        });
+      } else {
+        await tx.update(issueThreadInteractions).set({ result, updatedAt: now })
+          .where(eq(issueThreadInteractions.id, interactionId));
       }
-      await tx
-        .update(issueThreadInteractions)
-        .set({
-          ...(closesPending ? { status: input.status, resolvedAt: now } : {}),
-          result: {
-            ...(currentResult ?? { version: 1, outcome }),
-            toolAction: {
-              ...asRecord(currentResult?.toolAction),
-              version: 1,
-              status: input.status === "cancelled" ? "expired" : input.status,
-              errorCode: input.errorCode ?? null,
-              errorMessage: input.errorMessage ?? null,
-              resultSummary: input.resultSummary ?? null,
-              updatedAt: now.toISOString(),
-            },
-          } as unknown as NonNullable<
-            typeof issueThreadInteractions.$inferInsert.result
-          >,
-          updatedAt: now,
-        })
-        .where(eq(issueThreadInteractions.id, interactionId));
-      if (closesPending) await checkWip?.();
       return true;
     }).catch((error: unknown) => {
       // The tool approval has already expired. A pending card remains visible to projection repair.
@@ -4479,9 +4476,10 @@ export function createToolGatewayService(
       )
       .limit(1);
     if (existing) {
-      await db
-        .update(issueThreadInteractions)
-        .set({
+      await db.transaction(tx => writeInteractionCardStatus(tx, {
+        issue: { id: session.issueId!, companyId: session.companyId }, actor: { type: "system" },
+        where: eq(issueThreadInteractions.id, existing.id),
+        values: {
           status: "pending",
           continuationPolicy: "wake_assignee",
           requestedResolverPolicy: "human_only",
@@ -4493,8 +4491,8 @@ export function createToolGatewayService(
           result: null,
           resolvedAt: null,
           updatedAt: new Date(),
-        })
-        .where(eq(issueThreadInteractions.id, existing.id));
+        },
+      }));
       return;
     }
     await db.insert(issueThreadInteractions).values({
@@ -9884,7 +9882,7 @@ export function createToolGatewayService(
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; source?: string };
     }) {
       if (input.actor.agentId)
         throw new ToolGatewayHttpError(
@@ -10179,7 +10177,7 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; source?: string };
     }) {
       const updated = await commitToolActionReview(db, {
         ...input,

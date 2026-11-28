@@ -12,13 +12,13 @@ export function interactionWipActor(actor: InteractionActor, explicitActor?: Int
   return { type: "system" };
 }
 
-/** Agent confirmation can update its issue. Use the issue update's lock order. */
-export async function lockAgentConfirmationWipScope(
+/** Card decisions that also write issues must use the issue service's lock order. */
+export async function lockInteractionIssuePrivacyForWip(
   tx: Pick<Db, "execute">,
   companyId: string,
-  actor: InteractionActor,
+  actor: InteractionWipActor,
 ) {
-  if (!actor.agentId || agentWipLimit() === null) return;
+  if (agentWipLimit() === null || !wipLimitAppliesToActor(actor)) return;
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
 }
 

@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "../../interaction-card-status.js";
 import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
 import { vercelConnectHttpError, vercelCredentialFor, vercelConnectResourcesFor } from "../vercel-credentials.js";
 import { credentialScope, managedConnectorProfile } from "./client-settings.js";
@@ -622,9 +623,10 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
           )
           .limit(1);
         const [interaction] = existingInteraction
-          ? await tx
-              .update(issueThreadInteractions)
-              .set({
+          ? await writeInteractionCardStatus(tx, {
+              issue: { id: issueId, companyId }, actor: { type: "system" },
+              where: eq(issueThreadInteractions.id, existingInteraction.id),
+              values: {
                 status: "pending",
                 requestedResolverPolicy: "human_only",
                 effectiveResolverPolicy: "human_only",
@@ -635,9 +637,8 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
                 result: null,
                 resolvedAt: null,
                 updatedAt: new Date(),
-              })
-              .where(eq(issueThreadInteractions.id, existingInteraction.id))
-              .returning()
+              },
+            })
           : await tx
               .insert(issueThreadInteractions)
               .values({

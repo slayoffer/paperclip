@@ -11950,7 +11950,11 @@ export function issueService(db: Db) {
         }
         if (updated.assigneeAgentId !== existing.assigneeAgentId || updated.assigneeUserId !== existing.assigneeUserId) {
           const { issueThreadInteractionService } = await import("./issue-thread-interactions.js");
-          await issueThreadInteractionService(tx).expireConnectionIntentsForOwnershipChange(updated);
+          await issueThreadInteractionService(tx).expireConnectionIntentsForOwnershipChange(
+            updated,
+            options.wipAdmissionActor ?? (actorAgentId ? { type: "agent" }
+              : actorUserId ? { type: "board", source: "session" } : { type: "system" }),
+          );
         }
         if (existing.status !== updated.status) {
           if (

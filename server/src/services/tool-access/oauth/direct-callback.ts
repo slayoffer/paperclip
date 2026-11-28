@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "../../interaction-card-status.js";
 import { notifyIssueReviewState } from "../../issue-review-state-notifications.js";
 import { notifyToolConnectionHealth } from "../../tool-connection-health-notifications.js";
 import { credentialScope } from "./client-settings.js";
@@ -388,21 +389,15 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
           linkedInteraction?.kind === "request_confirmation"
         ) {
           await notifyIssueReviewState(tx, { companyId: connection.companyId, issueId: linkedInteraction.issueId });
-          await tx
-            .update(issueThreadInteractions)
-            .set({
-              status: "accepted",
-              result: { version: 1, outcome: "accepted" },
-              resolvedByUserId: stateRow.subjectUserId!,
-              resolvedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(issueThreadInteractions.id, stateRow.interactionId),
-                eq(issueThreadInteractions.companyId, connection.companyId),
-              ),
-            );
+          await writeInteractionCardStatus(tx, {
+            issue: { id: linkedInteraction.issueId, companyId: connection.companyId },
+            actor: { type: "board", source: "session" },
+            where: eq(issueThreadInteractions.id, stateRow.interactionId),
+            values: {
+              status: "accepted", result: { version: 1, outcome: "accepted" },
+              resolvedByUserId: stateRow.subjectUserId!, resolvedAt: new Date(), updatedAt: new Date(),
+            },
+          });
         }
         await syncCredentialBindings(
           connection,

@@ -1,3 +1,4 @@
+import type { InteractionCardStatusWriter } from "../interaction-card-status.js";
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import { completionContracts, heartbeatRuns, issues, issueThreadInteractions, statusDecisionEffects, statusDecisions, workAssessments, type Db } from "@paperclipai/db";
@@ -69,15 +70,17 @@ export async function findSupersededExternalReviewRequests(db: Db, binding: Revi
 export async function supersedeExternalReviewRequestsInTransaction(
   tx: Db, binding: ReviewBinding, candidates: Awaited<ReturnType<typeof findSupersededExternalReviewRequests>>,
   publications: ActivityPublication[],
+  writeCardStatus: InteractionCardStatusWriter,
 ) {
   for (const { interaction } of candidates) {
     await notifyAttentionRetentionWork(tx, { companyId: binding.companyId });
     const reason = "A later published review no longer requests human input.";
-    const [retired] = await tx.update(issueThreadInteractions).set({ status: "cancelled",
-      result: { version: 1, outcome: "withdrawn", reason }, resolvedAt: new Date(), updatedAt: new Date(),
-      resolvedByAgentId: binding.agentId, resolvedByRunId: binding.runId,
-    }).where(and(eq(issueThreadInteractions.id, interaction.id), eq(issueThreadInteractions.companyId, binding.companyId),
-      eq(issueThreadInteractions.status, "pending"), eq(issueThreadInteractions.payload, interaction.payload))).returning();
+    const [retired] = await writeCardStatus({
+      where: and(eq(issueThreadInteractions.id, interaction.id), eq(issueThreadInteractions.status, "pending"),
+        eq(issueThreadInteractions.payload, interaction.payload)),
+      values: { status: "cancelled", result: { version: 1, outcome: "withdrawn", reason },
+        resolvedAt: new Date(), updatedAt: new Date(), resolvedByAgentId: binding.agentId, resolvedByRunId: binding.runId },
+    });
     if (!retired) throw new Error("external_review_request_changed");
     const projected = await issueThreadInteractionService(tx).getById(retired.id);
     if (projected) await enqueueTerminalIssueInteractionChatPublications(tx, projected);

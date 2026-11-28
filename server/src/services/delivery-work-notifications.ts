@@ -81,6 +81,7 @@ export const DELIVERY_QUEUES = {
   toolReviewExpiry: "tool-review-expiry",
   gatewayCredentialExpiry: "gateway-credential-expiry",
   secretProposalExpiry: "secret-proposal-expiry",
+  secretProposalCardProjection: "secret-proposal-card-projection",
   customImageExpiry: "custom-image-expiry",
   historicalCleanup: "historical-cleanup",
   adapterLoginCleanup: "adapter-login-cleanup",

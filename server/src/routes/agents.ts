@@ -5515,6 +5515,7 @@ export function agentRoutes(
     if (validatedConnection?.connectionId !== connectionId) throw conflict("This is no longer the selected account. Reload the task and try again.");
     const completed = await intents.complete(interactionId, connectionId, userId, {
       validatedAdoption: { agentUpdatedAt: agent.updatedAt, binding: setup.aiConnection },
+      wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
     });
     // Dispatch the committed continuation now. The persisted delivery remains
     // available to the sweeper if this process exits or dispatch is deferred.

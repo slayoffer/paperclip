@@ -1,3 +1,4 @@
+import { withInteractionCardStatusWriter } from "../interaction-card-status.js";
 import type { ObsoletePolicyReviewScope } from "../obsolete-policy-review-notifications.js";
 import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import type { createDeliveryWorkCoordinator } from "../delivery-work-coordinator.js";
@@ -84,74 +85,75 @@ async function dismissCandidates(db: Db, candidates: Awaited<ReturnType<typeof f
         if (!issue) return;
         await notifyChatRunMilestones(tx, interaction);
         const now = new Date();
-        const [cancelled] = await tx.update(issueThreadInteractions).set({
-          status: "cancelled",
-          result: { version: 1, outcome: "withdrawn", reason: "A Paperclip upgrade does not require completion review." },
-          resolvedAt: now,
-          updatedAt: now,
-        }).where(and(
-          eq(issueThreadInteractions.id, interaction.id),
-          eq(issueThreadInteractions.companyId, decision.companyId),
-          eq(issueThreadInteractions.status, "pending"),
-          eq(issueThreadInteractions.payload, interaction.payload),
-          eq(issueThreadInteractions.kind, interaction.kind),
-          eq(issueThreadInteractions.sourceRunId, decision.runId),
-          eq(issueThreadInteractions.idempotencyKey, interaction.idempotencyKey!),
-          isNull(issueThreadInteractions.createdByAgentId), isNull(issueThreadInteractions.createdByUserId),
-        )).returning({ id: issueThreadInteractions.id });
-        if (!cancelled) return;
-        const terminalInteraction = await issueThreadInteractionService(tx as unknown as Db).getById(cancelled.id);
-        if (terminalInteraction) {
-          await enqueueTerminalIssueInteractionChatPublications(tx as unknown as Db, terminalInteraction);
-        }
+        await withInteractionCardStatusWriter(tx, { issue, actor: { type: "system" } }, async writeCardStatus => {
+          const [cancelled] = await writeCardStatus({
+            where: and(
+              eq(issueThreadInteractions.id, interaction.id), eq(issueThreadInteractions.status, "pending"),
+              eq(issueThreadInteractions.payload, interaction.payload), eq(issueThreadInteractions.kind, interaction.kind),
+              eq(issueThreadInteractions.sourceRunId, decision.runId), eq(issueThreadInteractions.idempotencyKey, interaction.idempotencyKey!),
+              isNull(issueThreadInteractions.createdByAgentId), isNull(issueThreadInteractions.createdByUserId),
+            ),
+            values: {
+              status: "cancelled",
+              result: { version: 1, outcome: "withdrawn", reason: "A Paperclip upgrade does not require completion review." },
+              resolvedAt: now,
+              updatedAt: now,
+            },
+          });
+          if (!cancelled) return;
+          const terminalInteraction = await issueThreadInteractionService(tx as unknown as Db).getById(cancelled.id);
+          if (terminalInteraction) {
+            await enqueueTerminalIssueInteractionChatPublications(tx as unknown as Db, terminalInteraction);
+          }
 
-        const pendingInteraction = await tx.select({ id: issueThreadInteractions.id })
-          .from(issueThreadInteractions).where(and(
-            eq(issueThreadInteractions.companyId, issue.companyId),
-            eq(issueThreadInteractions.issueId, issue.id),
-            eq(issueThreadInteractions.status, "pending"),
-          )).limit(1);
-        const pendingApproval = await tx.select({ id: approvals.id }).from(issueApprovals)
-          .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId),
-            eq(approvals.companyId, issue.companyId)))
-          .where(and(eq(issueApprovals.companyId, issue.companyId), eq(issueApprovals.issueId, issue.id),
-            inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
-        const restoreStatus = issue.status === "in_review"
-          && issue.lastStatusDecisionId === decision.id
-          && issue.statusVersion === Number(decision.decisionJson.projectedStatusVersion ?? decision.decisionVersion)
-          && ["backlog", "todo", "in_progress", "blocked"].includes(decision.fromStatus)
-          && pendingInteraction.length === 0 && pendingApproval.length === 0
-          && issue.executionState?.status !== "pending";
-        if (restoreStatus) {
-          const priorDecision = priorDecisionId ? await tx.select().from(statusDecisions).where(and(
-            eq(statusDecisions.id, priorDecisionId), eq(statusDecisions.companyId, issue.companyId),
-            eq(statusDecisions.issueId, issue.id),
-          )).then((rows) => rows[0]) : null;
-          await issueService(tx as unknown as Db).update(issue.id, {
-            status: decision.fromStatus,
-            // This is an administrative correction, not a replay of the old decision.
-            lastStatusDecisionId: null,
-            unblockDescriptor: priorDecision?.decisionJson.unblockDescriptor as typeof issue.unblockDescriptor ?? null,
-          }, tx, publications);
-        }
-        const { publication } = await persistActivity(tx as unknown as Db, {
-          companyId: issue.companyId,
-          actorType: "system",
-          actorId: "native-policy-review-cleanup",
-          action: restoreStatus ? "issue.updated" : "issue.interaction_cancelled",
-          entityType: "issue",
-          entityId: issue.id,
-          issueId: issue.id,
-          runId: decision.runId,
-          details: {
-            source: "obsolete_native_policy_review",
-            interactionId: interaction.id,
-            decisionId: decision.id,
-            fromStatus: issue.status,
-            toStatus: restoreStatus ? decision.fromStatus : issue.status,
-          },
+          const pendingInteraction = await tx.select({ id: issueThreadInteractions.id })
+            .from(issueThreadInteractions).where(and(
+              eq(issueThreadInteractions.companyId, issue.companyId),
+              eq(issueThreadInteractions.issueId, issue.id),
+              eq(issueThreadInteractions.status, "pending"),
+            )).limit(1);
+          const pendingApproval = await tx.select({ id: approvals.id }).from(issueApprovals)
+            .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId),
+              eq(approvals.companyId, issue.companyId)))
+            .where(and(eq(issueApprovals.companyId, issue.companyId), eq(issueApprovals.issueId, issue.id),
+              inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+          const restoreStatus = issue.status === "in_review"
+            && issue.lastStatusDecisionId === decision.id
+            && issue.statusVersion === Number(decision.decisionJson.projectedStatusVersion ?? decision.decisionVersion)
+            && ["backlog", "todo", "in_progress", "blocked"].includes(decision.fromStatus)
+            && pendingInteraction.length === 0 && pendingApproval.length === 0
+            && issue.executionState?.status !== "pending";
+          if (restoreStatus) {
+            const priorDecision = priorDecisionId ? await tx.select().from(statusDecisions).where(and(
+              eq(statusDecisions.id, priorDecisionId), eq(statusDecisions.companyId, issue.companyId),
+              eq(statusDecisions.issueId, issue.id),
+            )).then((rows) => rows[0]) : null;
+            await issueService(tx as unknown as Db).update(issue.id, {
+              status: decision.fromStatus,
+              // This is an administrative correction, not a replay of the old decision.
+              lastStatusDecisionId: null,
+              unblockDescriptor: priorDecision?.decisionJson.unblockDescriptor as typeof issue.unblockDescriptor ?? null,
+            }, tx, publications);
+          }
+          const { publication } = await persistActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "native-policy-review-cleanup",
+            action: restoreStatus ? "issue.updated" : "issue.interaction_cancelled",
+            entityType: "issue",
+            entityId: issue.id,
+            issueId: issue.id,
+            runId: decision.runId,
+            details: {
+              source: "obsolete_native_policy_review",
+              interactionId: interaction.id,
+              decisionId: decision.id,
+              fromStatus: issue.status,
+              toStatus: restoreStatus ? decision.fromStatus : issue.status,
+            },
+          });
+          publications.push(publication);
         });
-        publications.push(publication);
       });
     } catch (err) {
       logger.warn({ err, interactionId: interaction.id, issueId: decision.issueId },

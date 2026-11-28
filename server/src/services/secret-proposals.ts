@@ -1,8 +1,11 @@
+import { isInteractionCardWipRefusal, writeInteractionCardStatus, type InteractionCardStatusTransaction } from "./interaction-card-status.js";
+import type { InteractionWipActor } from "./interaction-wip-admission.js";
+import { agentWipLimit, wipLimitAppliesToActor } from "./agent-wip-limit.js";
 import { notifyChatRunMilestones } from "./chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { updateAgentConfigurationInTransaction } from "./agent-configuration-transaction.js";
 import { withAgentAppearance } from "@paperclipai/shared";
-import { and, count, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -19,7 +22,7 @@ import type { SecretProvider } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { agentService } from "./agents.js";
-import { logActivity } from "./activity-log.js";
+import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { normalizeSecretKey, secretService } from "./secrets.js";
 
 const CONFIG_PATH_RE = /^(?:env\.[A-Za-z_][A-Za-z0-9_]*|access\.[A-Za-z_][A-Za-z0-9_]*)$/;
@@ -257,13 +260,25 @@ export function createSecretProposalsService(db: Db) {
   }
 
   async function reflectProposalLifecycleOnInteraction(
-    txDb: Db,
-    proposal: Proposal,
+    tx: InteractionCardStatusTransaction,
+    proposal: Pick<Proposal, "id" | "companyId" | "interactionId" | "originIssueId">,
     outcome: "approved" | "rejected" | "withdrawn" | "expired",
-    input: { resolvedByUserId?: string | null; reason?: string | null } = {},
+    input: { resolvedByUserId?: string | null; reason?: string | null; wipAdmissionActor?: InteractionWipActor } = {},
   ) {
     if (!proposal.interactionId) return;
-    const current = await txDb
+    const actor = input.wipAdmissionActor ?? (input.resolvedByUserId ? { type: "board", source: "session" } : { type: "system" });
+    if (proposal.originIssueId && agentWipLimit() !== null && wipLimitAppliesToActor(actor)) {
+      // Card resolution takes the issue before the proposal. This path already holds the proposal.
+      // Retry contention without waiting for an issue lock held by a card resolver.
+      try {
+        await tx.select({ id: issues.id }).from(issues)
+          .where(and(eq(issues.id, proposal.originIssueId), eq(issues.companyId, proposal.companyId))).for("update", { noWait: true });
+      } catch (error) {
+        if ((asRecord(asRecord(error).cause).code ?? asRecord(error).code) !== "55P03") throw error;
+        throw conflict("Task owner admission is busy. Retry the card change.", { code: "agent_wip_limit" });
+      }
+    }
+    const current = await tx
       .select()
       .from(issueThreadInteractions)
       .where(and(
@@ -291,10 +306,15 @@ export function createSecretProposalsService(db: Db) {
       : outcome === "rejected"
         ? "rejected"
         : "withdrawn";
-    if (current.status !== status) await notifyChatRunMilestones(txDb, current);
-    await txDb
-      .update(issueThreadInteractions)
-      .set({
+    if (current.status !== status) await notifyChatRunMilestones(tx, current);
+    await writeInteractionCardStatus(tx, {
+      issue: { id: current.issueId, companyId: current.companyId },
+      actor,
+      where: and(
+        eq(issueThreadInteractions.id, current.id),
+        inArray(issueThreadInteractions.status, outcome === "approved" ? ["pending", "accepted"] : ["pending"]),
+      ),
+      values: {
         status,
         result: {
           ...currentResult,
@@ -310,11 +330,22 @@ export function createSecretProposalsService(db: Db) {
         resolvedByUserId: input.resolvedByUserId ?? current.resolvedByUserId ?? null,
         resolvedAt: current.resolvedAt ?? now,
         updatedAt: now,
-      })
-      .where(and(
-        eq(issueThreadInteractions.id, current.id),
-        inArray(issueThreadInteractions.status, outcome === "approved" ? ["pending", "accepted"] : ["pending"]),
-      ));
+      },
+    });
+  }
+
+  async function lockProposalIssueScope(tx: InteractionCardStatusTransaction, companyId: string, id: string) {
+    const [proposal] = await tx.select({ originIssueId: companySecretProposals.originIssueId, prerequisiteId: companySecretProposals.secretProposalId })
+      .from(companySecretProposals).where(and(eq(companySecretProposals.companyId, companyId), eq(companySecretProposals.id, id)));
+    if (!proposal) return;
+    const related = await tx.select({ originIssueId: companySecretProposals.originIssueId }).from(companySecretProposals).where(and(
+      eq(companySecretProposals.companyId, companyId),
+      or(eq(companySecretProposals.secretProposalId, id), proposal.prerequisiteId ? eq(companySecretProposals.id, proposal.prerequisiteId) : undefined),
+    ));
+    const issueIds = [...new Set([proposal.originIssueId, ...related.map(row => row.originIssueId)].filter((issueId): issueId is string => issueId !== null))];
+    if (!issueIds.length) return;
+    await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)))
+      .orderBy(asc(issues.id)).for("update");
   }
 
   async function createSecret(context: ProposalRunContext, input: {
@@ -654,9 +685,6 @@ export function createSecretProposalsService(db: Db) {
         ciphertextScrubbed: true,
       },
     });
-    await reflectProposalLifecycleOnInteraction(txDb, proposal, "approved", {
-      resolvedByUserId: input.resolvedByUserId,
-    });
     return updated;
   }
 
@@ -722,6 +750,7 @@ export function createSecretProposalsService(db: Db) {
 
   async function approve(companyId: string, proposalId: string, input: {
     resolvedByUserId: string;
+    wipAdmissionActor?: InteractionWipActor;
     cascade?: boolean;
     overrides?: { name?: string; description?: string | null; providerConfigId?: string | null };
     assertCanResolve?: (proposal: Proposal, txDb: Db) => Promise<void>;
@@ -733,10 +762,15 @@ export function createSecretProposalsService(db: Db) {
       await assertBindingSnapshotCurrent(proposal, txDb, true);
       return proposal;
     };
+    const admitApprovalCard = (tx: InteractionCardStatusTransaction, proposal: Proposal) =>
+      reflectProposalLifecycleOnInteraction(tx, proposal, "approved", input);
+    const metered = agentWipLimit() !== null && wipLimitAppliesToActor(input.wipAdmissionActor);
     const saved = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      if (metered) await lockProposalIssueScope(tx, companyId, proposalId);
       const proposal = await loadForApproval(txDb);
       if (proposal.kind === "secret") {
+        await admitApprovalCard(tx, proposal);
         const created = await applySecretApproval(txDb, proposal, input);
         return { kind: "secret" as const, proposal: await markApproved(txDb, proposal, {
           resolvedByUserId: input.resolvedByUserId,
@@ -758,6 +792,17 @@ export function createSecretProposalsService(db: Db) {
             throw conflict(`Binding proposal requires pending secret proposal ${dependency.id}; retry with cascade=true`);
           }
           assertNotExpired(dependency);
+          await admitApprovalCard(tx, dependency);
+          if (metered && proposal.interactionId) {
+            // Preview both card changes before creating the prerequisite in its own approval phase.
+            const previewComplete = Symbol();
+            await tx.transaction(async (preview) => {
+              await admitApprovalCard(preview, proposal);
+              throw previewComplete;
+            }).catch((error: unknown) => {
+              if (error !== previewComplete) throw error;
+            });
+          }
           const created = await applySecretApproval(txDb, dependency, input);
           await markApproved(txDb, dependency, {
             resolvedByUserId: input.resolvedByUserId,
@@ -774,11 +819,13 @@ export function createSecretProposalsService(db: Db) {
     // Keep the approved secret if applying its reference fails.
     return db.transaction(async tx => {
       const txDb = tx as unknown as Db;
+      if (metered) await lockProposalIssueScope(tx, companyId, proposalId);
       const proposal = await loadForApproval(txDb);
       const liveSecret = await secretService(txDb).getById(saved.secretId);
       if (!liveSecret || liveSecret.companyId !== companyId || liveSecret.status !== "active") {
         throw conflict("Binding proposal secret is not active");
       }
+      await admitApprovalCard(tx, proposal);
       await applyBindingApproval(txDb, proposal, liveSecret, input.resolvedByUserId);
       return markApproved(txDb, proposal, {
         resolvedByUserId: input.resolvedByUserId,
@@ -791,14 +838,33 @@ export function createSecretProposalsService(db: Db) {
     resolvedByUserId?: string | null;
     reason?: string | null;
     proposerAgentId?: string | null;
+    wipAdmissionActor?: InteractionWipActor;
   } = {}) {
     const proposal = await requirePending(companyId, proposalId);
     if (status === "withdrawn" && proposal.proposedByAgentId !== input.proposerAgentId) {
       throw forbidden("Only the proposer can withdraw this proposal");
     }
     const now = new Date();
-    return db.transaction(async (tx) => {
+    const publications: ActivityPublication[] = [];
+    const decision = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      const actor = input.wipAdmissionActor ?? (input.resolvedByUserId ? { type: "board", source: "session" } : { type: "system" });
+      if (status !== "expired" && agentWipLimit() !== null && wipLimitAppliesToActor(actor)) {
+        await lockProposalIssueScope(tx, companyId, proposalId);
+      }
+      async function reflectTerminalCard(target: Proposal, outcome: "rejected" | "withdrawn" | "expired", reason?: string | null) {
+        const reflect = (transaction: InteractionCardStatusTransaction) => reflectProposalLifecycleOnInteraction(transaction, target, outcome, {
+          resolvedByUserId: input.resolvedByUserId,
+          reason,
+          wipAdmissionActor: input.wipAdmissionActor,
+        });
+        if (status !== "expired") return reflect(tx);
+        // The expiry must clear retained secret material even when the card still holds a WIP slot.
+        await tx.transaction(reflect).catch(async (error: unknown) => {
+          if (!isInteractionCardWipRefusal(error)) throw error;
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.secretProposalCardProjection, target.companyId);
+        });
+      }
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.secretProposalExpiry, companyId);
       const updated = await tx.update(companySecretProposals).set({
         status,
@@ -838,7 +904,7 @@ export function createSecretProposalsService(db: Db) {
         agentId: proposal.proposedByAgentId,
         runId: proposal.originRunId,
         details: { ciphertextScrubbed: true, issueId: proposal.originIssueId, reason: input.reason ?? null },
-      });
+      }, publications);
       for (const dependent of dependents) {
         await logActivity(txDb, {
           companyId,
@@ -855,18 +921,14 @@ export function createSecretProposalsService(db: Db) {
             reason: dependent.resolutionReason,
             cascadeFromProposalId: proposal.id,
           },
-        });
-        await reflectProposalLifecycleOnInteraction(txDb, dependent, "rejected", {
-          resolvedByUserId: input.resolvedByUserId,
-          reason: dependent.resolutionReason,
-        });
+        }, publications);
+        await reflectTerminalCard(dependent, "rejected", dependent.resolutionReason);
       }
-      await reflectProposalLifecycleOnInteraction(txDb, proposal, status, {
-        resolvedByUserId: input.resolvedByUserId,
-        reason: input.reason ?? (status === "expired" ? "Pending proposal expired" : null),
-      });
+      await reflectTerminalCard(proposal, status, input.reason ?? (status === "expired" ? "Pending proposal expired" : null));
       return updated;
     });
+    for (const publication of publications) publishActivity(publication);
+    return decision;
   }
 
   async function sweepExpired(
@@ -915,5 +977,41 @@ export function createSecretProposalsService(db: Db) {
     return row?.at == null ? null : new Date(row.at).getTime();
   }
 
-  return { getById, view: enrich, createSecret, createBinding, listForAgent, listForBoard, assertBindingSnapshotCurrent, approve, transition, sweepExpired, sweepExpiredForCompany, expiryDeadlines, nextExpiryAt };
+  function pendingCardProjection(companyId?: string, proposalId?: string) {
+    return db.select({
+      id: companySecretProposals.id, companyId: companySecretProposals.companyId,
+      interactionId: companySecretProposals.interactionId, originIssueId: companySecretProposals.originIssueId,
+      status: companySecretProposals.status, resolutionReason: companySecretProposals.resolutionReason,
+      resolvedByUserId: companySecretProposals.resolvedByUserId,
+    }).from(companySecretProposals).innerJoin(issueThreadInteractions, and(
+      eq(issueThreadInteractions.id, companySecretProposals.interactionId),
+      eq(issueThreadInteractions.companyId, companySecretProposals.companyId),
+      eq(issueThreadInteractions.issueId, companySecretProposals.originIssueId),
+    )).where(and(
+      inArray(companySecretProposals.status, ["expired", "rejected"]),
+      eq(issueThreadInteractions.status, "pending"),
+      sql`${issueThreadInteractions.payload}->'secretProposal'->>'proposalId' = ${companySecretProposals.id}::text`,
+      companyId === undefined ? undefined : eq(companySecretProposals.companyId, companyId),
+      proposalId === undefined ? undefined : eq(companySecretProposals.id, proposalId),
+    ));
+  }
+
+  async function cardProjectionDeadlines(companyId?: string) {
+    const rows = await pendingCardProjection(companyId);
+    const dueAt = Date.now();
+    return rows.map(({ id, companyId }) => ({ id, companyId, dueAt }));
+  }
+
+  async function repairCardProjection(companyId: string, proposalId: string) {
+    const [proposal] = await pendingCardProjection(companyId, proposalId).limit(1);
+    if (!proposal || (proposal.status !== "expired" && proposal.status !== "rejected")) return;
+    const status = proposal.status;
+    await db.transaction(tx => reflectProposalLifecycleOnInteraction(tx, proposal, status, {
+      resolvedByUserId: proposal.resolvedByUserId,
+      reason: proposal.resolutionReason,
+      wipAdmissionActor: { type: "system" },
+    }));
+  }
+
+  return { getById, view: enrich, createSecret, createBinding, listForAgent, listForBoard, assertBindingSnapshotCurrent, approve, transition, sweepExpired, sweepExpiredForCompany, expiryDeadlines, nextExpiryAt, cardProjectionDeadlines, repairCardProjection };
 }

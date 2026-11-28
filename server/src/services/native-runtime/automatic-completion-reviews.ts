@@ -1,3 +1,4 @@
+import { writeInteractionCardStatus } from "../interaction-card-status.js";
 import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
 import type { AutomaticCompletionReviewScope } from "../automatic-completion-review-notifications.js";
 import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
@@ -141,9 +142,15 @@ async function dismissCandidates(db: Db, candidates: Awaited<ReturnType<typeof f
         await notifyChatRunMilestones(tx, interaction);
         await notifyNativeStatusReassessment(tx, { companyId: issue.companyId, issueId: issue.id, runId: decision.runId });
         const now = new Date();
-        const [retired] = await tx
-          .update(issueThreadInteractions)
-          .set({
+        const [retired] = await writeInteractionCardStatus(tx, {
+          issue, actor: { type: "system" },
+          where: and(
+            eq(issueThreadInteractions.id, interaction.id), eq(issueThreadInteractions.status, "pending"),
+            eq(issueThreadInteractions.payload, interaction.payload), eq(issueThreadInteractions.kind, interaction.kind),
+            eq(issueThreadInteractions.sourceRunId, decision.runId), eq(issueThreadInteractions.idempotencyKey, interaction.idempotencyKey!),
+            isNull(issueThreadInteractions.createdByAgentId), isNull(issueThreadInteractions.createdByUserId),
+          ),
+          values: {
             status: "cancelled",
             result: {
               version: 1,
@@ -152,20 +159,8 @@ async function dismissCandidates(db: Db, candidates: Awaited<ReturnType<typeof f
             },
             resolvedAt: now,
             updatedAt: now,
-          })
-          .where(
-            and(
-              eq(issueThreadInteractions.id, interaction.id),
-              eq(issueThreadInteractions.companyId, issue.companyId),
-              eq(issueThreadInteractions.status, "pending"),
-              eq(issueThreadInteractions.payload, interaction.payload),
-              eq(issueThreadInteractions.kind, interaction.kind),
-              eq(issueThreadInteractions.sourceRunId, decision.runId),
-              eq(issueThreadInteractions.idempotencyKey, interaction.idempotencyKey!),
-              isNull(issueThreadInteractions.createdByAgentId), isNull(issueThreadInteractions.createdByUserId),
-            ),
-          )
-          .returning();
+          },
+        });
         if (!retired) return;
         const projected = await issueThreadInteractionService(
           tx as unknown as Db,

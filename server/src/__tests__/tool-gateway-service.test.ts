@@ -1904,9 +1904,12 @@ describeEmbeddedPostgres("tool gateway service", () => {
       .where(eq(issueThreadInteractions.id, displayed.id)).returning();
     const input = { companyId: company.id, actionRequestId: action.id, actor: { userId: "board-user" },
       expectedRevision: displayed.revision, idempotencyKey: `tool-${decision}` };
-    const resolve = (expectedRevision: string) => decision === "approve"
-      ? gateway.approveActionRequest({ ...input, expectedRevision })
-      : gateway.declineActionRequest({ ...input, expectedRevision, reason: "Decline" });
+    const resolve = (expectedRevision: string, source?: string) => {
+      const actor = source ? { ...input.actor, source } : input.actor;
+      return decision === "approve"
+        ? gateway.approveActionRequest({ ...input, actor, expectedRevision })
+        : gateway.declineActionRequest({ ...input, actor, expectedRevision, reason: "Decline" });
+    };
     await expect(resolve(displayed.revision)).rejects.toMatchObject({ status: 409,
       details: { code: "interaction_revision_conflict" } });
     const [pending] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, action.id));
@@ -1916,7 +1919,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const events = await db.select().from(toolCallEvents);
     const deliveries = await db.select().from(toolActionDeliveries);
     const audit = await db.select().from(activityLog);
-    expect(await resolve(current.revision)).toEqual(first);
+    expect(await resolve(current.revision, "board_key")).toEqual(first);
     expect(await db.select().from(toolCallEvents)).toHaveLength(events.length);
     expect(await db.select().from(toolActionDeliveries)).toHaveLength(deliveries.length);
     expect(await db.select().from(activityLog)).toHaveLength(audit.length);
