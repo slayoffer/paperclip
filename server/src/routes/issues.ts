@@ -316,6 +316,7 @@ import {
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { agentWipFull, agentWipLimit, applyIssueUpdateWipAdmission, isWipActiveStatus, wipLimitAppliesToActor } from "../services/agent-wip-limit.js";
+import { tryLockPullQueueOwner } from "../services/pull-queue-owner-lock.js";
 import {
   agentIssueCreateLimits,
   agentIssueCreateRefusal,
@@ -15129,7 +15130,10 @@ export function issueRoutes(
                 .where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
               if (!lockedIssue) return null;
               const validatedStatus = issueUpdateData.status;
-              await applyIssueUpdateWipAdmission(tx, req.actor, lockedIssue, issueUpdateData, normalizedAssigneeAgentId);
+              await applyIssueUpdateWipAdmission(
+                tx, req.actor, lockedIssue, issueUpdateData, normalizedAssigneeAgentId,
+                (agentId) => tryLockPullQueueOwner(tx, lockedIssue.companyId, agentId),
+              );
               const monitorArmed = issueUpdateData.executionPolicy === undefined
                 ? Boolean(lockedIssue.monitorNextCheckAt)
                 : Boolean(normalizeIssueExecutionPolicy(issueUpdateData.executionPolicy)?.monitor);

@@ -67,19 +67,20 @@ export function wipPullRefusal(limit: number): string {
     "Finish or hand off one of them first; the next backlog issue is promoted when a slot frees.";
 }
 
-/** The same check runs on the preview and on the saved issue under the company admission lock. */
+/** The update transaction supplies the owner try-lock after acquiring the company and issue locks. */
 export async function applyIssueUpdateWipAdmission(
   db: Pick<Db, "select">,
   actor: { type?: string; source?: string },
   existing: { id: string; companyId: string; assigneeAgentId: string | null; status: string; priority: string },
   patch: { status?: string; priority?: string },
   requestedAssignee: string | null | undefined,
+  tryAcquireAdmissionLock?: (agentId: string) => Promise<boolean>,
 ) {
   const status = patch.status ?? existing.status;
   const reassigned = requestedAssignee !== undefined && requestedAssignee !== existing.assigneeAgentId;
   const agentId = reassigned ? requestedAssignee : existing.assigneeAgentId;
   const input = { companyId: existing.companyId, agentId, status,
-    priority: patch.priority ?? existing.priority, excludeIssueId: existing.id };
+    priority: patch.priority ?? existing.priority, excludeIssueId: existing.id, tryAcquireAdmissionLock };
   if (reassigned) {
     // Blocked work retains its stop condition even when the new owner is full.
     if (status !== "blocked" && await agentWipFull(db, actor, input)) patch.status = "backlog";
