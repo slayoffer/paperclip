@@ -3621,6 +3621,9 @@ describe("agent issue mutation checkout ownership", () => {
       expect(children).toHaveLength(2);
       expect(children[0]).toEqual(expect.objectContaining({ status: "todo" }));
       expect(children[1]).toEqual(expect.objectContaining({ status: "todo" }));
+      for (const child of children) {
+        expect(child.wipAdmissionActor).toStrictEqual({ type: "agent", source: "agent_key" });
+      }
       expect(children[1]?.blockedByIssueIds).toBeUndefined();
       expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2);
       expect(mockHeartbeatService.wakeup).toHaveBeenNthCalledWith(

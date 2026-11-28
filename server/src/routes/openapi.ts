@@ -7158,7 +7158,7 @@ registry.registerPath({
   path: "/api/instance/task-drain",
   tags: ["instance"],
   summary: "End a task drain and restore run admission",
-  description: "An owned lease requires its leaseId and the acquiring actor. An idle hold requires its ownerId query parameter. An unowned drain can be ended without either identifier.",
+  description: 'An owned lease requires its leaseId and the acquiring actor. By default, a POST with finite ttlMs creates an owned lease. Release it with {"leaseId": "…"} in the DELETE body. An idle hold requires its ownerId query parameter. An unowned drain can be ended without either identifier.',
   request: {
     query: z.object({ ownerId: z.string().uuid().optional() }),
     body: { ...jsonBody(stopTaskDrainRequestSchema), required: false },

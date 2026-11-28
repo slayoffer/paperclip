@@ -50,12 +50,14 @@ export async function agentWipFull(
   input: {
     companyId: string; agentId: string | null | undefined; status: unknown; excludeIssueId?: string | null; pending?: number;
     priority?: unknown;
+    tryAcquireAdmissionLock?: (agentId: string) => Promise<boolean>;
   },
 ): Promise<boolean> {
   const limit = agentWipLimit();
   if (limit === null || !input.agentId || !isWipActiveStatus(input.status) || !wipLimitAppliesToActor(actor)) return false;
   // Anton, 2026-10-17: a critical assignment bypasses WIP for any actor (the escape for urgent board-key work).
   if (input.priority === "critical") return false;
+  if (input.tryAcquireAdmissionLock && !await input.tryAcquireAdmissionLock(input.agentId)) return true;
   const active = await countAgentActiveIssues(db, { companyId: input.companyId, agentId: input.agentId, excludeIssueId: input.excludeIssueId });
   return active + (input.pending ?? 0) >= limit;
 }

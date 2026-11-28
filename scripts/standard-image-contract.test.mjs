@@ -4,22 +4,36 @@ import test from "node:test";
 import { standardImageDigest, resolveStandardImageDigest } from "./standard-image-contract.mjs";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
-test("Node image policy accepts Node 24 major tags and exact security pins", () => {
-  for (const tag of ["24-trixie-slim", "24-bookworm-slim", "24-alpine3.23", "24.11.0-bookworm", "24.21.0-bookworm",
-    `24.21.0-bookworm@sha256:${"a".repeat(64)}`, `24-bookworm@sha256:${"0".repeat(64)}`]) {
-    assert.equal(isNode24ImageTag(tag), true, tag);
-  }
-});
+const nodeImageDigest = `@sha256:${"a".repeat(64)}`;
 
-test("Node image policy rejects other majors, partial versions and malformed pins", () => {
-  for (const tag of ["240-bookworm", "25.21.0-bookworm", "v24.21.0-bookworm", "latest",
-    "24.0.0-bookworm", "24.10.0-bookworm", "24.10.99-bookworm",
-    "24.21-bookworm", "24.21.0", "24.21.0-", "24..21.0-bookworm", "24.021.0-bookworm",
-    "24.21.0-bookworm@sha256:short", `24.21.0-bookworm@@sha256:${"a".repeat(64)}`,
-    `24.21.0-bookworm@sha256:${"a".repeat(64)}junk`, "${NODE_VERSION}-bookworm", "24-$(whoami)"]) {
-    assert.equal(isNode24ImageTag(tag), false, tag);
-  }
-});
+for (const tag of [
+  `24.22.1-trixie-slim${nodeImageDigest}`,
+  `24.22.2-bookworm${nodeImageDigest}`,
+  `24.23.0-alpine3.24${nodeImageDigest}`,
+]) {
+  test(`Node image policy accepts ${tag.split("@")[0]} with a digest`, () => {
+    assert.equal(isNode24ImageTag(tag), true);
+  });
+}
+
+for (const tag of [
+  `24.11.0-trixie-slim${nodeImageDigest}`,
+  `24.22.0-trixie-slim${nodeImageDigest}`,
+  "24.22.1-trixie-slim",
+  "24-trixie-slim",
+  `24-trixie-slim${nodeImageDigest}`,
+  `24.22-trixie-slim${nodeImageDigest}`,
+  "24.22.1-trixie-slim@sha256:short",
+  `24.22.1-trixie-slim${nodeImageDigest}junk`,
+  `25.22.1-trixie-slim${nodeImageDigest}`,
+  `24.022.1-trixie-slim${nodeImageDigest}`,
+  `24.22.1-${nodeImageDigest}`,
+]) {
+  test(`Node image policy rejects ${tag}`, () => {
+    assert.equal(isNode24ImageTag(tag), false);
+  });
+}
+
 const descriptor = architecture => ({ platform: { os: "linux", architecture }, digest: `sha256:${"a".repeat(64)}`, size: 100 });
 const index = manifests => Buffer.from(JSON.stringify({ schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests }));
 test("signs the exact registry bytes, including both supported platforms", () => {

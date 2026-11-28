@@ -13365,7 +13365,7 @@ export function issueRoutes(
         );
         normalizedChildren.push({
           ...child,
-          wipAdmissionActor: req.actor,
+          wipAdmissionActor: { type: req.actor.type, source: req.actor.source },
           id: childIssueId,
           executionPolicy,
           ...(sourceTrust ? { sourceTrust } : {}),

@@ -1222,6 +1222,7 @@ async function startServerWithDatabaseTeardown(
   let wakePullQueue: (() => void) | undefined;
   let wakeResidualRecovery: (() => void) | undefined;
   let wakeHeartbeatSchedules: (() => void) | undefined;
+  let startupRecoveryDeferredByDrain = false;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
   const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
     const finishIdleWork = beginIdleTrackedWork();
@@ -1308,6 +1309,51 @@ async function startServerWithDatabaseTeardown(
     trackHeartbeatSchedulerWork(backupExpirationWork.ready);
     server.on("close", backupExpirationWork.stop);
   }
+  async function recoverStartupHeartbeatState(startupHeartbeat: NonNullable<typeof heartbeat>) {
+    try {
+      const hotRestart = await timeStartupRecovery("hot_restart", () => startupHeartbeat.reconcileHotRestartAdoption());
+      if (hotRestart.mode === "reported") {
+        logger.info(
+          hotRestart,
+          "startup hot-restart adoption reconciliation complete",
+        );
+      }
+    } catch (err) {
+      logger.error(
+        { err },
+        "startup hot-restart adoption reconciliation failed - recovery deadlines remain registered",
+      );
+    }
+
+    const recoveredGoalActions = await timeStartupRecovery("goal_actions", () => startupHeartbeat.recoverPendingSessionGoalActions()).catch(err => {
+      logger.error({ err }, "startup session-goal action recovery failed");
+      return { enqueued: 0, invalid: 0 };
+    });
+    if (recoveredGoalActions.enqueued > 0 || recoveredGoalActions.invalid > 0) {
+      logger.warn(
+        recoveredGoalActions,
+        "startup session-goal action outbox recovery reconciled pending controls",
+      );
+    }
+    const recoveredGoals = await timeStartupRecovery("active_goals", () => startupHeartbeat.recoverActiveSessionGoals()).catch(err => {
+      logger.error({ err }, "startup active session-goal recovery failed");
+      return { enqueued: 0 };
+    });
+    if (recoveredGoals.enqueued > 0) {
+      logger.warn(
+        recoveredGoals,
+        "startup session-goal recovery resumed durable agent goals",
+      );
+    }
+  }
+
+  async function resumeDeferredStartupRecovery(startupHeartbeat: NonNullable<typeof heartbeat>) {
+    const suppression = await startupHeartbeat.resolveSchedulingSuppression();
+    if (suppression.suppressed || !startupRecoveryDeferredByDrain || heartbeatSchedulerStopped || isWarmStandby()) return;
+    startupRecoveryDeferredByDrain = false;
+    await recoverStartupHeartbeatState(startupHeartbeat);
+  }
+
   const taskDrainExpiryWork = registerTaskDrainExpiryWork(deliveryWork, () => {
     if (heartbeatSchedulerStopped || isWarmStandby()) return;
     wakePullQueue?.();
@@ -1316,6 +1362,11 @@ async function startServerWithDatabaseTeardown(
     if (heartbeat) trackHeartbeatSchedulerWork(heartbeat.recoverNativeRunsAfterRestart(new Date(), undefined, {
       skipDelegatedWork: true,
     }).catch(err => logger.error({ err }, "failed to recover deferred native work after task drain expiry")));
+    if (heartbeat && startupRecoveryDeferredByDrain) {
+      trackHeartbeatSchedulerWork(resumeDeferredStartupRecovery(heartbeat).catch(err => {
+        logger.error({ err }, "failed to resume startup heartbeat recovery after task drain expiry");
+      }));
+    }
     trackHeartbeatSchedulerWork(accountingHeartbeat.resumeQueuedRunsAfterDrain().catch(err => {
       logger.error({ err }, "failed to resume queued work after task drain expiry");
     }));
@@ -1679,44 +1730,12 @@ async function startServerWithDatabaseTeardown(
           );
           throw err;
         }
-        if (heartbeatSchedulingSuppression.suppressed) return;
-        try {
-          const hotRestart = await timeStartupRecovery("hot_restart", () => heartbeat.reconcileHotRestartAdoption());
-          if (hotRestart.mode === "reported") {
-            logger.info(
-              hotRestart,
-              "startup hot-restart adoption reconciliation complete",
-            );
-          }
-        } catch (err) {
-          logger.error(
-            { err },
-            "startup hot-restart adoption reconciliation failed - recovery deadlines remain registered",
-          );
-        }
-
-        const recoveredGoalActions = await timeStartupRecovery("goal_actions", () => heartbeat.recoverPendingSessionGoalActions()).catch(err => {
-          logger.error({ err }, "startup session-goal action recovery failed");
-          return { enqueued: 0, invalid: 0 };
-        });
-        if (
-          recoveredGoalActions.enqueued > 0 ||
-          recoveredGoalActions.invalid > 0
-        ) {
-          logger.warn(
-            recoveredGoalActions,
-            "startup session-goal action outbox recovery reconciled pending controls",
-          );
-        }
-        const recoveredGoals = await timeStartupRecovery("active_goals", () => heartbeat.recoverActiveSessionGoals()).catch(err => {
-          logger.error({ err }, "startup active session-goal recovery failed");
-          return { enqueued: 0 };
-        });
-        if (recoveredGoals.enqueued > 0) {
-          logger.warn(
-            recoveredGoals,
-            "startup session-goal recovery resumed durable agent goals",
-          );
+        if (heartbeatSchedulingSuppression.reason === "task_drain") {
+          startupRecoveryDeferredByDrain = true;
+          // The drain can end while native restart recovery is still running.
+          await resumeDeferredStartupRecovery(heartbeat);
+        } else {
+          await recoverStartupHeartbeatState(heartbeat);
         }
       })().catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");

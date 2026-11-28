@@ -12,6 +12,7 @@ import { logger } from "../middleware/logger.js";
 import { isPullQueueEnabled, issueHasExecution, issueHasLiveRun, issueHasUnsettledNativeRun } from "./pull-queue-policy.js";
 import { issueOwnerParkingReason } from "./issue-owner-parking.js";
 import { agentWipLimit } from "./agent-wip-limit.js";
+import { tryLockPullQueueOwner } from "./pull-queue-owner-lock.js";
 import { issueWipReason, isRunnableWipReason, isWaitingWipReason } from "./agent-wip-policy.js";
 import { nextTimedPullQueueRetry, pullQueueCandidateBlocked, pullQueueFingerprint, pullQueueWakeWasSkipped } from "./pull-queue-state.js";
 
@@ -118,9 +119,11 @@ export function createHeartbeatPullQueue(db: Db, dependencies: {
       // Keep the selection lock on a dedicated connection: suppression and
       // normal admission need the ordinary pool while this transaction is open.
       await withDedicatedDbConnection(db, (dedicated) => dedicated.transaction(async (tx) => {
-        const lock = await tx.execute<{ acquired: boolean }>(sql`select pg_try_advisory_xact_lock(
-          hashtextextended(${`pull-queue:${companyId}:${agent.id}`}, 0)) as acquired`);
-        if (!lock[0]?.acquired) return;
+        if (!await tryLockPullQueueOwner(tx, companyId, agent.id)) {
+          // A create can roll back without publishing a change for this owner.
+          rememberSelectionFailure();
+          return;
+        }
         const executions = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agent.id),
             inArray(heartbeatRuns.status, liveStatuses))).limit(1);

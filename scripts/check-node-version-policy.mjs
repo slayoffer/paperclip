@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { MINIMUM_NODE_VERSION } from "../packages/shared/src/node-version.ts";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -16,7 +17,8 @@ const providerAssetsRoots = new Set([
   path.join(repoRoot, "packages", "paperclip-runner", "provider-assets"),
   path.join(repoRoot, "server", "provider-assets"),
 ]);
-const expectedEngine = ">=24.22.1";
+const expectedEngine = `>=${MINIMUM_NODE_VERSION}`;
+const [minimumMajor, minimumMinor, minimumPatch] = MINIMUM_NODE_VERSION.split(".");
 const upstreamEngine = ">=24.11.0";
 const expectedTypes = "^24.0.0";
 const failures = [];
@@ -65,7 +67,7 @@ walk(workflowRoot, (filePath) => {
     if (match[1] === "24.21.0" && packProducer
       && match.index >= packProducer.index
       && match.index < packProducer.index + packProducer[0].length) continue;
-    if (filePath === forkSshVerificationWorkflow && match[1] === "24.22.1") continue;
+    if (filePath === forkSshVerificationWorkflow && match[1] === MINIMUM_NODE_VERSION) continue;
     if (match[1] !== "24") failures.push(`${relative(filePath)}: node-version must be 24, found ${match[1]}`);
   }
 });
@@ -74,7 +76,9 @@ walk(repoRoot, (filePath) => {
   if (!path.basename(filePath).startsWith("Dockerfile")) return;
   const source = fs.readFileSync(filePath, "utf8");
   for (const match of source.matchAll(/^\s*FROM\s+node:([^\s]+)/gm)) {
-    if (!isNode24ImageTag(match[1])) failures.push(`${relative(filePath)}: Node base image must use the Node 24 major, found node:${match[1]}`);
+    if (!isNode24ImageTag(match[1])) {
+      failures.push(`${relative(filePath)}: Node base image requires a Node 24 patch pin at or above ${MINIMUM_NODE_VERSION} and a SHA-256 digest, found node:${match[1]}`);
+    }
   }
   for (const match of source.matchAll(/^\s*ARG\s+NODE_(?:MAJOR|VERSION)=([^\s]+)/gm)) {
     if (match[1] !== "24") failures.push(`${relative(filePath)}: Node build argument must be 24, found ${match[1]}`);
@@ -83,14 +87,13 @@ walk(repoRoot, (filePath) => {
 
 const requiredSourceFragments = [
   [".nvmrc", "24"],
-  ["packages/shared/src/node-version.ts", 'MINIMUM_NODE_VERSION = "24.22.1"'],
   ["scripts/install.sh", "MIN_NODE_VERSION=\"${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}.${MIN_NODE_PATCH}\""],
-  ["scripts/install.sh", "MIN_NODE_MAJOR=24"],
-  ["scripts/install.sh", "MIN_NODE_MINOR=22"],
-  ["scripts/install.sh", "MIN_NODE_PATCH=1"],
+  ["scripts/install.sh", `MIN_NODE_MAJOR=${minimumMajor}`],
+  ["scripts/install.sh", `MIN_NODE_MINOR=${minimumMinor}`],
+  ["scripts/install.sh", `MIN_NODE_PATCH=${minimumPatch}`],
   ["scripts/install.sh", "DEFAULT_NODE_MAJOR=24"],
   ["docker/agent-runtime/Dockerfile.base", "ARG NODE_VERSION=24"],
-  ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.22.1\""],
+  ["packages/adapter-utils/src/sandbox-install-command.ts", `NODE_VERSION="v${MINIMUM_NODE_VERSION}"`],
   ["packages/plugins/sandbox-providers/exe-dev/src/plugin.ts", "nodesource.com/setup_24.x"],
   ["packages/plugins/sandbox-providers/modal/src/manifest.ts", 'default: "node:24"'],
   ["cli/esbuild.config.mjs", 'target: "node24"'],

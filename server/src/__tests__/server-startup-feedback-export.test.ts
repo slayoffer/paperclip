@@ -10,6 +10,7 @@ import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { logger } from "../middleware/logger.js";
 import { getStartupRecoveryState } from "../startup-recovery-state.js";
 import { idleWorkSnapshot } from "../services/task-admission.js";
+import * as taskDrain from "../services/task-drain.js";
 import { readIdleSleepSafety } from "../services/idle-sleep-safety.js";
 import * as idleLocalWork from "../services/idle-local-work.js";
 import * as workspaceRecovery from "../services/workspace-recovery.js";
@@ -178,6 +179,7 @@ const {
     registerCapturedInstructionCommitWork: vi.fn((_coordinator: unknown, _canRun: () => boolean) => ({ ready: Promise.resolve() })),
     promoteDueScheduledRetries: vi.fn(async () => ({ promoted: 0, runIds: [] })),
     resumeQueuedRuns: vi.fn(async () => undefined),
+    resumeQueuedRunsAfterDrain: vi.fn(async () => undefined),
     recoverPendingSessionGoalActions: vi.fn(async () => ({ scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0 })),
     recoverActiveSessionGoals: vi.fn(async () => ({ scanned: 0, enqueued: 0 })),
     reconcileStrandedAssignedIssues: vi.fn(async () => ({
@@ -1887,6 +1889,52 @@ describe("startServer feedback export wiring", () => {
     expect(heartbeatServiceMock.registerActiveRunSilenceWork).toHaveBeenCalledTimes(1);
     expect(heartbeatServiceMock.registerRunDispatchWork).toHaveBeenCalledTimes(1);
     expect(fakeServer.close).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("runs startup-only recovery exactly once when initially drained is %s", async initiallyDrained => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    const recoveries = [heartbeatServiceMock.reconcileHotRestartAdoption,
+      heartbeatServiceMock.recoverPendingSessionGoalActions, heartbeatServiceMock.recoverActiveSessionGoals];
+    const lease = {
+      leaseId: "1ba6d1c9-005a-44cc-83e8-16cc32c043eb",
+      ownerId: "instance-admin",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const readLease = vi.fn(async () => initiallyDrained ? lease : null);
+    const originalDrainService = taskDrain.taskDrainService;
+    const drainService = vi.spyOn(taskDrain, "taskDrainService").mockImplementation((...args) => ({
+      ...originalDrainService(...args), activeLease: readLease,
+    }));
+    const setDrain = (draining: boolean) => {
+      readLease.mockResolvedValue(draining ? lease : null);
+      resolveHeartbeatSchedulingSuppressionMock.mockReturnValue({ suppressed: draining, reason: draining ? "task_drain" : null });
+    };
+    try {
+      setDrain(initiallyDrained);
+      const server = await startServer();
+      try {
+        await settleStartupHousekeeping();
+        for (const recovery of recoveries) expect(recovery).toHaveBeenCalledTimes(initiallyDrained ? 0 : 1);
+        const expiry = deliveryWorkRegisterMock.mock.calls.find(([queue]) => queue === DELIVERY_QUEUES.taskDrainExpiry)?.[1];
+        expect(expiry).toBeDefined();
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          if (!initiallyDrained || attempt > 1) {
+            setDrain(true);
+            await expiry!.run();
+          }
+          setDrain(false);
+          await expiry!.run();
+          await settleStartupHousekeeping();
+          expect(heartbeatServiceMock.resumeQueuedRunsAfterDrain).toHaveBeenCalledTimes(attempt);
+          for (const recovery of recoveries) expect(recovery).toHaveBeenCalledOnce();
+        }
+      } finally {
+        await server.shutdown();
+      }
+    } finally {
+      drainService.mockRestore();
+    }
   });
 
   it("closes the bound listener when native startup recovery fails", async () => {

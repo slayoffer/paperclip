@@ -1,4 +1,5 @@
 import { agentWipFull } from "./agent-wip-limit.js";
+import { tryLockPullQueueOwner } from "./pull-queue-owner-lock.js";
 import { recordPullQueueParking } from "./pull-queue-state.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
 import type { IssueDisplayStatus } from "@paperclipai/shared";
@@ -10421,6 +10422,9 @@ export function issueService(db: Db) {
         if (wipAdmissionActor && issueData.status !== "blocked" && await agentWipFull(tx, wipAdmissionActor, {
           companyId, agentId: issueData.assigneeAgentId, status: issueData.status ?? "backlog",
           priority: issueData.priority,
+          // Selection already holds this lock while it may need the company
+          // transaction. A busy owner sends this create to backlog immediately.
+          tryAcquireAdmissionLock: agentId => tryLockPullQueueOwner(tx, companyId, agentId),
         })) {
           issueData.status = "backlog";
         }
