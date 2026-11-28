@@ -315,7 +315,13 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
-import { agentWipFull, agentWipLimit, applyIssueUpdateWipAdmission, isWipActiveStatus, wipLimitAppliesToActor } from "../services/agent-wip-limit.js";
+import {
+  agentWipFull,
+  agentWipLimit,
+  applyIssueReassignmentWipFallback,
+  isWipActiveStatus,
+  wipLimitAppliesToActor,
+} from "../services/agent-wip-limit.js";
 import { tryLockPullQueueOwner } from "../services/pull-queue-owner-lock.js";
 import {
   agentIssueCreateLimits,
@@ -4651,6 +4657,20 @@ export function issueRoutes(
         },
       });
     }
+  }
+
+  function captureCommentSupersession(actor: Request["actor"]) {
+    const expired: IssueThreadInteraction[] = [];
+    const effects: Array<(committedDb: Db) => Promise<void>> = [];
+    return {
+      expired,
+      effects,
+      options: {
+        actor,
+        onExpired: (interactions: IssueThreadInteraction[]) => { expired.push(...interactions); },
+        deferCommitEffect: (effect: (committedDb: Db) => Promise<void>) => { effects.push(effect); },
+      },
+    };
   }
 
   async function queueExpiredInteractionReviewPathRecovery(input: {
@@ -14565,13 +14585,12 @@ export function issueRoutes(
       Object.assign(updateFields, transition.patch);
       if (preserveBlockedAssignment) delete updateFields.status;
 
-      const changesRunnableWip = isWipActiveStatus(updateFields.status) ||
-        updateFields.unblockDescriptor !== undefined || updateFields.blockedByIssueIds !== undefined;
-      const checkWipAdmission = agentWipLimit() !== null && wipLimitAppliesToActor(req.actor) &&
-        (changesRunnableWip || (!preserveBlockedAssignment && Boolean(normalizedAssigneeAgentId)));
-      if (checkWipAdmission) {
+      const checkWipAdmission = agentWipLimit() !== null && wipLimitAppliesToActor(req.actor);
+      const checkWipReassignment = checkWipAdmission &&
+        !preserveBlockedAssignment && Boolean(normalizedAssigneeAgentId);
+      if (checkWipReassignment) {
         const requestedWipStatus = updateFields.status ?? existing.status;
-        await applyIssueUpdateWipAdmission(db, req.actor, existing, updateFields, normalizedAssigneeAgentId);
+        await applyIssueReassignmentWipFallback(db, req.actor, existing, updateFields, normalizedAssigneeAgentId);
         if (requestedWipStatus !== "backlog" && updateFields.status === "backlog" && nextExecutionPolicy?.monitor) {
           throw conflict("A scheduled issue monitor prevents moving this issue to backlog.", {
             code: "scheduled_monitor_status_conflict",
@@ -14956,6 +14975,7 @@ export function issueRoutes(
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const issueUpdateData = {
         ...updateFields,
+        companyGuard: existing.companyId,
         ...(updateFields.parentId !== undefined ? { parentDepthPolicy } : {}),
         ...(expectedParentId !== undefined ? { expectedParentId } : {}),
         workspaceSelectionActor: req.actor,
@@ -14981,6 +15001,7 @@ export function issueRoutes(
               tx,
               postCommitActivityPublications,
               postCommitIssueActions,
+              { wipAdmissionActor: req.actor },
             );
           }
           return shouldCollectTerminalIssueActions
@@ -15106,15 +15127,17 @@ export function issueRoutes(
         transition.decision && decisionId ? transition.decision : null;
       let transactionalComment: Awaited<ReturnType<typeof svc.addComment>> | null =
         null;
+      const commentSupersession = captureCommentSupersession(req.actor);
+      const supersedingComment = Boolean(commentBody && actor.actorType === "user" && !actor.runId);
       const commentWithAdapterOverrides = Boolean(
         commentBody && updateFields.assigneeAdapterOverrides !== undefined,
       );
-      const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides
+      const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides || supersedingComment
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
       const shouldUseTransactionalIssueUpdate =
         checkWipAdmission || Boolean(commentAttachmentIds?.length) ||
-        commentWithAdapterOverrides ||
+        commentWithAdapterOverrides || supersedingComment ||
         Boolean(decision) ||
         shouldRelayStop ||
         persistReviewActivityTransactionally ||
@@ -15126,12 +15149,12 @@ export function issueRoutes(
               issueUpdateData.parentId !== undefined || issueUpdateData.projectId !== undefined) {
               await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
             }
-            if (checkWipAdmission) {
+            if (checkWipReassignment) {
               const [lockedIssue] = await tx.select().from(issueRows)
                 .where(and(eq(issueRows.id, id), eq(issueRows.companyId, existing.companyId))).for("update");
               if (!lockedIssue) return null;
               const validatedStatus = issueUpdateData.status;
-              await applyIssueUpdateWipAdmission(
+              await applyIssueReassignmentWipFallback(
                 tx, req.actor, lockedIssue, issueUpdateData, normalizedAssigneeAgentId,
                 (agentId) => tryLockPullQueueOwner(tx, lockedIssue.companyId, agentId),
               );
@@ -15152,7 +15175,7 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            if (commentAttachmentIds?.length || commentWithAdapterOverrides) {
+            if (commentAttachmentIds?.length || commentWithAdapterOverrides || supersedingComment) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
               transactionalComment = await svc.addComment(
@@ -15171,6 +15194,7 @@ export function issueRoutes(
                   mirrorToSlack: actor.actorType === "user",
                   authorizationReason: issueMutationAuthorizationReason,
                   sourceTrust: transactionalCommentSourceTrust,
+                  ...(supersedingComment ? { commentSupersession: commentSupersession.options } : {}),
                 },
                 tx,
               );
@@ -15203,7 +15227,6 @@ export function issueRoutes(
             }
 
             await persistReviewTransitionActivity(tx, updated);
-
             return updated;
           });
         } else {
@@ -15244,6 +15267,7 @@ export function issueRoutes(
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
+      for (const effect of commentSupersession.effects) await effect(db);
 
       if (enteringBlocked && issue.status === "blocked") {
         const blockedIssue = issue;
@@ -15917,12 +15941,7 @@ export function issueRoutes(
           },
         });
 
-        const expiredInteractions = await issueThreadInteractionService(
-          db,
-        ).expireRequestConfirmationsSupersededByComment(issue, comment, {
-          agentId: actor.agentId,
-          userId: actor.actorType === "user" ? actor.actorId : null,
-        });
+        const expiredInteractions = commentSupersession.expired;
         await logExpiredRequestConfirmations({
           issue,
           interactions: expiredInteractions,
@@ -16452,7 +16471,7 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     const attachments = await svc.listAttachments(id);
 
-    const issue = await svc.remove(id);
+    const issue = await svc.remove(id, req.actor);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -19100,7 +19119,9 @@ export function issueRoutes(
         scheduledRetrySupersededByComment =
           shouldResumeInProgressScheduledRetry &&
           issue.status === "in_progress";
-        const reopenedIssue = await svc.update(id, { status: "todo" });
+        const reopenedIssue = await svc.update(id, { status: "todo" }, db, undefined, undefined, {
+          wipAdmissionActor: req.actor,
+        });
         if (!reopenedIssue) {
           res.status(404).json({ error: "Issue not found" });
           return;
@@ -19205,6 +19226,8 @@ export function issueRoutes(
       let comment: Awaited<ReturnType<typeof svc.addComment>>;
       let goalCommentSteered = false;
       let fastResponseEnqueued = false;
+      const commentSupersession = captureCommentSupersession(req.actor);
+      const supersedingComment = actor.actorType === "user" && !actor.runId;
       if (shouldAutoApproveReviewComment) {
         const transition = applyIssueExecutionPolicyTransition({
           issue: currentIssue,
@@ -19253,6 +19276,7 @@ export function issueRoutes(
           clientRequestId: actor.actorType === "user" ? req.body.clientRequestId : undefined,
           mirrorToSlack: actor.actorType === "user",
           sourceTrust,
+          ...(supersedingComment ? { commentSupersession: commentSupersession.options } : {}),
         };
         let txResult: {
           comment: Awaited<ReturnType<typeof svc.addComment>>;
@@ -19262,6 +19286,9 @@ export function issueRoutes(
         const postCommitIssueActions: IssuePostCommitAction[] = [];
         try {
           txResult = await db.transaction(async (tx) => {
+            if (agentWipLimit() !== null && wipLimitAppliesToActor(req.actor)) {
+              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${currentIssue.companyId}`}, 0))`);
+            }
             const insertedComment = await svc.addComment(
               id,
               req.body.body,
@@ -19285,6 +19312,7 @@ export function issueRoutes(
                     tx,
                     postCommitActivityPublications,
                     postCommitIssueActions,
+                    { wipAdmissionActor: req.actor },
                   )
                 : await svc.update(
                     id,
@@ -19292,6 +19320,7 @@ export function issueRoutes(
                     tx,
                     undefined,
                     postCommitIssueActions,
+                    { wipAdmissionActor: req.actor },
                   );
             // Throw (not return null) so drizzle rolls back the inserted comment when the issue
             // has been concurrently deleted between the initial fetch and the in-transaction update.
@@ -19367,6 +19396,7 @@ export function issueRoutes(
           mirrorToSlack: actor.actorType === "user",
           authorizationReason: commentAuthorizationReason,
           sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
+          ...(supersedingComment ? { commentSupersession: commentSupersession.options } : {}),
         };
         const add = (dbOrTx: Db = db) =>
           svc.addComment(
@@ -19382,7 +19412,7 @@ export function issueRoutes(
             dbOrTx,
           );
         const needsFastResponse = actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status);
-        comment = needsFastResponse ? await db.transaction(async tx => {
+        comment = needsFastResponse || supersedingComment ? await db.transaction(async tx => {
           const saved = await add(tx as unknown as Db);
           if (actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
             await enqueueFastResponse(tx as unknown as Db, { companyId: currentIssue.companyId, issueId: currentIssue.id, agentId: currentIssue.assigneeAgentId,
@@ -19392,6 +19422,7 @@ export function issueRoutes(
           return saved;
         }) : await add();
       }
+      for (const effect of commentSupersession.effects) await effect(db);
 
       if (!fastResponseEnqueued && actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
         await db.transaction(tx => enqueueFastResponse(tx as unknown as Db, { companyId: currentIssue.companyId, issueId: currentIssue.id, agentId: currentIssue.assigneeAgentId,
@@ -19530,12 +19561,7 @@ export function issueRoutes(
         await logActivity(db, buildCommentActivity(commentReferenceDiff));
       }
 
-      const expiredInteractions = await issueThreadInteractionService(
-        db,
-      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      const expiredInteractions = commentSupersession.expired;
       await logExpiredRequestConfirmations({
         issue: currentIssue,
         interactions: expiredInteractions,

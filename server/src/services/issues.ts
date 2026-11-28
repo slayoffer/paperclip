@@ -1,8 +1,15 @@
-import { agentWipFull } from "./agent-wip-limit.js";
+import {
+  agentWipFull,
+  agentWipLimit,
+  assertIssueResultWipAdmission,
+  readDependentIssueWipReasons,
+  readIssueWipReason,
+  wipLimitAppliesToActor,
+} from "./agent-wip-limit.js";
 import { tryLockPullQueueOwner } from "./pull-queue-owner-lock.js";
 import { recordPullQueueParking } from "./pull-queue-state.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
-import type { IssueDisplayStatus } from "@paperclipai/shared";
+import type { IssueDisplayStatus, IssueThreadInteraction } from "@paperclipai/shared";
 import { issueDisplayStatusSql } from "./issue-display-status.js";
 import { notifyStrandedAgentStatus, notifyActiveRunSilence } from "./live-run-recovery-notifications.js";
 import { finishedIdleWake } from "./idle-work-proof.js";
@@ -11281,7 +11288,7 @@ export function issueService(db: Db) {
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
       postCommitActions?: IssuePostCommitAction[],
-      options: { bindRuntimeSharedWorkspace?: boolean } = {},
+      options: { bindRuntimeSharedWorkspace?: boolean; wipAdmissionActor?: AuthorizationActor } = {},
     ) => {
       const ownedActivityPublications: ActivityPublication[] = [];
       const activityPublications =
@@ -11613,9 +11620,11 @@ export function issueService(db: Db) {
         patch.executionLockedAt = null;
       }
 
+      const suppliedWipActor = options.wipAdmissionActor ?? (actorAgentId && !caseHandoffId ? { type: "agent" } : null);
+      const wipActor = agentWipLimit() !== null && wipLimitAppliesToActor(suppliedWipActor) ? suppliedWipActor : null;
       const runUpdate = async (tx: any) => {
         const changesPrivacy = issueData.visibility !== undefined || issueData.parentId !== undefined || issueData.projectId !== undefined;
-        if (changesPrivacy) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
+        if (changesPrivacy || wipActor) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
         if (issueData.parentId) await assertParentInCompany(tx, existing.companyId, issueData.parentId);
         if (lockedParentPlan && issueData.parentId !== undefined) {
           const relocked = await planIssueParentChange(tx, existing, lockedParentPlan.requestedParentId, lockedParentPlan.policy);
@@ -11636,6 +11645,16 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        const beforeOwnWip = wipActor && receiptExisting.assigneeAgentId
+          ? await readIssueWipReason(tx, receiptExisting.companyId, id)
+          : null;
+        const releasesDependentWip = receiptExisting.status !== "done" && receiptExisting.status !== "cancelled" &&
+          (patch.status === "done" || patch.status === "cancelled" ||
+            (patch.assigneeAgentId !== undefined && patch.assigneeAgentId !== receiptExisting.assigneeAgentId) ||
+            (patch.assigneeUserId !== undefined && patch.assigneeUserId !== receiptExisting.assigneeUserId));
+        const beforeDependentWip = wipActor && releasesDependentWip
+          ? await readDependentIssueWipReasons(tx, receiptExisting.companyId, id)
+          : [];
         if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
         if ((patch.status ?? receiptExisting.status) === "done" &&
             (receiptExisting.status !== "done" || issueData.executionPolicy !== undefined)) {
@@ -11969,7 +11988,7 @@ export function issueService(db: Db) {
                   nextIssueStatus: updated.status,
                   workspaceAction: "left_archived",
                 },
-              });
+              }, postCommitActivityPublications ?? (dbOrTx === db ? ownedActivityPublications : undefined));
             }
           }
           if (updated.status === "done" || updated.status === "cancelled") {
@@ -12049,7 +12068,7 @@ export function issueService(db: Db) {
                   source: "issue.status_transition.issue_closed",
                   result: interaction.result ?? null,
                 },
-              });
+              }, postCommitActivityPublications ?? (dbOrTx === db ? ownedActivityPublications : undefined));
             }
           }
           // A status-card generation task that goes done/cancelled/blocked stops
@@ -12218,6 +12237,21 @@ export function issueService(db: Db) {
           });
           activityPublications.push(publication);
         }
+        if (wipActor) {
+          if (updated.assigneeAgentId === receiptExisting.assigneeAgentId) {
+            await assertIssueResultWipAdmission(tx, {
+              actor: wipActor,
+              companyId: updated.companyId,
+              issueId: id,
+              before: beforeOwnWip,
+            });
+          }
+          for (const snapshot of beforeDependentWip) {
+            await assertIssueResultWipAdmission(tx, {
+              actor: wipActor, companyId: updated.companyId, ...snapshot,
+            });
+          }
+        }
         return {
           ...enriched,
           ...(nextBlockedByIssueIds !== undefined
@@ -12279,8 +12313,18 @@ export function issueService(db: Db) {
       return cleared;
     },
 
-    remove: (id: string) =>
+    remove: (id: string, actor?: AuthorizationActor) =>
       db.transaction(async (tx) => {
+        const [owner] = await tx.select({ companyId: issues.companyId }).from(issues).where(eq(issues.id, id));
+        if (!owner) return null;
+        let beforeDependentWip: Awaited<ReturnType<typeof readDependentIssueWipReasons>> = [];
+        if (actor && agentWipLimit() !== null && wipLimitAppliesToActor(actor)) {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${owner.companyId}`}, 0))`);
+          const [lockedIssue] = await tx.select({ id: issues.id }).from(issues)
+            .where(and(eq(issues.id, id), eq(issues.companyId, owner.companyId))).for("update");
+          if (!lockedIssue) return null;
+          beforeDependentWip = await readDependentIssueWipReasons(tx, owner.companyId, id);
+        }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
@@ -12294,33 +12338,28 @@ export function issueService(db: Db) {
         try {
           await notifyTerminalWorkspaceWork(tx, `issue:${id}`);
           await requestRestorePointDeletion(tx, { sourceIssueId: id });
-          const [owner] = await tx.select({ companyId: issues.companyId }).from(issues).where(eq(issues.id, id));
-          if (owner) {
-            await notifyIssueAttentionRetentionWork(tx, { companyId: owner.companyId, issueId: id });
-            await notifyExternalConversationSettlement(tx, { companyId: owner.companyId });
-            const mentionedObjects = await tx.selectDistinct({ objectId: externalObjectMentions.objectId })
-              .from(externalObjectMentions)
-              .where(and(
-                eq(externalObjectMentions.companyId, owner.companyId),
-                eq(externalObjectMentions.sourceIssueId, id),
-                isNotNull(externalObjectMentions.objectId),
-              ));
-            for (const mention of mentionedObjects) await notifyExternalObjectRefresh(tx, owner.companyId, mention.objectId!);
-            await notifyApprovalWork(tx, owner.companyId);
-            await notifyStatusCardIssueChange(tx, owner.companyId);
-          }
+          await notifyIssueAttentionRetentionWork(tx, { companyId: owner.companyId, issueId: id });
+          await notifyExternalConversationSettlement(tx, { companyId: owner.companyId });
+          const mentionedObjects = await tx.selectDistinct({ objectId: externalObjectMentions.objectId })
+            .from(externalObjectMentions)
+            .where(and(
+              eq(externalObjectMentions.companyId, owner.companyId),
+              eq(externalObjectMentions.sourceIssueId, id),
+              isNotNull(externalObjectMentions.objectId),
+            ));
+          for (const mention of mentionedObjects) await notifyExternalObjectRefresh(tx, owner.companyId, mention.objectId!);
+          await notifyApprovalWork(tx, owner.companyId);
+          await notifyStatusCardIssueChange(tx, owner.companyId);
           await notifyDecisionTargetIssueRemoval(tx, id);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
-          await notifyRunDispatch(tx, owner ? { companyId: owner.companyId } : undefined);
-          if (owner) {
-            await notifyDeferredExecutionEligibility(tx, owner);
-            await notifyActiveRunSilence(tx, { companyId: owner.companyId, issueId: id });
-          }
+          await notifyRunDispatch(tx, { companyId: owner.companyId });
+          await notifyDeferredExecutionEligibility(tx, owner);
+          await notifyActiveRunSilence(tx, { companyId: owner.companyId, issueId: id });
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
           await notifyRoutineExecutionStatus(tx, id);
           removedIssue = await tx
             .delete(issues)
-            .where(eq(issues.id, id))
+            .where(and(eq(issues.id, id), eq(issues.companyId, owner.companyId)))
             .returning()
             .then((rows) => rows[0] ?? null);
         } catch (err) {
@@ -12355,6 +12394,11 @@ export function issueService(db: Db) {
         }
 
         if (!removedIssue) return null;
+        if (actor) {
+          for (const snapshot of beforeDependentWip) {
+            await assertIssueResultWipAdmission(tx, { actor, companyId: owner.companyId, ...snapshot });
+          }
+        }
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
       }),
@@ -13219,6 +13263,11 @@ export function issueService(db: Db) {
         proactiveChatMessage?: { sourceTaskId: string; userId: string };
         /** Server-only: authenticated Paperclip messages also belong in the Slack thread. */
         mirrorToSlack?: boolean;
+        commentSupersession?: {
+          actor: AuthorizationActor;
+          onExpired: (interactions: IssueThreadInteraction[]) => void;
+          deferCommitEffect: (effect: (committedDb: Db) => Promise<void>) => void;
+        };
       },
       dbOrTx: any = db,
     ): Promise<IssueComment> {
@@ -13844,14 +13893,19 @@ export function issueService(db: Db) {
       ) {
         const { issueThreadInteractionService } =
           await import("./issue-thread-interactions.js");
-        const expiredInteractions = await issueThreadInteractionService(
-          dbOrTx,
-        ).expireRequestConfirmationsSupersededByComment(
+        const supersession = options?.commentSupersession;
+        const expiredInteractions = await issueThreadInteractionService(dbOrTx).expireRequestConfirmationsSupersededByComment(
           { id: issueId, companyId: issue.companyId },
           comment,
           { agentId: actor.agentId, userId: actor.userId },
+          supersession ? {
+            transaction: dbOrTx,
+            wipAdmissionActor: supersession.actor,
+            deferConfirmationCommitEffects: supersession.deferCommitEffect,
+          } : undefined,
         );
-        for (const interaction of expiredInteractions) {
+        if (supersession) supersession.onExpired(expiredInteractions);
+        for (const interaction of supersession ? [] : expiredInteractions) {
           await logActivity(dbOrTx, {
             companyId: issue.companyId,
             actorType: "user",

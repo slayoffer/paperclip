@@ -5,6 +5,7 @@ import { resolveNewTaskParent } from "../issue-hierarchy.js";
 import { DOWNLOAD_ARTIFACT, DOWNLOAD_ARTIFACT_DEFINITION, downloadArtifactSchema, createArtifactInstaller, type ArtifactInstaller } from "./artifact-transfer.js";
 import { GENERATE_IMAGE, GENERATE_IMAGE_DEFINITION, GENERATE_IMAGE_MODEL, generateImageSchema, generatedImageDestination, imageChargeCostEvent, imageIdentity, ImageGenerationProviderError, priceGeneratedImage, requestOpenAiImage, uncertainImageCharge, writeGeneratedImageLocally } from "./generate-image-tool.js";
 import { aiConnectionService } from "../ai-connections.js";
+import { agentWipLimit } from "../agent-wip-limit.js";
 import { createCostEventInTransaction } from "../costs.js";
 import { withOperationAccountingTransaction } from "../accounting-transaction.js";
 import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
@@ -3068,7 +3069,9 @@ export class PaperclipRunnerToolAuthority {
       }
     };
     return this.db.transaction(async tx => {
-      if (operationId === "create_task") {
+      const metersIssueUpdate = agentWipLimit() !== null &&
+        (operationId === "set_dependencies" || operationId === "reassign_task");
+      if (operationId === "create_task" || metersIssueUpdate) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${this.binding.companyId}`}, 0))`);
       }
       return mutate(tx);

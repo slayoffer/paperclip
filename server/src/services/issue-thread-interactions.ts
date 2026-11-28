@@ -10,6 +10,7 @@ import { projectGitHubInteractionErrors } from "./tool-access/github-action-erro
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { historicalQuestionCondition } from "./issue-question-context.js";
 import { resolveInteractionRevisionForService } from "./interaction-revision-service.js";
+import { captureInteractionWipAdmission, interactionWipActor, lockAgentConfirmationWipScope, type InteractionWipActor } from "./interaction-wip-admission.js";
 import { checkInteractionAnswerPreconditions, InteractionRevisionTargetExpired, isInteractionRevisionTransaction, needsInteractionRevisionLock } from "./interaction-revision.js";
 import { buildTaskCreationOrder, resolveSelectedSuggestedTasks, resolveSelectedCheckboxConfirmationOptions, resolveRequestItemVerdictSubmissions, normalizeQuestionAnswers, type InteractionActor } from "./interaction-resolution-input.js";
 export { resolveSelectedSuggestedTasks } from "./interaction-resolution-input.js";
@@ -212,6 +213,7 @@ export type IssueThreadInteractionServiceOptions = {
 
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type InteractionResolutionMutationOptions = {
+  wipAdmissionActor?: InteractionWipActor;
   afterRevisionResolveInTransaction?: (tx: Db, result: ResolvedInteractionResult) => Promise<void>;
   /** Confirmation accept/reject nested in an outer transaction must defer these
    * effects and flush them with the root database only after its commit. */
@@ -222,6 +224,10 @@ export type InteractionResolutionMutationOptions = {
     interaction: IssueThreadInteraction,
   ) => Promise<void>;
 };
+type CommentSupersessionMutationOptions = Pick<InteractionResolutionMutationOptions, "wipAdmissionActor"> & (
+  | { transaction?: undefined; deferConfirmationCommitEffects?: InteractionResolutionMutationOptions["deferConfirmationCommitEffects"] }
+  | { transaction: DbTransaction; deferConfirmationCommitEffects: NonNullable<InteractionResolutionMutationOptions["deferConfirmationCommitEffects"]> }
+);
 
 const GITHUB_PULL_REQUEST_URL_PATTERN =
   /https:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)/gi;
@@ -1859,6 +1865,9 @@ export function issueThreadInteractionService(
       return await resolveInteractionRevisionForService({
         db, issue, interactionId, input, operation, actor, mutationOptions, resolve, replay, interaction,
         createService: (tx) => issueThreadInteractionService(tx, opts),
+        beforeIssueLock: operation === "accept" || operation === "reject"
+          ? (tx) => lockAgentConfirmationWipScope(tx, issue.companyId, actor)
+          : undefined,
         beforeLock: (tx) => assertInteractionRunWriteAllowed(tx, issue, actor),
         authorize: (row) => assertInteractionResolutionAllowed(row, actor),
         hydrate: hydrateInteraction,
@@ -2134,6 +2143,7 @@ export function issueThreadInteractionService(
     const now = new Date();
     const postCommitActivityPublications: ActivityPublication[] = [];
     const result = await db.transaction(async (tx) => {
+      await lockAgentConfirmationWipScope(tx, args.issue.companyId, args.actor);
       await assertInteractionRunWriteAllowed(tx as unknown as Db, args.issue, args.actor);
       await notifyChatConfirmationResolution(tx, args.current);
       if (args.current.kind === "request_confirmation") await notifyChatRunMilestones(tx, args.current);
@@ -2167,6 +2177,8 @@ export function issueThreadInteractionService(
       if (!issueContext || issueContext.companyId !== args.issue.companyId) {
         throw notFound("Issue not found");
       }
+      const checkWip = await captureInteractionWipAdmission(tx, args.issue,
+        interactionWipActor(args.actor, args.mutationOptions?.wipAdmissionActor));
 
       await lockLinkedSecretProposal(tx as unknown as Db, args.current);
 
@@ -2366,6 +2378,7 @@ export function issueThreadInteractionService(
         tx as unknown as Db,
         acceptedInteraction,
       );
+      await checkWip?.();
 
       if (args.actor.systemId) {
         await logActivity(tx as unknown as Db, {
@@ -2433,6 +2446,7 @@ export function issueThreadInteractionService(
 
     const now = new Date();
     const updated = await db.transaction(async (tx) => {
+      await lockAgentConfirmationWipScope(tx, args.issue.companyId, args.actor);
       await assertInteractionRunWriteAllowed(tx as unknown as Db, args.issue, args.actor);
       await notifyChatConfirmationResolution(tx, args.current);
       if (args.current.kind === "request_confirmation") await notifyChatRunMilestones(tx, args.current);
@@ -2458,6 +2472,8 @@ export function issueThreadInteractionService(
       if (!issueContext || issueContext.companyId !== args.issue.companyId) {
         throw notFound("Issue not found");
       }
+      const checkWip = await captureInteractionWipAdmission(tx, args.issue,
+        interactionWipActor(args.actor, args.mutationOptions?.wipAdmissionActor));
 
       // Terminal issue transitions expire linked proposals while holding this
       // issue row. Match their issue -> proposal -> interaction order so a
@@ -2586,6 +2602,7 @@ export function issueThreadInteractionService(
         tx as unknown as Db,
         rejectedInteraction,
       );
+      await checkWip?.();
       return resolved;
     });
 
@@ -4572,50 +4589,35 @@ export function issueThreadInteractionService(
         origin?: string | null;
       },
       actor: InteractionActor,
+      options: CommentSupersessionMutationOptions = {},
     ) => {
       if (!comment.authorUserId || comment.origin === "fast_response") return [];
       // Local-CLI adapters post under user auth, so authorUserId can't tell a human from a
       // machine; createdByRunId can. Only genuine human comments (no run context) supersede.
       if (comment.createdByRunId) return [];
 
-      const [scope] = await db.select({ conversationAgentId: issues.conversationAgentId, conversationUserId: issues.conversationUserId })
-        .from(issues).where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)));
+      const expireInTransaction = async (tx: DbTransaction) => {
+        const [scope] = await tx.select({ conversationAgentId: issues.conversationAgentId, conversationUserId: issues.conversationUserId })
+          .from(issues).where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId))).for("update");
+        if (!scope) return [];
+        const rows = await tx.select().from(issueThreadInteractions).where(and(
+          eq(issueThreadInteractions.companyId, issue.companyId),
+          eq(issueThreadInteractions.issueId, issue.id),
+          inArray(issueThreadInteractions.kind, [...USER_COMMENT_SUPERSEDABLE_INTERACTION_KINDS]),
+          eq(issueThreadInteractions.status, "pending"),
+        )).orderBy(asc(issueThreadInteractions.id));
+        const superseded = rows.filter(row => {
+          if (row.kind === "ask_user_questions" && scope.conversationAgentId && scope.conversationUserId) return false;
+          return isUserCommentSupersedableKind(row.kind)
+            && shouldSupersedeInteractionOnUserComment(hydrateInteraction(row) as UserCommentSupersedableInteraction)
+            && isCommentAtOrAfterInteraction({ commentCreatedAt: comment.createdAt, interactionCreatedAt: row.createdAt });
+        });
+        if (!superseded.length) return [];
 
-      const rows = await db
-        .select()
-        .from(issueThreadInteractions)
-        .where(
-          and(
-            eq(issueThreadInteractions.companyId, issue.companyId),
-            eq(issueThreadInteractions.issueId, issue.id),
-            inArray(issueThreadInteractions.kind, [
-              ...USER_COMMENT_SUPERSEDABLE_INTERACTION_KINDS,
-            ]),
-            eq(issueThreadInteractions.status, "pending"),
-          ),
-        );
-
-      const superseded = rows.filter((row) => {
-        if (row.kind === "ask_user_questions" && scope?.conversationAgentId && scope.conversationUserId) return false;
-        if (!isUserCommentSupersedableKind(row.kind)) return false;
-        const interaction = hydrateInteraction(
-          row,
-        ) as UserCommentSupersedableInteraction;
-        return (
-          shouldSupersedeInteractionOnUserComment(interaction) &&
-          isCommentAtOrAfterInteraction({
-            commentCreatedAt: comment.createdAt,
-            interactionCreatedAt: row.createdAt,
-          })
-        );
-      });
-
-      if (superseded.length === 0) return [];
-
-      const now = new Date();
-      const expired: IssueThreadInteraction[] = [];
-      for (const row of superseded) {
-        const updated = await db.transaction(async (tx) => {
+        const checkWip = await captureInteractionWipAdmission(tx, issue, interactionWipActor(actor, options.wipAdmissionActor));
+        const now = new Date();
+        const expired: IssueThreadInteraction[] = [];
+        for (const row of superseded) {
           await notifyChatConfirmationResolution(tx, row);
           if (["ask_user_questions", "request_confirmation"].includes(row.kind)) await notifyChatRunMilestones(tx, row);
           else await notifyIssueReviewState(tx, row);
@@ -4642,20 +4644,26 @@ export function issueThreadInteractionService(
               ),
             )
             .returning();
-          if (!resolved) return null;
+          if (!resolved) continue;
           const interaction = hydrateInteraction(resolved);
           await enqueueTerminalIssueInteractionChatPublications(
             tx as unknown as Db,
             interaction,
           );
-          return interaction;
-        });
-        if (updated) expired.push(updated);
-      }
+          expired.push(interaction);
+        }
+        if (expired.length) {
+          await touchIssue(tx, issue.id, issue.companyId);
+          await checkWip?.();
+        }
+        return expired;
+      };
 
-      if (expired.length > 0) {
-        await touchIssue(db, issue.id, issue.companyId);
-        await emitResolvedInteractionsTelemetry(db, expired);
+      const expired = options.transaction ? await expireInTransaction(options.transaction) : await db.transaction(expireInTransaction);
+      if (expired.length) {
+        const publish = (committedDb: Db) => emitResolvedInteractionsTelemetry(committedDb, expired);
+        if (options.deferConfirmationCommitEffects) options.deferConfirmationCommitEffects(publish);
+        else await publish(db);
       }
       return expired;
     },
@@ -5306,6 +5314,7 @@ export function issueThreadInteractionService(
           }
           if (!historicalAnswer) throw interactionIssueClosedError();
         }
+        const checkWip = await captureInteractionWipAdmission(tx, issue, interactionWipActor(actor, mutationOptions.wipAdmissionActor));
         await assertInteractionRunWriteAllowed(tx as unknown as Db, issue, actor);
         await notifyChatRunMilestones(tx, current);
         await mutationOptions.beforeResolveInTransaction?.(tx);
@@ -5361,6 +5370,7 @@ export function issueThreadInteractionService(
           tx as unknown as Db,
           answered,
         );
+        await checkWip?.();
         return row;
       });
 

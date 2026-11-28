@@ -10,6 +10,7 @@ export async function resolveInteractionRevisionForService<T>(args: {
   input: InteractionAnswerPreconditions; operation: string; actor: InteractionActor;
   mutationOptions: InteractionResolutionMutationOptions;
   createService: (tx: Db) => Service;
+  beforeIssueLock?: (tx: Db) => Promise<void>;
   beforeLock: (tx: Db) => Promise<void>;
   authorize: (row: typeof issueThreadInteractions.$inferSelect) => void;
   hydrate: (row: typeof issueThreadInteractions.$inferSelect) => IssueThreadInteraction;
@@ -18,11 +19,11 @@ export async function resolveInteractionRevisionForService<T>(args: {
   interaction: (result: T) => IssueThreadInteraction;
 }): Promise<T> {
   const { db, issue, interactionId, input, operation, actor, mutationOptions,
-    createService, beforeLock, authorize, hydrate, resolve, replay, interaction } = args;
+    createService, beforeIssueLock, beforeLock, authorize, hydrate, resolve, replay, interaction } = args;
   const effects: Array<(committedDb: Db) => Promise<void>> = [];
   const result = await resolveWithInteractionRevision({
     db, issue, interactionId, input, operation, actor,
-    beforeLock, authorize, hydrate, replay, interaction,
+    beforeIssueLock, beforeLock, authorize, hydrate, replay, interaction,
     resolve: async (tx, fresh) => {
       const result = await resolve(createService(tx), fresh, {
         ...mutationOptions,

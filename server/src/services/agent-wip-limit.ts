@@ -1,7 +1,8 @@
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
-import { issues, type Db } from "@paperclipai/db";
-import { issueWipReason, RUNNABLE_WIP_REASONS } from "./agent-wip-policy.js";
+import { and, asc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { issueRelations, issues, type Db } from "@paperclipai/db";
+import { issueWipReason, isRunnableWipReason, RUNNABLE_WIP_REASONS, type WipReason } from "./agent-wip-policy.js";
 import { conflict } from "../errors.js";
+import { tryLockPullQueueOwner } from "./pull-queue-owner-lock.js";
 
 /**
  * Guild model v2, rule 2. A new assignment over PAPERCLIP_AGENT_WIP_LIMIT goes
@@ -67,37 +68,95 @@ export function wipPullRefusal(limit: number): string {
     "Finish or hand off one of them first; the next backlog issue is promoted when a slot frees.";
 }
 
-/** The update transaction supplies the owner try-lock after acquiring the company and issue locks. */
-export async function applyIssueUpdateWipAdmission(
+/** The reassignment fallback needs a status before the issue write. */
+export async function applyIssueReassignmentWipFallback(
   db: Pick<Db, "select">,
   actor: { type?: string; source?: string },
   existing: { id: string; companyId: string; assigneeAgentId: string | null; status: string; priority: string },
-  patch: NonNullable<Parameters<typeof issueWipReason>[1]> & { priority?: string },
+  patch: { status?: string; priority?: string },
   requestedAssignee: string | null | undefined,
   tryAcquireAdmissionLock?: (agentId: string) => Promise<boolean>,
 ) {
   const status = patch.status ?? existing.status;
-  const reassigned = requestedAssignee !== undefined && requestedAssignee !== existing.assigneeAgentId;
-  const agentId = reassigned ? requestedAssignee : existing.assigneeAgentId;
-  const input = { companyId: existing.companyId, agentId, status,
-    priority: patch.priority ?? existing.priority, excludeIssueId: existing.id, tryAcquireAdmissionLock };
-  if (reassigned) {
-    // Blocked work retains its stop condition even when the new owner is full.
-    if (status !== "blocked" && await agentWipFull(db, actor, input)) patch.status = "backlog";
-    return;
-  }
-  if (!wipLimitAppliesToActor(actor) || !agentId || !isWipActiveStatus(status) || input.priority === "critical") return;
-  if (actor.type !== "agent" || existing.status !== "backlog") {
-    const sameStatus = status === existing.status;
-    if (sameStatus && (status !== "blocked" ||
-      (patch.unblockDescriptor === undefined && patch.blockedByIssueIds === undefined))) return;
-    const [reasons] = await db.select({
-      wasRunnable: inArray(issueWipReason(), RUNNABLE_WIP_REASONS),
-      becomesRunnable: inArray(issueWipReason(undefined, patch), RUNNABLE_WIP_REASONS),
-    }).from(issues).where(and(eq(issues.companyId, existing.companyId), eq(issues.id, existing.id)));
-    if (!reasons?.becomesRunnable || reasons.wasRunnable) return;
-  }
-  if (await agentWipFull(db, actor, input)) {
-    throw conflict(wipPullRefusal(agentWipLimit() ?? 0), { code: "agent_wip_limit" });
+  // Blocked work retains its stop condition even when the new owner is full.
+  if (!requestedAssignee || requestedAssignee === existing.assigneeAgentId || status === "blocked") return;
+  if (await agentWipFull(db, actor, {
+    companyId: existing.companyId,
+    agentId: requestedAssignee,
+    status,
+    priority: patch.priority ?? existing.priority,
+    excludeIssueId: existing.id,
+    tryAcquireAdmissionLock,
+  })) patch.status = "backlog";
+}
+
+/** Read this snapshot while the issue row is locked and before mutating it. */
+export async function readIssueWipReason(
+  db: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<WipReason | null> {
+  const [issue] = await db.select({ reason: issueWipReason() }).from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
+  return issue?.reason ?? null;
+}
+
+/** Lock blocked dependents before the mutation that may release their external wait. */
+export async function readDependentIssueWipReasons(
+  tx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<Array<{ issueId: string; before: WipReason }>> {
+  const dependents = await tx.select({ id: issues.id }).from(issues)
+    .innerJoin(issueRelations, and(
+      eq(issueRelations.companyId, issues.companyId),
+      eq(issueRelations.relatedIssueId, issues.id),
+    ))
+    .where(and(
+      eq(issues.companyId, companyId),
+      eq(issues.status, "blocked"),
+      isNotNull(issues.assigneeAgentId),
+      eq(issueRelations.issueId, issueId),
+      eq(issueRelations.type, "blocks"),
+    ))
+    .orderBy(asc(issues.id))
+    .for("update", { of: issues });
+  if (!dependents.length) return [];
+
+  const snapshots = await tx.select({ issueId: issues.id, before: issueWipReason() }).from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, dependents.map(({ id }) => id))))
+    .orderBy(asc(issues.id));
+  return snapshots.filter(({ before }) => !isRunnableWipReason(before));
+}
+
+/** Reject new runnable work before committing the mutation that produced it. */
+export async function assertIssueResultWipAdmission(
+  tx: Pick<Db, "select" | "execute">,
+  input: {
+    actor: { type?: string; source?: string };
+    companyId: string;
+    issueId: string;
+    before: WipReason | null;
+  },
+): Promise<void> {
+  const { actor, companyId, issueId, before } = input;
+  const limit = agentWipLimit();
+  if (limit === null || !wipLimitAppliesToActor(actor) || before === null || isRunnableWipReason(before)) return;
+  const [result] = await tx.select({
+    reason: issueWipReason(),
+    agentId: issues.assigneeAgentId,
+    priority: issues.priority,
+    status: issues.status,
+  }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
+  if (!result || !isRunnableWipReason(result.reason)) return;
+  if (await agentWipFull(tx, actor, {
+    companyId,
+    agentId: result.agentId,
+    status: result.status,
+    priority: result.priority,
+    excludeIssueId: issueId,
+    tryAcquireAdmissionLock: (agentId) => tryLockPullQueueOwner(tx, companyId, agentId),
+  })) {
+    throw conflict(wipPullRefusal(limit), { code: "agent_wip_limit" });
   }
 }

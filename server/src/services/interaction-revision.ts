@@ -50,10 +50,11 @@ export function checkInteractionAnswerPreconditions(row: Row, input: Interaction
   return false;
 }
 
-/** Preserve issue -> run -> proposal -> interaction ordering. The database trigger covers every writer. */
+/** Acquire any company lock before issue -> run -> proposal -> interaction. */
 export async function resolveWithInteractionRevision<T>(args: {
   db: Db; issue: { id: string; companyId: string }; interactionId: string;
   input: InteractionAnswerPreconditions; operation: string; actor: Actor;
+  beforeIssueLock?: (tx: Db) => Promise<void>;
   beforeLock: (tx: Db) => Promise<void>;
   authorize: (row: Row) => void;
   hydrate: (row: Row) => IssueThreadInteraction;
@@ -63,6 +64,7 @@ export async function resolveWithInteractionRevision<T>(args: {
 }): Promise<T> {
   const settled = await args.db.transaction<{ result: T } | { expiry: InteractionRevisionTargetExpired }>(async (transaction) => {
     const tx = transaction as unknown as Db;
+    await args.beforeIssueLock?.(tx);
     const [issue] = await tx.select().from(issues).where(and(eq(issues.id, args.issue.id),
       eq(issues.companyId, args.issue.companyId))).for("update");
     if (!issue) throw issueThreadInteractionResolutionError(404, "interaction_not_found", "Interaction not found");
