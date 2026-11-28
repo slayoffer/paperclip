@@ -4,11 +4,20 @@ import { fileURLToPath } from "node:url";
 import { isNode24ImageTag } from "./node-image-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const piDistributionManifest = path.join(
-  repoRoot, "packages/paperclip-runner/scripts/pi-distribution/package.json",
-);
-const providerAssetsRoot = path.join(repoRoot, "packages", "paperclip-runner", "provider-assets");
-const expectedEngine = ">=24.11.0";
+// These manifests retain upstream's Node floor. The Pi distribution manifest
+// is also hashed into Pi's trusted closure.
+const upstreamEngineManifests = new Set([
+  "packages/paperclip-runner/scripts/pi-distribution/package.json",
+  "packages/paperclip-runner/scripts/kimi-distribution/package.json",
+  "packages/plugins/sandbox-providers/boxd/package.json",
+  "scripts/typecheck-sandbox-providers/package.json",
+].map((filePath) => path.join(repoRoot, filePath)));
+const providerAssetsRoots = new Set([
+  path.join(repoRoot, "packages", "paperclip-runner", "provider-assets"),
+  path.join(repoRoot, "server", "provider-assets"),
+]);
+const expectedEngine = ">=24.22.1";
+const upstreamEngine = ">=24.11.0";
 const expectedTypes = "^24.0.0";
 const failures = [];
 const skippedDirectories = new Set([".git", ".paperclip", "coverage", "data", "dist", "node_modules"]);
@@ -20,7 +29,7 @@ function relative(filePath) {
 function walk(directory, visit) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory() && (skippedDirectories.has(entry.name) || entryPath === providerAssetsRoot)) continue;
+    if (entry.isDirectory() && (skippedDirectories.has(entry.name) || providerAssetsRoots.has(entryPath))) continue;
     if (entry.isDirectory()) walk(entryPath, visit);
     else if (entry.isFile()) visit(entryPath);
   }
@@ -35,10 +44,8 @@ walk(repoRoot, (filePath) => {
       failures.push(`${relative(filePath)}: ${section}.@types/node must be ${expectedTypes}, found ${specifier}`);
     }
   }
-  // This isolated manifest is hashed into Pi's trusted closure. Its runtime
-  // uses pi-node-pins.ts, independently of the application's Node requirement.
-  const manifestEngine = filePath === piDistributionManifest
-    ? ">=24.11.0"
+  const manifestEngine = upstreamEngineManifests.has(filePath)
+    ? upstreamEngine
     : expectedEngine;
   if (manifest.engines?.node !== manifestEngine) {
     failures.push(`${relative(filePath)}: engines.node must be ${manifestEngine}, found ${manifest.engines?.node ?? "missing"}`);
@@ -76,10 +83,11 @@ walk(repoRoot, (filePath) => {
 
 const requiredSourceFragments = [
   [".nvmrc", "24"],
-  ["packages/shared/src/node-version.ts", 'MINIMUM_NODE_VERSION = "24.11.0"'],
+  ["packages/shared/src/node-version.ts", 'MINIMUM_NODE_VERSION = "24.22.1"'],
   ["scripts/install.sh", "MIN_NODE_VERSION=\"${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}.${MIN_NODE_PATCH}\""],
   ["scripts/install.sh", "MIN_NODE_MAJOR=24"],
-  ["scripts/install.sh", "MIN_NODE_MINOR=11"],
+  ["scripts/install.sh", "MIN_NODE_MINOR=22"],
+  ["scripts/install.sh", "MIN_NODE_PATCH=1"],
   ["scripts/install.sh", "DEFAULT_NODE_MAJOR=24"],
   ["docker/agent-runtime/Dockerfile.base", "ARG NODE_VERSION=24"],
   ["packages/adapter-utils/src/sandbox-install-command.ts", "NODE_VERSION=\"v24.11.0\""],
@@ -87,7 +95,7 @@ const requiredSourceFragments = [
   ["packages/plugins/sandbox-providers/modal/src/manifest.ts", 'default: "node:24"'],
   ["cli/esbuild.config.mjs", 'target: "node24"'],
   ["packages/plugins/sdk/src/bundlers.ts", 'target: "node24"'],
-  ["scripts/generate-npm-package-json.mjs", `engines: { node: "${expectedEngine}" }`],
+  ["scripts/generate-npm-package-json.mjs", `engines: { node: "${upstreamEngine}" }`],
 ];
 
 for (const [filePath, fragment] of requiredSourceFragments) {

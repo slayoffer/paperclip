@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.20
-FROM node:24-trixie-slim AS base
+FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
