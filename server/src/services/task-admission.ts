@@ -6,7 +6,7 @@ export type TaskDrainState = { startedAt: Date; expiresAt: Date | null; ownerId?
 let taskDrainState: TaskDrainState | null = null;
 const expiryListeners = new Set<() => void>();
 const changeListeners = new Set<() => void>();
-const drainClearedListeners = new Set<() => void>();
+const drainClearedListeners = new Set<(startupRecheck?: symbol) => void>();
 let lastClearedOwnedLeaseId: string | undefined;
 
 function notifyDrainChanged() {
@@ -20,19 +20,19 @@ export function subscribeTaskDrainExpiry(listener: () => void) {
   expiryListeners.add(listener);
   return () => { expiryListeners.delete(listener); };
 }
-export function subscribeTaskDrainCleared(listener: () => void) {
+export function subscribeTaskDrainCleared(listener: (startupRecheck?: symbol) => void) {
   drainClearedListeners.add(listener);
   return () => { drainClearedListeners.delete(listener); };
 }
 
-export function notifyTaskDrainCleared(ownedLeaseId?: string): void {
+export function notifyTaskDrainCleared(ownedLeaseId?: string, startupRecheck?: symbol): void {
   // A local release and the database observer can report the same lease.
   if (ownedLeaseId) {
     if (ownedLeaseId === lastClearedOwnedLeaseId) return;
     lastClearedOwnedLeaseId = ownedLeaseId;
   }
   for (const listener of drainClearedListeners) {
-    try { listener(); } catch (error) { process.emitWarning(`Task drain cleared notification failed: ${String(error)}`); }
+    try { listener(startupRecheck); } catch (error) { process.emitWarning(`Task drain cleared notification failed: ${String(error)}`); }
   }
 }
 
@@ -47,9 +47,38 @@ export function registerTaskDrainExpiryWork(
 ) {
   let activeLease: DurableTaskDrainLease | null = null;
   let settledRelease: { leaseId: string } | null = null;
-  let startupDrainRecheck: object | null = null;
-  let unobservedClearReported = false;
+  let startupDrainRecheck: symbol | null = null;
+  let lastAnonymousClearPass: symbol | null = null;
   let lastHandledExpiryLeaseId: string | undefined;
+  async function reconcileDurableDrain(signal?: AbortSignal) {
+    if (!readLeaseSnapshot) return;
+    const release = settledRelease;
+    const recheck = startupDrainRecheck;
+    const previousLease = activeLease;
+    const lease = await readLeaseSnapshot();
+    if (signal?.aborted) return;
+    activeLease = lease && Date.parse(lease.expiresAt) > Date.now() ? lease : null;
+    if (settledRelease === release) settledRelease = null;
+    const isCurrentRecheck = startupDrainRecheck === recheck;
+    if (isCurrentRecheck) startupDrainRecheck = null;
+    if (activeLease) return;
+
+    const clearedLeaseId = lease?.leaseId ?? release?.leaseId ?? previousLease?.leaseId;
+    const startupDrainCleared = recheck !== null && isCurrentRecheck && readTaskDrain(new Date()) === null;
+    const foundExpiredOnStartupRecheck = startupDrainCleared && Boolean(lease?.leaseId);
+    if (previousLease || release || foundExpiredOnStartupRecheck) {
+      notifyTaskDrainCleared(clearedLeaseId);
+    } else if (startupDrainCleared && recheck !== lastAnonymousClearPass) {
+      // Use the captured pass. A retry from this observation cannot request another anonymous clear.
+      lastAnonymousClearPass = recheck;
+      notifyTaskDrainCleared(undefined, recheck);
+    }
+    if (previousLease || (foundExpiredOnStartupRecheck && clearedLeaseId !== lastHandledExpiryLeaseId)) {
+      lastHandledExpiryLeaseId = clearedLeaseId;
+      onExpired();
+    }
+  }
+
   const worker = coordinator.register(DELIVERY_QUEUES.taskDrainExpiry, {
     retryMs: 1000,
     runDuringDrain: true,
@@ -57,34 +86,10 @@ export function registerTaskDrainExpiryWork(
       const leaseId = hints?.values().next().value;
       if (leaseId) settledRelease = { leaseId };
     },
-    run: async () => {
+    run: async signal => {
+      if (signal?.aborted) return;
       readTaskDrain(new Date());
-      if (!readLeaseSnapshot) return;
-      const release = settledRelease;
-      const recheck = startupDrainRecheck;
-      const previousLease = activeLease;
-      const lease = await readLeaseSnapshot();
-      activeLease = lease && Date.parse(lease.expiresAt) > Date.now() ? lease : null;
-      if (settledRelease === release) settledRelease = null;
-      if (startupDrainRecheck === recheck) startupDrainRecheck = null;
-      if (activeLease) {
-        unobservedClearReported = false;
-      } else {
-        const clearedLeaseId = lease?.leaseId ?? release?.leaseId ?? previousLease?.leaseId;
-        const startupDrainCleared = recheck !== null && readTaskDrain(new Date()) === null;
-        const foundExpiredOnStartupRecheck = startupDrainCleared && Boolean(lease?.leaseId);
-        if (previousLease || release || foundExpiredOnStartupRecheck) {
-          notifyTaskDrainCleared(clearedLeaseId);
-        } else if (startupDrainCleared && !unobservedClearReported) {
-          // A different process may have released the lease before this worker read it.
-          unobservedClearReported = true;
-          notifyTaskDrainCleared();
-        }
-        if (previousLease || (foundExpiredOnStartupRecheck && clearedLeaseId !== lastHandledExpiryLeaseId)) {
-          lastHandledExpiryLeaseId = clearedLeaseId;
-          onExpired();
-        }
-      }
+      await reconcileDurableDrain(signal);
     },
     hasPending: async () => false,
     nextRunAt: () => {
@@ -98,8 +103,9 @@ export function registerTaskDrainExpiryWork(
   changeListeners.add(worker.wake);
   return {
     ready: worker.ready,
-    recheckStartupDrain() {
-      startupDrainRecheck = {};
+    recheckStartupDrain(pass = Symbol()) {
+      if (pass === startupDrainRecheck || pass === lastAnonymousClearPass) return;
+      startupDrainRecheck = pass;
       worker.wake();
     },
     async stop() {

@@ -40,6 +40,7 @@ import { registerEnvironmentCleanupWork } from "./services/environment-cleanup-w
 import { loginCleanupSchedule } from "./services/login-cleanup-state.js";
 import { registerLoginCleanupWork } from "./services/login-cleanup-work.js";
 import { timeStartupRecovery } from "./startup-recovery-timing.js";
+import { createStartupHeartbeatRecovery } from "./startup-heartbeat-recovery.js";
 import { runtimeAssetRetention } from "./services/native-runtime/runtime-asset-retention.js";
 import { skillPackageWork } from "./services/skill-package-work.js";
 import { skillSourceSyncService } from "./services/skill-source-sync.js";
@@ -1222,9 +1223,6 @@ async function startServerWithDatabaseTeardown(
   let wakePullQueue: (() => void) | undefined;
   let wakeResidualRecovery: (() => void) | undefined;
   let wakeHeartbeatSchedules: (() => void) | undefined;
-  let startupRecoveryPending = false;
-  let startupRecoveryRunning = false;
-  let startupRecoveryWakePending = false;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
   const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
     const finishIdleWork = beginIdleTrackedWork();
@@ -1359,41 +1357,17 @@ async function startServerWithDatabaseTeardown(
     };
   }
 
-  async function runPendingStartupRecovery(startupHeartbeat: NonNullable<typeof heartbeat>) {
-    startupRecoveryRunning = true;
-    try {
-      do {
-        startupRecoveryWakePending = false;
-        const suppression = await startupHeartbeat.resolveSchedulingSuppression();
-        if (heartbeatSchedulerStopped || isWarmStandby()) return;
-        if (suppression.suppressed) {
-          if (suppression.reason === "task_drain") taskDrainExpiryWork.recheckStartupDrain();
-          continue;
-        }
-        // A clear that arrived during the admission check is covered by this pass.
-        startupRecoveryWakePending = false;
-        const result = await recoverStartupHeartbeatState(startupHeartbeat);
-        const afterRecovery = await startupHeartbeat.resolveSchedulingSuppression();
-        if (result.drainObserved || afterRecovery.reason === "task_drain") taskDrainExpiryWork.recheckStartupDrain();
-        if (result.recovered && !afterRecovery.suppressed && !startupRecoveryWakePending) {
-          startupRecoveryPending = false;
-        }
-      } while (startupRecoveryWakePending);
-    } finally {
-      startupRecoveryRunning = false;
-    }
-  }
-
-  const stopStartupRecoveryOnDrain = heartbeat && subscribeTaskDrainCleared(() => {
-    if (!startupRecoveryPending || heartbeatSchedulerStopped || isWarmStandby()) return;
-    if (startupRecoveryRunning) {
-      startupRecoveryWakePending = true;
-      return;
-    }
-    trackHeartbeatSchedulerWork(runPendingStartupRecovery(heartbeat).catch(err => {
-      logger.error({ err }, "failed to resume startup heartbeat recovery after task drain cleared");
-    }));
+  const startupRecovery = heartbeat && createStartupHeartbeatRecovery({
+    coordinator: deliveryWork,
+    canRun: () => !heartbeatSchedulerStopped && !isWarmStandby(),
+    checkSuppression: heartbeat.resolveSchedulingSuppression,
+    recover: () => recoverStartupHeartbeatState(heartbeat),
+    recheckDrain: pass => taskDrainExpiryWork.recheckStartupDrain(pass),
+    track: work => trackHeartbeatSchedulerWork(work.catch(err => {
+      logger.error({ err }, "failed to resume pending startup heartbeat recovery");
+    })),
   });
+  const stopStartupRecoveryOnDrain = startupRecovery && subscribeTaskDrainCleared(startupRecovery.drainCleared);
 
   const durableTaskDrain = taskDrainService(db as any);
   const taskDrainExpiryWork = registerTaskDrainExpiryWork(deliveryWork, () => {
@@ -1410,6 +1384,7 @@ async function startServerWithDatabaseTeardown(
   }, () => durableTaskDrain.activeLease({ includeExpired: true }));
   server.on("close", () => {
     stopStartupRecoveryOnDrain?.();
+    void startupRecovery?.stop();
     void taskDrainExpiryWork.stop();
   });
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
@@ -1770,8 +1745,7 @@ async function startServerWithDatabaseTeardown(
           );
           throw err;
         }
-        startupRecoveryPending = true;
-        await runPendingStartupRecovery(heartbeat);
+        await startupRecovery?.start();
       })().catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
         throw err;
@@ -2132,6 +2106,7 @@ async function startServerWithDatabaseTeardown(
     const shutdownStartedAt = Date.now();
     logger.info({ signal }, "shutdown signal received; starting ordered shutdown");
     setStartupRecoveryPhase("draining");
+    await startupRecovery?.stop();
     for (const client of liveEventsWebSocketServer.clients) client.close(1012, "Server restarting");
     liveEventsWebSocketServer.close();
     // Finish admitted HTTP requests while their services, workers and database

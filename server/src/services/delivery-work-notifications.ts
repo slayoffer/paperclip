@@ -89,6 +89,7 @@ export const DELIVERY_QUEUES = {
   budgetEnforcement: "budget-enforcement",
   accounting: "cost-accounting",
   taskDrainExpiry: "task-drain-expiry",
+  startupHeartbeatRecovery: "startup-heartbeat-recovery",
   controllerInstanceLease: "controller-instance-lease",
   agentLifecycle: "agent-lifecycle",
   chatBoardMessages: "chat-board-messages",
