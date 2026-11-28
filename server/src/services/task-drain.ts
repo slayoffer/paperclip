@@ -50,9 +50,9 @@ export function taskDrainService(db: Db, now = () => new Date()) {
       });
   }
 
-  async function activeLease(): Promise<TaskDrainLease | null> {
+  async function activeLease({ includeExpired = false }: { includeExpired?: boolean } = {}): Promise<TaskDrainLease | null> {
     const lease = await readLease(db);
-    return isActive(lease, now()) ? lease : null;
+    return includeExpired || isActive(lease, now()) ? lease : null;
   }
 
   return {

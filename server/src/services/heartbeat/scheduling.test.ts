@@ -82,7 +82,10 @@ describe("heartbeat scheduling module boundary", () => {
       const deps = callbacks(database.db);
       deps.getSchedulingSuppression.mockResolvedValue({ suppressed: true });
       const result = await createHeartbeatScheduling(database.db, deps)[operation]();
-      expect(Object.values(result).every(value => value === 0)).toBe(true);
+      if (operation === "recoverActiveSessionGoals" || operation === "recoverPendingSessionGoalActions") {
+        expect(result).toMatchObject({ suppression: { suppressed: true } });
+      }
+      expect(Object.entries(result).filter(([key]) => key !== "suppression").every(([, value]) => value === 0)).toBe(true);
       expect(database.access).not.toHaveBeenCalled();
       expect(deps.enqueueWakeup).not.toHaveBeenCalled();
       expect(deps.claimDueTimerHeartbeat).not.toHaveBeenCalled();

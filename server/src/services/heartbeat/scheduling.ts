@@ -77,7 +77,7 @@ export interface HeartbeatSchedulingDependencies
     Pick<RunPreparation, "toAgentOrgRow" | "groupAgentOrgRowsByCompany"> {
   issuesSvc: Pick<ReturnType<typeof issueService>, "listReviewAttention" | "create" | "listDependencyReadiness">;
   scheduleBoundedRetryForRun: ReturnType<typeof createHeartbeatRetries>["scheduleBoundedRetryForRun"];
-  getSchedulingSuppression: (fresh?: boolean) => Promise<{ suppressed: boolean }>;
+  getSchedulingSuppression: (fresh?: boolean) => Promise<{ suppressed: boolean; reason?: string | null }>;
 }
 
 function readNonEmptyString(value: unknown): string | null {
@@ -1137,8 +1137,9 @@ export function createHeartbeatScheduling(
   }
 
   async function recoverActiveSessionGoals() {
-    if ((await getSchedulingSuppression()).suppressed) {
-      return { scanned: 0, enqueued: 0 };
+    const suppression = await getSchedulingSuppression();
+    if (suppression.suppressed) {
+      return { scanned: 0, enqueued: 0, suppression };
     }
     const sessions = await db
       .select({
@@ -1186,8 +1187,9 @@ export function createHeartbeatScheduling(
   }
 
   async function recoverPendingSessionGoalActions() {
-    if ((await getSchedulingSuppression()).suppressed) {
-      return { scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0 };
+    const suppression = await getSchedulingSuppression();
+    if (suppression.suppressed) {
+      return { scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0, suppression };
     }
     const pending = await db
       .select({

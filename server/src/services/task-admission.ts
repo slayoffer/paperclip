@@ -43,10 +43,13 @@ type DurableTaskDrainLease = { leaseId?: string; expiresAt: string };
 export function registerTaskDrainExpiryWork(
   coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
   onExpired: () => void,
-  readActiveLease?: () => Promise<DurableTaskDrainLease | null>,
+  readLeaseSnapshot?: () => Promise<DurableTaskDrainLease | null>,
 ) {
   let activeLease: DurableTaskDrainLease | null = null;
   let settledRelease: { leaseId: string } | null = null;
+  let startupDrainRecheck: object | null = null;
+  let unobservedClearReported = false;
+  let lastHandledExpiryLeaseId: string | undefined;
   const worker = coordinator.register(DELIVERY_QUEUES.taskDrainExpiry, {
     retryMs: 1000,
     runDuringDrain: true,
@@ -56,14 +59,31 @@ export function registerTaskDrainExpiryWork(
     },
     run: async () => {
       readTaskDrain(new Date());
-      if (!readActiveLease) return;
+      if (!readLeaseSnapshot) return;
       const release = settledRelease;
+      const recheck = startupDrainRecheck;
       const previousLease = activeLease;
-      activeLease = await readActiveLease();
+      const lease = await readLeaseSnapshot();
+      activeLease = lease && Date.parse(lease.expiresAt) > Date.now() ? lease : null;
       if (settledRelease === release) settledRelease = null;
-      if (activeLease === null && (previousLease || release)) {
-        notifyTaskDrainCleared(release?.leaseId ?? previousLease?.leaseId);
-        if (previousLease) onExpired();
+      if (startupDrainRecheck === recheck) startupDrainRecheck = null;
+      if (activeLease) {
+        unobservedClearReported = false;
+      } else {
+        const clearedLeaseId = lease?.leaseId ?? release?.leaseId ?? previousLease?.leaseId;
+        const startupDrainCleared = recheck !== null && readTaskDrain(new Date()) === null;
+        const foundExpiredOnStartupRecheck = startupDrainCleared && Boolean(lease?.leaseId);
+        if (previousLease || release || foundExpiredOnStartupRecheck) {
+          notifyTaskDrainCleared(clearedLeaseId);
+        } else if (startupDrainCleared && !unobservedClearReported) {
+          // A different process may have released the lease before this worker read it.
+          unobservedClearReported = true;
+          notifyTaskDrainCleared();
+        }
+        if (previousLease || (foundExpiredOnStartupRecheck && clearedLeaseId !== lastHandledExpiryLeaseId)) {
+          lastHandledExpiryLeaseId = clearedLeaseId;
+          onExpired();
+        }
       }
     },
     hasPending: async () => false,
@@ -78,6 +98,10 @@ export function registerTaskDrainExpiryWork(
   changeListeners.add(worker.wake);
   return {
     ready: worker.ready,
+    recheckStartupDrain() {
+      startupDrainRecheck = {};
+      worker.wake();
+    },
     async stop() {
       changeListeners.delete(worker.wake);
       expiryListeners.delete(onExpired);
